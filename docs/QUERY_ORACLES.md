@@ -1214,3 +1214,28 @@ limits cannot suppress generation, and only the last generator matters. The
 fixture remains 167 source rows and now contains 346 row-query cases, one
 stochastic case, 494 error cases, and 516 statistics/pipeline cases: 1,357
 cases total, all passing against the immutable image. The fixture now contains 1357 cases.
+
+`LQL-S12` adds eight exact statistics/pipeline cases and nine error cases for
+`json_values`. They pin the statistics form and standalone shorthand;
+case-insensitive `sort`/`order`, optional `by`, per-field direction, and
+natural ordering; bounded top-k; quoted and zero limits; explicit and default
+aliases; selector deduplication; empty-argument all-field selection; one `{}`
+for every row missing the requested fields; and one JSON-array string even for
+empty input. Malformed parentheses, separators, sort fields, limit spellings,
+clause order, and attached command suffixes fail explicitly.
+
+Source audit covers `stats_json_values.go`, `stats_json_values_sorted.go`,
+`stats_json_values_topk.go`, their parser and unit tests, and the shared
+natural-sort and limit helpers at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. Upstream serializes selected
+column values textually, omits missing fields, treats a missing sort value as
+empty text, and does not promise cross-block tie or unsorted merge order. A
+positive limit uses bounded top-k for sorted results; zero means no
+operator-specific limit. Timeless keeps those language semantics while
+preserving retained native JSON types and nesting and strengthening equal-key
+ties to deterministic public-row order. Those retained-model choices are
+tested through the real extension rather than falsely attributed to the
+textual upstream store. The fixture remains 167 source rows and now contains
+346 row-query cases, one stochastic case, 503 error cases, and 524
+statistics/pipeline cases: 1,374 cases total, all passing against the
+immutable image. The fixture now contains 1374 cases.

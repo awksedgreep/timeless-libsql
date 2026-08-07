@@ -1359,6 +1359,26 @@ extension primitive, private table, storage contract, batching, compression,
 index, retention, transaction, migration, optimize, or maintenance behavior
 changed. `LQL-P48` is closed.
 
+Session 18's `LQL-S12` semantic implementation is complete as API-owned,
+bounded `json_values` aggregation with `SQL-LOG-063` as the fixed-path typed
+JSON1 foundation for direct users. Pinned VictoriaLogs source plus the
+complete 1,374-case live oracle establish the statistics and shorthand
+grammar, JSON-array-string envelope, missing-field objects, natural multi-key
+ordering, bounded top-k, zero-limit behavior, aliases, and strict errors.
+
+Timeless preserves native nested values rather than flattening every upstream
+column to text, and it strengthens unspecified equal-key order to stable
+public-row order. Direct parser/evaluator and real-extension regressions pin
+those boundaries, immutable source rows, optimize, flush, shutdown, reopen,
+and reader reuse. Review caught an initially incomplete limit boundary:
+the implicit result name now includes VictoriaLogs' normalized sort/limit
+suffix; sort-key projection and multiple `json_values` expressions share one
+cumulative work budget; retained result strings are included in the state
+budget; and the transient heap-to-index conversion is peak-bounded. `QSF-247`
+records these corrections and the unchanged public-storage boundary. Exact release
+performance, physical-work equality, storage, and HWM evidence remain before
+`LQL-S12` can close.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

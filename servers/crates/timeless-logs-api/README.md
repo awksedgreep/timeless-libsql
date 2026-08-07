@@ -141,8 +141,8 @@ the same public decode.
 The implemented statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
 `median`, `quantile`, `stddev`, `sum_len`, `any`, `field_min`, `field_max`,
-`row_any`, `row_min`, `row_max`, `rate`, and `rate_sum`. Missing, null, and
-empty remain distinct;
+`row_any`, `row_min`, `row_max`, `json_values`, `rate`, and `rate_sum`.
+Missing, null, and empty remain distinct;
 `count_empty` deliberately counts all three for compatibility. Exact unique
 counts use complete typed tuples, while `count_uniq_hash` uses a documented
 stable 64-bit FNV-1a key hash and claims cardinality—not VictoriaLogs hash-bit
@@ -213,6 +213,29 @@ tail is 9.8% higher and is retained. Each pair scans identical one/four
 blocks, decodes 1,024/8,192 entries, reads 235,778/1,914,055 payload bytes,
 and materializes 128/8,192 public rows. `QSF-199` records the complete tails,
 larger typed-object responses, HWM, and unchanged storage verdict.
+
+`json_values(fields...)` returns one JSON-array string whose elements are
+selected current-row objects. Empty arguments or `*` select all fields;
+exact, quoted, dotted, and suffix-wildcard prefix selectors are supported and
+deduplicated. Missing paths are omitted, rows with no selected value produce
+`{}`, and null, empty, false, zero, arrays, empty objects, and nested objects
+remain native. Empty input produces `[]`.
+
+Optional `sort`/`order [by] (field [asc|desc], ...)` uses the complete
+VictoriaLogs natural textual comparator and deterministic source-order ties.
+A positive `limit` uses bounded top-k; zero or omission means no
+operator-specific cap while the server hard result limit remains mandatory.
+Sort projection, nested traversal, retained state across multiple expressions,
+encoded output, work, result, response, deadline, and cancellation are
+bounded. The standalone `json_values(...)` shorthand has the same semantics.
+Without an explicit alias, the response field uses VictoriaLogs' normalized
+function spelling, including normalized `sort by` and a positive limit.
+Executable
+[`SQL-LOG-063`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)
+provides fixed-path typed JSON1 composition and native-number sorting to
+direct SQLite/libSQL users. Dynamic selectors and complete LogsQL semantics
+remain in this Rust API over public rows; no private table or extension
+primitive is used.
 
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.

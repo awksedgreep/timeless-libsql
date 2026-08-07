@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::mem::size_of;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -9055,6 +9055,8 @@ fn stats(
     cancelled: &AtomicBool,
 ) -> Result<Map<String, Value>, String> {
     let mut result = Map::new();
+    let mut json_values_work_items = 0usize;
+    let mut json_values_retained_bytes = size_of::<Map<String, Value>>();
     for expression in expressions {
         ensure_active(cancelled)?;
         let value = match expression.kind {
@@ -9128,6 +9130,33 @@ fn stats(
             StatsKind::RowAny => row_any(rows, &expression.fields, limits, cancelled)?,
             StatsKind::RowMin => row_extreme(rows, &expression.fields, false, limits, cancelled)?,
             StatsKind::RowMax => row_extreme(rows, &expression.fields, true, limits, cancelled)?,
+            StatsKind::JsonValues => {
+                let value = json_values(
+                    rows,
+                    expression,
+                    limits,
+                    cancelled,
+                    &mut json_values_work_items,
+                    json_values_retained_bytes,
+                )?;
+                let encoded_len = value
+                    .as_str()
+                    .ok_or_else(|| "LogsQL json_values result is not a string".to_string())?
+                    .len();
+                json_values_retained_bytes = json_values_retained_bytes
+                    .checked_add(size_of::<String>())
+                    .and_then(|bytes| bytes.checked_add(expression.alias.len()))
+                    .and_then(|bytes| bytes.checked_add(size_of::<Value>()))
+                    .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+                    .and_then(|bytes| bytes.checked_add(encoded_len))
+                    .ok_or_else(|| "LogsQL json_values state size overflow".to_string())?;
+                ensure_first_state_bytes(
+                    json_values_retained_bytes,
+                    limits.max_state_bytes,
+                    "json_values",
+                )?;
+                value
+            }
             StatsKind::Rate => {
                 let value = rate_window_seconds
                     .filter(|duration| *duration > 0.0)
@@ -9147,6 +9176,329 @@ fn stats(
         result.insert(expression.alias.clone(), value);
     }
     Ok(result)
+}
+
+#[derive(Debug)]
+struct JsonValuesCandidate {
+    row_index: usize,
+    sort_values: Vec<String>,
+    descending: Vec<bool>,
+    state_bytes: usize,
+}
+
+impl PartialEq for JsonValuesCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for JsonValuesCandidate {}
+
+impl PartialOrd for JsonValuesCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JsonValuesCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        for ((left, right), descending) in self
+            .sort_values
+            .iter()
+            .zip(&other.sort_values)
+            .zip(&self.descending)
+        {
+            let mut ordering = logsql_sort_comparison(left, right);
+            if *descending {
+                ordering = ordering.reverse();
+            }
+            if !ordering.is_eq() {
+                return ordering;
+            }
+        }
+        // VictoriaLogs does not promise a cross-block tie order. Timeless
+        // strengthens this to the deterministic public-row order.
+        self.row_index.cmp(&other.row_index)
+    }
+}
+
+fn json_values(
+    rows: &[Value],
+    expression: &StatsExpression,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+    retained_stats_bytes: usize,
+) -> Result<Value, String> {
+    const OPERATION: &str = "json_values";
+    ensure_active(cancelled)?;
+    let requested_limit = expression.limit.filter(|limit| *limit > 0);
+    let retained_limit = requested_limit.unwrap_or(limits.max_result_rows);
+    if retained_limit > limits.max_result_rows {
+        return Err(format!(
+            "LogsQL {OPERATION} exceeds max_result_rows={}",
+            limits.max_result_rows
+        ));
+    }
+    if requested_limit.is_none() && rows.len() > limits.max_result_rows {
+        return Err(format!(
+            "LogsQL {OPERATION} exceeds max_result_rows={}",
+            limits.max_result_rows
+        ));
+    }
+
+    let indices = json_values_indices(
+        rows,
+        &expression.sort_fields,
+        retained_limit,
+        limits,
+        cancelled,
+        work_items,
+        retained_stats_bytes,
+    )?;
+    let indices_bytes = size_of::<Vec<usize>>()
+        .checked_add(
+            indices
+                .len()
+                .checked_mul(size_of::<usize>())
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        )
+        .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+    ensure_first_state_bytes(
+        retained_stats_bytes
+            .checked_add(indices_bytes)
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        limits.max_state_bytes,
+        OPERATION,
+    )?;
+
+    let mut encoded = String::from("[");
+    for (position, row_index) in indices.into_iter().enumerate() {
+        check_periodically(cancelled, position)?;
+        let mut transient_bytes = retained_stats_bytes
+            .checked_add(indices_bytes)
+            .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+            .and_then(|bytes| bytes.checked_add(encoded.len()))
+            .and_then(|bytes| bytes.checked_add(size_of::<Map<String, Value>>()))
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+        ensure_first_state_bytes(transient_bytes, limits.max_state_bytes, OPERATION)?;
+        let selected = select_json_fields(
+            &rows[row_index],
+            &expression.fields,
+            &mut transient_bytes,
+            work_items,
+            limits,
+            cancelled,
+            OPERATION,
+        )?;
+        let object = serde_json::to_string(&selected)
+            .map_err(|error| format!("encode LogsQL {OPERATION} row: {error}"))?;
+        let peak_bytes = transient_bytes
+            .checked_add(size_of::<String>())
+            .and_then(|bytes| bytes.checked_add(object.len()))
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+        ensure_first_state_bytes(peak_bytes, limits.max_state_bytes, OPERATION)?;
+        if position > 0 {
+            encoded.push(',');
+        }
+        encoded.push_str(&object);
+        let retained_bytes = retained_stats_bytes
+            .checked_add(indices_bytes)
+            .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+            .and_then(|bytes| bytes.checked_add(encoded.len()))
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+        ensure_first_state_bytes(retained_bytes, limits.max_state_bytes, OPERATION)?;
+    }
+    encoded.push(']');
+    ensure_first_state_bytes(
+        retained_stats_bytes
+            .checked_add(indices_bytes)
+            .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+            .and_then(|bytes| bytes.checked_add(encoded.len()))
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        limits.max_state_bytes,
+        OPERATION,
+    )?;
+    ensure_active(cancelled)?;
+    Ok(Value::String(encoded))
+}
+
+fn json_values_indices(
+    rows: &[Value],
+    sort_fields: &[crate::logsql::PipelineSortField],
+    retained_limit: usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+    work_items: &mut usize,
+    retained_stats_bytes: usize,
+) -> Result<Vec<usize>, String> {
+    const OPERATION: &str = "json_values";
+    if sort_fields.is_empty() {
+        let count = rows.len().min(retained_limit);
+        let state_bytes = size_of::<Vec<usize>>()
+            .checked_add(
+                count
+                    .checked_mul(size_of::<usize>())
+                    .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+            )
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+        ensure_first_state_bytes(
+            retained_stats_bytes
+                .checked_add(state_bytes)
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+            limits.max_state_bytes,
+            OPERATION,
+        )?;
+        ensure_active(cancelled)?;
+        return Ok((0..count).collect());
+    }
+
+    let mut heap = BinaryHeap::with_capacity(retained_limit.min(rows.len()));
+    let descending = sort_fields
+        .iter()
+        .map(|field| field.descending)
+        .collect::<Vec<_>>();
+    let mut heap_state_bytes = size_of::<BinaryHeap<JsonValuesCandidate>>()
+        .checked_add(size_of::<Vec<bool>>())
+        .and_then(|bytes| bytes.checked_add(descending.len()))
+        .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+    ensure_first_state_bytes(
+        retained_stats_bytes
+            .checked_add(heap_state_bytes)
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        limits.max_state_bytes,
+        OPERATION,
+    )?;
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        let mut candidate_bytes = size_of::<JsonValuesCandidate>()
+            .checked_add(
+                sort_fields
+                    .len()
+                    .checked_mul(size_of::<String>())
+                    .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+            )
+            .and_then(|bytes| bytes.checked_add(descending.len()))
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+        ensure_first_state_bytes(
+            retained_stats_bytes
+                .checked_add(heap_state_bytes)
+                .and_then(|bytes| bytes.checked_add(candidate_bytes))
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+            limits.max_state_bytes,
+            OPERATION,
+        )?;
+        let mut sort_values = Vec::with_capacity(sort_fields.len());
+        for sort_field in sort_fields {
+            ensure_active(cancelled)?;
+            let PipelineField::Exact { path, .. } = &sort_field.field else {
+                return Err("LogsQL json_values sort field is not exact".into());
+            };
+            let value = field_value(row, path);
+            let projected_len = match value {
+                None | Some(Value::Null) => {
+                    charge_transfer_work(work_items, limits.max_state_items, OPERATION)?;
+                    0
+                }
+                Some(Value::String(value)) => {
+                    charge_transfer_work(work_items, limits.max_state_items, OPERATION)?;
+                    value.len()
+                }
+                Some(value) => compact_json_len_for_operation(
+                    value,
+                    0,
+                    work_items,
+                    limits.max_state_items,
+                    cancelled,
+                    OPERATION,
+                )?,
+            };
+            candidate_bytes = candidate_bytes
+                .checked_add(projected_len)
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+            ensure_first_state_bytes(
+                retained_stats_bytes
+                    .checked_add(heap_state_bytes)
+                    .and_then(|bytes| bytes.checked_add(candidate_bytes))
+                    .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+                limits.max_state_bytes,
+                OPERATION,
+            )?;
+            let projected = projected_text(value).into_owned();
+            if projected.len() != projected_len {
+                return Err(format!(
+                    "LogsQL {OPERATION} sort-key length accounting mismatch"
+                ));
+            }
+            sort_values.push(projected);
+        }
+        ensure_first_state_bytes(
+            retained_stats_bytes
+                .checked_add(heap_state_bytes)
+                .and_then(|bytes| bytes.checked_add(candidate_bytes))
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+            limits.max_state_bytes,
+            OPERATION,
+        )?;
+        let candidate = JsonValuesCandidate {
+            row_index,
+            sort_values,
+            descending: descending.clone(),
+            state_bytes: candidate_bytes,
+        };
+
+        if heap.len() < retained_limit {
+            heap_state_bytes = heap_state_bytes
+                .checked_add(candidate_bytes)
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+            ensure_first_state_bytes(
+                retained_stats_bytes
+                    .checked_add(heap_state_bytes)
+                    .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+                limits.max_state_bytes,
+                OPERATION,
+            )?;
+            heap.push(candidate);
+        } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+            let removed = heap.pop().expect("non-empty bounded heap");
+            heap_state_bytes = heap_state_bytes.saturating_sub(removed.state_bytes);
+            heap_state_bytes = heap_state_bytes
+                .checked_add(candidate_bytes)
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+            ensure_first_state_bytes(
+                retained_stats_bytes
+                    .checked_add(heap_state_bytes)
+                    .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+                limits.max_state_bytes,
+                OPERATION,
+            )?;
+            heap.push(candidate);
+        }
+    }
+    ensure_active(cancelled)?;
+    let mut candidates = heap.into_vec();
+    candidates.sort();
+    let indices_bytes = size_of::<Vec<usize>>()
+        .checked_add(
+            candidates
+                .len()
+                .checked_mul(size_of::<usize>())
+                .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        )
+        .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?;
+    ensure_first_state_bytes(
+        retained_stats_bytes
+            .checked_add(heap_state_bytes)
+            .and_then(|bytes| bytes.checked_add(indices_bytes))
+            .ok_or_else(|| format!("LogsQL {OPERATION} state size overflow"))?,
+        limits.max_state_bytes,
+        OPERATION,
+    )?;
+    ensure_active(cancelled)?;
+    Ok(candidates
+        .into_iter()
+        .map(|candidate| candidate.row_index)
+        .collect())
 }
 
 fn count(
@@ -11066,6 +11418,131 @@ mod tests {
                 &cancelled,
             )
             .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn json_values_preserves_rich_types_natural_topk_ties_and_bounds() {
+        fn evaluate(
+            rows: &[Value],
+            expression: &StatsExpression,
+            limits: PipelineLimits,
+            cancelled: bool,
+        ) -> Result<Value, String> {
+            let mut work_items = 0usize;
+            json_values(
+                rows,
+                expression,
+                limits,
+                &AtomicBool::new(cancelled),
+                &mut work_items,
+                0,
+            )
+        }
+
+        let exact = |name: &str| PipelineField::Exact {
+            path: name.split('.').map(str::to_owned).collect(),
+            name: name.into(),
+        };
+        let rows = [
+            json!({"case":"ten","a":10,"nested":{"value":10},"nullish":null}),
+            json!({"case":"two-first","a":2,"nested":{"value":2},"array":[1,false]}),
+            json!({"case":"missing","nested":{}}),
+            json!({"case":"two-later","a":2,"nested":{"value":2.5}}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 10_000,
+        };
+        let expression = StatsExpression {
+            kind: StatsKind::JsonValues,
+            fields: vec![
+                exact("case"),
+                exact("a"),
+                PipelineField::Prefix {
+                    prefix: "nested".into(),
+                },
+                exact("array"),
+                exact("nullish"),
+            ],
+            alias: "selected".into(),
+            limit: Some(3),
+            quantile: None,
+            sort_fields: vec![crate::logsql::PipelineSortField {
+                field: exact("a"),
+                descending: false,
+            }],
+        };
+        let encoded = evaluate(&rows, &expression, limits, false).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(encoded.as_str().unwrap()).unwrap(),
+            json!([
+                {"case":"missing","nested":{}},
+                {"case":"two-first","a":2,"nested":{"value":2},"array":[1,false]},
+                {"case":"two-later","a":2,"nested":{"value":2.5}}
+            ]),
+            "sorted top-k must keep source order for equal keys"
+        );
+
+        let first_two = StatsExpression {
+            limit: Some(2),
+            sort_fields: Vec::new(),
+            ..expression.clone()
+        };
+        let encoded = evaluate(&rows, &first_two, limits, false).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(encoded.as_str().unwrap()).unwrap(),
+            json!([
+                {"case":"ten","a":10,"nested":{"value":10},"nullish":null},
+                {"case":"two-first","a":2,"nested":{"value":2},"array":[1,false]}
+            ])
+        );
+
+        let unlimited = StatsExpression {
+            limit: Some(0),
+            ..expression.clone()
+        };
+        let result_error = evaluate(
+            &rows,
+            &unlimited,
+            PipelineLimits {
+                max_result_rows: 3,
+                ..limits
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(result_error.contains("max_result_rows=3"), "{result_error}");
+
+        let work_error = evaluate(
+            &rows,
+            &expression,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+        let state_error = evaluate(
+            &rows,
+            &expression,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+        assert_eq!(
+            evaluate(&rows, &expression, limits, true).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

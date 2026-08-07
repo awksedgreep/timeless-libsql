@@ -2716,6 +2716,62 @@ rows. The checked evidence artifact is
 with SHA-256
 `eae8dc26fc6eb257445b96229a74891fea695470c65d053724dc53dd0184ed8b`.
 
+## LogsQL bounded typed `json_values`
+
+The statistics pipeline can return selected current-row objects as one JSON
+array string:
+
+```text
+* | stats json_values(host, status, context*) sort by (status desc, host) limit 100 as rows
+* | json_values(range_key, context.attempt) order (range_key desc) limit 64 values
+* | stats json_values() as all_rows
+```
+
+`json_values` is case-insensitive and works both as a statistics expression
+and as the standalone pipeline shorthand. Arguments may be exact quoted or
+dotted fields, suffix-wildcard prefixes, or `*`; empty parentheses select all
+current fields. Repeated selectors are an idempotent union. Each selected row
+becomes one object. Missing exact paths are omitted, selected explicit nulls,
+empty strings, false, zero, arrays, empty objects, and nested objects retain
+their native JSON type and shape. A row with no selected field contributes
+`{}`, and empty input still emits one statistics row containing the string
+`[]`.
+
+Optional `sort` or `order`, optional `by`, and a parenthesized comma-separated
+list of exact fields select the ordering. Each field defaults to ascending and
+may specify `asc` or `desc`. Comparison follows the VictoriaLogs signed,
+unsigned, RFC3339, duration, byte-size, math-number, and natural UTF-8 order;
+missing and null sort as empty text. Timeless strengthens otherwise
+unspecified equal-key order to deterministic current public-row order. Without
+a sort clause, current public-row order is retained; no compatibility claim is
+made for VictoriaLogs' physical cross-block merge order.
+
+A positive `limit` selects a bounded top-k and must not exceed the server's
+`max_result_rows`. `limit 0` and an omitted limit mean no operator-specific
+limit, but the hard result cap still applies and rejects an oversized source
+instead of silently truncating it. Sort-key projection, nested selection,
+retained heap/indices, encoded strings, multiple `json_values` expressions,
+result rows, response bytes, deadline, and cancellation are cumulatively
+bounded. A cancelled or rejected request leaves the public SQLite reader
+reusable, and request-local selection never mutates durable rows.
+
+An explicit alias may use `as name` or the upstream bare-name shorthand. With
+no alias, the result field is the normalized function spelling: `order`
+becomes `sort by`, explicit `asc` is omitted, quoted/underscored limits become
+decimal, and zero is omitted. For example, `json_values(case) order (a asc)
+limit "2"` produces the field name `json_values(case) sort by (a) limit 2`.
+
+The result field is deliberately a JSON string containing an array, matching
+the pinned VictoriaLogs wire contract. VictoriaLogs stores and emits textual
+columns; Timeless preserves the richer types already retained by its log
+model. Executable
+[`SQL-LOG-063`](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)
+provides direct SQLite/libSQL users the fixed-path, native-number-sort JSON1
+foundation. Dynamic selectors, the complete natural comparator, bounded
+top-k, LogsQL grammar, limits, cancellation, and envelopes remain Rust API
+composition over public `logs` rows. No private table, extension opcode,
+storage-format change, or batching change is involved.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

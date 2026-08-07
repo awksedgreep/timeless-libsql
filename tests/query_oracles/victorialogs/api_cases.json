@@ -2350,6 +2350,46 @@
   ],
   "stats_cases": [
     {
+      "id": "LQL-S12-json-values-sorts-and-omits-missing-fields",
+      "query": "state_group:=state | stats json_values(case,probe) sort by (case) as selected",
+      "expected_rows": [{"selected": "[{\"case\":\"state-empty\"},{\"case\":\"state-false\",\"probe\":\"false\"},{\"case\":\"state-missing\"},{\"case\":\"state-null\"},{\"case\":\"state-string\",\"probe\":\"value\"},{\"case\":\"state-zero\",\"probe\":\"0\"}]"}]
+    },
+    {
+      "id": "LQL-S12-json-values-natural-sort-supports-bounded-topk",
+      "query": "numeric_group:=numeric | stats json_values(case,n) sort by (n,case) limit 5 as selected",
+      "expected_rows": [{"selected": "[{\"case\":\"numeric-missing\"},{\"case\":\"numeric-null\"},{\"case\":\"numeric-negative\",\"n\":\"-2\"},{\"case\":\"numeric-zero\",\"n\":\"0\"},{\"case\":\"numeric-two\",\"n\":\"2\"}]"}]
+    },
+    {
+      "id": "LQL-S12-json-values-shorthand-order-desc-and-alias",
+      "query": "state_group:=state | json_values(case,probe) order by (case desc) limit 2 selected",
+      "expected_rows": [{"selected": "[{\"case\":\"state-zero\",\"probe\":\"0\"},{\"case\":\"state-string\",\"probe\":\"value\"}]"}]
+    },
+    {
+      "id": "LQL-S12-json-values-emits-an-empty-object-per-missing-selection",
+      "query": "state_group:=state | stats json_values(absent) sort by (case) as selected",
+      "expected_rows": [{"selected": "[{},{},{},{},{},{}]"}]
+    },
+    {
+      "id": "LQL-S12-json-values-is-case-insensitive-deduplicated-and-limit-zero-is-unlimited",
+      "query": "state_group:=state | STATS JSON_VALUES(case,probe,case) ORDER BY (case) LIMIT 0 AS selected",
+      "expected_rows": [{"selected": "[{\"case\":\"state-empty\"},{\"case\":\"state-false\",\"probe\":\"false\"},{\"case\":\"state-missing\"},{\"case\":\"state-null\"},{\"case\":\"state-string\",\"probe\":\"value\"},{\"case\":\"state-zero\",\"probe\":\"0\"}]"}]
+    },
+    {
+      "id": "LQL-S12-json-values-prefix-selection-is-flattened-upstream",
+      "query": "case:=format-row | stats json_values(math_*,case) sort by (case) as selected",
+      "expected_rows": [{"selected": "[{\"case\":\"format-row\",\"math_a\":\"2\",\"math_array\":\"[1,2]\",\"math_b\":\"3\",\"math_bad\":\"nope\",\"math_bytes\":\"1.5KiB\",\"math_duration\":\"10m5s\",\"math_ipv4\":\"123.45.67.89\",\"math_nested.value\":\"4\",\"math_timestamp\":\"2024-05-30T01:02:03Z\"}]"}]
+    },
+    {
+      "id": "LQL-S12-json-values-quoted-limit-and-default-result-name",
+      "query": "state_group:=state | json_values(case) order (case) limit \"2\"",
+      "expected_rows": [{"json_values(case) sort by (case) limit 2": "[{\"case\":\"state-empty\"},{\"case\":\"state-false\"}]"}]
+    },
+    {
+      "id": "LQL-S12-json-values-empty-input-still-emits-one-empty-array",
+      "query": "case:=does-not-exist | stats json_values(case) sort by (case) as selected",
+      "expected_rows": [{"selected": "[]"}]
+    },
+    {
       "id": "LQL-P48-generate-sequence-is-independent-of-input",
       "query": "case:=does-not-exist | generate_sequence 3",
       "expected_rows": [{"_msg": "0"}, {"_msg": "1"}, {"_msg": "2"}]
@@ -5437,6 +5477,69 @@
     }
   ],
   "error_cases": [
+    {
+      "id": "LQL-S12-json-values-requires-parentheses",
+      "query": "state_group:=state | stats json_values",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-requires-comma-separated-fields",
+      "query": "state_group:=state | stats json_values(case probe)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-sort-requires-parenthesized-fields",
+      "query": "state_group:=state | stats json_values(case) sort case",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-sort-requires-exact-fields",
+      "query": "state_group:=state | stats json_values(case) sort by (case*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-limit-requires-a-value",
+      "query": "state_group:=state | stats json_values(case) limit",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-rejects-leading-zero-limits",
+      "query": "state_group:=state | stats json_values(case) limit 01",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-rejects-negative-limits",
+      "query": "state_group:=state | stats json_values(case) limit -1",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-rejects-sort-after-limit",
+      "query": "state_group:=state | stats json_values(case) limit 2 sort by (case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-S12-json-values-rejects-an-attached-command-suffix",
+      "query": "state_group:=state | json_values.extra(case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
     {
       "id": "LQL-P48-generate-sequence-requires-a-count",
       "query": "* | generate_sequence",

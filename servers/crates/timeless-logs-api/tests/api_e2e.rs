@@ -9499,6 +9499,291 @@ async fn session_eighteen_generate_sequence_is_scan_free_bounded_composable_and_
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_json_values_is_sorted_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("json-values-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let body = [
+        r#"{"_time":1800400000000001,"_msg":"missing","level":"info","json_group":"s12","case":"missing","nested":{}}"#,
+        r#"{"_time":1800400000000002,"_msg":"two","level":"warning","json_group":"s12","case":"two","a":2,"b":3,"flag":false,"array":[1,true,null],"nested":{"value":2},"nullish":null}"#,
+        r#"{"_time":1800400000000003,"_msg":"ten","level":"error","json_group":"s12","case":"ten","a":10,"b":"","flag":true,"array":[],"nested":{"value":10}}"#,
+        r#"{"_time":1800400000000004,"_msg":"also two","level":"notice","json_group":"s12","case":"also-two","a":2,"b":123,"flag":false,"nested":{"value":2.5}}"#,
+    ]
+    .join("\n");
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn selected(app: &axum::Router) -> Vec<serde_json::Value> {
+        let rows = pipeline_rows(
+            app,
+            r#"json_group:="s12" | stats json_values(case, a, b, flag, array, nested*, nullish, absent, a) sort by (a, b) limit 0 as selected"#,
+        )
+        .await;
+        assert_eq!(rows.len(), 1);
+        serde_json::from_str(rows[0]["selected"].as_str().unwrap()).unwrap()
+    }
+
+    let app = router(storage.clone());
+    let rows = selected(&app).await;
+    assert_eq!(
+        rows,
+        [
+            serde_json::json!({"case":"missing", "nested":{}}),
+            serde_json::json!({
+                "case":"two", "a":2, "b":3, "flag":false,
+                "array":[1,true,null], "nested":{"value":2}, "nullish":null
+            }),
+            serde_json::json!({
+                "case":"also-two", "a":2, "b":123, "flag":false,
+                "nested":{"value":2.5}
+            }),
+            serde_json::json!({
+                "case":"ten", "a":10, "b":"", "flag":true,
+                "array":[], "nested":{"value":10}
+            })
+        ],
+        "json_values must sort naturally while preserving retained native JSON types"
+    );
+
+    let shorthand = pipeline_rows(
+        &app,
+        r#"json_group:="s12" | JsOn_VaLuEs(case, a) OrDeR By (a) LiMiT 3 As "selected rows""#,
+    )
+    .await;
+    let shorthand: Vec<serde_json::Value> =
+        serde_json::from_str(shorthand[0]["selected rows"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        shorthand,
+        [
+            serde_json::json!({"case":"missing"}),
+            serde_json::json!({"case":"two", "a":2}),
+            serde_json::json!({"case":"also-two", "a":2})
+        ]
+    );
+
+    let default_alias = "json_values(case) sort by (a) limit 2";
+    let default_result = pipeline_rows(
+        &app,
+        r#"json_group:="s12" | json_values(case) order (a asc) limit "2""#,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            default_result[0][default_alias].as_str().unwrap()
+        )
+        .unwrap(),
+        serde_json::json!([{"case":"missing"},{"case":"two"}]),
+        "the implicit result name must use VictoriaLogs' normalized function spelling"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"json_group:="absent" | stats json_values(case) as selected"#,
+        )
+        .await,
+        [serde_json::json!({"selected":"[]"})]
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            pipeline_rows(
+                &app,
+                r#"json_group:="s12" | stats json_values(case, a) sort by (a desc) limit 2 as selected"#,
+            )
+            .await[0]["selected"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap(),
+        serde_json::json!([{"case":"ten","a":10},{"case":"two","a":2}])
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            pipeline_rows(
+                &app,
+                r#"json_group:="s12" | stats json_values(case) limit 2 as selected"#,
+            )
+            .await[0]["selected"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap(),
+        serde_json::json!([{"case":"missing"},{"case":"two"}]),
+        "unsorted output must preserve deterministic public-row order"
+    );
+    let all_fields = pipeline_rows(
+        &app,
+        r#"json_group:="s12" | stats json_values() limit 1 as selected"#,
+    )
+    .await;
+    let all_fields: Vec<serde_json::Value> =
+        serde_json::from_str(all_fields[0]["selected"].as_str().unwrap()).unwrap();
+    assert_eq!(all_fields[0]["_msg"], "missing");
+    assert_eq!(all_fields[0]["level"], "info");
+    assert_eq!(all_fields[0]["nested"], serde_json::json!({}));
+    assert!(
+        all_fields[0]["_time"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(".000001Z")),
+        "all-field selection must preserve microsecond response fidelity"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"json_group:="s12" | stats json_values(absent) sort (a) as empty_objects"#,
+        )
+        .await,
+        [serde_json::json!({"empty_objects":"[{},{},{},{}]"})]
+    );
+
+    let composed = pipeline_rows(
+        &app,
+        r#"json_group:="s12" | stats count() as total, json_values(case) order (a) limit 2 as selected | fields total, selected"#,
+    )
+    .await;
+    assert_eq!(composed.len(), 1);
+    assert_eq!(composed[0]["total"], 4);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(composed[0]["selected"].as_str().unwrap())
+            .unwrap(),
+        serde_json::json!([{"case":"missing"},{"case":"two"}])
+    );
+
+    for malformed in [
+        r#"json_group:="s12" | stats json_values"#,
+        r#"json_group:="s12" | stats json_values(a b)"#,
+        r#"json_group:="s12" | stats json_values(a) sort rank"#,
+        r#"json_group:="s12" | stats json_values(a) sort by (rank*)"#,
+        r#"json_group:="s12" | stats json_values(a) limit"#,
+        r#"json_group:="s12" | stats json_values(a) limit -1"#,
+        r#"json_group:="s12" | stats json_values(a) as rows, count() as rows"#,
+        r#"json_group:="s12" | json_values.extra(a)"#,
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(logsql_request(malformed))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{malformed}"
+        );
+    }
+
+    for (limits, query, reason) in [
+        (
+            LogsQueryLimits {
+                max_result_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"json_group:="s12" | stats json_values(case) sort (a) limit 3 as selected"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"json_group:="s12" | stats json_values(case) sort (a) limit 0 as selected"#,
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            r#"json_group:="s12" | stats json_values(case) sort (a) limit 1 as selected"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_work_rows: 7,
+                ..LogsQueryLimits::default()
+            },
+            r#"json_group:="s12" | stats json_values(case) sort (a) limit 1 as first, json_values(case) sort (a) limit 1 as second"#,
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 64,
+                ..LogsQueryLimits::default()
+            },
+            r#"json_group:="s12" | stats json_values(*) sort (a) as selected"#,
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    let source_query = r#"json_group:="s12" | sort by (_time) asc | fields case, a, b, flag, array, nested, nullish, _msg, level | limit 10000"#;
+    let source_rows = pipeline_rows(&app, source_query).await;
+    assert_eq!(source_rows.len(), 4);
+    assert_eq!(
+        source_rows[0],
+        serde_json::json!({
+            "case":"missing", "nested":{}, "_msg":"missing", "level":"info"
+        })
+    );
+    assert_eq!(source_rows[1]["array"], serde_json::json!([1, true, null]));
+    assert_eq!(source_rows[1]["nullish"], serde_json::Value::Null);
+    assert_eq!(
+        pipeline_rows(&app, r#"json_group:="s12" | stats count() as total"#).await,
+        [serde_json::json!({"total":4})],
+        "limit failures must leave the public reader reusable"
+    );
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(selected(&reopened_app).await, rows);
+    assert_eq!(
+        pipeline_rows(&reopened_app, source_query).await,
+        source_rows
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

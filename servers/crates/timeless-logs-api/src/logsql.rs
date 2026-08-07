@@ -86,6 +86,7 @@ pub(crate) enum StatsKind {
     RowAny,
     RowMin,
     RowMax,
+    JsonValues,
     Rate,
     RateSum,
 }
@@ -371,10 +372,15 @@ fn parse_filter_pipe(segment: &str, context: &mut ParseContext) -> Result<Pipeli
 }
 
 fn parse_stats_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
-    let rest = segment
-        .strip_prefix("stats")
-        .expect("caller checked stats prefix")
-        .trim();
+    let command = segment
+        .get(.."stats".len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL stats pipe is empty"))?;
+    if !command.eq_ignore_ascii_case("stats") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL stats pipe, not {command:?}"
+        )));
+    }
+    let rest = segment["stats".len()..].trim();
     if rest.is_empty() {
         return Err(LogsqlError::malformed(
             "LogsQL stats requires at least one function",
@@ -432,6 +438,7 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         "row_any" => StatsKind::RowAny,
         "row_min" => StatsKind::RowMin,
         "row_max" => StatsKind::RowMax,
+        "json_values" => StatsKind::JsonValues,
         "rate" => StatsKind::Rate,
         "rate_sum" => StatsKind::RateSum,
         _ => {
@@ -530,39 +537,66 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         _ if fields.is_empty() => fields.push(PipelineField::All),
         _ => {}
     }
-
-    let canonical = format!("{function}({})", args.trim());
-    let words = pipeline_words(expression[close + 1..].trim())?;
-    let mut limit = None;
-    let mut alias = None;
-    let mut index = 0usize;
-    while index < words.len() {
-        match words[index].as_str() {
-            "limit" if limit.is_none() => {
-                let value = words.get(index + 1).ok_or_else(|| {
-                    LogsqlError::malformed(format!("LogsQL {function} limit requires a value"))
-                })?;
-                limit = Some(parse_pipeline_usize(&function, value)?);
-                index += 2;
-            }
-            "as" if alias.is_none() => {
-                let value = words.get(index + 1).ok_or_else(|| {
-                    LogsqlError::malformed(format!("LogsQL {function} alias requires a value"))
-                })?;
-                alias = Some(pipeline_field_name(&parse_pipeline_field(value, false)?)?);
-                index += 2;
-            }
-            token if alias.is_none() && index + 1 == words.len() => {
-                alias = Some(pipeline_field_name(&parse_pipeline_field(token, false)?)?);
-                index += 1;
-            }
-            token => {
-                return Err(LogsqlError::malformed(format!(
-                    "unexpected LogsQL {function} token {token:?}"
-                )))
+    let json_values_label_fields = (kind == StatsKind::JsonValues).then(|| fields.clone());
+    if kind == StatsKind::JsonValues {
+        let mut unique_fields = Vec::with_capacity(fields.len());
+        for field in fields {
+            if !unique_fields.contains(&field) {
+                unique_fields.push(field);
             }
         }
+        fields = unique_fields;
     }
+
+    let tail = expression[close + 1..].trim();
+    let (sort_fields, limit, alias) = if kind == StatsKind::JsonValues {
+        let tail = parse_json_values_stats_tail(tail)?;
+        (tail.sort_fields, tail.limit, tail.alias)
+    } else {
+        let words = pipeline_words(tail)?;
+        let mut limit = None;
+        let mut alias = None;
+        let mut index = 0usize;
+        while index < words.len() {
+            match words[index].as_str() {
+                "limit" if limit.is_none() => {
+                    let value = words.get(index + 1).ok_or_else(|| {
+                        LogsqlError::malformed(format!("LogsQL {function} limit requires a value"))
+                    })?;
+                    limit = Some(parse_pipeline_usize(&function, value)?);
+                    index += 2;
+                }
+                "as" if alias.is_none() => {
+                    let value = words.get(index + 1).ok_or_else(|| {
+                        LogsqlError::malformed(format!("LogsQL {function} alias requires a value"))
+                    })?;
+                    alias = Some(pipeline_field_name(&parse_pipeline_field(value, false)?)?);
+                    index += 2;
+                }
+                token if alias.is_none() && index + 1 == words.len() => {
+                    alias = Some(pipeline_field_name(&parse_pipeline_field(token, false)?)?);
+                    index += 1;
+                }
+                token => {
+                    return Err(LogsqlError::malformed(format!(
+                        "unexpected LogsQL {function} token {token:?}"
+                    )))
+                }
+            }
+        }
+        (Vec::new(), limit, alias)
+    };
+    let canonical = if kind == StatsKind::JsonValues {
+        canonical_json_values(
+            json_values_label_fields
+                .as_deref()
+                .expect("json_values label fields were captured"),
+            &sort_fields,
+            limit,
+        )
+    } else {
+        format!("{function}({})", args.trim())
+    };
     if limit.is_some()
         && !matches!(
             kind,
@@ -570,6 +604,7 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
                 | StatsKind::CountUniqHash
                 | StatsKind::UniqValues
                 | StatsKind::Values
+                | StatsKind::JsonValues
         )
     {
         return Err(LogsqlError::malformed(format!(
@@ -582,6 +617,282 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         alias: alias.unwrap_or(canonical),
         limit,
         quantile,
+        sort_fields,
+    })
+}
+
+fn canonical_json_values(
+    fields: &[PipelineField],
+    sort_fields: &[PipelineSortField],
+    limit: Option<usize>,
+) -> String {
+    let fields = fields
+        .iter()
+        .map(canonical_json_values_selector)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut output = format!("json_values({fields})");
+    if !sort_fields.is_empty() {
+        let fields = sort_fields
+            .iter()
+            .map(|field| {
+                let descending = field.descending;
+                let PipelineField::Exact { name, .. } = &field.field else {
+                    unreachable!("json_values sort fields are exact")
+                };
+                let mut field = quote_victorialogs_token(name);
+                if descending {
+                    field.push_str(" desc");
+                }
+                field
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(" sort by (");
+        output.push_str(&fields);
+        output.push(')');
+    }
+    if let Some(limit) = limit.filter(|limit| *limit > 0) {
+        output.push_str(" limit ");
+        output.push_str(&limit.to_string());
+    }
+    output
+}
+
+fn canonical_json_values_selector(field: &PipelineField) -> String {
+    match field {
+        PipelineField::Exact { name, .. } => quote_victorialogs_token(name),
+        PipelineField::Prefix { prefix } => {
+            let mut field = quote_victorialogs_token(prefix);
+            field.push('*');
+            field
+        }
+        PipelineField::All => "*".into(),
+    }
+}
+
+fn quote_victorialogs_token(value: &str) -> String {
+    let word = !value.is_empty() && value.chars().all(victorialogs_token_word_character);
+    let keyword = matches!(
+        value.to_ascii_lowercase().as_str(),
+        "and"
+            | "or"
+            | "not"
+            | "now"
+            | "offset"
+            | "contains_all"
+            | "contains_any"
+            | "json_array_contains_any"
+            | "contains_common_case"
+            | "eq_field"
+            | "equals_common_case"
+            | "exact"
+            | "i"
+            | "in"
+            | "ipv4_range"
+            | "ipv6_range"
+            | "le_field"
+            | "len_range"
+            | "lt_field"
+            | "pattern_match"
+            | "pattern_match_full"
+            | "pattern_match_prefix"
+            | "pattern_match_suffix"
+            | "range"
+            | "re"
+            | "seq"
+            | "string_range"
+            | "value_type"
+            | "options"
+            | "if"
+            | "by"
+            | "as"
+            | "from"
+            | "block_stats"
+            | "blocks_count"
+            | "coalesce"
+            | "collapse_nums"
+            | "copy"
+            | "cp"
+            | "decolorize"
+            | "del"
+            | "delete"
+            | "drop"
+            | "drop_empty_fields"
+            | "extract"
+            | "extract_regexp"
+            | "eval"
+            | "facets"
+            | "field_names"
+            | "field_values"
+            | "fields"
+            | "filter"
+            | "first"
+            | "format"
+            | "generate_sequence"
+            | "hash"
+            | "join"
+            | "json_array_concat"
+            | "json_array_len"
+            | "head"
+            | "keep"
+            | "last"
+            | "len"
+            | "limit"
+            | "math"
+            | "mv"
+            | "order"
+            | "pack_json"
+            | "pack_logfmt"
+            | "query_stats"
+            | "rename"
+            | "replace"
+            | "replace_regexp"
+            | "rm"
+            | "running_stats"
+            | "sample"
+            | "set_stream_fields"
+            | "skip"
+            | "sort"
+            | "split"
+            | "stats"
+            | "stats_remote"
+            | "stream_context"
+            | "time_add"
+            | "top"
+            | "total_stats"
+            | "union"
+            | "uniq"
+            | "unpack_json"
+            | "unpack_logfmt"
+            | "unpack_syslog"
+            | "unpack_words"
+            | "unroll"
+            | "where"
+            | "any"
+            | "avg"
+            | "count"
+            | "count_empty"
+            | "count_uniq"
+            | "count_uniq_hash"
+            | "field_max"
+            | "field_min"
+            | "histogram"
+            | "json_values"
+            | "max"
+            | "median"
+            | "min"
+            | "quantile"
+            | "rate"
+            | "rate_sum"
+            | "row_any"
+            | "row_max"
+            | "row_min"
+            | "stddev"
+            | "sum"
+            | "sum_len"
+            | "uniq_values"
+            | "values"
+            | "abs"
+            | "ceil"
+            | "exp"
+            | "floor"
+            | "ln"
+            | "rand"
+            | "round"
+    );
+    if word && !keyword {
+        value.to_owned()
+    } else {
+        serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
+    }
+}
+
+fn victorialogs_token_word_character(character: char) -> bool {
+    if character.is_ascii() {
+        return character == '_' || character.is_ascii_alphanumeric();
+    }
+    static WORD_RUNE: OnceLock<Regex> = OnceLock::new();
+    let matcher = WORD_RUNE.get_or_init(|| {
+        Regex::new(r"^(?:\p{L}|\p{Nd})$")
+            .expect("VictoriaLogs Unicode token-rune expression must compile")
+    });
+    let mut encoded = [0_u8; 4];
+    matcher.is_match(character.encode_utf8(&mut encoded))
+}
+
+struct JsonValuesStatsTail {
+    sort_fields: Vec<PipelineSortField>,
+    limit: Option<usize>,
+    alias: Option<String>,
+}
+
+fn parse_json_values_stats_tail(tail: &str) -> Result<JsonValuesStatsTail, LogsqlError> {
+    let tokens = lex_first_pipe(tail, "json_values")?;
+    let mut cursor = 0usize;
+    let mut sort_fields = Vec::new();
+    if tokens.get(cursor).is_some_and(|token| {
+        token.eq_ignore_ascii_case("sort") || token.eq_ignore_ascii_case("order")
+    }) {
+        cursor += 1;
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("by"))
+        {
+            cursor += 1;
+        }
+        sort_fields = parse_first_sort_fields(&tokens, &mut cursor, "json_values")?;
+    }
+
+    let mut limit = None;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("limit"))
+    {
+        cursor += 1;
+        let token = tokens
+            .get(cursor)
+            .ok_or_else(|| LogsqlError::malformed("LogsQL json_values limit requires a value"))?;
+        let value = quoted_value(token)?.unwrap_or_else(|| token.clone());
+        let parsed = parse_replace_limit(&value, "json_values")?;
+        limit = Some(usize::try_from(parsed).map_err(|_| {
+            LogsqlError::malformed(format!(
+                "LogsQL json_values limit {value:?} exceeds this platform"
+            ))
+        })?);
+        cursor += 1;
+    }
+
+    let explicit_as = tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("as"));
+    if explicit_as {
+        cursor += 1;
+    }
+    let alias = if let Some(token) = tokens.get(cursor) {
+        if matches!(token.as_str(), "(" | ")" | ",") {
+            return Err(LogsqlError::malformed(
+                "LogsQL json_values alias requires an exact field name",
+            ));
+        }
+        cursor += 1;
+        Some(pipeline_field_name(&parse_pipeline_field(token, false)?)?)
+    } else if explicit_as {
+        return Err(LogsqlError::malformed(
+            "LogsQL json_values alias requires a value",
+        ));
+    } else {
+        None
+    };
+    if let Some(token) = tokens.get(cursor) {
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL json_values token {token:?}"
+        )));
+    }
+    Ok(JsonValuesStatsTail {
+        sort_fields,
+        limit,
+        alias,
     })
 }
 
@@ -2721,6 +3032,7 @@ fn normalize_query_rows_source(query: &mut LogsqlPlan) {
             alias: "total".into(),
             limit: None,
             quantile: None,
+            sort_fields: Vec::new(),
         }])];
         query.spec.limit = 0;
         query.spec.offset = 0;
@@ -3957,6 +4269,33 @@ fn is_generate_sequence_pipe(segment: &str) -> bool {
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
+fn is_json_values_pipe(segment: &str) -> bool {
+    let operation = "json_values";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
+fn parse_json_values_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let operation = "json_values";
+    if segment[operation.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace() && character != '(')
+    {
+        return Err(LogsqlError::malformed(
+            "unexpected text attached to LogsQL json_values pipe",
+        ));
+    }
+    let expression = parse_stats_expression(segment)?;
+    if expression.kind != StatsKind::JsonValues {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL json_values pipe, not {segment:?}"
+        )));
+    }
+    Ok(PipelineOp::Stats(vec![expression]))
+}
+
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
     let operation = "drop_empty_fields";
     segment
@@ -5137,6 +5476,7 @@ pub(crate) struct StatsExpression {
     pub alias: String,
     pub limit: Option<usize>,
     pub quantile: Option<f64>,
+    pub sort_fields: Vec<PipelineSortField>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5869,6 +6209,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
                     alias: "total".into(),
                     limit: None,
                     quantile: None,
+                    sort_fields: Vec::new(),
                 }]));
             }
             ["stats", function @ ("count(*)" | "count()"), "as", "total"]
@@ -5884,6 +6225,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
                     alias: "total".into(),
                     limit: None,
                     quantile: None,
+                    sort_fields: Vec::new(),
                 }]));
             }
             _ if segment.starts_with("field_values ") => {
@@ -5906,8 +6248,12 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
                 pipeline.push(parse_filter_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
-            _ if segment.starts_with("stats ") => {
+            _ if is_stats_pipe(segment) => {
                 pipeline.push(parse_stats_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_json_values_pipe(segment) => {
+                pipeline.push(parse_json_values_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if words
@@ -8974,6 +9320,17 @@ fn advance_count_pipeline(stage: &mut u8) -> Result<(), LogsqlError> {
 
 fn is_sort_pipe(segment: &str) -> bool {
     segment.starts_with("sort ") || segment.starts_with("order ")
+}
+
+fn is_stats_pipe(segment: &str) -> bool {
+    let operation = "stats";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+        && segment[operation.len()..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
 }
 
 fn parse_time_sort(segment: &str) -> Result<bool, LogsqlError> {
@@ -12895,6 +13252,67 @@ mod tests {
             "* | generate_sequence 3 trailing",
             "* | generate_sequence.3",
             "* | generate_sequence(3)",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn session_eighteen_json_values_grammar_is_sorted_bounded_and_strict() {
+        for query in [
+            "* | stats json_values() as rows",
+            "* | stats json_values(a, nested*, missing) sort by (rank desc, a) limit 10 as rows",
+            "* | stats JsOn_VaLuEs(a) OrDeR (rank) LiMiT 0 As rows",
+            r#"* | JSON_VALUES(a, "nested value") order by (rank desc) limit 1_0 "selected rows""#,
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, None, "{query:?}");
+            let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+                panic!("unexpected json_values plan: {plan:?}");
+            };
+            assert_eq!(expressions.len(), 1, "{query:?}");
+        }
+
+        for (query, expected_alias) in [
+            (
+                r#"* | json_values(case) order (case asc) limit "2""#,
+                "json_values(case) sort by (case) limit 2",
+            ),
+            ("* | stats json_values()", "json_values(*)"),
+            (
+                r#"* | stats json_values(case, case) order by ("nested.value" desc) limit 0"#,
+                r#"json_values(case, case) sort by ("nested.value" desc)"#,
+            ),
+            (
+                r#"* | stats json_values("sort", nested.*, "hy-phen", β)"#,
+                r#"json_values("sort", "nested."*, "hy-phen", β)"#,
+            ),
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+                panic!("unexpected json_values plan: {plan:?}");
+            };
+            assert_eq!(expressions[0].alias, expected_alias, "{query:?}");
+        }
+
+        for malformed in [
+            "* | stats json_values",
+            "* | stats json_values(a b)",
+            "* | stats json_values(a) sort rank",
+            "* | stats json_values(a) sort by (rank*)",
+            "* | stats json_values(a) sort by (,rank)",
+            "* | stats json_values(a) limit",
+            "* | stats json_values(a) limit 01",
+            "* | stats json_values(a) limit -1",
+            "* | stats json_values(a) limit 2 sort by (rank)",
+            "* | stats json_values(a) as rows trailing",
+            "* | json_values.extra(a)",
         ] {
             assert!(
                 parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),

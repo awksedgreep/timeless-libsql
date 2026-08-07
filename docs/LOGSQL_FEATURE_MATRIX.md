@@ -1059,7 +1059,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S09` | `sum_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-045-summed-utf-8-byte-length-of-one-exact-field)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
-| `LQL-S12` | `json_values` | missing | `ROWS`, `SQL` | `API` | P3 |
+| `LQL-S12` | `json_values` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)) | in progress | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S15` | total `count/first/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
@@ -1152,6 +1152,40 @@ one/four candidate blocks, 1,024/8,192 decoded entries,
 235,778/1,914,055 payload bytes, and 128/8,192 materialized rows. `QSF-199`
 accepts the bounded rich-object cost and retains the wide tail and whole-
 workload HWM honestly above the unchanged public storage boundary.
+
+`json_values(fields...)` is implemented as both a statistics expression and
+standalone shorthand. Exact, quoted, dotted, prefix, empty/all, and repeated
+selectors produce one JSON-array string containing one selected object per
+current row. Missing paths are omitted; a row with no selected field becomes
+`{}`; explicit null, empty strings, false, zero, arrays, empty objects, and
+nested objects retain their native type and shape. Empty input still produces
+the string `[]`. This is an explicit retained-model strengthening over
+VictoriaLogs' textual flattened columns.
+
+Optional `sort`/`order`, optional `by`, parenthesized exact fields, and per-
+field `asc`/`desc` use the complete VictoriaLogs natural comparator. Timeless
+strengthens unspecified equal-key order to deterministic source order. A
+positive `limit` uses a bounded top-k; zero or omission remains subject to the
+hard result cap and fails rather than truncating. Sort-key projection, nested
+selection, retained heap plus index conversion, multiple expressions, encoded
+state, work/result/response limits, deadlines, and cancellation are bounded.
+The parser rejects invalid separators, wildcard sort keys, clause order,
+limit spelling, attached suffixes, and trailing tokens before storage work.
+An omitted alias uses VictoriaLogs' normalized function spelling, including
+normalized `sort by`, omitted `asc`, decimal positive limits, and no zero
+limit suffix.
+
+Pinned VictoriaLogs v1.52.0 source and all 1,374 oracle cases establish the
+grammar, JSON-string envelope, missing-field objects, natural sort, top-k, and
+error behavior. Real-extension and direct evaluator regressions additionally
+pin rich fidelity, deterministic ties, cumulative bounds, immutable source
+rows, optimize, shutdown, and reopen. Public `SQL-LOG-063` gives direct users
+fixed-path typed JSON1 composition with deterministic native-number sorting.
+Dynamic selectors, complete natural sorting, top-k, grammar, limits,
+cancellation, and envelopes remain Rust API composition after the required
+public scan; no extension primitive or private table is warranted. Exact-build
+narrow/wide performance, physical-work equality, storage, and HWM evidence
+remain required before this row changes from `in progress` to `shipped`.
 
 ## Query options and HTTP behavior
 

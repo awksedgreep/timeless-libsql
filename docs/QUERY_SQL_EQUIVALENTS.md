@@ -170,6 +170,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-060`](#sql-log-060-bounded-total-numeric-state-by-one-exact-key) | `LQL-P46` | current foundation | bounded full-partition SQL windows that repeat final row count, nonempty numeric count, numeric sum/min/max, and fixed first/last offsets over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
 | [`SQL-LOG-061`](#sql-log-061-add-a-duration-to-public-native-log-time) | `LQL-P47` | current foundation | bounded saturating shift of public native log timestamps plus an explicit sub-native nanosecond remainder; API owns duration/RFC3339Nano grammar, arbitrary fields, UTC canonicalization, response mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-062`](#sql-log-062-generate-a-bounded-decimal-string-sequence) | `LQL-P48` | current foundation | input-independent bounded recursive sequence of decimal strings using core SQLite/libSQL; API owns LogsQL numeric grammar, replacement semantics, limits, cancellation, composition, and envelopes |
+| [`SQL-LOG-063`](#sql-log-063-bounded-typed-json-values-from-fixed-public-paths) | `LQL-S12` | current foundation | one JSON-array string of fixed exact retained paths from bounded public log rows, with missing omission, explicit-null/native-type fidelity, and deterministic native-number ordering; API owns dynamic selectors, complete natural sorting, top-k, grammar, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -9510,6 +9511,130 @@ optimize, and migration behavior remain untouched. Direct regression:
 `tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
 regression:
 `session_eighteen_generate_sequence_is_scan_free_bounded_composable_and_durable`.
+
+### SQL-LOG-063: bounded typed JSON values from fixed public paths
+
+Bind three exact SQLite JSON paths, one exact native-number sort path,
+inclusive native timestamp bounds, and positive work/result limits. A positive
+`:json_values_limit` caps the represented objects; zero means the caller's
+`:max_result_rows` cap. This ordinary JSON1 statement returns one string that
+contains a JSON array, matching the `json_values` result shape without reading
+private storage tables:
+
+```sql
+WITH bounded AS MATERIALIZED (
+  SELECT ts, level, message, metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+), typed AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    json_type(metadata, :json_values_path_1) AS type_1,
+    json_type(metadata, :json_values_path_2) AS type_2,
+    json_type(metadata, :json_values_path_3) AS type_3,
+    json_type(metadata, :json_values_sort_path) AS sort_type,
+    json_extract(metadata, :json_values_sort_path) AS sort_value
+  FROM bounded
+), selected_1 AS (
+  SELECT
+    *,
+    CASE
+      WHEN type_1 IS NULL THEN json('{}')
+      ELSE json_set(
+        json('{}'),
+        :json_values_path_1,
+        json(metadata -> :json_values_path_1)
+      )
+    END AS selected_json_1
+  FROM typed
+), selected_2 AS (
+  SELECT
+    *,
+    CASE
+      WHEN type_2 IS NULL THEN selected_json_1
+      ELSE json_set(
+        selected_json_1,
+        :json_values_path_2,
+        json(metadata -> :json_values_path_2)
+      )
+    END AS selected_json_2
+  FROM selected_1
+), selected_3 AS (
+  SELECT
+    *,
+    CASE
+      WHEN type_3 IS NULL THEN selected_json_2
+      ELSE json_set(
+        selected_json_2,
+        :json_values_path_3,
+        json(metadata -> :json_values_path_3)
+      )
+    END AS selected_json
+  FROM selected_2
+), ordered AS MATERIALIZED (
+  SELECT selected_json
+  FROM selected_3
+  WHERE :max_result_rows > 0
+  ORDER BY
+    CASE WHEN sort_type IN ('integer', 'real') THEN 0 ELSE 1 END,
+    CASE
+      WHEN sort_type IN ('integer', 'real') THEN CAST(sort_value AS REAL)
+    END,
+    CASE
+      WHEN sort_type NOT IN ('integer', 'real') THEN CAST(sort_value AS TEXT)
+      ELSE ''
+    END COLLATE BINARY,
+    ts,
+    level,
+    message,
+    metadata
+  LIMIT CASE
+    WHEN :json_values_limit > 0
+      THEN MIN(:json_values_limit, :max_result_rows)
+    ELSE :max_result_rows
+  END
+)
+SELECT COALESCE(json_group_array(json(selected_json)), '[]') AS json_values
+FROM ordered;
+```
+
+For the executable fixture, bind paths `$.host`, `$.duration_ms`, and
+`$.nested.none`, sort by `$.duration_ms`, and bind `:json_values_limit` to
+`2`. The exact result is a single text value containing:
+
+```json
+[{"host":"web-2","duration_ms":4},{"host":"web-1","duration_ms":12,"nested":{"none":null}}]
+```
+
+Missing selected paths are omitted. Explicit JSON null, empty strings,
+booleans, numbers, arrays, objects, and nested structure remain typed because
+the statement uses JSON text insertion rather than scalar coercion. Empty
+input still returns the string `[]`. Timestamp units are the units configured
+for the public `logs` table; the fixture uses milliseconds and binds
+`:start_ts`/`:end_ts` to `1000`/`2000`, `:max_work_entries` to `100000`, and
+`:max_result_rows` to `100`.
+
+This is an exact SQL equivalent for a fixed retained path list and a finite
+native-number sort path. It does not claim VictoriaLogs' complete signed,
+unsigned, RFC3339, duration, byte-size, and natural UTF-8 comparator, dynamic
+exact/prefix/all selectors, canonical `_time`/`_msg`/`level` fields, or
+unsorted physical merge order. The Rust API owns those language semantics,
+case-insensitive `stats json_values(...)` and shorthand grammar, optional
+multi-field directions, bounded top-k selection, deterministic source-order
+ties, selector deduplication, the JSON-array-string result name, cumulative
+work/state/result/response/deadline limits, cancellation, and HTTP envelopes.
+
+The recipe already performs the required bounded public row scan and JSON1
+composition. A language-specific extension primitive would not avoid a block
+read, decode, or public row crossing, so the storage extension remains
+unchanged. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
+harness; HTTP/oracle/optimize/reopen regression:
+`session_eighteen_json_values_is_sorted_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

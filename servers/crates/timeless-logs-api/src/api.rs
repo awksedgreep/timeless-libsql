@@ -1027,6 +1027,7 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                                 expression.kind,
                                 crate::logsql::StatsKind::UniqValues
                                     | crate::logsql::StatsKind::Values
+                                    | crate::logsql::StatsKind::JsonValues
                             ) && limit > limits.max_result_rows
                             {
                                 return Err(("max_result_rows", limits.max_result_rows));
