@@ -2951,6 +2951,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "total_stats_narrow",
+                "logs-total-stats-narrow",
+                r#"host:="h00" AND query | total_stats by (service, level) count() as total | limit 64 | fields total"#,
+                64,
+                None,
+            ),
+            (
+                "total_stats_wide",
+                "logs-total-stats-wide",
+                r#"query | total_stats by (service, level) count() as total | limit 64 | fields total"#,
+                64,
+                None,
+            ),
+            (
+                "total_stats_control_narrow",
+                "logs-total-stats-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | math 128 as total | fields total"#,
+                64,
+                None,
+            ),
+            (
+                "total_stats_control_wide",
+                "logs-total-stats-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | math 1024 as total | fields total"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3557,6 +3585,12 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "running_stats_control_wide",
             "running_stats_wide",
         )?;
+        require_same_public_query_work(
+            &queries,
+            "total_stats_control_narrow",
+            "total_stats_narrow",
+        )?;
+        require_same_public_query_work(&queries, "total_stats_control_wide", "total_stats_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
