@@ -2172,7 +2172,7 @@ completed and durable with zero queued work before any query ran.
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | exact `level:error service:api status:=500`, descending, offset 1, limit 100 | 100 | 17,067 | 6.273 | 9.734 | 9.995 | 1 / 1 | 4,096 | 546,985 |
 | exact phrase `"query contract"`, ascending, limit 10,000 | 8,192 | 1,424,639 | 22.222 | 28.450 | 28.809 | 4 / 4 | 8,192 | 1,088,919 |
-| `service:api | stats count() as total` | 1 | 15 | 7.366 | 8.986 | 9.412 | 2 / 2 | 5,120 | 679,661 |
+| `service:api` followed by `stats count() as total` | 1 | 15 | 7.366 | 8.986 | 9.412 | 2 / 2 | 5,120 | 679,661 |
 
 The narrow storage predicate prunes to one coarse severity block. That block
 contains 4,096 entries because physical severity partitioning is intentionally

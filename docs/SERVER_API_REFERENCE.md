@@ -287,7 +287,7 @@ Token claims are `iss`, `aud`, `sub`, `jti`, `tenant`, `signal`, `scopes`,
 | `max_request_bytes` | Auth middleware buffers and caps the request before route execution. The hard server body cap remains 10 MiB. |
 | `max_decompressed_bytes` | Caps gzip OTLP protobuf after decompression; other current request formats are not compressed. |
 | `max_response_bytes` | Auth middleware caps the final body; signal query limits may be tighter. |
-| `max_query_rows` | Prechecks `limit`, `max_rows`, `max_points`, and LogsQL `| limit`; then verifies the handler's internal exact result-row header. |
+| `max_query_rows` | Prechecks `limit`, `max_rows`, `max_points`, and the LogsQL `limit` pipeline stage; then verifies the handler's internal exact result-row header. |
 | `max_request_ms` | Deadline for read and stats routes. Writes are not response-cancelled because queued durability would make timeout ambiguous. |
 | `max_concurrent_requests` | Per-subject active request cap. |
 | `max_queue_ms` | Per-subject admission wait before HTTP 429. |
@@ -393,7 +393,7 @@ stable families:
 | Unsupported route/parameter/capability | 422 | `{"error":"unsupported_capability","reason":"..."}`; LogsQL may add `message`. |
 | Malformed LogsQL | 400 | `{"error":"invalid_query","reason":"malformed_logsql","message":"..."}` |
 | LogsQL execution conflict | 422 | `{"error":"query_execution","reason":"field_conflict","message":"..."}` |
-| Logs query limit | 422 | `{"error":"query_limit","reason":"max_result_rows|max_work_rows|max_response_bytes","limit":N}` |
+| Logs query limit | 422 | `{"error":"query_limit",...}` with reason `max_result_rows`, `max_work_rows`, or `max_response_bytes` and numeric `limit`. |
 | Logs query timeout | 504 | `{"error":"timeout","reason":"query_deadline","deadline_ms":N}` |
 | Prometheus/MetricsQL parse | 400 | `{"status":"error","errorType":"bad_data","error":"..."}` |
 | Prometheus/MetricsQL execution/limit | 422 | Same envelope with `errorType="execution"`. |

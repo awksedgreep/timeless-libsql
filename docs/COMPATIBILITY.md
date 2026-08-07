@@ -70,8 +70,8 @@ These independent versions must not be conflated:
 | `0.4.x` | tagged/pre-release `0.3.x` server | unsupported | The current extension declares a `0.4.0` server floor; an old server cannot prove it understands the current API/resource contract. |
 | any version with a different `data_abi` | current servers | unsupported | The server refuses before virtual-table initialization. |
 | current extension with a future-schema database | current servers | unsupported/fail closed | The server does not downgrade or mutate a future ledger. |
-| current extension loaded directly by SQLite/libSQL | supported | The host must negotiate capabilities and own maintenance, backup, concurrency, and limits. |
-| current `timeless-ext` linked into a Rust host with only the `embedded` feature | supported | The host registers every connection and owns the same maintenance, backup, concurrency, and limit duties; `entrypoints` and `embedded` are mutually exclusive build modes. |
+| current extension loaded directly by SQLite/libSQL | no Timeless server; host-owned | supported | The host must negotiate capabilities and own maintenance, backup, concurrency, and limits. |
+| current `timeless-ext` linked into a Rust host with only the `embedded` feature | no Timeless server; embedded host-owned | supported | The host registers every connection and owns the same maintenance, backup, concurrency, and limit duties; `entrypoints` and `embedded` are mutually exclusive build modes. |
 
 The `minimum_*_version` fields are necessary but not sufficient. An artifact
 at the numeric floor can still be rejected for a missing signal batch or

@@ -307,6 +307,56 @@ fn markdown_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn validate_markdown_table_structure(root: &Path) -> Result<Vec<String>> {
+    let mut errors = Vec::new();
+    for path in markdown_files(root)? {
+        if !path.is_file() {
+            continue;
+        }
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let mut expected: Option<(usize, usize)> = None;
+        let mut fence: Option<char> = None;
+        for (offset, line) in fs::read_to_string(&path)?.lines().enumerate() {
+            let number = offset + 1;
+            let trimmed = line.trim_start();
+            let fence_character = if trimmed.starts_with("```") {
+                Some('`')
+            } else if trimmed.starts_with("~~~") {
+                Some('~')
+            } else {
+                None
+            };
+            if let Some(character) = fence_character {
+                match fence {
+                    Some(active) if active == character => fence = None,
+                    None => fence = Some(character),
+                    Some(_) => {}
+                }
+                expected = None;
+                continue;
+            }
+            if fence.is_some() {
+                continue;
+            }
+            if !line.starts_with('|') {
+                expected = None;
+                continue;
+            }
+
+            let actual = unescaped_pipe_count(line);
+            match expected {
+                Some((separators, start)) if actual != separators => errors.push(format!(
+                    "{}:{number}: Markdown table started at line {start} has {actual} unescaped separators; expected {separators}",
+                    relative.display()
+                )),
+                None => expected = Some((actual, number)),
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(errors)
+}
+
 fn validate_logs_storage_boundary(root: &Path) -> Result<Vec<String>> {
     let relative = "servers/crates/timeless-logs-api/src/storage.rs";
     let path = root.join(relative);
@@ -1861,6 +1911,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_public_compatibility_versions(root)?);
     errors.extend(validate_public_artifact_inventory(root)?);
     errors.extend(validate_public_embedding_contract(root)?);
+    errors.extend(validate_markdown_table_structure(root)?);
     errors.extend(validate_query_storage_findings(root)?);
     errors.extend(validate_query_release_report(root, &rows)?);
     errors.extend(validate_canonical_documentation_wording(root)?);
@@ -2034,6 +2085,29 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("expected QSF-009, got QSF-010")));
+    }
+
+    #[test]
+    fn markdown_tables_reject_unescaped_extra_columns_outside_fences() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path();
+        fs::create_dir(root.join("docs")).unwrap();
+        fs::write(
+            root.join("docs/tables.md"),
+            "# Tables\n\n\
+             | first | second |\n\
+             |---|---|\n\
+             | value | an unescaped | pipeline |\n\n\
+             ```text\n\
+             | this | is | literal | fenced | text |\n\
+             ```\n",
+        )
+        .unwrap();
+
+        let errors = validate_markdown_table_structure(root).unwrap();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("tables.md:5"));
+        assert!(errors[0].contains("has 4 unescaped separators; expected 3"));
     }
 
     #[test]

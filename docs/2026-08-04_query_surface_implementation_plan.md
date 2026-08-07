@@ -1929,7 +1929,8 @@ documentation contract derives that summary, requires every non-shipped ID in
 the final report, checks exact query-build identities and durable barriers,
 rejects absent or failed owned fault evidence, and keeps the append-only
 storage-finding IDs, table columns, terminal statuses, and reported range in
-sync. `LQL-P10` and `LQL-P11` received the missing
+sync. A general tracked-document check also rejects inconsistent unescaped
+Markdown table columns outside fenced examples. `LQL-P10` and `LQL-P11` received the missing
 physical-block-diagnostics prerequisite and explicit no-SQL disposition
 without exposing private storage.
 
@@ -1944,7 +1945,7 @@ failure. Its SHA-256 is
 the exact query artifact SHA-256 is
 `d576b5bcb3729f79d6e81f4793181551c3c99fd9c9a6bbdb877164c2b7e39660`.
 
-The successful gate set includes 47 Rust query-contract tests; 135 public-SQL
+The successful gate set includes 48 Rust query-contract tests; 135 public-SQL
 recipes/173 statements; live immutable Prometheus 549, VictoriaMetrics 196,
 and VictoriaLogs 1,498-case runs; root and server format/test/strict
 Clippy/Rustdoc; separate dbhealth validation; 93 metrics and 84 logs

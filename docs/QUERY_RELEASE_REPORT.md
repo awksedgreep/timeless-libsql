@@ -239,7 +239,7 @@ cannot embed its own hash.
 
 | gate | result and evidence |
 |---|---|
-| matrix/document contracts | Pass: 47 Rust tests, including negative final-report, fault-evidence, and storage-finding table drift tests. |
+| matrix/document contracts | Pass: 48 Rust tests, including negative final-report, fault-evidence, storage-finding, and tracked Markdown-table drift tests. |
 | SQL cookbook | Pass: 135 recipes / 173 real-extension statements. |
 | immutable oracles | Pass: manifest/image probes plus live Prometheus 549, VictoriaMetrics 196, and VictoriaLogs 1,498 cases. |
 | root extension | Pass: format, all targets/tests, strict Clippy/Rustdoc, and separate dbhealth artifact/shell gate. |
