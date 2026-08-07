@@ -1151,3 +1151,26 @@ the intentional compatibility deviation in the P45 storage finding. The
 fixture now contains 167 source rows, 346 row-query cases, one stochastic
 case, 464 error cases, and 489 statistics/pipeline cases: 1,300 cases total,
 all passing against the immutable image. The fixture now contains 1300 cases.
+
+`LQL-P46` adds thirteen exact pipeline cases and sixteen error cases for
+`total_stats`. They establish that the pipe uses the same strict group,
+function, field-selector, offset, and alias grammar as `running_stats`, but
+first consumes the complete bounded group and then writes the same final
+count, sum, natural min/max, or time-relative first/last value onto every row
+in that group. The cases cover whole-row, exact, and prefix counts; grouped
+and shorthand forms; case-insensitive spelling; canonical aliases; later-pipe
+visibility; destination overwrite; empty input; initial `NaN`; skipped
+nonfinite sum input; and every corresponding malformed form.
+
+Source audit covers `pipe_total_stats.go`, the shared
+`pipe_running_stats.go`, all six shared state processors, their unit tests,
+and the checked language reference at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. The implementation sets an
+explicit total mode, sorts and partitions exactly as `running_stats`, updates
+each accumulator across the complete group before emitting any row, and then
+reuses the final state for every output. It therefore shares the upstream
+formatted-time ordering defect and the same unspecified cross-group order;
+Timeless retains the P45 numeric-microsecond compatibility correction. The
+fixture now contains 167 source rows, 346 row-query cases, one stochastic
+case, 480 error cases, and 502 statistics/pipeline cases: 1,329 cases total,
+all passing against the immutable image. The fixture now contains 1329 cases.

@@ -1281,6 +1281,27 @@ request-attributed API mean after byte-identical public storage work. All
 in-flight work are zero. No extension primitive, private table, storage
 contract, or authoritative batching behavior changed. `LQL-P45` is closed.
 
+Session 18's `LQL-P46` semantic implementation is complete as API-owned
+bounded total state over one public `logs` scan, with `SQL-LOG-060` as the
+direct-user fixed-key full-partition SQLite window foundation. Pinned
+VictoriaLogs source plus the complete 1,329-case live oracle establish the
+shared strict grouping/expression grammar, complete-group count and sum,
+natural-order rich min/max, fixed-offset first/last, canonical aliases,
+recursive prefix selection, later-pipe visibility, destination overwrite,
+empty input, skipped nonfinite sum input, and explicit failures.
+
+Timeless deliberately retains P45's numeric-microsecond correction for the
+upstream variable-width formatted-time ordering defect, with stable ties and
+deterministic lexical group order. Group keys, chronological sorting,
+recursive traversal, complete accumulators, offset values, generated fields,
+cardinality, response bytes, deadlines, and cancellation are cumulative and
+bounded. Real-extension coverage pins rich final state on every row, limits,
+reader reuse after cancellation, immutable source rows, optimize, shutdown,
+and reopen. `QSF-241` records the semantic and unchanged-storage boundary.
+Exact-build performance, storage, and HWM evidence remain the only exit work
+before the row is closed; no extension primitive, private table, storage
+contract, or authoritative batching behavior changed.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

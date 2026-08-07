@@ -2320,6 +2320,53 @@ cost is bounded language composition after the same public scan; fixed-key
 SQLite windows already serve direct users, so it does not justify an
 extension primitive.
 
+## LogsQL bounded total statistics
+
+`total_stats` uses the same strict functions and grouping grammar as
+`running_stats`, but computes the final state for each complete group before
+writing that same state onto every row:
+
+```text
+* | total_stats count() as rows
+* | total_stats by (service, level) sum(duration_ms) as total_duration
+* | total_stats (service) min(duration_ms) as minimum, max(duration_ms) as maximum
+* | total_stats first(message) offset 1 as second_message, last(message) offset 1 as penultimate_message
+* | total_stats sum(payload.*) as nested_total
+```
+
+The command, optional `by (field, ...)` or `(field, ...)` group, functions,
+field selectors, offsets, aliases, canonical destination names, and explicit
+syntax failures are identical to `running_stats`. Group fields and
+`first`/`last` sources must be exact; `count`, `sum`, `min`, and `max` accept
+exact, prefix, all-current-field, or omitted selectors. Duplicate or wildcard
+destinations and malformed groups, arity, offsets, commas, suffixes, or
+trailing tokens fail before the public scan is evaluated.
+
+Each group is ordered by numeric microsecond time with stable input-order
+ties, and groups are emitted in deterministic lexical key order. This retains
+the documented Timeless correction for VictoriaLogs' variable-width
+formatted-time ordering defect. `first` selects the fixed zero-based offset
+from the beginning of the complete group; `last` selects the fixed offset
+from its end. The chosen values, final counts, final sums, and final extrema
+are then repeated on every row in the group. Empty input stays empty.
+
+Count, finite textual/native sum, nonfinite rendering, complete natural-order
+rich minima/maxima, recursive prefix traversal, atomic arrays, original-row
+expression snapshots, later-pipe visibility, scalar overwrite, and
+scalar-parent conflicts follow `running_stats` exactly. In particular, a
+group with no finite sum input receives the explicit string `"NaN"` on every
+row rather than an invalid JSON number.
+
+Group keys, chronological sort state, recursive traversal, accumulators,
+offset values, generated fields, result rows, response bytes, deadlines, and
+cancellation are bounded by the existing request limits. Evaluation uses one
+public `logs` scan, never a private shadow table, and leaves stored rows
+unchanged through optimize, shutdown, and reopen. Executable
+[`SQL-LOG-060`](QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)
+provides full-partition fixed-key SQLite windows for direct users. Rust owns
+dynamic LogsQL grammar, natural/rich semantics, limits, cancellation, and
+HTTP envelopes; no extension primitive or storage-format change is needed.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

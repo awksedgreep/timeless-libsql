@@ -167,6 +167,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-057`](#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key) | `LQL-P43` | current foundation | bounded deterministic left/inner join over two public log scans using one exact textual metadata key, with duplicate right matches and separate typed payloads; API owns LogsQL grammar, multiple keys, inline/query sources, rich merging, prefixes, limits, cancellation, and envelopes |
 | [`SQL-LOG-058`](#sql-log-058-bounded-ordered-union-of-two-public-log-scans) | `LQL-P44` | current foundation | bounded `UNION ALL` over two independent public log scans with explicit source/row order and complete typed payloads; API owns LogsQL grammar, inline/query sources, nesting, cumulative limits, cancellation, and envelopes |
 | [`SQL-LOG-059`](#sql-log-059-bounded-running-numeric-state-by-one-exact-key) | `LQL-P45` | current foundation | bounded chronological SQL windows for row count, nonempty numeric count, numeric sum/min/max, first-at-offset, and previous-at-offset over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
+| [`SQL-LOG-060`](#sql-log-060-bounded-total-numeric-state-by-one-exact-key) | `LQL-P46` | current foundation | bounded full-partition SQL windows that repeat final row count, nonempty numeric count, numeric sum/min/max, and fixed first/last offsets over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -9251,6 +9252,142 @@ No extension primitive or private shadow-table access is warranted. Direct
 regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_eighteen_running_stats_are_rich_bounded_chronological_and_durable`.
+
+### SQL-LOG-060: bounded total numeric state by one exact key
+
+Bind inclusive native timestamp bounds, one JSON path for the textual group,
+one exact numeric JSON path, one exact companion JSON path, nonnegative first
+and last offsets, a positive public-scan work limit, and a positive result
+limit. This read-only statement evaluates fixed numeric state over each
+complete textual partition and repeats the final values on every row. The
+complete public metadata payload remains available beside the projected
+window results.
+
+```sql
+WITH source AS MATERIALIZED (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    CASE json_type(metadata, :total_group_path)
+      WHEN 'null' THEN ''
+      WHEN 'true' THEN 'true'
+      WHEN 'false' THEN 'false'
+      WHEN NULL THEN ''
+      ELSE CAST(json_extract(metadata, :total_group_path) AS TEXT)
+    END AS group_value,
+    json_type(metadata, :total_value_path) AS value_type,
+    json_extract(metadata, :total_value_path) AS numeric_value,
+    json_extract(metadata, :total_companion_path) AS companion_value
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND max_work_entries = :max_work_entries
+    AND :max_result_rows > 0
+),
+totals AS (
+  SELECT
+    ts,
+    level,
+    message,
+    metadata,
+    group_value,
+    count(*) OVER complete_group AS total_count,
+    count(
+      CASE
+        WHEN value_type IN ('integer', 'real') THEN 1
+      END
+    ) OVER complete_group AS total_numeric_count,
+    sum(
+      CASE
+        WHEN value_type IN ('integer', 'real')
+          THEN CAST(numeric_value AS REAL)
+      END
+    ) OVER complete_group AS total_sum,
+    min(
+      CASE
+        WHEN value_type IN ('integer', 'real')
+          THEN CAST(numeric_value AS REAL)
+      END
+    ) OVER complete_group AS total_min,
+    max(
+      CASE
+        WHEN value_type IN ('integer', 'real')
+          THEN CAST(numeric_value AS REAL)
+      END
+    ) OVER complete_group AS total_max,
+    coalesce(
+      nth_value(companion_value, :total_first_offset + 1)
+        OVER complete_group,
+      ''
+    ) AS first_at_offset,
+    coalesce(
+      nth_value(companion_value, :total_last_offset + 1)
+        OVER reverse_complete_group,
+      ''
+    ) AS last_at_offset
+  FROM source
+  WINDOW
+    complete_group AS (
+      PARTITION BY group_value
+      ORDER BY ts, level, message, metadata
+      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ),
+    reverse_complete_group AS (
+      PARTITION BY group_value
+      ORDER BY ts DESC, level DESC, message DESC, metadata DESC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    )
+)
+SELECT
+  group_value,
+  ts,
+  level,
+  message,
+  metadata,
+  total_count,
+  total_numeric_count,
+  total_sum,
+  total_min,
+  total_max,
+  first_at_offset,
+  last_at_offset
+FROM totals
+ORDER BY group_value, ts, level, message, metadata
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:max_work_entries` to `100000`, `:max_result_rows` to `100`,
+`:total_group_path` to `$.service`, `:total_value_path` to `$.duration_ms`,
+`:total_companion_path` to `$.host`, and both offsets to `1`. Both rows share
+group `api`. Each receives final count `2`, numeric count `2`, sum `16.0`,
+minimum `4.0`, maximum `12.0`, first-at-offset `web-2`, and last-at-offset
+`web-1`. Timestamps remain in the virtual table's configured native unit;
+this fixture uses milliseconds.
+
+This is the honest direct-SQL foundation for `LQL-P46`, not a claim that SQL
+has parsed LogsQL or reproduced every VictoriaLogs state rule. It provides the
+ordinary-SQL path when direct users have a fixed group and numeric field.
+SQLite JSON exposes arrays and objects from `json_extract` as JSON text, its
+`min`/`max` ordering is not VictoriaLogs natural textual ordering, and a safe
+generic SQL cast cannot distinguish every accepted textual float from a
+partially numeric string. The Rust logs API therefore owns case-insensitive
+`total_stats` grammar; exact, prefix, and all-field selectors; missing, null,
+and empty behavior; textual-number parsing; complete natural-order min/max;
+typed and nested winning values; canonical and explicit destination paths;
+independent groups; numeric microsecond chronology; cumulative
+work/state/result/response/deadline limits; cancellation; and HTTP envelopes.
+
+All state remains request-local after one bounded public scan. Ordinary SQL
+windows already give SQLite/libSQL users the useful fixed-field reduction, and
+moving LogsQL syntax or dynamic rich-value state into the extension would not
+eliminate the required storage scan, block decode, or public payload crossing.
+No extension primitive or private shadow-table access is warranted. Direct
+regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/optimize/reopen regression:
+`session_eighteen_total_stats_are_rich_bounded_chronological_and_durable`.
 
 ## Adding the next recipe
 

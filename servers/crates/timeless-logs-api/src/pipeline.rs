@@ -26,9 +26,9 @@ use crate::logsql::{
     JoinSpec, JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec,
     PackJsonSpec, PackLogfmtSpec, PipelineField, PipelineOp, QueryRowsSource,
     RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, RunningStatsExpression,
-    RunningStatsKind, RunningStatsSpec, SplitSpec, StatsExpression, StatsKind, TopSpec,
-    UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec,
-    UnpackWordsSpec, UnrollSpec,
+    RunningStatsKind, RunningStatsMode, RunningStatsSpec, SplitSpec, StatsExpression, StatsKind,
+    TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec,
+    UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -5372,7 +5372,7 @@ enum RunningAccumulator {
 }
 
 impl RunningAccumulator {
-    fn new(kind: RunningStatsKind) -> Result<Self, String> {
+    fn new(kind: RunningStatsKind, operation: &str) -> Result<Self, String> {
         Ok(match kind {
             RunningStatsKind::Count => Self::Count(0),
             RunningStatsKind::Sum => Self::Sum(f64::NAN),
@@ -5385,7 +5385,7 @@ impl RunningAccumulator {
             },
             RunningStatsKind::Last { offset } => {
                 offset.checked_add(1).ok_or_else(|| {
-                    "LogsQL running_stats last offset exceeds the supported range".to_string()
+                    format!("LogsQL {operation} last offset exceeds the supported range")
                 })?;
                 Self::Last {
                     offset,
@@ -5395,16 +5395,17 @@ impl RunningAccumulator {
         })
     }
 
-    fn update(
+    fn advance(
         &mut self,
+        operation: &str,
         expression: &RunningStatsExpression,
         row: &Value,
         state_bytes: &mut usize,
         work_items: &mut usize,
         limits: PipelineLimits,
         cancelled: &AtomicBool,
-    ) -> Result<Value, String> {
-        charge_transfer_work(work_items, limits.max_state_items, "running_stats")?;
+    ) -> Result<(), String> {
+        charge_transfer_work(work_items, limits.max_state_items, operation)?;
         ensure_active(cancelled)?;
         match self {
             Self::Count(total) => {
@@ -5422,6 +5423,7 @@ impl RunningAccumulator {
                         work_items,
                         limits.max_state_items,
                         cancelled,
+                        operation,
                     )? {
                         if value.is_some_and(is_nonempty) {
                             matched = true;
@@ -5431,7 +5433,7 @@ impl RunningAccumulator {
                         *total = total.saturating_add(1);
                     }
                 }
-                Ok(Value::from(*total))
+                Ok(())
             }
             Self::Sum(sum) => {
                 for value in running_selected_values(
@@ -5440,6 +5442,7 @@ impl RunningAccumulator {
                     work_items,
                     limits.max_state_items,
                     cancelled,
+                    operation,
                 )? {
                     let text = projected_text(value);
                     let Ok(number) = text.parse::<f64>() else {
@@ -5454,7 +5457,7 @@ impl RunningAccumulator {
                         *sum += number;
                     }
                 }
-                Ok(running_number(*sum))
+                Ok(())
             }
             Self::Min { selected } => update_running_extreme(
                 selected,
@@ -5465,6 +5468,7 @@ impl RunningAccumulator {
                 work_items,
                 limits,
                 cancelled,
+                operation,
             ),
             Self::Max { selected } => update_running_extreme(
                 selected,
@@ -5475,6 +5479,7 @@ impl RunningAccumulator {
                 work_items,
                 limits,
                 cancelled,
+                operation,
             ),
             Self::First {
                 offset,
@@ -5482,7 +5487,7 @@ impl RunningAccumulator {
                 selected,
             } => {
                 if *rows_seen == *offset {
-                    let value = running_exact_value(row, &expression.fields)?;
+                    let value = running_exact_value(row, &expression.fields, operation)?;
                     charge_transfer_value(
                         &value,
                         state_bytes,
@@ -5490,17 +5495,15 @@ impl RunningAccumulator {
                         cancelled,
                         work_items,
                         limits.max_state_items,
-                        "running_stats",
+                        operation,
                     )?;
                     *selected = Some(value);
                 }
                 *rows_seen = rows_seen.saturating_add(1);
-                Ok(selected
-                    .clone()
-                    .unwrap_or_else(|| Value::String(String::new())))
+                Ok(())
             }
             Self::Last { offset, values } => {
-                let value = running_exact_value(row, &expression.fields)?;
+                let value = running_exact_value(row, &expression.fields, operation)?;
                 charge_transfer_value(
                     &value,
                     state_bytes,
@@ -5508,23 +5511,39 @@ impl RunningAccumulator {
                     cancelled,
                     work_items,
                     limits.max_state_items,
-                    "running_stats",
+                    operation,
                 )?;
                 values.push_back(value);
                 let capacity = offset.checked_add(1).ok_or_else(|| {
-                    "LogsQL running_stats last offset exceeds the supported range".to_string()
+                    format!("LogsQL {operation} last offset exceeds the supported range")
                 })?;
                 if values.len() > capacity {
                     values.pop_front();
                 }
-                Ok(if values.len() <= *offset {
+                Ok(())
+            }
+        }
+    }
+
+    fn current_value(&self) -> Value {
+        match self {
+            Self::Count(total) => Value::from(*total),
+            Self::Sum(sum) => running_number(*sum),
+            Self::Min { selected } | Self::Max { selected } => selected
+                .as_ref()
+                .map_or_else(|| Value::String(String::new()), |(_, value)| value.clone()),
+            Self::First { selected, .. } => selected
+                .clone()
+                .unwrap_or_else(|| Value::String(String::new())),
+            Self::Last { offset, values } => {
+                if values.len() <= *offset {
                     Value::String(String::new())
                 } else {
                     values
                         .front()
                         .cloned()
                         .unwrap_or_else(|| Value::String(String::new()))
-                })
+                }
             }
         }
     }
@@ -5536,10 +5555,11 @@ fn running_stats_rows(
     limits: PipelineLimits,
     cancelled: &AtomicBool,
 ) -> Result<Vec<Value>, String> {
+    let operation = spec.mode.operation();
     ensure_active(cancelled)?;
     if rows.len() > limits.max_state_items {
         return Err(format!(
-            "LogsQL running_stats exceeds max_work_rows={}",
+            "LogsQL {operation} exceeds max_work_rows={}",
             limits.max_state_items
         ));
     }
@@ -5551,35 +5571,35 @@ fn running_stats_rows(
                 .checked_mul(rows.len())
                 .and_then(|row_bytes| bytes.checked_add(row_bytes))
         })
-        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
+        .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
     let mut persistent_bytes = size_of::<Vec<RunningSortKey>>()
         .checked_add(size_of::<Vec<Option<Value>>>())
         .and_then(|bytes| bytes.checked_add(size_of::<Vec<Value>>()))
         .and_then(|bytes| bytes.checked_add(row_slots_bytes))
-        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
-    ensure_first_state_bytes(persistent_bytes, limits.max_state_bytes, "running_stats")?;
+        .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+    ensure_first_state_bytes(persistent_bytes, limits.max_state_bytes, operation)?;
 
     let mut work_items = 0usize;
     let mut keys = Vec::with_capacity(rows.len());
     for (row_index, row) in rows.iter().enumerate() {
         check_periodically(cancelled, row_index)?;
-        charge_transfer_work(&mut work_items, limits.max_state_items, "running_stats")?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, operation)?;
         let mut group = Vec::with_capacity(spec.group_by.len());
         persistent_bytes = persistent_bytes
             .checked_add(size_of::<RunningSortKey>())
             .and_then(|bytes| bytes.checked_add(size_of::<Vec<String>>()))
-            .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
+            .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
         for field in &spec.group_by {
             let PipelineField::Exact { path, .. } = field else {
-                return Err("LogsQL running_stats group field is not exact".into());
+                return Err(format!("LogsQL {operation} group field is not exact"));
             };
-            charge_transfer_work(&mut work_items, limits.max_state_items, "running_stats")?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, operation)?;
             let value = projected_text(field_value(row, path)).into_owned();
             charge_transfer_string(
                 &value,
                 &mut persistent_bytes,
                 limits.max_state_bytes,
-                "running_stats",
+                operation,
             )?;
             group.push(value);
         }
@@ -5588,7 +5608,7 @@ fn running_stats_rows(
             &timestamp_text,
             &mut persistent_bytes,
             limits.max_state_bytes,
-            "running_stats",
+            operation,
         )?;
         let timestamp_us = DateTime::parse_from_rfc3339(&timestamp_text)
             .ok()
@@ -5619,72 +5639,120 @@ fn running_stats_rows(
 
     let mut row_slots = rows.into_iter().map(Some).collect::<Vec<_>>();
     let mut output = Vec::with_capacity(row_slots.len());
-    let mut current_group = None::<Vec<String>>;
-    let mut accumulators = Vec::<RunningAccumulator>::new();
     let accumulator_base = size_of::<Vec<RunningAccumulator>>()
         .checked_add(
             size_of::<RunningAccumulator>()
                 .checked_mul(spec.expressions.len())
-                .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?,
+                .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?,
         )
-        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
-    let mut group_bytes = 0usize;
-    for (position, key) in keys.into_iter().enumerate() {
-        check_periodically(cancelled, position)?;
-        if current_group.as_ref() != Some(&key.group) {
-            current_group = Some(key.group);
-            accumulators = spec
-                .expressions
-                .iter()
-                .map(|expression| RunningAccumulator::new(expression.kind))
-                .collect::<Result<Vec<_>, _>>()?;
-            group_bytes = accumulator_base;
+        .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+    let mut group_start = 0usize;
+    while group_start < keys.len() {
+        let mut group_end = group_start + 1;
+        while group_end < keys.len() && keys[group_end].group == keys[group_start].group {
+            group_end += 1;
         }
-        ensure_running_stats_bytes(persistent_bytes, group_bytes, limits.max_state_bytes)?;
-        let mut row = row_slots
-            .get_mut(key.row_index)
-            .and_then(Option::take)
-            .ok_or_else(|| "LogsQL running_stats selected a row twice".to_string())?;
-        let mut generated = Vec::with_capacity(spec.expressions.len());
-        for (expression, accumulator) in spec.expressions.iter().zip(&mut accumulators) {
-            let value = accumulator.update(
-                expression,
-                &row,
-                &mut group_bytes,
-                &mut work_items,
-                limits,
-                cancelled,
-            )?;
-            ensure_running_stats_bytes(persistent_bytes, group_bytes, limits.max_state_bytes)?;
-            generated.push((expression, value));
+
+        let mut accumulators = spec
+            .expressions
+            .iter()
+            .map(|expression| RunningAccumulator::new(expression.kind, operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut group_bytes = accumulator_base;
+        if spec.mode == RunningStatsMode::Total {
+            for (offset, key) in keys[group_start..group_end].iter().enumerate() {
+                check_periodically(cancelled, group_start + offset)?;
+                let row = row_slots
+                    .get(key.row_index)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| format!("LogsQL {operation} selected a row twice"))?;
+                for (expression, accumulator) in spec.expressions.iter().zip(&mut accumulators) {
+                    accumulator.advance(
+                        operation,
+                        expression,
+                        row,
+                        &mut group_bytes,
+                        &mut work_items,
+                        limits,
+                        cancelled,
+                    )?;
+                }
+                ensure_running_stats_bytes(
+                    persistent_bytes,
+                    group_bytes,
+                    limits.max_state_bytes,
+                    operation,
+                )?;
+            }
         }
-        for (expression, value) in generated {
-            charge_transfer_string(
-                &expression.alias_name,
-                &mut persistent_bytes,
+
+        for (offset, key) in keys[group_start..group_end].iter().enumerate() {
+            check_periodically(cancelled, group_start + offset)?;
+            ensure_running_stats_bytes(
+                persistent_bytes,
+                group_bytes,
                 limits.max_state_bytes,
-                "running_stats",
+                operation,
             )?;
-            charge_transfer_value(
-                &value,
-                &mut persistent_bytes,
-                limits.max_state_bytes,
-                cancelled,
-                &mut work_items,
-                limits.max_state_items,
-                "running_stats",
-            )?;
-            ensure_running_stats_bytes(persistent_bytes, group_bytes, limits.max_state_bytes)?;
-            let PipelineField::Exact { path, .. } = &expression.alias else {
-                return Err("LogsQL running_stats result field is not exact".into());
-            };
-            let object = row
-                .as_object_mut()
-                .ok_or_else(|| "LogsQL running_stats input row is not a JSON object".to_string())?;
-            insert_path(object, path, value)
-                .map_err(|error| format!("LogsQL running_stats destination conflict: {error}"))?;
+            let mut row = row_slots
+                .get_mut(key.row_index)
+                .and_then(Option::take)
+                .ok_or_else(|| format!("LogsQL {operation} selected a row twice"))?;
+            let mut generated = Vec::with_capacity(spec.expressions.len());
+            for (expression, accumulator) in spec.expressions.iter().zip(&mut accumulators) {
+                if spec.mode == RunningStatsMode::Running {
+                    accumulator.advance(
+                        operation,
+                        expression,
+                        &row,
+                        &mut group_bytes,
+                        &mut work_items,
+                        limits,
+                        cancelled,
+                    )?;
+                    ensure_running_stats_bytes(
+                        persistent_bytes,
+                        group_bytes,
+                        limits.max_state_bytes,
+                        operation,
+                    )?;
+                }
+                generated.push((expression, accumulator.current_value()));
+            }
+            for (expression, value) in generated {
+                charge_transfer_string(
+                    &expression.alias_name,
+                    &mut persistent_bytes,
+                    limits.max_state_bytes,
+                    operation,
+                )?;
+                charge_transfer_value(
+                    &value,
+                    &mut persistent_bytes,
+                    limits.max_state_bytes,
+                    cancelled,
+                    &mut work_items,
+                    limits.max_state_items,
+                    operation,
+                )?;
+                ensure_running_stats_bytes(
+                    persistent_bytes,
+                    group_bytes,
+                    limits.max_state_bytes,
+                    operation,
+                )?;
+                let PipelineField::Exact { path, .. } = &expression.alias else {
+                    return Err(format!("LogsQL {operation} result field is not exact"));
+                };
+                let object = row
+                    .as_object_mut()
+                    .ok_or_else(|| format!("LogsQL {operation} input row is not a JSON object"))?;
+                insert_path(object, path, value)
+                    .map_err(|error| format!("LogsQL {operation} destination conflict: {error}"))?;
+            }
+            output.push(row);
         }
-        output.push(row);
+        group_start = group_end;
     }
     ensure_active(cancelled)?;
     Ok(output)
@@ -5700,13 +5768,15 @@ fn update_running_extreme(
     work_items: &mut usize,
     limits: PipelineLimits,
     cancelled: &AtomicBool,
-) -> Result<Value, String> {
+    operation: &str,
+) -> Result<(), String> {
     for value in running_selected_values(
         row,
         &expression.fields,
         work_items,
         limits.max_state_items,
         cancelled,
+        operation,
     )? {
         let text = projected_text(value).into_owned();
         let replace = selected.as_ref().is_none_or(|(current, _)| {
@@ -5719,7 +5789,7 @@ fn update_running_extreme(
         });
         if replace {
             let value = running_value(value);
-            charge_transfer_string(&text, state_bytes, limits.max_state_bytes, "running_stats")?;
+            charge_transfer_string(&text, state_bytes, limits.max_state_bytes, operation)?;
             charge_transfer_value(
                 &value,
                 state_bytes,
@@ -5727,14 +5797,12 @@ fn update_running_extreme(
                 cancelled,
                 work_items,
                 limits.max_state_items,
-                "running_stats",
+                operation,
             )?;
             *selected = Some((text, value));
         }
     }
-    Ok(selected
-        .as_ref()
-        .map_or_else(|| Value::String(String::new()), |(_, value)| value.clone()))
+    Ok(())
 }
 
 fn running_selected_values<'a>(
@@ -5743,13 +5811,14 @@ fn running_selected_values<'a>(
     work_items: &mut usize,
     max_work_items: usize,
     cancelled: &AtomicBool,
+    operation: &str,
 ) -> Result<Vec<Option<&'a Value>>, String> {
     let mut output = Vec::new();
     for field in fields {
         ensure_active(cancelled)?;
         match field {
             PipelineField::Exact { path, .. } => {
-                charge_transfer_work(work_items, max_work_items, "running_stats")?;
+                charge_transfer_work(work_items, max_work_items, operation)?;
                 output.push(field_value(row, path));
             }
             PipelineField::Prefix { prefix } => collect_running_leaves(
@@ -5760,6 +5829,7 @@ fn running_selected_values<'a>(
                 work_items,
                 max_work_items,
                 cancelled,
+                operation,
             )?,
             PipelineField::All => collect_running_leaves(
                 row,
@@ -5769,6 +5839,7 @@ fn running_selected_values<'a>(
                 work_items,
                 max_work_items,
                 cancelled,
+                operation,
             )?,
         }
     }
@@ -5784,8 +5855,9 @@ fn collect_running_leaves<'a>(
     work_items: &mut usize,
     max_work_items: usize,
     cancelled: &AtomicBool,
+    operation: &str,
 ) -> Result<(), String> {
-    charge_transfer_work(work_items, max_work_items, "running_stats")?;
+    charge_transfer_work(work_items, max_work_items, operation)?;
     check_periodically(cancelled, *work_items)?;
     if prefix.is_some_and(|prefix| {
         !path.is_empty() && !path.starts_with(prefix) && !prefix.starts_with(path.as_str())
@@ -5810,6 +5882,7 @@ fn collect_running_leaves<'a>(
                 work_items,
                 max_work_items,
                 cancelled,
+                operation,
             )?;
             path.truncate(original_len);
         }
@@ -5848,18 +5921,27 @@ fn running_value(value: Option<&Value>) -> Value {
         .unwrap_or_else(|| Value::String(String::new()))
 }
 
-fn running_exact_value(row: &Value, fields: &[PipelineField]) -> Result<Value, String> {
+fn running_exact_value(
+    row: &Value,
+    fields: &[PipelineField],
+    operation: &str,
+) -> Result<Value, String> {
     let Some(PipelineField::Exact { path, .. }) = fields.first() else {
-        return Err("LogsQL running_stats first/last field is not exact".into());
+        return Err(format!("LogsQL {operation} first/last field is not exact"));
     };
     Ok(running_value(field_value(row, path)))
 }
 
-fn ensure_running_stats_bytes(persistent: usize, group: usize, limit: usize) -> Result<(), String> {
+fn ensure_running_stats_bytes(
+    persistent: usize,
+    group: usize,
+    limit: usize,
+    operation: &str,
+) -> Result<(), String> {
     let used = persistent
         .checked_add(group)
-        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
-    ensure_first_state_bytes(used, limit, "running_stats")
+        .ok_or_else(|| format!("LogsQL {operation} state size overflow"))?;
+    ensure_first_state_bytes(used, limit, operation)
 }
 
 fn ensure_join_result_capacity(current: usize, limit: usize) -> Result<(), String> {
@@ -13260,6 +13342,66 @@ mod tests {
             running_stats_rows(source, spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
+    }
+
+    #[test]
+    fn total_stats_repeat_final_group_state_with_rich_values() {
+        let source = vec![
+            json!({"_time":"2026-08-06T00:00:00.000004Z","case":"b-four","group":"b","n":2,"source":{"nested":[1,false,null]}}),
+            json!({"_time":"2026-08-06T00:00:00.000002Z","case":"a-two","group":"a","n":"2.5","source":null}),
+            json!({"_time":"2026-08-06T00:00:00.000003Z","case":"b-three","group":"b","n":"10","source":[1,false,null]}),
+            json!({"_time":"2026-08-06T00:00:00.000001Z","case":"a-one","group":"a","n":-2}),
+        ];
+        let plan = crate::logsql::parse_at(
+            "* | total_stats by (group) count() as total_count, sum(n) as total_sum, min(n) as total_min, max(n) as total_max, first(source) offset 1 as first_source, last(source) offset 1 as previous_source",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let result = execute(
+            source,
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits: PipelineLimits {
+                    max_result_rows: 20,
+                    max_state_items: 100_000,
+                    max_state_bytes: 2_000_000,
+                },
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.iter().map(|row| &row["case"]).collect::<Vec<_>>(),
+            [
+                &json!("a-one"),
+                &json!("a-two"),
+                &json!("b-three"),
+                &json!("b-four")
+            ]
+        );
+        for row in &result[..2] {
+            assert_eq!(row["total_count"], 2);
+            assert_eq!(row["total_sum"], 0.5);
+            assert_eq!(row["total_min"], -2);
+            assert_eq!(row["total_max"], "2.5");
+            assert_eq!(row["first_source"], Value::Null);
+            assert_eq!(row["previous_source"], "");
+        }
+        for row in &result[2..] {
+            assert_eq!(row["total_count"], 2);
+            assert_eq!(row["total_sum"], 12.0);
+            assert_eq!(row["total_min"], 2);
+            assert_eq!(row["total_max"], "10");
+            assert_eq!(row["first_source"], json!({"nested":[1,false,null]}));
+            assert_eq!(row["previous_source"], json!([1, false, null]));
+        }
     }
 
     #[test]

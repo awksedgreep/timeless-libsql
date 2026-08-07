@@ -5210,6 +5210,149 @@
         {"case": "numeric-two", "running": "2"},
         {"case": "format-row", "running": "2"}
       ]
+    },
+    {
+      "id": "LQL-P46-total-count-repeats-final-state",
+      "query": "state_group:=state | total_stats count() as total | fields case, total, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "state-missing", "total": "6"},
+        {"case": "state-null", "total": "6"},
+        {"case": "state-empty", "total": "6"},
+        {"case": "state-string", "total": "6"},
+        {"case": "state-false", "total": "6"},
+        {"case": "state-zero", "total": "6"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-count-skips-empty-field-states",
+      "query": "state_group:=state | total_stats count(probe) as total | fields case, total, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "state-missing", "total": "3"},
+        {"case": "state-null", "total": "3"},
+        {"case": "state-empty", "total": "3"},
+        {"case": "state-string", "total": "3"},
+        {"case": "state-false", "total": "3"},
+        {"case": "state-zero", "total": "3"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-count-accepts-prefix-fields",
+      "query": "state_group:=state | total_stats count(p*) as total | fields case, total, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "state-missing", "total": "3"},
+        {"case": "state-null", "total": "3"},
+        {"case": "state-empty", "total": "3"},
+        {"case": "state-string", "total": "3"},
+        {"case": "state-false", "total": "3"},
+        {"case": "state-zero", "total": "3"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-sum-min-max-use-complete-state",
+      "query": "numeric_group:=numeric n:<=2.5 | total_stats sum(n) as total_sum, min(n) as total_min, max(n) as total_max | fields case, total_sum, total_min, total_max, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "numeric-negative", "total_sum": "2.5", "total_min": "-2", "total_max": "2.5"},
+        {"case": "numeric-zero", "total_sum": "2.5", "total_min": "-2", "total_max": "2.5"},
+        {"case": "numeric-two", "total_sum": "2.5", "total_min": "-2", "total_max": "2.5"},
+        {"case": "numeric-decimal", "total_sum": "2.5", "total_min": "-2", "total_max": "2.5"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-stats-group-by-is-independent",
+      "query": "numeric_group:=numeric n:<=2.5 | total_stats by (first_partition) count() as total_count, sum(n) as total_sum | fields case, first_partition, total_count, total_sum, _time",
+      "required_ignored_fields": ["_time"],
+      "result_order": "unordered",
+      "expected_rows": [
+        {"case": "numeric-two", "first_partition": "a", "total_count": "2", "total_sum": "4.5"},
+        {"case": "numeric-decimal", "first_partition": "a", "total_count": "2", "total_sum": "4.5"},
+        {"case": "numeric-negative", "first_partition": "b", "total_count": "2", "total_sum": "-2"},
+        {"case": "numeric-zero", "first_partition": "b", "total_count": "2", "total_sum": "-2"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-stats-allows-shorthand-group-and-case-insensitive-name",
+      "query": "numeric_group:=numeric n:<=2.5 | ToTaL_StAtS (first_partition) count() as total | fields case, first_partition, total, _time",
+      "required_ignored_fields": ["_time"],
+      "result_order": "unordered",
+      "expected_rows": [
+        {"case": "numeric-two", "first_partition": "a", "total": "2"},
+        {"case": "numeric-decimal", "first_partition": "a", "total": "2"},
+        {"case": "numeric-negative", "first_partition": "b", "total": "2"},
+        {"case": "numeric-zero", "first_partition": "b", "total": "2"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-first-last-offsets-use-complete-time-range",
+      "query": "state_group:=state | total_stats first(case) offset 1 as first_case, last(case) offset 1 as last_case | fields case, first_case, last_case, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "state-missing", "first_case": "state-null", "last_case": "state-false"},
+        {"case": "state-null", "first_case": "state-null", "last_case": "state-false"},
+        {"case": "state-empty", "first_case": "state-null", "last_case": "state-false"},
+        {"case": "state-string", "first_case": "state-null", "last_case": "state-false"},
+        {"case": "state-false", "first_case": "state-null", "last_case": "state-false"},
+        {"case": "state-zero", "first_case": "state-null", "last_case": "state-false"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-stats-default-result-names-are-canonical",
+      "query": "numeric_group:=numeric n:<=2.5 | total_stats count(), sum(n) | fields case, \"count(*)\", \"sum(n)\", _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "numeric-negative", "count(*)": "4", "sum(n)": "2.5"},
+        {"case": "numeric-zero", "count(*)": "4", "sum(n)": "2.5"},
+        {"case": "numeric-two", "count(*)": "4", "sum(n)": "2.5"},
+        {"case": "numeric-decimal", "count(*)": "4", "sum(n)": "2.5"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-stats-feed-subsequent-pipes",
+      "query": "state_group:=state | total_stats count() as total | filter total:>5 | fields case, total, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "state-missing", "total": "6"},
+        {"case": "state-null", "total": "6"},
+        {"case": "state-empty", "total": "6"},
+        {"case": "state-string", "total": "6"},
+        {"case": "state-false", "total": "6"},
+        {"case": "state-zero", "total": "6"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-result-overwrites-an-existing-field",
+      "query": "state_group:=state | total_stats count() as probe | fields case, probe, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "state-missing", "probe": "6"},
+        {"case": "state-null", "probe": "6"},
+        {"case": "state-empty", "probe": "6"},
+        {"case": "state-string", "probe": "6"},
+        {"case": "state-false", "probe": "6"},
+        {"case": "state-zero", "probe": "6"}
+      ]
+    },
+    {
+      "id": "LQL-P46-total-stats-empty-input-remains-empty",
+      "query": "case:=does-not-exist | total_stats count() as total | fields case, total",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P46-total-sum-missing-state-is-nan",
+      "query": "case:=state-missing | total_stats sum(never_present) as total | fields case, total",
+      "expected_rows": [{"case": "state-missing", "total": "NaN"}]
+    },
+    {
+      "id": "LQL-P46-total-sum-skips-nonfinite-after-a-finite-value",
+      "query": "case:=numeric-two | union (case:=format-row | math 1 / 0 as n | fields case, n, _time) | total_stats sum(n) as total | fields case, total, _time",
+      "required_ignored_fields": ["_time"],
+      "expected_rows": [
+        {"case": "numeric-two", "total": "2"},
+        {"case": "format-row", "total": "2"}
+      ]
     }
   ],
   "sample_cases": [
@@ -8355,6 +8498,118 @@
     {
       "id": "LQL-P45-running-stats-rejects-an-unterminated-function",
       "query": "* | running_stats sum(n",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-requires-a-function",
+      "query": "* | total_stats",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-by-requires-parentheses",
+      "query": "* | total_stats by",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-an-unknown-function",
+      "query": "* | total_stats foo()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-function-requires-parentheses",
+      "query": "* | total_stats count",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-a-wildcard-group",
+      "query": "* | total_stats by (*) count()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-a-prefix-group",
+      "query": "* | total_stats by (host*) count()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-a-wildcard-result",
+      "query": "* | total_stats count() as x*",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-duplicate-results",
+      "query": "* | total_stats sum() x, count() x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-first-requires-a-field",
+      "query": "* | total_stats first() as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-first-rejects-a-prefix-field",
+      "query": "* | total_stats first(a*) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-first-rejects-multiple-fields",
+      "query": "* | total_stats first(a, b) as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-last-rejects-a-negative-offset",
+      "query": "* | total_stats last(a) offset -1 as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-first-rejects-a-nonnumeric-offset",
+      "query": "* | total_stats first(a) offset nope as x",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-a-trailing-token",
+      "query": "* | total_stats count() as x trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-an-empty-expression",
+      "query": "* | total_stats count() as x,,sum(n) as y",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P46-total-stats-rejects-an-unterminated-function",
+      "query": "* | total_stats sum(n",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

@@ -1845,6 +1845,48 @@ projected fields differ. The bounded wide partition/sort/state cost remains
 above the unchanged public storage boundary; ordinary fixed-key SQLite
 windows already benefit direct users.
 
+## LogsQL bounded total statistics
+
+`total_stats` computes complete-group state and repeats the final result on
+every input row:
+
+```text
+* | total_stats count() as rows
+* | total_stats by (service, level) sum(duration_ms) as total_duration
+* | total_stats (service) min(duration_ms) as minimum, max(duration_ms) as maximum
+* | total_stats first(message) offset 1 as second_message, last(message) offset 1 as penultimate_message
+* | total_stats sum(payload.*) as nested_total
+```
+
+Its case-insensitive command, optional `by (field, ...)` or `(field, ...)`
+group, functions, selectors, offsets, aliases, canonical names, and strict
+errors are shared with `running_stats`. Group and `first`/`last` fields must
+be exact; count, sum, minimum, and maximum accept exact, prefix, all-field, or
+omitted selectors. Invalid groups, selectors, destinations, arity, offsets,
+commas, suffixes, duplicate aliases, and trailing tokens fail before
+execution.
+
+Rows use numeric microsecond chronology with stable ties inside each group;
+groups have deterministic lexical order. This preserves the documented
+Timeless correction for VictoriaLogs' formatted-time ordering defect.
+`first` selects from the beginning of the complete group and `last` from its
+end, using zero-based offsets. Every row then receives the same final count,
+sum, natural-order rich extrema, and selected first/last values. Empty input
+remains empty, and a sum without any finite textual/native number is the
+explicit string `"NaN"`.
+
+Recursive prefix traversal, atomic arrays, original-row expression snapshots,
+later-pipe visibility, scalar overwrite, and scalar-parent conflict behavior
+match `running_stats`. Group keys, sort state, traversal, accumulators, offset
+values, work, result rows, response bytes, deadlines, and cancellation are
+bounded. One public `logs` scan supplies immutable rich rows across optimize,
+shutdown, and reopen. Executable
+[`SQL-LOG-060`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)
+provides full-partition fixed-key SQLite windows for direct users. Rust owns
+dynamic LogsQL grammar, natural/rich semantics, limits, cancellation, and
+envelopes; no private table, extension query opcode, storage format, or
+authoritative 8,192-entry batching behavior changes.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

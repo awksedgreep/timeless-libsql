@@ -450,6 +450,10 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "running_value_path" => Value::Text("$.duration_ms".to_owned()),
         "running_companion_path" => Value::Text("$.host".to_owned()),
         "running_first_offset" | "running_last_offset" => Value::Integer(1),
+        "total_group_path" => Value::Text("$.service".to_owned()),
+        "total_value_path" => Value::Text("$.duration_ms".to_owned()),
+        "total_companion_path" => Value::Text("$.host".to_owned()),
+        "total_first_offset" | "total_last_offset" => Value::Integer(1),
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "any_source_path" => Value::Text("$.host".to_owned()),
@@ -1779,6 +1783,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let unroll_rows = recipe_values("SQL-LOG-056", 0)?;
     let join_rows = recipe_values("SQL-LOG-057", 0)?;
     let running_stats_rows = recipe_values("SQL-LOG-059", 0)?;
+    let total_stats_rows = recipe_values("SQL-LOG-060", 0)?;
     if [
         bounded,
         substring,
@@ -2055,6 +2060,50 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         ]
     {
         bail!("SQL-LOG-059 running numeric state changed: {running_stats_rows:?}");
+    }
+    let total_state = total_stats_rows
+        .iter()
+        .map(|row| {
+            (
+                row.first().cloned(),
+                row.get(1).cloned(),
+                row.get(5).cloned(),
+                row.get(6).cloned(),
+                row.get(7).cloned(),
+                row.get(8).cloned(),
+                row.get(9).cloned(),
+                row.get(10).cloned(),
+                row.get(11).cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if total_state
+        != [
+            (
+                Some(Value::Text("api".to_owned())),
+                Some(Value::Integer(1_000)),
+                Some(Value::Integer(2)),
+                Some(Value::Integer(2)),
+                Some(Value::Real(16.0)),
+                Some(Value::Real(4.0)),
+                Some(Value::Real(12.0)),
+                Some(Value::Text("web-2".to_owned())),
+                Some(Value::Text("web-1".to_owned())),
+            ),
+            (
+                Some(Value::Text("api".to_owned())),
+                Some(Value::Integer(2_000)),
+                Some(Value::Integer(2)),
+                Some(Value::Integer(2)),
+                Some(Value::Real(16.0)),
+                Some(Value::Real(4.0)),
+                Some(Value::Real(12.0)),
+                Some(Value::Text("web-2".to_owned())),
+                Some(Value::Text("web-1".to_owned())),
+            ),
+        ]
+    {
+        bail!("SQL-LOG-060 total numeric state changed: {total_stats_rows:?}");
     }
     let join_sql = recipe_sql("SQL-LOG-057", 0)?;
     let measured_join =
@@ -4383,13 +4432,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 125);
+        assert_eq!(recipes.len(), 126);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            157
+            158
         );
         assert_eq!(
             recipes
@@ -4397,7 +4446,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            163
+            164
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }
