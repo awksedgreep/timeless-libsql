@@ -3072,6 +3072,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "global_filter_narrow",
+                "logs-global-filter-narrow",
+                r#"options(global_filter=(host:="h00")) query | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
+                "global_filter_wide",
+                "logs-global-filter-wide",
+                r#"options(global_filter=(query)) * | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
+                "global_filter_control_narrow",
+                "logs-global-filter-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
+                "global_filter_control_wide",
+                "logs-global-filter-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
                 "set_stream_fields_narrow",
                 "logs-set-stream-fields-narrow",
                 r#"host:="h00" AND query | sort by (_time) asc | limit 64 | set_stream_fields host | fields _stream"#,
@@ -3790,6 +3818,16 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "time_offset_narrow",
         )?;
         require_same_public_query_work(&queries, "time_offset_control_wide", "time_offset_wide")?;
+        require_same_public_query_work(
+            &queries,
+            "global_filter_control_narrow",
+            "global_filter_narrow",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "global_filter_control_wide",
+            "global_filter_wide",
+        )?;
         require_same_public_query_work(
             &queries,
             "set_stream_fields_control_narrow",

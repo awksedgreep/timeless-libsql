@@ -6664,3 +6664,46 @@ semantic, parser, storage, performance, and ownership verdicts. No extension
 primitive, private access, storage format, authoritative batching,
 compression, index, rollup, retention, transaction, migration, optimize, or
 maintenance behavior changed.
+
+## Session 19 LogsQL global filters
+
+`LQL-Q05` has complete semantic, direct-SQL, and real-extension evidence and
+remains in progress only until its exact-build performance artifact is
+captured. Thirteen successful and nine error witnesses pass inside the
+complete 1,482-case immutable VictoriaLogs 1.52.0 fixture. Pinned source and
+exact responses establish global-before-local conjunction, logical
+precedence, duplicate-last behavior with validation of every declaration,
+inheritance into every nested query kind, explicit replacement, filter-only
+grammar, query-backed initialization, and declaration-time interaction with
+`time_offset`.
+
+The Rust parser regression failed first because `global_filter` was
+unsupported. The implemented path stores compiled predicates in the parse
+context rather than substituting text. A second regression exposed a generic
+option scanner that paired the closing parenthesis of `_time:[start,end)` with
+the enclosing option group. The corrected option-only group scanner tracks
+mixed range and ordinary delimiters while retaining strict quote, comma, and
+trailing-text errors.
+
+The real-extension regression applies one predicate to the base query,
+query-backed membership and pipeline conditions, join sources, and union
+sources; pins explicit replacement and all three time-option scope cases; and
+proves rich typed fidelity, strict zero-read errors, cumulative work limits,
+cancellation and reader reuse, immutable rows, flush, optimize, shutdown, and
+reopen. Executable `SQL-LOG-066` runs two separately materialized public
+`logs` scans with the same global conjunct and independent work/result bounds.
+
+The first SQL recipe revision supplied hidden `max_work_entries` inputs from a
+joined one-row CTE. SQLite reordered the second virtual-table join, made that
+hidden constraint unusable, and the residual equality compared against the
+unbound `NULL` projection, eliminating its rows. Direct hidden-column binds
+restore both scans and are the documented public contract; a core-table analog
+and `EXPLAIN QUERY PLAN` distinguished this from global-filter state. Ordinary
+conjunction already exposes the correct direct-user operation, so no
+language-specific extension primitive, private access, format, authoritative
+batching, compression, index, rollup, retention, transaction, migration,
+optimize, or maintenance behavior changes.
+
+Exact-build narrow/wide latency, public work, response bytes, durable work,
+physical/logical storage, cancellation, and RSS HWM will be added from the
+clean implementation commit before the matrix row is marked shipped.

@@ -304,6 +304,96 @@
       "expected_cases": ["week-sun-late", "week-mon-early", "week-mon"]
     },
     {
+      "id": "LQL-Q05-global-filter-is-anded-with-the-base-filter",
+      "query": "options(global_filter=(common_value:=\"VictoriaMetrics\")) common_group:=common | fields case",
+      "status": 200,
+      "expected_cases": ["common-original"]
+    },
+    {
+      "id": "LQL-Q05-global-filter-preserves-logical-precedence",
+      "query": "options(global_filter=(common_group:=common AND (common_value:=\"VictoriaMetrics\" OR common_value:=\"VICTORIAMETRICS\"))) * | fields case",
+      "status": 200,
+      "expected_cases": ["common-original", "common-upper"]
+    },
+    {
+      "id": "LQL-Q05-last-duplicate-global-filter-wins-with-a-trailing-comma",
+      "query": "options(global_filter=(common_value:=\"victoriametrics\"), global_filter=(common_value:=\"VictoriaMetrics\"),) common_group:=common | fields case",
+      "status": 200,
+      "expected_cases": ["common-original"]
+    },
+    {
+      "id": "LQL-Q05-options-keyword-is-case-insensitive",
+      "query": "OPTIONS(global_filter=(common_value:=\"VictoriaMetrics\")) common_group:=common | fields case",
+      "status": 200,
+      "expected_cases": ["common-original"]
+    },
+    {
+      "id": "LQL-Q05-global-filter-is-inherited-by-query-backed-filters",
+      "query": "options(global_filter=(common_value:=\"VictoriaMetrics\")) case:in(common_group:=common | fields case) | fields case",
+      "status": 200,
+      "expected_cases": ["common-original"]
+    },
+    {
+      "id": "LQL-Q05-global-filter-is-inherited-by-join-sources",
+      "query": "options(global_filter=(common_value:=\"VictoriaMetrics\")) common_group:=common | join by (common_group) (common_group:=common | fields common_group, case) inner | fields case",
+      "status": 200,
+      "expected_cases": ["common-original"]
+    },
+    {
+      "id": "LQL-Q05-global-filter-is-inherited-by-union-sources",
+      "query": "options(global_filter=(common_value:=\"VictoriaMetrics\")) page_group:=page | union (common_group:=common | fields case) | fields case",
+      "status": 200,
+      "expected_cases": ["common-original"]
+    },
+    {
+      "id": "LQL-Q05-inner-global-filter-replaces-the-inherited-filter",
+      "query": "options(global_filter=(page_group:=page)) page_group:=page | join by (missing_key) (options(global_filter=(common_value:=\"VictoriaMetrics\")) common_group:=common | fields case, missing_key) inner | fields case",
+      "status": 200,
+      "expected_cases": ["page-0", "page-1", "page-2", "page-3"]
+    },
+    {
+      "id": "LQL-Q05-global-filter-may-contain-a-query-backed-filter",
+      "query": "options(global_filter=(case:in(common_value:=\"VictoriaMetrics\" | fields case))) common_group:=common | fields case",
+      "status": 200,
+      "expected_cases": ["common-original"]
+    },
+    {
+      "id": "LQL-Q05-wildcard-global-filter-is-an-identity",
+      "query": "options(global_filter=(*)) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q05-sibling-time-offset-does-not-rewrite-the-global-filter",
+      "query": "options(time_offset=1s, global_filter=(_time:[{start},{end}))) page_group:=page | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-1", "page-2"]
+    },
+    {
+      "id": "LQL-Q05-global-filter-may-declare-its-own-time-offset",
+      "query": "options(global_filter=(options(time_offset=1s) _time:[{start},{end}))) page_group:=page | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-Q05-global-filter-time-filters-inherit-the-parent-offset",
+      "query": "options(time_offset=1s) case:in(options(global_filter=(_time:[{start},{end}))) page_group:=page | fields case) | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
       "id": "LQL-F35-bare-stream-selector-equality",
       "query": "{case=\"phrase-exact\"}",
       "status": 200,
@@ -5897,6 +5987,69 @@
     {
       "id": "LQL-Q04-time-offset-rejects-an-invalid-quoted-duration",
       "query": "options(time_offset=\"one second\") *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-global-filter-requires-parentheses",
+      "query": "options(global_filter=*) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-global-filter-requires-a-filter",
+      "query": "options(global_filter=()) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-global-filter-rejects-top-level-pipes",
+      "query": "options(global_filter=(* | fields case)) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-an-invalid-earlier-duplicate-still-fails",
+      "query": "options(global_filter=(* | fields case), global_filter=(*)) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-option-name-is-case-sensitive",
+      "query": "options(GLOBAL_FILTER=(*)) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-options-require-a-closing-parenthesis",
+      "query": "options(global_filter=(*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-options-still-require-a-query",
+      "query": "options(global_filter=(*))",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-global-filter-rejects-an-incomplete-filter",
+      "query": "options(global_filter=(common_value:=)) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q05-global-filter-rejects-trailing-text",
+      "query": "options(global_filter=(*) trailing) *",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

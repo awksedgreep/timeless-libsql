@@ -1327,7 +1327,7 @@ closed.
 | `LQL-Q02` | field projection in response ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | shipped | `API` | P1 | Ordered `fields`/`keep` stages choose response fields; `_time`/`_msg` are retained only when selected, dotted metadata reconstructs its nested shape, and missing paths remain absent. |
 | `LQL-Q03` | concurrency/parallel-reader options ([no SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-19-architecture-disposition-logsql-query-parallelism)) | deferred | `DEFER` | DEFER | VictoriaLogs controls CPU workers and I/O readers inside each query. Timeless executes one public SQLite cursor per query; its server reader pool and auth admission cap independent requests and are not equivalent. |
 | `LQL-Q04` | `time_offset` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-065-offset-public-log-query-time-without-rounding); [evidence](QUERY_EVIDENCE.md#session-19-logsql-query-time-offsets)) | shipped | `API` | P2 | Exact positive/negative/sub-native source bounds, nested inheritance/replacement, leading-filter optimizer order, nanosecond results, strict errors, limits, cancellation, optimize, and reopen are pinned by `session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_queries`. |
-| `LQL-Q05` | `global_filter` | missing | `API` | P3 | Apply before every subquery without textual substitution. |
+| `LQL-Q05` | `global_filter` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-066-apply-one-global-predicate-to-every-public-log-scan)) | in progress | `API` | P3 | Query-wide compiled-predicate composition, nested inheritance/replacement, query-backed filter initialization, declaration-time `time_offset` scope, strict filter-only grammar, limits, optimize, and reopen are pinned without textual substitution. Exact-build evidence remains before shipment. |
 | `LQL-Q06` | partial-response option | missing | `API` | P3 | Default remains fail-closed; never silently return incomplete rows. |
 | `LQL-Q07` | cancellation, deadline, row/response/sample limits | shipped | `API` | P0 | Hard defaults cap result rows, decoded/examined entries, response bytes, and wall time. Capability-advertised `max_work_entries` guards row/count/value reads before decode; dropped requests cancel SQLite/Rust work and readers remain reusable. |
 | `LQL-Q08` | stable VictoriaLogs-compatible errors | shipped | `API` | P0 | Timeless intentionally improves the upstream 400 text envelope: malformed syntax is stable JSON HTTP 400 and unsupported capability is stable JSON HTTP 422, with neither reaching storage. See `QSF-063`. |
@@ -1362,6 +1362,30 @@ implements the same integer source-bound translation through the documented
 `logs` table. Exact-build evidence shows identical candidate/control public
 storage work and an 11.9%/13.2% narrow/wide p95 API-layer cost, so no extension
 primitive or private storage access is warranted.
+
+`LQL-Q05` compiles a leading `global_filter=(...)` option once and conjoins it
+with every public query scope: the base query, query-backed membership,
+query-backed pipeline conditions, join sources, and union sources. Thirteen
+successful and nine error witnesses pass the complete 1,482-case immutable
+VictoriaLogs oracle. The global predicate is composed before the local
+predicate; nested queries inherit it unless they declare a replacement; and
+all duplicate declarations are parsed even though the last value wins. A
+global-filter value is filter-only syntax, may contain query-backed filters,
+and cannot contain a result pipeline.
+
+Scope is represented by compiled predicates rather than query-string
+substitution. This preserves quoting and source offsets, gives nested
+query-backed plans the correct initialization context, and lets every public
+scan retain its own work bound. A sibling `time_offset` does not rewrite a
+global value declared in the same option list; a global value can declare its
+own offset, and a nested declaration inherits the surrounding offset at its
+declaration point. Real-extension regressions pin strict pre-storage errors,
+cumulative limits, rich fidelity, cancellation, flush, optimize, shutdown,
+and reopen. `SQL-LOG-066` gives direct users the ordinary-SQL equivalent:
+repeat the same predicate as a conjunct in every independently bounded public
+`logs` scan. No language-specific extension primitive or private storage path
+is warranted. Exact-build performance, HWM, and final row disposition remain
+before shipment.
 
 ## Higher-order library boundary
 

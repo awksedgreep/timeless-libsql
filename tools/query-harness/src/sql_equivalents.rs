@@ -506,7 +506,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "row_result_path_1" => Value::Text("$.host".to_owned()),
         "row_result_path_2" => Value::Text("$.nested".to_owned()),
         "with_hits" => Value::Integer(1),
-        "max_result_rows" => Value::Integer(100),
+        "max_result_rows" | "outer_max_result_rows" | "subquery_max_result_rows" => {
+            Value::Integer(100)
+        }
         "sample" => Value::Integer(1),
         "separator" => Value::Text("/".to_owned()),
         "source_labels_json" => Value::Text(r#"["service","zone"]"#.to_owned()),
@@ -519,7 +521,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "end_ms" => Value::Integer(2000),
         "step_ms" => Value::Integer(1000),
         "level" => Value::Text("error".to_owned()),
+        "subquery_level" if identifier == "SQL-LOG-066" => Value::Text("info".to_owned()),
         "subquery_level" => Value::Text("error".to_owned()),
+        "global_service" => Value::Text("api".to_owned()),
         "service" => Value::Text("api".to_owned()),
         "limit" => Value::Integer(10),
         "needle" | "message_contains" => Value::Text("timeout".to_owned()),
@@ -1992,6 +1996,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let json_values_rows = recipe_values("SQL-LOG-063", 0)?;
     let histogram_rows = recipe_values("SQL-LOG-064", 0)?;
     let time_offset_rows = recipe_values("SQL-LOG-065", 0)?;
+    let global_filter_rows = recipe_values("SQL-LOG-066", 0)?;
     if [
         bounded,
         substring,
@@ -2430,6 +2435,32 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         )]
     {
         bail!("SQL-LOG-065 negative query time offset changed: {negative_time_offset_rows:?}");
+    }
+    if global_filter_rows
+        != [
+            vec![
+                Value::Text("outer".to_owned()),
+                Value::Integer(1_000),
+                Value::Text("error".to_owned()),
+                Value::Text("request timeout".to_owned()),
+                Value::Text(
+                    r#"{"client_ip":"010.000.000.001","deployment":{"region":"us-east"},"duration_ms":12,"host":"web-1","nested":{"array_text":"  [1,{\"x\":2},[3],null]  ","count":2,"empty":"","none":null,"ok":true},"service":"api","tags":["prod","",123,true,false,null,{"nested":"ignored"},["ignored"],"ab","*"]}"#
+                        .to_owned(),
+                ),
+            ],
+            vec![
+                Value::Text("subquery".to_owned()),
+                Value::Integer(2_000),
+                Value::Text("info".to_owned()),
+                Value::Text("request ok".to_owned()),
+                Value::Text(
+                    r#"{"client_ip":"10.0.1.1","deployment":{"region":"us-west"},"duration_ms":4,"host":"web-2","nested":{"array_text":"  [1,{\"x\":2},[3],null]  ","count":"2","empty":null,"ok":"true"},"service":"api","tags":["dev",1.5,-2,"123","a\"b","a\nb","a/b"]}"#
+                        .to_owned(),
+                ),
+            ],
+        ]
+    {
+        bail!("SQL-LOG-066 global filter scopes changed: {global_filter_rows:?}");
     }
     let join_sql = recipe_sql("SQL-LOG-057", 0)?;
     let measured_join =

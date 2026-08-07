@@ -1527,3 +1527,30 @@ retained timestamp to shift.
 The fixture remains 167 source rows and now contains 378 row-query cases, one
 stochastic case, 540 error cases, and 541 statistics/pipeline cases: 1,460
 cases total, all passing against the immutable image. The fixture now contains 1460 cases.
+
+`LQL-Q05` adds thirteen successful row-query witnesses and nine parser errors
+for leading `options(global_filter=(...))`. They pin conjunction with the base
+filter, logical precedence, duplicate-last-wins and trailing-comma behavior,
+case-insensitive `options` with a case-sensitive option name, inheritance into
+query-backed membership, query-backed pipeline conditions, joins, and unions,
+explicit nested replacement, wildcard identity, and strict filter-only
+grammar. The time witnesses distinguish three scopes: a sibling
+`time_offset` does not rewrite the global value declared beside it, a global
+value may declare its own offset, and a nested global declaration inherits the
+surrounding offset at the declaration point.
+
+Source audit at immutable commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers `parser.go`, the query
+option and global-filter tests, query initialization, nested-query parsing,
+and storage-filter construction. VictoriaLogs composes the global predicate
+before the local predicate and initializes every nested query with the
+surrounding option state. A nested explicit declaration replaces the inherited
+global predicate rather than conjoining a second one. The global value is
+parsed as a filter-only query: it cannot have a result pipeline, but
+query-backed filters inside it receive the parent option context. Every
+duplicate declaration is parsed and validated even though the final value is
+retained.
+
+The fixture remains 167 source rows and now contains 391 row-query cases, one
+stochastic case, 549 error cases, and 541 statistics/pipeline cases: 1,482
+cases total, all passing against the immutable image. The fixture now contains 1482 cases.

@@ -1740,6 +1740,26 @@ payload bytes, matched rows, and returned rows. The 8,192-entry fixture
 remains four raw blocks and 2,022,736 physical bytes with zero queued work;
 logs RSS HWM is 101,372 KiB.
 
+`LQL-Q05` now has its semantic implementation and pre-evidence gates. A
+leading `global_filter` is compiled as a scoped predicate and conjoined with
+the base query and every query-backed membership, conditional pipeline, join,
+and union scope. Nested queries inherit it, explicit nested declarations
+replace it, all duplicate declarations are validated before the last wins,
+and result pipelines in the filter-only value fail before storage. Thirteen
+successful and nine error witnesses pass in the complete 1,482-case immutable
+VictoriaLogs fixture.
+
+The implementation deliberately avoids textual substitution. Compiled scope
+preserves quoting, source positions, query-backed initialization, and the
+upstream declaration-time interaction with `time_offset`. The real-extension
+regression covers cumulative limits, cancellation and reader reuse, rich
+fidelity, immutable storage, flush, optimize, shutdown, and reopen. Executable
+`SQL-LOG-066` gives direct users the ordinary-SQL foundation by conjoining one
+shared predicate with each separately bounded public `logs` scan. A planner
+finding requires hidden virtual-table inputs to be bound directly instead of
+through a reorderable joined CTE. Exact-build latency/storage/HWM evidence and
+the final shipped-row audit remain before `LQL-Q05` closes.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

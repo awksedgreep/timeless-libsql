@@ -56,10 +56,24 @@ struct ParseContext {
     timestamp_unit: TimestampUnit,
     query_now: i64,
     inherited_time_offset_ns: i64,
+    /// Compiled VictoriaLogs `global_filter` inherited by nested queries.
+    /// Keeping the AST in the request-owned parser context avoids textual
+    /// substitution and preserves the declaration-time option scope.
+    inherited_global_filter: Option<LogPredicate>,
     query_backed_depth: usize,
     query_backed_lists: usize,
     common_case_values: usize,
     common_case_state_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParseMode {
+    Query,
+    /// Parse the local filter owned by a `global_filter=(...)` value. Its
+    /// query options still scope nested subqueries, but its own inherited or
+    /// explicit global predicate is not applied to the value itself, matching
+    /// VictoriaLogs' stored `q.f` behavior.
+    GlobalFilterValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6087,6 +6101,7 @@ pub fn parse_at(
         timestamp_unit,
         query_now,
         inherited_time_offset_ns: 0,
+        inherited_global_filter: None,
         query_backed_depth: 0,
         query_backed_lists: 0,
         common_case_values: 0,
@@ -6096,24 +6111,65 @@ pub fn parse_at(
 }
 
 fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlPlan, LogsqlError> {
-    let inherited = context.inherited_time_offset_ns;
-    let result = parse_with_scoped_context(query, context);
-    context.inherited_time_offset_ns = inherited;
+    parse_with_context_mode(query, context, ParseMode::Query)
+}
+
+fn parse_with_context_mode(
+    query: &str,
+    context: &mut ParseContext,
+    mode: ParseMode,
+) -> Result<LogsqlPlan, LogsqlError> {
+    let inherited_time_offset_ns = context.inherited_time_offset_ns;
+    let inherited_global_filter = context.inherited_global_filter.clone();
+    let result = parse_with_scoped_context(query, context, mode);
+    context.inherited_time_offset_ns = inherited_time_offset_ns;
+    context.inherited_global_filter = inherited_global_filter;
     result
+}
+
+fn parse_global_filter_value(
+    source: &str,
+    context: &mut ParseContext,
+) -> Result<LogPredicate, LogsqlError> {
+    let plan = parse_with_context_mode(source, context, ParseMode::GlobalFilterValue)?;
+    if plan.output != LogsqlOutput::Rows || !plan.pipeline.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL global_filter cannot contain top-level pipelines",
+        ));
+    }
+    Ok(plan.spec.predicate.unwrap_or(LogPredicate::True))
 }
 
 fn parse_with_scoped_context(
     query: &str,
     context: &mut ParseContext,
+    mode: ParseMode,
 ) -> Result<LogsqlPlan, LogsqlError> {
     let timestamp_unit = context.timestamp_unit;
     let query_now = context.query_now;
     let prepared_query = prepare_query_layout(query)?;
     let prepared_query = prepared_query.as_ref();
     reject_deferred_query_parallelism_options(prepared_query)?;
-    let (query, explicit_time_offset_ns) = parse_leading_query_options(prepared_query)?;
-    let time_offset_ns = explicit_time_offset_ns.unwrap_or(context.inherited_time_offset_ns);
+    let options = parse_leading_query_options(prepared_query)?;
+    let mut explicit_global_filter = None;
+    for source in &options.global_filters {
+        // Sibling options are not installed while the global-filter value is
+        // parsed. It sees the parent scope, while its own nested query options
+        // remain fully functional.
+        explicit_global_filter = Some(parse_global_filter_value(source, context)?);
+    }
+    let global_filter = explicit_global_filter.or_else(|| context.inherited_global_filter.clone());
+    let time_offset_ns = options
+        .time_offset_ns
+        .unwrap_or(context.inherited_time_offset_ns);
     context.inherited_time_offset_ns = time_offset_ns;
+    context.inherited_global_filter = global_filter.clone();
+    let query = options.body;
+    if mode == ParseMode::GlobalFilterValue && pipeline_segments(query)?.len() != 1 {
+        return Err(LogsqlError::malformed(
+            "LogsQL global_filter cannot contain top-level pipelines",
+        ));
+    }
     reject_deferred_stream_context_pipe(query)?;
     reject_deferred_stream_selectors(query)?;
     reject_deferred_stream_id_filters(query)?;
@@ -6134,12 +6190,17 @@ fn parse_with_scoped_context(
         return Err(LogsqlError::malformed("LogsQL query is empty"));
     }
     let logical_tokens = lex_logical_tokens(base)?;
-    let use_logical_parser = logical_tokens.iter().any(|token| {
-        matches!(
-            token,
-            LogicalToken::And | LogicalToken::Or | LogicalToken::Not | LogicalToken::FieldGroup(_)
-        )
-    }) || matches!(logical_tokens.first(), Some(LogicalToken::LeftParen));
+    let use_logical_parser = mode == ParseMode::GlobalFilterValue
+        || logical_tokens.iter().any(|token| {
+            matches!(
+                token,
+                LogicalToken::And
+                    | LogicalToken::Or
+                    | LogicalToken::Not
+                    | LogicalToken::FieldGroup(_)
+            )
+        })
+        || matches!(logical_tokens.first(), Some(LogicalToken::LeftParen));
     if use_logical_parser {
         let expression = LogicalParser::new(logical_tokens).parse()?;
         let predicate = compile_logical_expression(&expression, None, context)?;
@@ -6618,6 +6679,18 @@ fn parse_with_scoped_context(
                 .take_while(|operation| matches!(operation, PipelineOp::Filter(_)))
                 .count();
             pipeline.insert(insertion, PipelineOp::QueryTimeOffset(time_offset_ns));
+        }
+    }
+    if mode == ParseMode::Query && !generated_source {
+        if let Some(global_filter) = global_filter {
+            if !matches!(global_filter, LogPredicate::True) {
+                // The declaration-time predicate is already offset in its own
+                // scope. Attach it only after shifting this query's local
+                // filter, then add compatible candidate pushdowns without
+                // overwriting a conflicting local exact constraint.
+                apply_safe_global_filter_pushdowns(&global_filter, &mut spec)?;
+                prepend_predicate(&mut spec, global_filter);
+            }
         }
     }
     let cardinality_owned_by_pipeline = pipeline.iter().any(|operation| {
@@ -8504,6 +8577,19 @@ fn append_predicate(spec: &mut QuerySpec, predicate: LogPredicate) {
     });
 }
 
+fn prepend_predicate(spec: &mut QuerySpec, predicate: LogPredicate) {
+    spec.predicate = Some(match spec.predicate.take() {
+        None => predicate,
+        Some(LogPredicate::And(mut existing)) => {
+            let mut predicates = Vec::with_capacity(existing.len() + 1);
+            predicates.push(predicate);
+            predicates.append(&mut existing);
+            LogPredicate::And(predicates)
+        }
+        Some(existing) => LogPredicate::And(vec![predicate, existing]),
+    });
+}
+
 fn logsql_word_char(character: char) -> bool {
     character == '_' || character.is_alphanumeric()
 }
@@ -9285,6 +9371,93 @@ fn apply_safe_logical_pushdowns(
     Ok(())
 }
 
+/// Add sound candidate pushdowns for an inherited global predicate without
+/// replacing a conflicting exact constraint already owned by the local
+/// query. The complete global predicate remains in `spec.predicate`, so these
+/// fields are only read-pruning hints.
+fn apply_safe_global_filter_pushdowns(
+    predicate: &LogPredicate,
+    spec: &mut QuerySpec,
+) -> Result<(), LogsqlError> {
+    match predicate {
+        LogPredicate::And(predicates) => {
+            for predicate in predicates {
+                apply_safe_global_filter_pushdowns(predicate, spec)?;
+            }
+        }
+        LogPredicate::Timestamp { minimum, maximum } => {
+            if let Some(minimum) = minimum {
+                spec.ts_min = Some(spec.ts_min.map_or(*minimum, |value| value.max(*minimum)));
+            }
+            if let Some(maximum) = maximum {
+                spec.ts_max = Some(spec.ts_max.map_or(*maximum, |value| value.min(*maximum)));
+            }
+        }
+        LogPredicate::Exact { field, value }
+        | LogPredicate::TypedExact {
+            field,
+            value: Value::String(value),
+        } => apply_compatible_global_exact_pushdown(field, value, spec)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn apply_compatible_global_exact_pushdown(
+    field: &LogField,
+    value: &str,
+    spec: &mut QuerySpec,
+) -> Result<(), LogsqlError> {
+    match field {
+        LogField::Level => {
+            if !matches!(
+                value,
+                "debug"
+                    | "info"
+                    | "notice"
+                    | "warning"
+                    | "error"
+                    | "critical"
+                    | "alert"
+                    | "emergency"
+            ) {
+                return Err(LogsqlError::malformed(format!(
+                    "unsupported LogsQL level {value:?}"
+                )));
+            }
+            if spec
+                .level
+                .as_deref()
+                .is_none_or(|existing| existing == value)
+            {
+                spec.level = Some(value.to_owned());
+            }
+        }
+        LogField::Metadata(path) if path.as_slice() == ["service"] => {
+            if spec
+                .service
+                .as_deref()
+                .is_none_or(|existing| existing == value)
+            {
+                spec.service = Some(value.to_owned());
+            }
+        }
+        LogField::Metadata(path) if matches!(path.as_slice(), [key] if matches!(key.as_str(), "host" | "path" | "status")) =>
+        {
+            let key = &path[0];
+            if spec
+                .metadata_eq
+                .get(key)
+                .is_none_or(|existing| existing == value)
+            {
+                spec.metadata_eq.insert(key.clone(), value.to_owned());
+            }
+        }
+        LogField::Message | LogField::Time | LogField::Metadata(_) | LogField::FieldPrefix(_) => {}
+    }
+    Ok(())
+}
+
 fn apply_exact_pushdown(
     field: &LogField,
     value: &str,
@@ -9425,18 +9598,32 @@ fn source_line_column(source: &str, byte_offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+struct ParsedQueryOptions<'a> {
+    body: &'a str,
+    time_offset_ns: Option<i64>,
+    /// Every declaration is parsed for strictness and request-cost
+    /// accounting; VictoriaLogs retains only the final duplicate.
+    global_filters: Vec<String>,
+}
+
 /// Parse one optional leading VictoriaLogs `options(...)` clause and return
-/// the query body plus an explicit `time_offset`, if present.
+/// its API-owned declarations plus the remaining query body.
 ///
 /// Option names are deliberately case-sensitive, while the `options` keyword
 /// is case-insensitive. A duplicate option uses its last value and one
 /// trailing comma is accepted, matching the pinned VictoriaLogs parser.
-fn parse_leading_query_options(query: &str) -> Result<(&str, Option<i64>), LogsqlError> {
+fn parse_leading_query_options(query: &str) -> Result<ParsedQueryOptions<'_>, LogsqlError> {
     const KEYWORD: &str = "options";
+
+    let no_options = || ParsedQueryOptions {
+        body: query,
+        time_offset_ns: None,
+        global_filters: Vec::new(),
+    };
 
     let trimmed = query.trim_start();
     let Some(keyword) = trimmed.get(..KEYWORD.len()) else {
-        return Ok((query, None));
+        return Ok(no_options());
     };
     if !keyword.eq_ignore_ascii_case(KEYWORD)
         || trimmed[KEYWORD.len()..]
@@ -9444,13 +9631,13 @@ fn parse_leading_query_options(query: &str) -> Result<(&str, Option<i64>), Logsq
             .next()
             .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
     {
-        return Ok((query, None));
+        return Ok(no_options());
     }
     let after_keyword = trimmed[KEYWORD.len()..].trim_start();
     if !after_keyword.starts_with('(') {
-        return Ok((query, None));
+        return Ok(no_options());
     }
-    let close = matching_parenthesis(after_keyword, 0)
+    let close = matching_query_parenthesis(after_keyword, 0)
         .map_err(|_| LogsqlError::malformed("unterminated LogsQL options(...) clause"))?;
     let body = after_keyword[close + 1..].trim_start();
     if body.is_empty() {
@@ -9464,11 +9651,16 @@ fn parse_leading_query_options(query: &str) -> Result<(&str, Option<i64>), Logsq
         inner = without_trailing_comma.trim_end();
     }
     if inner.is_empty() {
-        return Ok((body, None));
+        return Ok(ParsedQueryOptions {
+            body,
+            time_offset_ns: None,
+            global_filters: Vec::new(),
+        });
     }
 
     let mut time_offset_ns = None;
-    for item in split_top_level(inner, ',')? {
+    let mut global_filters = Vec::new();
+    for item in split_query_option_items(inner)? {
         let Some((name, value)) = split_query_option_assignment(&item) else {
             return Err(LogsqlError::malformed(format!(
                 "LogsQL query option {item:?} requires '='"
@@ -9506,7 +9698,10 @@ fn parse_leading_query_options(query: &str) -> Result<(&str, Option<i64>), Logsq
                     "LogsQL {name} query option is deferred: Timeless does not implement VictoriaLogs intra-query worker or reader fan-out"
                 )))
             }
-            "global_filter" | "ignore_global_time_filter" => {
+            "global_filter" => {
+                global_filters.push(parse_global_filter_option_value(value)?);
+            }
+            "ignore_global_time_filter" => {
                 return Err(LogsqlError::unsupported(format!(
                     "LogsQL {name} query option is not implemented yet"
                 )))
@@ -9523,7 +9718,142 @@ fn parse_leading_query_options(query: &str) -> Result<(&str, Option<i64>), Logsq
             }
         }
     }
-    Ok((body, time_offset_ns))
+    Ok(ParsedQueryOptions {
+        body,
+        time_offset_ns,
+        global_filters,
+    })
+}
+
+fn parse_global_filter_option_value(value: &str) -> Result<String, LogsqlError> {
+    let value = value.trim();
+    if !value.starts_with('(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL global_filter value must be parenthesized",
+        ));
+    }
+    let close = matching_query_parenthesis(value, 0)
+        .map_err(|_| LogsqlError::malformed("unterminated LogsQL global_filter value"))?;
+    if close + 1 != value.len() {
+        return Err(LogsqlError::malformed(
+            "unexpected text after LogsQL global_filter value",
+        ));
+    }
+    let source = value[1..close].trim();
+    if source.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL global_filter requires a filter",
+        ));
+    }
+    Ok(source.to_owned())
+}
+
+/// Split an options clause without confusing mixed-open time ranges such as
+/// `_time:[start,end)` with the parentheses around `global_filter=(...)`.
+fn split_query_option_items(value: &str) -> Result<Vec<String>, LogsqlError> {
+    let mut output = Vec::new();
+    let mut start = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut groups = Vec::new();
+
+    for (index, character) in value.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' | '[' | '{' => groups.push(QueryOptionGroup {
+                open: character,
+                time_range: is_query_option_time_range_open(value, index),
+            }),
+            ')' | ']' | '}' => close_query_group(&mut groups, character)?,
+            ',' if groups.is_empty() => {
+                output.push(value[start..index].trim().to_owned());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() || !groups.is_empty() {
+        return Err(LogsqlError::malformed(
+            "unterminated LogsQL query option expression",
+        ));
+    }
+    output.push(value[start..].trim().to_owned());
+    if output.iter().any(String::is_empty) {
+        return Err(LogsqlError::malformed(
+            "empty item in LogsQL options clause",
+        ));
+    }
+    Ok(output)
+}
+
+fn matching_query_parenthesis(value: &str, open: usize) -> Result<usize, LogsqlError> {
+    let mut groups = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for (relative, character) in value[open..].char_indices() {
+        let index = open + relative;
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' | '[' | '{' => groups.push(QueryOptionGroup {
+                open: character,
+                time_range: is_query_option_time_range_open(value, index),
+            }),
+            ')' | ']' | '}' => {
+                close_query_group(&mut groups, character)?;
+                if groups.is_empty() {
+                    return Ok(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(LogsqlError::malformed(
+        "unterminated LogsQL query option group",
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct QueryOptionGroup {
+    open: char,
+    time_range: bool,
+}
+
+fn is_query_option_time_range_open(value: &str, index: usize) -> bool {
+    value[..index].trim_end().ends_with("_time:")
+}
+
+fn close_query_group(groups: &mut Vec<QueryOptionGroup>, close: char) -> Result<(), LogsqlError> {
+    let group = groups
+        .pop()
+        .ok_or_else(|| LogsqlError::malformed("unmatched LogsQL query option closing group"))?;
+    let compatible = matches!((group.open, close), ('(', ')') | ('[', ']') | ('{', '}'))
+        || (group.time_range && matches!((group.open, close), ('[', ')') | ('(', ']')));
+    if !compatible {
+        return Err(LogsqlError::malformed(
+            "mismatched LogsQL query option group",
+        ));
+    }
+    Ok(())
 }
 
 fn split_query_option_assignment(item: &str) -> Option<(&str, &str)> {
@@ -11423,6 +11753,128 @@ mod tests {
     }
 
     #[test]
+    fn session_nineteen_global_filter_is_scoped_composed_and_time_exact() {
+        fn query_backed_plan(predicate: &LogPredicate) -> Option<&LogsqlPlan> {
+            match predicate {
+                LogPredicate::And(predicates) | LogPredicate::Or(predicates) => {
+                    predicates.iter().find_map(query_backed_plan)
+                }
+                LogPredicate::Not(predicate) => query_backed_plan(predicate),
+                LogPredicate::QueryBackedTextualIn { query, .. }
+                | LogPredicate::QueryBackedTextualContainsAll { query, .. }
+                | LogPredicate::QueryBackedTextualContainsAny { query, .. } => Some(query),
+                _ => None,
+            }
+        }
+
+        fn has_typed_exact(predicate: &LogPredicate, field: &str, value: &str) -> bool {
+            match predicate {
+                LogPredicate::And(predicates) | LogPredicate::Or(predicates) => predicates
+                    .iter()
+                    .any(|predicate| has_typed_exact(predicate, field, value)),
+                LogPredicate::Not(predicate) => has_typed_exact(predicate, field, value),
+                LogPredicate::TypedExact {
+                    field: LogField::Metadata(path),
+                    value: Value::String(actual),
+                } => path.as_slice() == [field] && actual == value,
+                _ => false,
+            }
+        }
+
+        // The global predicate is retained even when a conflicting local
+        // legacy pushdown exists; neither side may overwrite the other.
+        let conflict = parse_at(
+            "options(global_filter=(level:=error)) level:warning",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(conflict.spec.level.as_deref(), Some("warning"));
+        assert!(matches!(
+            conflict.spec.predicate,
+            Some(LogPredicate::Exact {
+                field: LogField::Level,
+                ref value,
+            }) if value == "error"
+        ));
+
+        // Query-backed filters inherit the compiled global predicate without
+        // textual substitution.
+        let inherited = parse_at(
+            "options(global_filter=(common_value:=\"VictoriaMetrics\")) case:in(common_group:=common | fields case)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let nested = query_backed_plan(inherited.spec.predicate.as_ref().unwrap()).unwrap();
+        assert!(has_typed_exact(
+            nested.spec.predicate.as_ref().unwrap(),
+            "common_value",
+            "VictoriaMetrics"
+        ));
+
+        // A sibling time_offset rewrites the local query only. A global
+        // filter can declare its own offset, and a nested declaration sees
+        // the inherited parent offset while it is parsed.
+        let sibling = parse_at(
+            "options(time_offset=1s, global_filter=(_time:[1800000002000000,1800000004000000))) *",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(sibling.spec.ts_min, Some(1_800_000_002_000_000));
+        assert_eq!(sibling.spec.ts_max, Some(1_800_000_003_999_999));
+
+        let explicit = parse_at(
+            "options(global_filter=(options(time_offset=1s) _time:[1800000002000000,1800000004000000))) *",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(explicit.spec.ts_min, Some(1_800_000_001_000_000));
+        assert_eq!(explicit.spec.ts_max, Some(1_800_000_002_999_999));
+
+        let parent = parse_at(
+            "options(time_offset=1s) case:in(options(global_filter=(_time:[1800000002000000,1800000004000000))) page_group:=page | fields case)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let nested = query_backed_plan(parent.spec.predicate.as_ref().unwrap()).unwrap();
+        assert_eq!(nested.spec.ts_min, Some(1_800_000_001_000_000));
+        assert_eq!(nested.spec.ts_max, Some(1_800_000_002_999_999));
+
+        let mixed_range = parse_at(
+            "options(global_filter=(_time:(1800000002000000,1800000004000000])) *",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(mixed_range.spec.ts_min, Some(1_800_000_002_000_001));
+        assert_eq!(mixed_range.spec.ts_max, Some(1_800_000_004_000_000));
+    }
+
+    #[test]
+    fn session_nineteen_global_filter_grammar_is_strict() {
+        for malformed in [
+            "options(global_filter=*) *",
+            "options(global_filter=()) *",
+            "options(global_filter=(* | fields case)) *",
+            "options(global_filter=(* | fields case), global_filter=(*)) *",
+            "options(GLOBAL_FILTER=(*)) *",
+            "options(global_filter=(*)",
+            "options(global_filter=(*))",
+            "options(global_filter=(common_value:=)) *",
+            "options(global_filter=(*) trailing) *",
+            "options(time_offset=1s] *",
+            "options(global_filter=(*]) *",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
     fn session_nineteen_stream_id_filters_fail_with_an_explicit_storage_prerequisite() {
         const STREAM_ID: &str = "0000007b000001c8302bc96e02e54e5524b3a68ec271e55e";
         for (query, line, column) in [
@@ -12040,6 +12492,7 @@ mod tests {
             timestamp_unit: TimestampUnit::Microseconds,
             query_now: 0,
             inherited_time_offset_ns: 0,
+            inherited_global_filter: None,
             query_backed_depth: 0,
             query_backed_lists: 0,
             common_case_values: 0,

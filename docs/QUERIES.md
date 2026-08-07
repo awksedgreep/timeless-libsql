@@ -2725,6 +2725,54 @@ measures 64-row offsets at 3.230/3.538/4.159 ms narrow and
 blocks, entries, payload bytes, and public rows. The measured cost is bounded
 API timestamp transformation and rendering, not storage amplification.
 
+## LogsQL global filters
+
+A leading `global_filter` query option applies one filter-only predicate to
+every query scope created by the request:
+
+```text
+options(global_filter=(service:=api)) level:error | sort by (_time) asc
+options(global_filter=(tenant:="acme")) user:in(level:info | fields user)
+options(global_filter=(region:=east)) * | join by (trace_id) (level:error)
+options(global_filter=(region:=east)) * | union (level:warn)
+```
+
+`options` is case-insensitive; the option name `global_filter` is
+case-sensitive. The value must be one parenthesized filter expression. It may
+use logical groups and query-backed filters, but it cannot contain a result
+pipeline. Missing assignment or value, unbalanced delimiters, an incomplete
+filter, a pipeline, or trailing text fails before any public storage read.
+Repeated declarations are all parsed and validated; the last valid declaration
+wins, and a trailing comma is accepted.
+
+The Rust API compiles the global value into a scoped predicate. It does not
+paste query text together. The predicate is conjoined before the local filter
+in the base query and in every query-backed membership, conditional pipeline,
+join, and union source. A nested query inherits the surrounding predicate. An
+explicit nested `global_filter` replaces the inherited predicate for that
+scope rather than adding a second global predicate. `global_filter=(*)` is the
+identity predicate.
+
+Query-option timing follows declaration scope. A sibling `time_offset` does
+not retroactively rewrite a global value in the same option list. A global
+value may use its own leading `options(time_offset=...)`, and a nested explicit
+global declaration inherits the surrounding time offset present at that
+declaration. These rules match the pinned VictoriaLogs initialization order.
+
+Every independently executed public scan keeps its extension-enforced work
+limit, while the request also charges nested scans and retained subquery values
+to cumulative API work and state budgets. Deadline cancellation, result and
+response limits, optimize, shutdown, and reopen use the existing bounded query
+path; retained rows are never mutated.
+
+Direct SQLite/libSQL users can implement the same storage behavior with
+[`SQL-LOG-066`](QUERY_SQL_EQUIVALENTS.md#sql-log-066-apply-one-global-predicate-to-every-public-log-scan):
+repeat the shared predicate as a conjunct in every independently bounded
+public `logs` scan. LogsQL parsing, lexical inheritance/replacement,
+query-backed initialization, cumulative limits, cancellation, and HTTP
+envelopes remain Rust API responsibilities. Ordinary SQL already provides the
+useful storage operation, so no global-filter extension opcode is exposed.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

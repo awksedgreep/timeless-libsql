@@ -85,6 +85,17 @@ composition, strict errors, limits, cancellation, optimize, and reopen are
 covered by `LQL-Q04`. This is API planning over the public `logs` table, not a
 LogsQL parser or private storage path inside the extension.
 
+A leading `options(global_filter=(...))` compiles one filter-only predicate
+and applies it to the base query and every query-backed membership,
+conditional pipeline, join, and union scope. Nested queries inherit that
+predicate unless they explicitly replace it. Duplicate declarations are all
+validated and the last value wins; malformed values and result pipelines fail
+before storage. Declaration-time `time_offset` scope follows VictoriaLogs,
+and cumulative nested work, state, response, deadline, and cancellation limits
+remain enforced. Direct SQLite/libSQL users can repeat the shared predicate in
+each bounded public scan as documented by `SQL-LOG-066`; no private table or
+language-specific extension opcode is used.
+
 `seq(v1, ..., vN)` preserves argument order and duplicates, then resumes each
 phrase search after the preceding match. Empty phrases are ignored; an empty
 or all-empty sequence is a field-independent true predicate. Malformed

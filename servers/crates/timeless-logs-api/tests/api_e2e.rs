@@ -18625,6 +18625,210 @@ async fn session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_qu
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_nineteen_global_filter_applies_to_every_public_query_scope() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("global-filter-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(
+                [
+                    r#"{"_time":1800000001000000,"_msg":"page zero","level":"notice","case":"page-0","page_group":"page"}"#,
+                    r#"{"_time":1800000002000000,"_msg":"page one","level":"warning","case":"page-1","page_group":"page"}"#,
+                    r#"{"_time":1800000003000000,"_msg":"page two","level":"error","case":"page-2","page_group":"page"}"#,
+                    r#"{"_time":1800000004000000,"_msg":"page three","level":"critical","case":"page-3","page_group":"page"}"#,
+                    r#"{"_time":1800000005000000,"_msg":"common original","level":"info","case":"common-original","common_group":"common","common_value":"VictoriaMetrics"}"#,
+                    r#"{"_time":1800000006000000,"_msg":"common lower","level":"debug","case":"common-lower","common_group":"common","common_value":"victoriametrics"}"#,
+                    r#"{"_time":1800000007000000,"_msg":"common upper","level":"alert","case":"common-upper","common_group":"common","common_value":"VICTORIAMETRICS"}"#,
+                ]
+                .join("\n"),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"options(global_filter=(common_value:="VictoriaMetrics")) common_group:=common | fields case"#,
+        )
+        .await,
+        [serde_json::json!({"case": "common-original"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"options(global_filter=(common_value:="VictoriaMetrics")) case:in(common_group:=common | fields case) | fields case"#,
+        )
+        .await,
+        [serde_json::json!({"case": "common-original"})]
+    );
+    let mut replaced_scope = pipeline_rows(
+        &app,
+        r#"options(global_filter=(page_group:=page)) page_group:=page | join by (missing_key) (options(global_filter=(common_value:="VictoriaMetrics")) common_group:=common | fields case, missing_key) inner | fields case"#,
+    )
+    .await;
+    replaced_scope.sort_by(|left, right| left["case"].as_str().cmp(&right["case"].as_str()));
+    assert_eq!(
+        replaced_scope,
+        [
+            serde_json::json!({"case": "page-0"}),
+            serde_json::json!({"case": "page-1"}),
+            serde_json::json!({"case": "page-2"}),
+            serde_json::json!({"case": "page-3"}),
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"options(global_filter=(case:in(common_value:="VictoriaMetrics" | fields case))) common_group:=common | fields case"#,
+        )
+        .await,
+        [serde_json::json!({"case": "common-original"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"options(global_filter=(common_value:="VictoriaMetrics")) page_group:=page | union (common_group:=common | fields case) | fields case"#,
+        )
+        .await,
+        [serde_json::json!({"case": "common-original"})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "options(global_filter=(*)) case:=page-0 | fields case",
+        )
+        .await,
+        [serde_json::json!({"case": "page-0"})]
+    );
+
+    let mut sibling_offset = pipeline_rows(
+        &app,
+        "options(time_offset=1s, global_filter=(_time:[1800000002000000,1800000004000000))) page_group:=page | fields case",
+    )
+    .await;
+    sibling_offset.sort_by(|left, right| left["case"].as_str().cmp(&right["case"].as_str()));
+    assert_eq!(
+        sibling_offset,
+        [
+            serde_json::json!({"case": "page-1"}),
+            serde_json::json!({"case": "page-2"}),
+        ]
+    );
+    let mut explicit_offset = pipeline_rows(
+        &app,
+        "options(global_filter=(options(time_offset=1s) _time:[1800000002000000,1800000004000000))) page_group:=page | fields case",
+    )
+    .await;
+    explicit_offset.sort_by(|left, right| left["case"].as_str().cmp(&right["case"].as_str()));
+    assert_eq!(
+        explicit_offset,
+        [
+            serde_json::json!({"case": "page-0"}),
+            serde_json::json!({"case": "page-1"}),
+        ]
+    );
+    let mut inherited_offset = pipeline_rows(
+        &app,
+        "options(time_offset=1s) case:in(options(global_filter=(_time:[1800000002000000,1800000004000000))) page_group:=page | fields case) | fields case",
+    )
+    .await;
+    inherited_offset.sort_by(|left, right| left["case"].as_str().cmp(&right["case"].as_str()));
+    assert_eq!(
+        inherited_offset,
+        [
+            serde_json::json!({"case": "page-0"}),
+            serde_json::json!({"case": "page-1"}),
+        ]
+    );
+    assert!(pipeline_rows(
+        &app,
+        "options(global_filter=(level:=error)) level:warning | fields case",
+    )
+    .await
+    .is_empty());
+
+    let before = storage.stats().await.unwrap();
+    let invalid = app
+        .clone()
+        .oneshot(logsql_request("options(global_filter=(* | fields case)) *"))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let after = storage.stats().await.unwrap();
+    assert_eq!(after.api_query_count, before.api_query_count);
+    assert_eq!(after.query_count, before.query_count);
+    assert_eq!(
+        after.query_payload_bytes_read,
+        before.query_payload_bytes_read
+    );
+    assert_eq!(after.query_decoded_entries, before.query_decoded_entries);
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 10_000,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"options(global_filter=(case:in(common_group:=common | fields case))) common_group:=common | fields case"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(work_limited.into_body(), usize::MAX)
+                .await
+                .unwrap()
+        )
+        .unwrap()["reason"],
+        "max_work_rows"
+    );
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        pipeline_rows(
+            &reopened_app,
+            r#"options(global_filter=(common_value:="VictoriaMetrics")) common_group:=common | fields case"#,
+        )
+        .await,
+        [serde_json::json!({"case": "common-original"})]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_nineteen_set_stream_fields_synthesizes_canonical_result_streams() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

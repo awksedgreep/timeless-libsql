@@ -176,6 +176,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-063`](#sql-log-063-bounded-typed-json-values-from-fixed-public-paths) | `LQL-S12` | current foundation | one JSON-array string of fixed exact retained paths from bounded public log rows, with missing omission, explicit-null/native-type fidelity, and deterministic native-number ordering; API owns dynamic selectors, complete natural sorting, top-k, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-064`](#sql-log-064-bounded-histogram-over-one-native-number-path) | `LQL-S13` | current foundation | bounded Victoria-compatible logarithmic bucket assignment over one fixed public native-number path; API owns textual number/duration/byte parsing, natural result order, grammar, cumulative limits, cancellation, and envelopes |
 | [`SQL-LOG-065`](#sql-log-065-offset-public-log-query-time-without-rounding) | `LQL-Q04` | current foundation | exact integer source-bound translation plus an explicit sub-native nanosecond remainder over the public `logs` table; API owns LogsQL option grammar, inherited query scope, timestamp rendering, pipeline order, limits, cancellation, and envelopes |
+| [`SQL-LOG-066`](#sql-log-066-apply-one-global-predicate-to-every-public-log-scan) | `LQL-Q05` | current foundation | explicit conjunction of one shared predicate with each independently bounded public `logs` scan; API owns LogsQL option grammar, AST scope/inheritance/replacement, query-backed initialization, cumulative limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -10373,6 +10374,105 @@ compression, indexes, optimize behavior, transactions, and migration remain
 unchanged. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
 harness; HTTP/oracle/optimize/reopen regression:
 `session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_queries`.
+
+### SQL-LOG-066: apply one global predicate to every public log scan
+
+Bind one shared exact service predicate, one local severity predicate for each
+independent query scope, and positive per-scan work/result limits. This example
+uses the public indexed `service` column because the setup declares
+`index_keys='service,...'`; for an unindexed retained field, use the documented
+typed `metadata` JSON projection instead. Timestamps remain in the public
+table's configured native unit and rich metadata remains canonical JSON.
+
+```sql
+WITH
+outer_scope AS MATERIALIZED (
+  SELECT
+    row_number() OVER (
+      ORDER BY logs.ts, logs.level, logs.message, logs.metadata
+    ) AS source_row,
+    logs.ts,
+    logs.level,
+    logs.message,
+    logs.metadata
+  FROM logs
+  WHERE logs.service = :global_service
+    AND logs.level = :level
+    AND logs.max_work_entries = :outer_max_work_entries
+    AND :outer_max_result_rows > 0
+  ORDER BY logs.ts, logs.level, logs.message, logs.metadata
+  LIMIT :outer_max_result_rows
+),
+subquery_scope AS MATERIALIZED (
+  SELECT
+    row_number() OVER (
+      ORDER BY logs.ts, logs.level, logs.message, logs.metadata
+    ) AS source_row,
+    logs.ts,
+    logs.level,
+    logs.message,
+    logs.metadata
+  FROM logs
+  WHERE logs.service = :global_service
+    AND logs.level = :subquery_level
+    AND logs.max_work_entries = :subquery_max_work_entries
+    AND :subquery_max_result_rows > 0
+  ORDER BY logs.ts, logs.level, logs.message, logs.metadata
+  LIMIT :subquery_max_result_rows
+),
+scoped_rows AS (
+  SELECT 0 AS scope_order, source_row, 'outer' AS scope,
+         ts, level, message, metadata
+  FROM outer_scope
+  UNION ALL
+  SELECT 1 AS scope_order, source_row, 'subquery' AS scope,
+         ts, level, message, metadata
+  FROM subquery_scope
+)
+SELECT scope, ts, level, message, metadata
+FROM scoped_rows
+ORDER BY scope_order, source_row;
+```
+
+For the executable fixture, bind `global_service='api'`, `level='error'`,
+`subquery_level='info'`, both work limits to `100000`, and both result limits
+to `100`. The statement returns the error row at timestamp `1000` from the
+outer scope followed by the info row at `2000` from the nested scope. The
+shared `service='api'` conjunct appears in both public scans; omitting it from
+either scope would not be a `global_filter` equivalent.
+
+This is the honest direct-SQL foundation for `LQL-Q05`: compile the global
+predicate once in the caller and conjoin it with every independently executed
+public scan, including query-backed membership, join, and union sources. An
+explicit nested `global_filter` replaces the inherited predicate for that
+scope. Each scan has its own extension-enforced work bound; callers composing
+multiple scans must additionally charge their sum to one request-owned work
+budget and bound retained intermediate values.
+
+Bind hidden input columns such as `max_work_entries` directly in each virtual
+table scan, as above. Supplying a hidden input indirectly from a joined CTE
+can make the constraint unusable when SQLite reorders that join; an
+unconstrained hidden input projects `NULL`, so a later residual equality can
+eliminate every row. This is standard hidden-argument planning behavior, not
+global-filter state, and is pinned as `QSF-275`.
+
+Core SQL does not parse LogsQL or propagate lexical scope automatically. The
+Rust logs API owns the case-insensitive `options` keyword, case-sensitive
+`global_filter` name, parenthesized filter-only grammar, duplicate-last
+behavior, compiled-AST inheritance/replacement, declaration-time interaction
+with `time_offset`, query-backed initialization/caching, cumulative limits,
+cancellation, deterministic response semantics, and HTTP errors. Invalid or
+unsupported syntax fails before any scan.
+
+Every useful predicate already reaches the public `logs` constraints or the
+bounded Rust row predicate evaluator. A language-specific extension opcode
+would neither avoid a required scan nor provide general SQL users more than
+ordinary conjunction, so no extension primitive or private table access is
+added. Storage format, authoritative batching, compression, indexes,
+retention, optimize behavior, transactions, and migration remain unchanged.
+Direct regression: `tests/cli.sh` section 45 and the Rust SQL harness;
+HTTP/oracle/limit/optimize/reopen regression:
+`session_nineteen_global_filter_applies_to_every_public_query_scope`.
 
 ## Adding the next recipe
 
