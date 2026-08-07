@@ -2235,6 +2235,344 @@ fn parse_unroll_pipe(segment: &str, context: &mut ParseContext) -> Result<Pipeli
     Ok(PipelineOp::Unroll(UnrollSpec { fields, condition }))
 }
 
+fn parse_join_pipe(segment: &str, context: &mut ParseContext) -> Result<PipelineOp, LogsqlError> {
+    const OPERATION: &str = "join";
+    let command = segment
+        .get(..OPERATION.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL join pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(OPERATION) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL join pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[OPERATION.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL join requires whitespace before its fields",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+    if starts_format_keyword(rest, "by") {
+        rest = rest["by".len()..].trim_start();
+    } else if starts_format_keyword(rest, "on") {
+        rest = rest["on".len()..].trim_start();
+    }
+    if !rest.starts_with('(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL join requires parenthesized exact fields",
+        ));
+    }
+    let fields_close = matching_parenthesis(rest, 0)
+        .map_err(|_| LogsqlError::malformed("unterminated LogsQL join fields"))?;
+    let fields_source = rest[1..fields_close].trim();
+    if fields_source.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL join requires at least one exact field",
+        ));
+    }
+    let fields_source = fields_source.strip_suffix(',').unwrap_or(fields_source);
+    let fields = split_top_level(fields_source, ',')?
+        .into_iter()
+        .map(|field| parse_first_exact_field(field.trim(), "by", OPERATION))
+        .collect::<Result<Vec<_>, _>>()?;
+    if fields.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL join requires at least one exact field",
+        ));
+    }
+    rest = rest[fields_close + 1..].trim_start();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL join requires a parenthesized query or rows(...) source",
+        ));
+    }
+
+    let (source, tail) = if starts_format_keyword(rest, "rows") {
+        let after_keyword = rest["rows".len()..].trim_start();
+        if !after_keyword.starts_with('(') {
+            return Err(LogsqlError::malformed(
+                "LogsQL join rows source requires parentheses",
+            ));
+        }
+        let close = matching_parenthesis(after_keyword, 0)
+            .map_err(|_| LogsqlError::malformed("unterminated LogsQL join rows source"))?;
+        let rows = parse_join_inline_rows(&after_keyword[1..close])?;
+        (
+            JoinSource::Rows(rows),
+            after_keyword[close + 1..].trim_start(),
+        )
+    } else {
+        if !rest.starts_with('(') {
+            return Err(LogsqlError::malformed(
+                "LogsQL join requires a parenthesized query or rows(...) source",
+            ));
+        }
+        let close = matching_parenthesis(rest, 0)
+            .map_err(|_| LogsqlError::malformed("unterminated LogsQL join subquery"))?;
+        let query_source = rest[1..close].trim();
+        if query_source.is_empty() {
+            return Err(LogsqlError::malformed(
+                "LogsQL join subquery cannot be empty",
+            ));
+        }
+        if context.query_backed_depth >= MAX_QUERY_BACKED_LIST_DEPTH {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL join nesting exceeds {MAX_QUERY_BACKED_LIST_DEPTH}"
+            )));
+        }
+        if context.query_backed_lists >= MAX_QUERY_BACKED_LISTS {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL query contains more than {MAX_QUERY_BACKED_LISTS} nested query compositions"
+            )));
+        }
+        context.query_backed_lists += 1;
+        context.query_backed_depth += 1;
+        let parsed = parse_with_context(query_source, context);
+        context.query_backed_depth -= 1;
+        let mut query = parsed.map_err(|error| {
+            LogsqlError::malformed(format!(
+                "cannot parse LogsQL join subquery: {}",
+                error.message
+            ))
+        })?;
+        if query.output == LogsqlOutput::Count {
+            query.output = LogsqlOutput::Pipeline;
+            query.pipeline = vec![PipelineOp::Stats(vec![StatsExpression {
+                kind: StatsKind::Count,
+                fields: vec![PipelineField::All],
+                alias: "total".into(),
+                limit: None,
+                quantile: None,
+            }])];
+            query.spec.limit = 0;
+            query.spec.offset = 0;
+            query.spec.descending = false;
+        } else if query.output == LogsqlOutput::Rows && !query.limit_explicit {
+            query.spec.limit = 0;
+        }
+        query.implicit_result_limit = None;
+        (
+            JoinSource::Query(Box::new(query)),
+            rest[close + 1..].trim_start(),
+        )
+    };
+
+    let mut inner = false;
+    let mut prefix = None;
+    let mut tail = tail;
+    while !tail.is_empty() {
+        if starts_format_keyword(tail, "inner") {
+            if inner {
+                return Err(LogsqlError::malformed(
+                    "LogsQL join inner modifier may appear only once",
+                ));
+            }
+            inner = true;
+            tail = tail["inner".len()..].trim_start();
+            continue;
+        }
+        if starts_format_keyword(tail, "prefix") {
+            if prefix.is_some() {
+                return Err(LogsqlError::malformed(
+                    "LogsQL join prefix modifier may appear only once",
+                ));
+            }
+            tail = tail["prefix".len()..].trim_start();
+            let (value, remaining) = take_join_compound_token(tail, "prefix")?;
+            prefix = Some(value);
+            tail = remaining.trim_start();
+            continue;
+        }
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL join token {tail:?}"
+        )));
+    }
+
+    Ok(PipelineOp::Join(JoinSpec {
+        fields,
+        source,
+        inner,
+        prefix: prefix.unwrap_or_default(),
+    }))
+}
+
+fn take_join_compound_token<'a>(
+    value: &'a str,
+    role: &str,
+) -> Result<(String, &'a str), LogsqlError> {
+    if value.is_empty() {
+        return Err(LogsqlError::malformed(format!(
+            "LogsQL join {role} requires a value"
+        )));
+    }
+    if let Some((decoded, consumed)) = parse_quoted_prefix(value)? {
+        return Ok((decoded, &value[consumed..]));
+    }
+    let end = value.find(char::is_whitespace).unwrap_or(value.len());
+    let token = &value[..end];
+    if token.is_empty()
+        || token
+            .chars()
+            .any(|character| matches!(character, '(' | ')' | '{' | '}'))
+    {
+        return Err(LogsqlError::malformed(format!(
+            "invalid LogsQL join {role} {token:?}"
+        )));
+    }
+    Ok((token.to_owned(), &value[end..]))
+}
+
+fn parse_join_inline_rows(source: &str) -> Result<Vec<Value>, LogsqlError> {
+    let mut rows = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        skip_join_whitespace(source, &mut cursor);
+        if cursor == source.len() {
+            break;
+        }
+        if !source[cursor..].starts_with('{') {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL join rows expects '{{' at byte {cursor}"
+            )));
+        }
+        cursor += 1;
+        let mut row = serde_json::Map::new();
+        loop {
+            skip_join_whitespace(source, &mut cursor);
+            if cursor >= source.len() {
+                return Err(LogsqlError::malformed(
+                    "unterminated LogsQL join inline row",
+                ));
+            }
+            if source[cursor..].starts_with('}') {
+                cursor += 1;
+                break;
+            }
+            let field_source = take_join_inline_atom(source, &mut cursor, true)?;
+            let field = parse_first_exact_field(&field_source, "rows", "join")?;
+            let PipelineField::Exact { path, .. } = field else {
+                unreachable!("inline join field was checked as exact")
+            };
+            while source[cursor..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+            {
+                cursor += source[cursor..].chars().next().unwrap().len_utf8();
+            }
+            let separator = source[cursor..].chars().next().ok_or_else(|| {
+                LogsqlError::malformed("LogsQL join inline field is missing ':' or '='")
+            })?;
+            if !matches!(separator, ':' | '=') {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL join inline field {field_source:?} is missing ':' or '='"
+                )));
+            }
+            cursor += separator.len_utf8();
+            while source[cursor..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+            {
+                cursor += source[cursor..].chars().next().unwrap().len_utf8();
+            }
+            let value_source = take_join_inline_atom(source, &mut cursor, false)?;
+            let value = quoted_value(&value_source)?.unwrap_or(value_source);
+            insert_join_inline_path(&mut row, &path, Value::String(value))?;
+            skip_join_whitespace(source, &mut cursor);
+            if source[cursor..].starts_with(',') {
+                cursor += 1;
+            }
+        }
+        rows.push(Value::Object(row));
+        skip_join_whitespace(source, &mut cursor);
+        if source[cursor..].starts_with(',') {
+            cursor += 1;
+        }
+    }
+    Ok(rows)
+}
+
+fn skip_join_whitespace(source: &str, cursor: &mut usize) {
+    while let Some(character) = source[*cursor..].chars().next() {
+        if !character.is_whitespace() {
+            break;
+        }
+        *cursor += character.len_utf8();
+    }
+}
+
+fn take_join_inline_atom(
+    source: &str,
+    cursor: &mut usize,
+    field: bool,
+) -> Result<String, LogsqlError> {
+    if *cursor >= source.len() {
+        return Err(LogsqlError::malformed(
+            "LogsQL join inline row is missing a token",
+        ));
+    }
+    let rest = &source[*cursor..];
+    if let Some((_decoded, consumed)) = parse_quoted_prefix(rest)? {
+        let token = rest[..consumed].to_owned();
+        *cursor += consumed;
+        return Ok(token);
+    }
+    let mut end = *cursor;
+    for (relative, character) in rest.char_indices() {
+        if character.is_whitespace()
+            || character == ','
+            || character == '}'
+            || (field && matches!(character, ':' | '='))
+        {
+            break;
+        }
+        if !field && matches!(character, '{' | '[') {
+            return Err(LogsqlError::malformed(
+                "LogsQL join inline values must be scalar compound tokens",
+            ));
+        }
+        end = *cursor + relative + character.len_utf8();
+    }
+    if end == *cursor {
+        return Err(LogsqlError::malformed(
+            "LogsQL join inline row contains an empty token",
+        ));
+    }
+    let token = source[*cursor..end].to_owned();
+    *cursor = end;
+    Ok(token)
+}
+
+fn insert_join_inline_path(
+    object: &mut serde_json::Map<String, Value>,
+    path: &[String],
+    value: Value,
+) -> Result<(), LogsqlError> {
+    let Some((last, parents)) = path.split_last() else {
+        return Err(LogsqlError::malformed(
+            "LogsQL join inline field path is empty",
+        ));
+    };
+    let mut current = object;
+    for parent in parents {
+        let entry = current
+            .entry(parent.clone())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        current = entry.as_object_mut().ok_or_else(|| {
+            LogsqlError::malformed(format!(
+                "LogsQL join inline field {parent:?} conflicts with a scalar"
+            ))
+        })?;
+    }
+    current.insert(last.clone(), value);
+    Ok(())
+}
+
 fn parse_length_pipe(segment: &str, operation: &str) -> Result<UnaryFieldSpec, LogsqlError> {
     let tokens = lex_first_pipe(segment, operation)?;
     let Some(command) = tokens.first() else {
@@ -3237,6 +3575,13 @@ fn is_json_array_len_pipe(segment: &str) -> bool {
 
 fn is_unroll_pipe(segment: &str) -> bool {
     let operation = "unroll";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
+fn is_join_pipe(segment: &str) -> bool {
+    let operation = "join";
     segment
         .get(..operation.len())
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
@@ -4655,6 +5000,20 @@ pub(crate) struct UnrollSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) enum JoinSource {
+    Query(Box<LogsqlPlan>),
+    Rows(Vec<Value>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct JoinSpec {
+    pub fields: Vec<PipelineField>,
+    pub source: JoinSource,
+    pub inner: bool,
+    pub prefix: String,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct UnpackJsonSpec {
     pub source: PipelineField,
     pub fields: Vec<PipelineField>,
@@ -4733,6 +5092,7 @@ pub(crate) enum PipelineOp {
     JsonArrayConcat(JsonArrayConcatSpec),
     JsonArrayLen(UnaryFieldSpec),
     Unroll(UnrollSpec),
+    Join(JoinSpec),
     DropEmptyFields,
     Replace(ReplaceSpec),
     ReplaceRegexp(ReplaceRegexpSpec),
@@ -5179,6 +5539,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_unroll_pipe(segment) => {
                 pipeline.push(parse_unroll_pipe(segment, context)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_join_pipe(segment) => {
+                pipeline.push(parse_join_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_drop_empty_fields_pipe(segment) => {
@@ -11246,6 +11610,47 @@ mod tests {
             "* | unroll (source) trailing",
             "* | unroll (source) if (kind:=expand)",
             "* | unroll.extra",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn session_eighteen_join_grammar_is_complete_and_strict() {
+        for query in [
+            "* | join by (case) (kind:=admin | fields case, value)",
+            "* | join on (case, kind) (kind:=admin | fields case, kind, value) inner prefix right.",
+            r#"* | join (case) rows({"case":"left","value":"x"})"#,
+            r#"* | JoIn By ("left field", nested.key) rows({"left field":"x","nested.key":"y","value":"z"}) prefix "p." inner"#,
+            "* | join by (case) rows() inner",
+            "* | join by (case) rows({})",
+            r#"* | join by (case) rows({ "case" : "a" , } { value : -1.24/sd-f },)"#,
+            "* | join by (case) (* | join by (nested) (kind:=admin))",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+        }
+
+        for malformed in [
+            "* | join",
+            "* | join by",
+            "* | join by () (*)",
+            "* | join by (*) (*)",
+            "* | join by (case, *) (*)",
+            "* | join by (case)",
+            "* | join by (case) ()",
+            "* | join by (case) rows(",
+            "* | join by (case) rows({case})",
+            "* | join by (case) rows({,})",
+            r#"* | join by (case) rows({"case":"a",,})"#,
+            r#"* | join by (case) rows({"case":[]})"#,
+            r#"* | join by (case) rows({"case":{}})"#,
+            "* | join by (case) rows({case: two words})",
+            "* | join by (case) (*) prefix",
+            "* | join by (case) (*) inner prefix right. inner",
+            "* | join.extra by (case) (*)",
         ] {
             let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
             assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");

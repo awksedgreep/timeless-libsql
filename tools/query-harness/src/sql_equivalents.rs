@@ -442,6 +442,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "json_array_concat_delimiter" => Value::Text("|".to_owned()),
         "unroll_source_path" => Value::Text("$.tags".to_owned()),
         "unroll_source_override" => Value::Null,
+        "join_key_path" => Value::Text("$.service".to_owned()),
+        "join_left_level" | "join_right_level" => Value::Null,
+        "join_inner" => Value::Integer(0),
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "any_source_path" => Value::Text("$.host".to_owned()),
@@ -1769,6 +1772,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let unpack_syslog_rows = recipe_values("SQL-LOG-054", 0)?;
     let json_array_concat_rows = recipe_values("SQL-LOG-055", 0)?;
     let unroll_rows = recipe_values("SQL-LOG-056", 0)?;
+    let join_rows = recipe_values("SQL-LOG-057", 0)?;
     if [
         bounded,
         substring,
@@ -1966,6 +1970,96 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         )
     {
         bail!("SQL-LOG-056 JSON array unroll changed: {unroll_rows:?}");
+    }
+    let join_timestamp_pairs = join_rows
+        .iter()
+        .map(|row| (row.first().cloned(), row.get(4).cloned()))
+        .collect::<Vec<_>>();
+    if join_timestamp_pairs
+        != [
+            (Some(Value::Integer(1_000)), Some(Value::Integer(1_000))),
+            (Some(Value::Integer(1_000)), Some(Value::Integer(2_000))),
+            (Some(Value::Integer(2_000)), Some(Value::Integer(1_000))),
+            (Some(Value::Integer(2_000)), Some(Value::Integer(2_000))),
+        ]
+    {
+        bail!("SQL-LOG-057 join row order changed: {join_rows:?}");
+    }
+    for row in &join_rows {
+        let left = row
+            .get(3)
+            .and_then(|value| match value {
+                Value::Text(value) => Some(value),
+                _ => None,
+            })
+            .context("SQL-LOG-057 left metadata must be JSON text")?;
+        let right = row
+            .get(5)
+            .and_then(|value| match value {
+                Value::Text(value) => Some(value),
+                _ => None,
+            })
+            .context("SQL-LOG-057 matched right metadata must be JSON text")?;
+        let left: serde_json::Value = serde_json::from_str(left)?;
+        let right: serde_json::Value = serde_json::from_str(right)?;
+        if left["service"] != "api" || right.get("service").is_some() {
+            bail!("SQL-LOG-057 typed payload/key removal changed: {join_rows:?}");
+        }
+    }
+    let join_sql = recipe_sql("SQL-LOG-057", 0)?;
+    let measured_join =
+        |key_path: &str, right_level: Option<&str>, inner: bool| -> Result<Vec<Vec<Value>>> {
+            let mut statement = connection.prepare(&join_sql)?;
+            for index in 1..=statement.parameter_count() {
+                let name = statement
+                    .parameter_name(index)
+                    .context("SQL-LOG-057 parameter must be named")?
+                    .trim_start_matches(':');
+                let value = match name {
+                    "join_key_path" => Value::Text(key_path.to_owned()),
+                    "join_right_level" => right_level
+                        .map(|value| Value::Text(value.to_owned()))
+                        .unwrap_or(Value::Null),
+                    "join_inner" => Value::Integer(i64::from(inner)),
+                    _ => parameter("SQL-LOG-057", name),
+                };
+                statement.raw_bind_parameter(index, value)?;
+            }
+            let columns = statement.column_count();
+            let mut query = statement.raw_query();
+            let mut output = Vec::new();
+            while let Some(row) = query.next()? {
+                output.push(
+                    (0..columns)
+                        .map(|column| row.get(column))
+                        .collect::<rusqlite::Result<Vec<Value>>>()?,
+                );
+            }
+            Ok(output)
+        };
+    let left_join = measured_join("$.host", Some("error"), false)?;
+    let left_pairs = left_join
+        .iter()
+        .map(|row| (row.first().cloned(), row.get(4).cloned()))
+        .collect::<Vec<_>>();
+    if left_pairs
+        != [
+            (Some(Value::Integer(1_000)), Some(Value::Integer(1_000))),
+            (Some(Value::Integer(2_000)), Some(Value::Null)),
+        ]
+    {
+        bail!("SQL-LOG-057 left join changed: {left_join:?}");
+    }
+    let inner_join = measured_join("$.host", Some("error"), true)?;
+    if inner_join.len() != 1
+        || inner_join[0].first() != Some(&Value::Integer(1_000))
+        || inner_join[0].get(4) != Some(&Value::Integer(1_000))
+    {
+        bail!("SQL-LOG-057 inner join changed: {inner_join:?}");
+    }
+    let empty_key_join = measured_join("$.missing", None, false)?;
+    if empty_key_join.len() != 4 {
+        bail!("SQL-LOG-057 missing-key equivalence changed: {empty_key_join:?}");
     }
     let json_array_concat_sql = recipe_sql("SQL-LOG-055", 0)?;
     let measured_json_array_concatenation =
@@ -4239,13 +4333,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 122);
+        assert_eq!(recipes.len(), 123);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            154
+            155
         );
         assert_eq!(
             recipes
@@ -4253,7 +4347,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            160
+            161
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

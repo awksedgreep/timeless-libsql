@@ -1081,3 +1081,23 @@ suffixes, and trailing tokens fail. Source audit covers `pipe_unroll.go` and
 source rows, 346 row-query cases, one stochastic case, 425 error cases, and
 451 statistics/pipeline cases: 1,223 cases total, all passing against the
 immutable image. The fixture now contains 1223 cases.
+
+`LQL-P43` adds twelve exact pipeline/statistics cases and fourteen error cases
+for `join`. They pin optional case-insensitive `by`/`on`; one or more exact
+keys; inline `rows(...)` and query-backed right rows; default left and optional
+inner behavior; duplicate right-match expansion in source order; right
+join-key removal; missing/null/empty textual-key equivalence; nonempty-left
+collision precedence; empty-left filling; prefixes; empty inline sources;
+modifier order; and strict failures for empty/wildcard keys, missing or
+malformed sources, invalid inline rows, missing prefixes, repeated modifiers,
+and attached suffixes. Source audit covers `pipe_join.go`,
+`pipe_join_test.go`, `pipe_unpack.go`, and the storage join regressions at
+immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. Timeless retains typed and
+nested right values instead of VictoriaLogs's flattened strings; quoted
+dotted names remain literal while unquoted dotted names address nested paths;
+and scalar-parent conflicts fail explicitly. Those retained-model choices are
+covered separately through the real extension. The fixture still contains
+167 source rows, 346 row-query cases, one stochastic case, 439 error cases,
+and 463 statistics/pipeline cases: 1,249 cases total, all passing against the
+immutable image. The fixture now contains 1249 cases.

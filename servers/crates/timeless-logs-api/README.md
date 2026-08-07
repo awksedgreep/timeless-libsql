@@ -1692,6 +1692,44 @@ request-attributed API mean after identical public storage work. The doubled
 candidate cardinality and 704 additional response bytes remain visible; no
 independent equal-cardinality expansion control is claimed.
 
+LogsQL `join` performs a bounded default-left or optional-inner join over
+current public rows:
+
+```text
+* | join by (service) (kind:="deployment" | fields service, owner)
+* | join on (service, region) (kind:="deployment" | fields service, region, owner) inner
+* | join by (service) rows({service:"api",owner:"platform"}) prefix deployment.
+```
+
+`by`/`on`, `join`, `inner`, and `prefix` are case-insensitive. Join keys are a
+nonempty parenthesized list of exact fields. Right rows come from a complete
+parenthesized LogsQL pipeline or strict inline scalar `rows(...)`. Wildcard,
+prefix, empty, malformed, repeated-modifier, attached-suffix, and trailing
+forms fail explicitly. Quoted dotted names are literal retained names;
+unquoted dotted names address nested paths.
+
+Missing, null, and empty values share one empty textual key. Other rich values
+use the standard LogsQL textual projection. Duplicate right keys expand in
+right-source order while left order is retained. Unmatched rows pass through
+unless `inner` is present. Right join keys are removed. Nonempty left values
+win collisions; missing/null/empty left values may be filled. A prefix is
+applied before right fields are inserted. Right typed and nested values remain
+typed, unrelated siblings survive, and scalar-parent conflicts return HTTP
+422 instead of flattening or silently dropping data.
+
+Nested queries recursively use the same parser, request clock, public storage
+owner, and parent limits. Right rows, rich state, textual keys, index buckets,
+output cardinality, work, response bytes, deadlines, and cancellation are
+bounded. Request-local composition leaves both sides durably unchanged across
+optimize, shutdown, and reopen. The complete 1,249-case pinned VictoriaLogs
+fixture and the real-extension regression cover language and retained-model
+semantics. Direct SQLite/libSQL users can run executable
+[`SQL-LOG-057`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key)
+for a deterministic one-key left/inner foundation over two independently
+bounded public scans with separate typed payloads. Rust owns the complete
+LogsQL AST and merge policy; no private table, extension language opcode,
+storage format, or authoritative 8,192-entry batching behavior changes.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

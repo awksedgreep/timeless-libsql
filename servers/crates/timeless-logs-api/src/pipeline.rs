@@ -23,10 +23,11 @@ use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CollapseNumsSpec,
     CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
-    JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec, PackJsonSpec,
-    PackLogfmtSpec, PipelineField, PipelineOp, RegexpReplacementStep, RenameSpec,
-    ReplaceRegexpSpec, ReplaceSpec, SplitSpec, StatsExpression, StatsKind, TopSpec, UnaryFieldSpec,
-    UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
+    JoinSource, JoinSpec, JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction,
+    MathSpec, PackJsonSpec, PackLogfmtSpec, PipelineField, PipelineOp, RegexpReplacementStep,
+    RenameSpec, ReplaceRegexpSpec, ReplaceSpec, SplitSpec, StatsExpression, StatsKind, TopSpec,
+    UnaryFieldSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec,
+    UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -244,6 +245,7 @@ pub(crate) fn execute(
                 execution.limits,
                 execution.cancelled,
             )?,
+            PipelineOp::Join(spec) => join_rows(rows, spec, execution.limits, execution.cancelled)?,
             PipelineOp::DropEmptyFields => {
                 drop_empty_fields(rows, execution.limits, execution.cancelled)?
             }
@@ -5121,6 +5123,231 @@ fn unroll_fields(
     }
     ensure_active(cancelled)?;
     Ok(output)
+}
+
+fn join_rows(
+    rows: Vec<Value>,
+    spec: &JoinSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let fields = spec
+        .fields
+        .iter()
+        .map(|field| match field {
+            PipelineField::Exact { path, name } => Ok((path.as_slice(), name.as_str())),
+            PipelineField::Prefix { .. } | PipelineField::All => {
+                Err("LogsQL join field is not exact".to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let JoinSource::Rows(right_rows) = &spec.source else {
+        return Err("LogsQL join subquery was not resolved before evaluation".into());
+    };
+
+    let mut work_items = 0usize;
+    let mut retained_bytes = size_of::<Vec<Value>>()
+        .checked_add(size_of::<BTreeMap<Vec<String>, Vec<usize>>>())
+        .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+    ensure_first_state_bytes(retained_bytes, limits.max_state_bytes, "join")?;
+    let mut right_by_key: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    for (right_index, row) in right_rows.iter().enumerate() {
+        check_periodically(cancelled, right_index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "join")?;
+        charge_transfer_value(
+            row,
+            &mut retained_bytes,
+            limits.max_state_bytes,
+            cancelled,
+            &mut work_items,
+            limits.max_state_items,
+            "join",
+        )?;
+        let key = join_key(
+            row,
+            &fields,
+            &mut retained_bytes,
+            &mut work_items,
+            limits,
+            cancelled,
+        )?;
+        if !right_by_key.contains_key(&key) {
+            retained_bytes = retained_bytes
+                .checked_add(size_of::<Vec<usize>>())
+                .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+        }
+        retained_bytes = retained_bytes
+            .checked_add(size_of::<usize>())
+            .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+        ensure_first_state_bytes(retained_bytes, limits.max_state_bytes, "join")?;
+        right_by_key.entry(key).or_default().push(right_index);
+    }
+
+    let mut output = Vec::new();
+    for (left_index, row) in rows.into_iter().enumerate() {
+        check_periodically(cancelled, left_index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "join")?;
+        let mut key_state_bytes = retained_bytes;
+        let key = join_key(
+            &row,
+            &fields,
+            &mut key_state_bytes,
+            &mut work_items,
+            limits,
+            cancelled,
+        )?;
+        let matching_rows = right_by_key.get(&key);
+        if matching_rows.is_none_or(Vec::is_empty) {
+            if spec.inner {
+                continue;
+            }
+            ensure_join_result_capacity(output.len(), limits.max_result_rows)?;
+            let mut candidate_bytes = retained_bytes;
+            charge_transfer_value(
+                &row,
+                &mut candidate_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                &mut work_items,
+                limits.max_state_items,
+                "join",
+            )?;
+            retained_bytes = candidate_bytes;
+            output.push(row);
+            continue;
+        }
+
+        for right_index in matching_rows.into_iter().flatten() {
+            ensure_active(cancelled)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "join")?;
+            ensure_join_result_capacity(output.len(), limits.max_result_rows)?;
+            let mut joined = row.clone();
+            let object = joined
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL join input row is not a JSON object".to_string())?;
+            let right = right_rows
+                .get(*right_index)
+                .ok_or_else(|| "LogsQL join map contains an invalid row index".to_string())?;
+            let mut source_path = Vec::new();
+            merge_join_fields(
+                object,
+                right,
+                &mut source_path,
+                &fields,
+                &spec.prefix,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            let mut candidate_bytes = retained_bytes;
+            charge_transfer_value(
+                &joined,
+                &mut candidate_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                &mut work_items,
+                limits.max_state_items,
+                "join",
+            )?;
+            retained_bytes = candidate_bytes;
+            output.push(joined);
+        }
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+fn ensure_join_result_capacity(current: usize, limit: usize) -> Result<(), String> {
+    if current >= limit {
+        Err(format!("LogsQL join exceeds max_result_rows={limit}"))
+    } else {
+        Ok(())
+    }
+}
+
+fn join_key(
+    row: &Value,
+    fields: &[(&[String], &str)],
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    let mut key = Vec::with_capacity(fields.len());
+    *state_bytes = state_bytes
+        .checked_add(size_of::<Vec<String>>())
+        .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "join")?;
+    for (path, name) in fields {
+        ensure_active(cancelled)?;
+        charge_transfer_work(work_items, limits.max_state_items, "join")?;
+        charge_transfer_string(name, state_bytes, limits.max_state_bytes, "join")?;
+        let value = projected_text(field_value(row, path)).into_owned();
+        charge_transfer_string(&value, state_bytes, limits.max_state_bytes, "join")?;
+        key.push(value);
+    }
+    Ok(key)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_join_fields(
+    destination: &mut Map<String, Value>,
+    value: &Value,
+    source_path: &mut Vec<String>,
+    by_fields: &[(&[String], &str)],
+    prefix: &str,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, limits.max_state_items, "join")?;
+    check_periodically(cancelled, *work_items)?;
+    if by_fields
+        .iter()
+        .any(|(path, _)| *path == source_path.as_slice())
+    {
+        return Ok(());
+    }
+    if let Value::Object(object) = value {
+        if object.is_empty() && source_path.is_empty() {
+            return Ok(());
+        }
+        if !object.is_empty() {
+            for (name, child) in object {
+                source_path.push(name.clone());
+                merge_join_fields(
+                    destination,
+                    child,
+                    source_path,
+                    by_fields,
+                    prefix,
+                    work_items,
+                    limits,
+                    cancelled,
+                )?;
+                source_path.pop();
+            }
+            return Ok(());
+        }
+    }
+    if source_path.is_empty() {
+        return Err("LogsQL join source row is not a JSON object".into());
+    }
+    let destination_path = if prefix.is_empty() {
+        source_path.clone()
+    } else {
+        format!("{prefix}{}", source_path.join("."))
+            .split('.')
+            .map(str::to_owned)
+            .collect()
+    };
+    if object_field_value(destination, &destination_path)
+        .is_some_and(|existing| !projected_text(Some(existing)).is_empty())
+    {
+        return Ok(());
+    }
+    insert_path(destination, &destination_path, value.clone())
+        .map_err(|error| format!("LogsQL join destination conflict: {error}"))
 }
 
 fn victorialogs_unroll_values(
@@ -11990,6 +12217,164 @@ mod tests {
                 &cancelled,
             )
             .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn join_is_left_by_default_preserves_rich_values_and_observes_bounds() {
+        let exact = |name: &str| PipelineField::Exact {
+            path: name.split('.').map(str::to_owned).collect(),
+            name: name.to_owned(),
+        };
+        let right_rows = vec![
+            json!({
+                "case":"a",
+                "right":{"typed":[1,false,null],"object":{"value":2}},
+                "collision":"right",
+                "empty":"filled",
+                "null_value":"filled-null"
+            }),
+            json!({"case":"a","duplicate":2}),
+            json!({"case":"1","numeric":true}),
+            json!({}),
+        ];
+        let spec = JoinSpec {
+            fields: vec![exact("case")],
+            source: JoinSource::Rows(right_rows.clone()),
+            inner: false,
+            prefix: String::new(),
+        };
+        let left_rows = vec![
+            json!({
+                "case":"a",
+                "left":"kept",
+                "collision":"left",
+                "empty":"",
+                "null_value":null,
+                "nested":{"sibling":true}
+            }),
+            json!({"case":"unmatched","left":"only"}),
+            json!({"case":1,"left":"numeric"}),
+            json!({"left":"missing-key"}),
+        ];
+        let limits = PipelineLimits {
+            max_result_rows: 20,
+            max_state_items: 10_000,
+            max_state_bytes: 500_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let joined = join_rows(left_rows.clone(), &spec, limits, &cancelled).unwrap();
+        assert_eq!(joined.len(), 5);
+        assert_eq!(joined[0]["case"], "a");
+        assert_eq!(joined[0]["left"], "kept");
+        assert_eq!(joined[0]["collision"], "left");
+        assert_eq!(joined[0]["empty"], "filled");
+        assert_eq!(joined[0]["null_value"], "filled-null");
+        assert_eq!(joined[0]["right"]["typed"], json!([1, false, null]));
+        assert_eq!(joined[0]["right"]["object"]["value"], 2);
+        assert!(joined[0].get("duplicate").is_none());
+        assert_eq!(joined[1]["duplicate"], 2);
+        assert!(joined[1].get("right").is_none());
+        assert_eq!(joined[2], left_rows[1]);
+        assert_eq!(joined[3]["numeric"], true);
+        assert_eq!(joined[3]["case"], 1);
+        assert_eq!(joined[4], left_rows[3]);
+        assert_eq!(right_rows[0]["case"], "a");
+
+        let inner = JoinSpec {
+            inner: true,
+            ..spec.clone()
+        };
+        let inner_rows = join_rows(left_rows.clone(), &inner, limits, &cancelled).unwrap();
+        assert_eq!(inner_rows.len(), 4);
+        assert!(inner_rows.iter().all(|row| row["case"] != "unmatched"));
+
+        let prefixed = JoinSpec {
+            fields: vec![exact("case")],
+            source: JoinSource::Rows(vec![json!({
+                "case":"a",
+                "nested":{"value":7},
+                "flat":"right"
+            })]),
+            inner: false,
+            prefix: "joined.".into(),
+        };
+        let prefixed_rows =
+            join_rows(vec![json!({"case":"a"})], &prefixed, limits, &cancelled).unwrap();
+        assert_eq!(
+            prefixed_rows,
+            [json!({
+                "case":"a",
+                "joined":{"nested":{"value":7},"flat":"right"}
+            })]
+        );
+
+        let empty_right = JoinSpec {
+            fields: vec![exact("case")],
+            source: JoinSource::Rows(vec![json!({})]),
+            inner: false,
+            prefix: String::new(),
+        };
+        assert_eq!(
+            join_rows(
+                vec![json!({"left":"unchanged"})],
+                &empty_right,
+                limits,
+                &cancelled
+            )
+            .unwrap(),
+            [json!({"left":"unchanged"})]
+        );
+
+        for (limited, expected) in [
+            (
+                PipelineLimits {
+                    max_result_rows: 1,
+                    ..limits
+                },
+                "max_result_rows=1",
+            ),
+            (
+                PipelineLimits {
+                    max_state_items: 1,
+                    ..limits
+                },
+                "max_work_rows=1",
+            ),
+            (
+                PipelineLimits {
+                    max_state_bytes: 1,
+                    ..limits
+                },
+                "max_response_bytes=1",
+            ),
+        ] {
+            let error = join_rows(left_rows.clone(), &spec, limited, &cancelled).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+
+        let conflict = JoinSpec {
+            fields: vec![exact("case")],
+            source: JoinSource::Rows(vec![json!({"case":"a","nested":{"child":1}})]),
+            inner: false,
+            prefix: String::new(),
+        };
+        let conflict_error = join_rows(
+            vec![json!({"case":"a","nested":"scalar"})],
+            &conflict,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict_error.contains("LogsQL join destination conflict"),
+            "{conflict_error}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            join_rows(left_rows, &spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

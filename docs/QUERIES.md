@@ -2110,6 +2110,64 @@ identical public block, decode, payload, and row work. The candidate's doubled
 cardinality and 704 additional bytes are retained in the endpoint result; no
 independent equal-cardinality expansion control exists at this boundary.
 
+## LogsQL bounded joins
+
+`join` combines each current left row with inline or query-backed right rows
+using one or more exact textual keys:
+
+```text
+* | join by (service) (kind:="deployment" | fields service, owner)
+* | join on (service, region) (kind:="deployment" | fields service, region, owner) inner
+* | join by (service) rows({service:"api",owner:"platform"}) prefix deployment.
+```
+
+`by` and `on` are interchangeable and case-insensitive. Keys must be a
+nonempty parenthesized list of exact bare, quoted, or dotted fields; wildcards
+and prefixes fail. The right source is either a parenthesized LogsQL query or
+`rows({field:value,...},...)`. Inline names and scalar compound values may be
+quoted, `:` and `=` are accepted, terminal commas are allowed, and arrays or
+objects are rejected as inline values. Quoted dotted names are literal;
+unquoted dotted names address retained nested paths. The optional `inner` and
+`prefix value` modifiers may appear as `inner prefix` or `prefix inner`, once
+each. Unsupported or malformed syntax fails before storage work.
+
+The default is a left join: an unmatched row passes through unchanged. `inner`
+drops it. Missing, explicit null, and empty values share the empty textual key;
+numbers, booleans, arrays, objects, and strings use the same public rich-row
+text projection as other LogsQL operations. Every matching right row emits an
+output in right-source order, so duplicate keys expand cardinality. Left order
+is retained. Use an explicit supported sort inside either query when that
+order matters.
+
+All join-key fields are removed from the right payload. With no prefix, a
+nonempty left value wins a collision; a missing, null, or empty left value is
+filled. Prefixes are prepended before retained nested insertion. Timeless
+preserves right strings, numbers, booleans, arrays, objects, explicit nulls,
+and nested paths instead of flattening everything to VictoriaLogs strings.
+Unrelated left siblings remain intact, while a required object path through a
+scalar parent returns HTTP 422 `field_conflict`. Joins are request-local and
+never modify either public source row.
+
+Nested right queries run through the same Rust parser and public `logs`
+interface, share one request clock, recursively resolve their own query-backed
+operations, and inherit parent work, result, response, deadline, and nesting
+limits. Inline and query rows, their rich values, textual keys, duplicate
+indexes, output rows, and response bytes are all bounded; cancellation is
+checked during map construction, matching, recursive rich merging, and
+output. Empty `rows()` is a left identity and produces no inner results.
+
+The complete 1,249-case pinned VictoriaLogs fixture covers twelve successful
+join vectors and fourteen strict failures. Real-extension regressions add
+typed/nested fidelity, numeric/string key equivalence, collision envelopes,
+limits, immutable source data, optimize, shutdown, and reopen. Executable
+[`SQL-LOG-057`](QUERY_SQL_EQUIVALENTS.md#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key)
+provides the direct SQLite/libSQL foundation: two independently bounded public
+scans, textual key projection, deterministic duplicate expansion, optional
+inner filtering, and separate typed left/right payloads. The API owns LogsQL
+grammar and rich merge policy. Both scans and payload crossings are required,
+so no language-specific extension primitive or private storage access is
+justified.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

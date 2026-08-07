@@ -4900,6 +4900,76 @@
       "id": "LQL-P42-unroll-composes-with-statistics",
       "query": "case:=json-array-strings | unroll tags | stats count() as rows",
       "expected_rows": [{"rows": "3"}]
+    },
+    {
+      "id": "LQL-P43-join-expands-duplicate-right-matches-in-order",
+      "query": "case:=state-string | join by (case) rows({\"case\":\"state-string\",\"right\":\"one\"},{\"case\":\"state-string\",\"right\":\"two\"}) | fields case, probe, right",
+      "expected_rows": [
+        {"case": "state-string", "probe": "value", "right": "one"},
+        {"case": "state-string", "probe": "value", "right": "two"}
+      ]
+    },
+    {
+      "id": "LQL-P43-join-default-left-preserves-unmatched-row",
+      "query": "case:=state-string | join by (case) rows({\"case\":\"other\",\"right\":\"nope\"}) | fields case, probe, right",
+      "expected_rows": [{"case": "state-string", "probe": "value"}]
+    },
+    {
+      "id": "LQL-P43-join-inner-drops-unmatched-row",
+      "query": "case:=state-string | join by (case) rows({\"case\":\"other\",\"right\":\"nope\"}) inner | fields case, probe, right",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P43-join-keeps-nonempty-left-collision",
+      "query": "case:=state-string | join by (case) rows({\"case\":\"state-string\",\"probe\":\"right\",\"extra\":\"joined\"}) | fields case, probe, extra",
+      "expected_rows": [{"case": "state-string", "probe": "value", "extra": "joined"}]
+    },
+    {
+      "id": "LQL-P43-join-fills-empty-left-collision",
+      "query": "case:=state-empty | join by (case) rows({\"case\":\"state-empty\",\"probe\":\"filled\"}) | fields case, probe",
+      "expected_rows": [{"case": "state-empty", "probe": "filled"}]
+    },
+    {
+      "id": "LQL-P43-join-prefixes-right-fields",
+      "query": "case:=state-string | join by (case) rows({\"case\":\"state-string\",\"probe\":\"right\",\"extra\":\"joined\"}) prefix \"rhs.\" | fields case, probe, rhs.probe, rhs.extra",
+      "expected_rows": [{"case": "state-string", "probe": "value", "rhs.probe": "right", "rhs.extra": "joined"}]
+    },
+    {
+      "id": "LQL-P43-join-missing-null-empty-share-empty-key",
+      "query": "state_group:=state | join by (probe) rows({\"probe\":\"\",\"bucket\":\"empty\"},{\"probe\":\"value\",\"bucket\":\"value\"}) | fields case, probe, bucket | sort by (case) asc",
+      "expected_rows": [
+        {"case": "state-empty", "bucket": "empty"},
+        {"case": "state-false", "probe": "false"},
+        {"case": "state-missing", "bucket": "empty"},
+        {"case": "state-null", "bucket": "empty"},
+        {"case": "state-string", "probe": "value", "bucket": "value"},
+        {"case": "state-zero", "probe": "0"}
+      ]
+    },
+    {
+      "id": "LQL-P43-join-supports-multiple-exact-keys",
+      "query": "case:=state-string | join by (case, probe) rows({\"case\":\"state-string\",\"probe\":\"value\",\"extra\":\"joined\"}) inner | fields case, probe, extra",
+      "expected_rows": [{"case": "state-string", "probe": "value", "extra": "joined"}]
+    },
+    {
+      "id": "LQL-P43-join-supports-query-backed-right-rows",
+      "query": "case:=state-string | join by (case) (case:=state-string | fields case, probe) prefix \"rhs.\" | fields case, probe, rhs.probe",
+      "expected_rows": [{"case": "state-string", "probe": "value", "rhs.probe": "value"}]
+    },
+    {
+      "id": "LQL-P43-join-empty-inline-source-is-left-identity",
+      "query": "case:=state-string | join by (case) rows() | fields case, probe",
+      "expected_rows": [{"case": "state-string", "probe": "value"}]
+    },
+    {
+      "id": "LQL-P43-join-empty-inline-source-drops-inner-row",
+      "query": "case:=state-string | join by (case) rows() inner | fields case, probe",
+      "expected_rows": []
+    },
+    {
+      "id": "LQL-P43-join-on-is-case-insensitive-and-prefix-may-precede-inner",
+      "query": "case:=state-string | JoIn On (case) rows({\"case\":\"state-string\",\"extra\":\"joined\"}) prefix \"rhs.\" inner | fields case, rhs.extra",
+      "expected_rows": [{"case": "state-string", "rhs.extra": "joined"}]
     }
   ],
   "sample_cases": [
@@ -7772,6 +7842,104 @@
     {
       "id": "LQL-P42-unroll-rejects-attached-suffix",
       "query": "* | unroll.extra",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-requires-fields-and-source",
+      "query": "* | join",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-empty-fields",
+      "query": "* | join by () (*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-wildcard-field",
+      "query": "* | join by (*) (*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-mixed-wildcard-fields",
+      "query": "* | join by (case, *) (*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-requires-source",
+      "query": "* | join by (case)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-empty-subquery",
+      "query": "* | join by (case) ()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-unterminated-subquery",
+      "query": "* | join by (case) (",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-inline-row-without-value",
+      "query": "* | join by (case) rows({case})",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-leading-inline-comma",
+      "query": "* | join by (case) rows({,})",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-double-inline-comma",
+      "query": "* | join by (case) rows({\"case\":\"a\",,})",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-inline-array-value",
+      "query": "* | join by (case) rows({\"case\":[]})",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-prefix-requires-value",
+      "query": "* | join by (case) (*) prefix",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-repeated-inner",
+      "query": "* | join by (case) (*) inner prefix rhs. inner",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P43-join-rejects-attached-suffix",
+      "query": "* | join.extra by (case) (*)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

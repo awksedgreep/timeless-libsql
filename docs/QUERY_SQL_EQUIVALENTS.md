@@ -164,6 +164,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-054`](#sql-log-054-decode-one-fixed-rfc5424-header) | `LQL-P38` | current foundation | bounded decoding of PRI and the five fixed RFC5424 header fields when structured data is `-`; API owns RFC3164, structured data, CEF/CEE, timezone/year rules, mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-055`](#sql-log-055-concatenate-one-json-array) | `LQL-P40` | current foundation | ordered concatenation of one bounded canonical JSON array from a public metadata path; API owns raw token spelling, bare `NaN`, grammar, rich mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-056`](#sql-log-056-unroll-one-json-array) | `LQL-P42` | current foundation | ordered row expansion of one bounded canonical JSON array from a public metadata path, including one empty result for missing, invalid, scalar, or empty sources; API owns multi-field zip composition, raw token spelling, conditions, rich mutation, limits, cancellation, and envelopes |
+| [`SQL-LOG-057`](#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key) | `LQL-P43` | current foundation | bounded deterministic left/inner join over two public log scans using one exact textual metadata key, with duplicate right matches and separate typed payloads; API owns LogsQL grammar, multiple keys, inline/query sources, rich merging, prefixes, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -8931,6 +8932,109 @@ or row crossing, so no extension primitive or private shadow-table access is
 warranted. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
 harness; HTTP/oracle/optimize/reopen regression:
 `session_eighteen_unroll_is_exact_rich_bounded_and_durable`.
+
+### SQL-LOG-057: bounded left or inner join on one exact metadata key
+
+Bind one exact metadata JSON path, inclusive native timestamp bounds, separate
+positive work limits for the left and right public scans, a positive result
+limit, and `:join_inner` as `0` for a left join or `1` for an inner join. This
+read-only statement projects missing, JSON null, and empty strings to the same
+empty textual key; renders booleans as `true`/`false`; and otherwise uses the
+public retained value's SQLite text projection. Every matching right row
+emits a result, so duplicate right keys expand in deterministic source order.
+
+```sql
+WITH
+left_rows AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS left_id,
+    ts,
+    level,
+    message,
+    metadata,
+    CASE
+      WHEN json_type(metadata, :join_key_path) IS NULL
+        OR json_type(metadata, :join_key_path) = 'null' THEN ''
+      WHEN json_type(metadata, :join_key_path) = 'true' THEN 'true'
+      WHEN json_type(metadata, :join_key_path) = 'false' THEN 'false'
+      ELSE CAST(json_extract(metadata, :join_key_path) AS TEXT)
+    END AS join_key
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND (:join_left_level IS NULL OR level = :join_left_level)
+    AND max_work_entries = :outer_max_work_entries
+    AND :max_result_rows > 0
+),
+right_rows AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS right_id,
+    ts,
+    metadata,
+    CASE
+      WHEN json_type(metadata, :join_key_path) IS NULL
+        OR json_type(metadata, :join_key_path) = 'null' THEN ''
+      WHEN json_type(metadata, :join_key_path) = 'true' THEN 'true'
+      WHEN json_type(metadata, :join_key_path) = 'false' THEN 'false'
+      ELSE CAST(json_extract(metadata, :join_key_path) AS TEXT)
+    END AS join_key
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND (:join_right_level IS NULL OR level = :join_right_level)
+    AND max_work_entries = :subquery_max_work_entries
+    AND :max_result_rows > 0
+)
+SELECT
+  left_rows.ts AS left_ts,
+  left_rows.level AS left_level,
+  left_rows.message AS left_message,
+  left_rows.metadata AS left_metadata,
+  right_rows.ts AS right_ts,
+  CASE WHEN right_rows.right_id IS NULL THEN NULL
+    ELSE json_remove(right_rows.metadata, :join_key_path)
+  END AS right_metadata_without_key
+FROM left_rows
+LEFT JOIN right_rows USING (join_key)
+WHERE :join_inner = 0 OR right_rows.right_id IS NOT NULL
+ORDER BY left_rows.left_id, right_rows.right_id
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:outer_max_work_entries` and `:subquery_max_work_entries` to `100000`,
+`:max_result_rows` to `100`, `:join_key_path` to `$.service`, and
+`:join_inner` to `0`; bind `:join_left_level` and `:join_right_level` to SQL
+`NULL`. Both fixture rows have service `api`, so the statement returns four
+rows in `(left_ts, right_ts)` order: `(1000,1000)`,
+`(1000,2000)`, `(2000,1000)`, and `(2000,2000)`. Each left metadata object is
+returned unchanged. Each right metadata object remains typed and has only the
+join path removed. Binding `:join_inner` to `1` removes unmatched left rows;
+binding a missing path demonstrates that missing, null, and empty values share
+the empty textual key. Timestamps remain in the virtual table's configured
+native unit, and both scans are independently bounded through the documented
+public `max_work_entries` input.
+
+This is the honest direct-SQL foundation for `LQL-P43`, not a claim that SQL
+has parsed LogsQL or performed Timeless's rich-object mutation policy. The
+Rust logs API owns case-insensitive `join by`/`join on` grammar; multiple exact
+keys; inline `rows(...)`; recursively query-backed right pipelines; inherited
+time and request limits; default-left and optional-inner behavior; prefixing;
+removal of all join fields from the right payload; nonempty-left collision
+precedence; missing/null/empty equivalence; retained nested strings, numbers,
+booleans, arrays, objects, and explicit nulls; scalar-parent conflict errors;
+result/work/state/response/deadline bounds; cancellation; and HTTP envelopes.
+Callers using this recipe receive the two typed payloads separately and must
+choose their own merge policy rather than accidentally relying on
+`json_patch`, whose null/deletion and collision rules differ.
+
+The operation necessarily performs two independently bounded public scans.
+The right rows are then held in a bounded Rust map and composed with the left
+rows; moving LogsQL syntax or the map into the extension would not eliminate
+either storage read, block decode, or public payload crossing. No extension
+primitive or private shadow-table access is warranted. Direct regression:
+`tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
+regression: `session_eighteen_join_is_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

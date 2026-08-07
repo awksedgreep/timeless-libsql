@@ -8141,6 +8141,293 @@ async fn session_eighteen_unroll_is_exact_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_join_is_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("join-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let entries = [
+        (
+            1,
+            "left-a",
+            serde_json::json!({
+                "join_group":"left", "case":"a", "region":"us", "left":"kept",
+                "collision":"left", "empty":"", "null_value":null,
+                "nested":{"sibling":true}
+            }),
+        ),
+        (
+            2,
+            "left-b",
+            serde_json::json!({
+                "join_group":"left", "case":"b", "region":"eu", "left":"only-b"
+            }),
+        ),
+        (
+            3,
+            "left-number",
+            serde_json::json!({
+                "join_group":"left", "case":1, "left":"numeric"
+            }),
+        ),
+        (
+            4,
+            "left-missing",
+            serde_json::json!({
+                "join_group":"left", "left":"missing-key"
+            }),
+        ),
+        (
+            5,
+            "left-unmatched",
+            serde_json::json!({
+                "join_group":"left", "case":"unmatched", "left":"only"
+            }),
+        ),
+        (
+            6,
+            "left-conflict",
+            serde_json::json!({
+                "join_group":"conflict", "case":"conflict", "nested":"scalar"
+            }),
+        ),
+        (
+            11,
+            "right-a-first",
+            serde_json::json!({
+                "join_group":"right", "case":"a", "region":"us",
+                "typed":[1,false,null,{"value":2}], "collision":"right",
+                "empty":"filled", "null_value":"filled-null", "rank":"first"
+            }),
+        ),
+        (
+            12,
+            "right-a-second",
+            serde_json::json!({
+                "join_group":"right", "case":"a", "region":"us", "rank":"second"
+            }),
+        ),
+        (
+            13,
+            "right-b",
+            serde_json::json!({
+                "join_group":"right", "case":"b", "region":"eu"
+            }),
+        ),
+        (
+            14,
+            "right-number",
+            serde_json::json!({
+                "join_group":"right", "case":"1", "numeric":true
+            }),
+        ),
+        (
+            15,
+            "right-missing",
+            serde_json::json!({
+                "join_group":"right", "missing_fill":{"native":false}
+            }),
+        ),
+    ]
+    .into_iter()
+    .map(|(offset, message, metadata)| LogEntry {
+        ts: 1_800_000_000_000_000 + offset,
+        level: 1,
+        severity: "info".into(),
+        message: message.into(),
+        metadata_json: metadata.to_string(),
+    })
+    .collect();
+    storage.ingest(entries).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let query = r#"join_group:="left" | sort by (_time) asc | join by (case) (join_group:="right" | sort by (_time) asc | fields case, typed, collision, empty, null_value, rank, numeric, missing_fill) | fields case, left, collision, empty, null_value, typed, rank, numeric, missing_fill, nested | limit 10000"#;
+    let rows = pipeline_rows(&app, query).await;
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[0]["case"], "a");
+    assert_eq!(rows[0]["left"], "kept");
+    assert_eq!(rows[0]["collision"], "left");
+    assert_eq!(rows[0]["empty"], "filled");
+    assert_eq!(rows[0]["null_value"], "filled-null");
+    assert_eq!(
+        rows[0]["typed"],
+        serde_json::json!([1, false, null, {"value":2}])
+    );
+    assert_eq!(rows[0]["rank"], "first");
+    assert_eq!(rows[0]["nested"]["sibling"], true);
+    assert_eq!(rows[1]["rank"], "second");
+    assert!(rows[1].get("typed").is_none());
+    assert_eq!(rows[2], serde_json::json!({"case":"b","left":"only-b"}));
+    assert_eq!(
+        rows[3],
+        serde_json::json!({"case":1,"left":"numeric","numeric":true})
+    );
+    assert_eq!(rows[4]["left"], "missing-key");
+    assert_eq!(rows[4]["missing_fill"], serde_json::json!({"native":false}));
+    assert_eq!(
+        rows[5],
+        serde_json::json!({"case":"unmatched","left":"only"})
+    );
+
+    let inner = pipeline_rows(&app, &format!("{query} | join by (case) rows() inner")).await;
+    assert!(
+        inner.is_empty(),
+        "empty inline inner join must drop every row"
+    );
+    let inner = pipeline_rows(
+        &app,
+        r#"join_group:="left" | sort by (_time) asc | join by (case) (join_group:="right" | fields case, rank, numeric, missing_fill) inner | fields case, left, rank, numeric, missing_fill | limit 10000"#,
+    )
+    .await;
+    assert_eq!(inner.len(), 5);
+    assert!(inner.iter().all(|row| row["case"] != "unmatched"));
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"join_group:="left" case:="a" | join by (case, region) (join_group:="right" | sort by (_time) asc | fields case, region, rank) inner prefix joined. | fields case, region, joined | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"a","region":"us","joined":{"rank":"first"}}),
+            serde_json::json!({"case":"a","region":"us","joined":{"rank":"second"}})
+        ],
+        "multiple keys, inner mode, duplicate matches, and rich prefixes must compose"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"join_group:="left" case:="a" | join by (case) rows({"case":"a","inline":"yes","nested.value":"7"}) prefix right. | fields case, left, right"#,
+        )
+        .await,
+        [serde_json::json!({
+            "case":"a", "left":"kept",
+            "right":{"inline":"yes","nested":{"value":"7"}}
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"join_group:="left" case:="b" | join by (case) (join_group:="right" case:="b" | stats count() as total | format 'b' as case) | fields case, left, total"#,
+        )
+        .await,
+        [serde_json::json!({"case":"b","left":"only-b","total":1})],
+        "query-backed join sources must support complete nested pipelines"
+    );
+
+    for malformed in [
+        "* | join",
+        "* | join by () (*)",
+        "* | join by (*) (*)",
+        "* | join by (case)",
+        "* | join by (case) ()",
+        "* | join by (case) rows({case})",
+        "* | join by (case) rows({,})",
+        "* | join by (case) (*) prefix",
+        "* | join by (case) (*) inner prefix right. inner",
+        "* | join.extra by (case) (*)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"join_group:="conflict" | join by (case) rows({case:"conflict",nested.child:"x"})"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 5,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"join_group:="left" | sort by (_time) asc | fields case, region, left, collision, empty, null_value, nested | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case":"a", "region":"us", "left":"kept", "collision":"left",
+                "empty":"", "null_value":null, "nested":{"sibling":true}
+            }),
+            serde_json::json!({"case":"b","region":"eu","left":"only-b"}),
+            serde_json::json!({"case":1,"left":"numeric"}),
+            serde_json::json!({"left":"missing-key"}),
+            serde_json::json!({"case":"unmatched","left":"only"})
+        ],
+        "request-local join composition must not mutate durable rich rows"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(pipeline_rows(&router(reopened.clone()), query).await, rows);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

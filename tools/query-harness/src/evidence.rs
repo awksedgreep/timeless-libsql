@@ -2820,6 +2820,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "join_narrow",
+                "logs-join-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | join by (range_key) (host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | format 'joined' as joined) | fields joined"#,
+                64,
+                None,
+            ),
+            (
+                "join_wide",
+                "logs-join-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields range_key | join by (range_key) (query | sort by (_time) asc | limit 64 | fields range_key | format 'joined' as joined) | fields joined"#,
+                64,
+                None,
+            ),
+            (
+                "join_control_narrow",
+                "logs-join-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | filter range_key:in(host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key) | format 'joined' as joined | fields joined"#,
+                64,
+                None,
+            ),
+            (
+                "join_control_wide",
+                "logs-join-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields range_key | filter range_key:in(query | sort by (_time) asc | limit 64 | fields range_key) | format 'joined' as joined | fields joined"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3388,6 +3416,8 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         )?;
         require_same_public_query_work(&queries, "unroll_control_narrow", "unroll_narrow")?;
         require_same_public_query_work(&queries, "unroll_control_wide", "unroll_wide")?;
+        require_same_public_query_work(&queries, "join_control_narrow", "join_narrow")?;
+        require_same_public_query_work(&queries, "join_control_wide", "join_wide")?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({

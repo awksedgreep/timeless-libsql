@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io::{self, Write};
+use std::mem::size_of;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -301,6 +302,9 @@ fn resolve_query_backed_plan<'a>(
                         resolve_query_backed_predicate(storage, predicate, resolution).await?;
                     }
                 }
+                crate::logsql::PipelineOp::Join(spec) => {
+                    resolve_join_source(storage, spec, resolution).await?;
+                }
                 _ => {}
             }
         }
@@ -313,6 +317,128 @@ fn resolve_query_backed_plan<'a>(
         plan.spec.max_work_rows = plan.spec.max_work_rows.min(resolution.remaining_work_rows);
         Ok(())
     })
+}
+
+async fn resolve_join_source(
+    storage: &Storage,
+    spec: &mut crate::logsql::JoinSpec,
+    resolution: &mut QueryBackedResolution,
+) -> Result<(), String> {
+    let source = std::mem::replace(
+        &mut spec.source,
+        crate::logsql::JoinSource::Rows(Vec::new()),
+    );
+    let rows = match source {
+        crate::logsql::JoinSource::Rows(rows) => rows,
+        crate::logsql::JoinSource::Query(mut query) => {
+            resolve_query_backed_plan(storage, &mut query, resolution).await?;
+            let limits = resolution.limits;
+            let rate_window_seconds = rate_window_seconds(&query.spec, storage.timestamp_unit());
+            let (rows, report) = storage
+                .pipeline_with_report(
+                    query.spec,
+                    query.pipeline,
+                    query.implicit_result_limit,
+                    rate_window_seconds,
+                    PipelineLimits {
+                        max_result_rows: limits.max_result_rows,
+                        max_state_items: resolution.remaining_work_rows,
+                        max_state_bytes: resolution.remaining_state_bytes,
+                    },
+                )
+                .await?;
+            let physical_work = usize::try_from(report.processed_entries)
+                .unwrap_or(usize::MAX)
+                .max(rows.len());
+            if physical_work > resolution.remaining_work_rows {
+                return Err(format!(
+                    "LogsQL join composition exceeded max_work_rows={}",
+                    limits.max_work_rows
+                ));
+            }
+            resolution.remaining_work_rows -= physical_work;
+            rows
+        }
+    };
+    if rows.len() > resolution.limits.max_result_rows {
+        return Err(format!(
+            "LogsQL join source exceeds max_result_rows={}",
+            resolution.limits.max_result_rows
+        ));
+    }
+    let (work_items, state_bytes) = join_rows_resolution_cost(&rows)?;
+    if work_items > resolution.remaining_work_rows {
+        return Err(format!(
+            "LogsQL join composition exceeded max_work_rows={}",
+            resolution.limits.max_work_rows
+        ));
+    }
+    if state_bytes > resolution.remaining_state_bytes {
+        return Err(format!(
+            "LogsQL join source exceeds max_response_bytes={}",
+            resolution.limits.max_response_bytes
+        ));
+    }
+    resolution.remaining_work_rows -= work_items;
+    resolution.remaining_state_bytes -= state_bytes;
+    spec.source = crate::logsql::JoinSource::Rows(rows);
+    Ok(())
+}
+
+fn join_rows_resolution_cost(rows: &[Value]) -> Result<(usize, usize), String> {
+    let mut work_items = rows.len();
+    let mut state_bytes = size_of::<Vec<Value>>();
+    for row in rows {
+        join_value_resolution_cost(row, &mut work_items, &mut state_bytes)?;
+    }
+    Ok((work_items, state_bytes))
+}
+
+fn join_value_resolution_cost(
+    value: &Value,
+    work_items: &mut usize,
+    state_bytes: &mut usize,
+) -> Result<(), String> {
+    *state_bytes = state_bytes
+        .checked_add(size_of::<Value>())
+        .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+        Value::String(value) => {
+            *state_bytes = state_bytes
+                .checked_add(value.len())
+                .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+            Ok(())
+        }
+        Value::Array(values) => {
+            *state_bytes = state_bytes
+                .checked_add(size_of::<Vec<Value>>())
+                .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+            for value in values {
+                *work_items = work_items
+                    .checked_add(1)
+                    .ok_or_else(|| "LogsQL join work size overflow".to_string())?;
+                join_value_resolution_cost(value, work_items, state_bytes)?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            *state_bytes = state_bytes
+                .checked_add(size_of::<serde_json::Map<String, Value>>())
+                .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+            for (name, value) in object {
+                *work_items = work_items
+                    .checked_add(1)
+                    .ok_or_else(|| "LogsQL join work size overflow".to_string())?;
+                *state_bytes = state_bytes
+                    .checked_add(size_of::<String>())
+                    .and_then(|bytes| bytes.checked_add(name.len()))
+                    .ok_or_else(|| "LogsQL join state size overflow".to_string())?;
+                join_value_resolution_cost(value, work_items, state_bytes)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn resolve_query_backed_predicate<'a>(
@@ -776,6 +902,7 @@ fn query_execution_error(error: String) -> Response<Body> {
         || error.starts_with("LogsQL pack_logfmt destination conflict:")
         || error.starts_with("LogsQL unpack_json destination conflict:")
         || error.starts_with("LogsQL unpack_json field selection conflict:")
+        || error.starts_with("LogsQL join destination conflict:")
         || error.starts_with("LogsQL unpack_logfmt destination conflict:")
         || error.starts_with("LogsQL unpack_syslog destination conflict:")
         || error.starts_with("LogsQL unpack_words destination conflict:")
@@ -948,6 +1075,11 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
             crate::logsql::PipelineOp::Unroll(spec) => {
                 if let Some(predicate) = &mut spec.condition {
                     apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::Join(spec) => {
+                if let crate::logsql::JoinSource::Query(query) = &mut spec.source {
+                    apply_plan_limits(query, limits)?;
                 }
             }
             _ => {}
