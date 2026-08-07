@@ -18109,6 +18109,264 @@ async fn session_nineteen_stream_id_filters_fail_explicitly_without_storage() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_nineteen_set_stream_fields_synthesizes_canonical_result_streams() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("set-stream-fields-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(
+                [
+                    r#"{"_time":1800000000000001,"_msg":"stream projection","level":"notice","case":"selected","stream_group":"stream","kind":"admin","foo":"aaa","bar":"bb","empty":"","null_value":null,"number":2,"flag":false,"array":[1,"x"],"nested":{"leaf":"λ","keep":true},"quote":"line\n\t\"quoted\"\\slash","_stream":"stored-selected","_stream_id":"stored-selected-id"}"#,
+                    r#"{"_time":1800000000000002,"_msg":"conditional preservation","level":"warning","case":"skipped","stream_group":"stream","kind":"user","foo":"unchanged","_stream":"stored-skipped","_stream_id":"stored-skipped-id"}"#,
+                ]
+                .join("\n"),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "case:=selected | set_stream_fields foo, bar | fields case, _stream, _stream_id",
+        )
+        .await,
+        [serde_json::json!({
+            "case": "selected",
+            "_stream": r#"{bar="bb",foo="aaa"}"#,
+            "_stream_id": "",
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "case:=selected | set_stream_fields array, flag, nested*, null_value, empty, number, quote | fields case, _stream, _stream_id",
+        )
+        .await,
+        [serde_json::json!({
+            "case": "selected",
+            "_stream": r#"{array="[1,\"x\"]",flag="false",nested.keep="true",nested.leaf="λ",number="2",quote="line\n\t\"quoted\"\\slash"}"#,
+            "_stream_id": "",
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "case:=selected | fields foo, bar | set_stream_fields * | fields _stream, _stream_id",
+        )
+        .await,
+        [serde_json::json!({
+            "_stream": r#"{bar="bb",foo="aaa"}"#,
+            "_stream_id": "",
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "stream_group:=stream | sort by (_time) asc | set_stream_fields if (kind:=admin) foo | fields case, _stream, _stream_id",
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case": "selected",
+                "_stream": r#"{foo="aaa"}"#,
+                "_stream_id": "",
+            }),
+            serde_json::json!({
+                "case": "skipped",
+                "_stream": "stored-skipped",
+                "_stream_id": "stored-skipped-id",
+            }),
+        ]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "stream_group:=stream | sort by (_time) asc | set_stream_fields if (kind:in(case:=selected | fields kind)) foo | fields case, _stream, _stream_id",
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case": "selected",
+                "_stream": r#"{foo="aaa"}"#,
+                "_stream_id": "",
+            }),
+            serde_json::json!({
+                "case": "skipped",
+                "_stream": "stored-skipped",
+                "_stream_id": "stored-skipped-id",
+            }),
+        ]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "case:=selected | format generated as synthetic | set_stream_fields synthetic | fields case, synthetic, _stream, _stream_id",
+        )
+        .await,
+        [serde_json::json!({
+            "case": "selected",
+            "synthetic": "generated",
+            "_stream": r#"{synthetic="generated"}"#,
+            "_stream_id": "",
+        })]
+    );
+
+    // The pipe only rewrites the current response row. Durable metadata and
+    // rich values remain byte-for-byte queryable afterwards.
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "case:=selected | fields case, _stream, _stream_id, array, nested, null_value, empty",
+        )
+        .await,
+        [serde_json::json!({
+            "case": "selected",
+            "_stream": "stored-selected",
+            "_stream_id": "stored-selected-id",
+            "array": [1, "x"],
+            "nested": {"leaf": "λ", "keep": true},
+            "null_value": null,
+            "empty": "",
+        })]
+    );
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                "case:=selected | set_stream_fields foo, bar, nested*, array, quote",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    let response = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "case:=selected | set_stream_fields if (kind:in(stream_group:=stream | limit 2 | fields kind)) foo",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "max_result_rows", "{body}");
+
+    for malformed in [
+        "* | set_stream_fields",
+        "* | set_stream_fields if",
+        "* | set_stream_fields if kind:=admin foo",
+        "* | set_stream_fields foo bar",
+        "* | set_stream_fields foo,",
+        "* | set_stream_fields foo*bar",
+        "* | set_stream_fields.extra foo",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    let before_maintenance = storage.stats().await.unwrap();
+    assert_eq!(before_maintenance.total_entries, 2);
+    assert_eq!(before_maintenance.buffered_entries, 2);
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    let after_maintenance = storage.stats().await.unwrap();
+    assert_eq!(after_maintenance.total_entries, 2);
+    assert_eq!(after_maintenance.buffered_entries, 0);
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        pipeline_rows(
+            &reopened_app,
+            "case:=selected | set_stream_fields foo, bar | fields case, _stream, _stream_id",
+        )
+        .await,
+        [serde_json::json!({
+            "case": "selected",
+            "_stream": r#"{bar="bb",foo="aaa"}"#,
+            "_stream_id": "",
+        })]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &reopened_app,
+            "case:=selected | fields case, _stream, _stream_id, array, nested",
+        )
+        .await,
+        [serde_json::json!({
+            "case": "selected",
+            "_stream": "stored-selected",
+            "_stream_id": "stored-selected-id",
+            "array": [1, "x"],
+            "nested": {"leaf": "λ", "keep": true},
+        })]
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 fn make_evidence_rich_lines(count: usize) -> String {
     const BASE_TS: i64 = 1_800_000_000_000_000;
     const SEVERITIES: [&str; 8] = [

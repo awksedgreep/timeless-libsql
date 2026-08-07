@@ -17,6 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use chrono::{DateTime, NaiveDate, SecondsFormat, TimeDelta, Utc};
+use regex::Regex;
 use serde_json::{Map, Number, Value};
 
 use crate::logsql::{
@@ -26,9 +27,10 @@ use crate::logsql::{
     FirstSpec, FormatSpec, FormatStep, JoinSpec, JsonArrayConcatSpec, MathBinaryOperator,
     MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec, PipelineField,
     PipelineOp, QueryRowsSource, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
-    RunningStatsExpression, RunningStatsKind, RunningStatsMode, RunningStatsSpec, SplitSpec,
-    StatsExpression, StatsKind, TimeAddSpec, TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec,
-    UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
+    RunningStatsExpression, RunningStatsKind, RunningStatsMode, RunningStatsSpec,
+    SetStreamFieldsSpec, SplitSpec, StatsExpression, StatsKind, TimeAddSpec, TopSpec,
+    UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec,
+    UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -466,6 +468,13 @@ pub(crate) fn execute(
             PipelineOp::GenerateSequence(count) => {
                 generate_sequence_rows(*count, execution.limits, execution.cancelled)?
             }
+            PipelineOp::SetStreamFields(spec) => set_stream_fields(
+                rows,
+                spec,
+                execution.timestamp_unit,
+                execution.limits,
+                execution.cancelled,
+            )?,
             PipelineOp::QueryStats => vec![Value::Object(query_stats(
                 execution.report,
                 execution
@@ -999,6 +1008,347 @@ fn logfmt_needs_quote(value: &str) -> bool {
     value
         .chars()
         .any(|character| character <= '\u{20}' || matches!(character, '"' | '\\'))
+}
+
+fn set_stream_fields(
+    rows: Vec<Value>,
+    spec: &SetStreamFieldsSpec,
+    timestamp_unit: TimestampUnit,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let mut work_items = 0usize;
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, mut row)| {
+            check_periodically(cancelled, row_index)?;
+            charge_transfer_work(&mut work_items, limits.max_state_items, "set_stream_fields")?;
+            if let Some(condition) = &spec.condition {
+                if !predicate_matches(condition, &row, timestamp_unit, cancelled)? {
+                    return Ok(row);
+                }
+            }
+
+            let mut state_bytes = size_of::<BTreeMap<String, String>>();
+            ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "set_stream_fields")?;
+            let fields = select_stream_fields(
+                &row,
+                &spec.fields,
+                &mut state_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            let stream =
+                bounded_stream_tags(&fields, &mut state_bytes, limits.max_state_bytes, cancelled)?;
+
+            for name in ["_stream", "_stream_id"] {
+                charge_transfer_string(
+                    name,
+                    &mut state_bytes,
+                    limits.max_state_bytes,
+                    "set_stream_fields",
+                )?;
+            }
+            let object = row.as_object_mut().ok_or_else(|| {
+                "LogsQL set_stream_fields input row is not a JSON object".to_string()
+            })?;
+            // These are query-result columns, not durable metadata mutations.
+            // Matching rows replace any current synthetic values just as the
+            // VictoriaLogs pipe does; a false condition preserves the row.
+            object.insert("_stream".into(), Value::String(stream));
+            object.insert("_stream_id".into(), Value::String(String::new()));
+            Ok(row)
+        })
+        .collect()
+}
+
+fn select_stream_fields(
+    row: &Value,
+    selectors: &[PipelineField],
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<BTreeMap<String, String>, String> {
+    if !row.is_object() {
+        return Err("LogsQL set_stream_fields input row is not a JSON object".into());
+    }
+    let mut selected = BTreeMap::new();
+    if selectors
+        .iter()
+        .any(|selector| matches!(selector, PipelineField::All))
+    {
+        collect_stream_leaves(
+            row,
+            &mut String::new(),
+            "",
+            &mut selected,
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+        )?;
+        return Ok(selected);
+    }
+
+    for selector in selectors {
+        ensure_active(cancelled)?;
+        match selector {
+            PipelineField::Exact { path, name } => {
+                charge_transfer_work(work_items, limits.max_state_items, "set_stream_fields")?;
+                check_periodically(cancelled, *work_items)?;
+                let value = field_value(row, path).filter(|value| !value.is_object());
+                insert_stream_field(
+                    &mut selected,
+                    name,
+                    value,
+                    state_bytes,
+                    work_items,
+                    limits,
+                    cancelled,
+                )?;
+            }
+            PipelineField::Prefix { prefix } => collect_stream_leaves(
+                row,
+                &mut String::new(),
+                prefix,
+                &mut selected,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?,
+            PipelineField::All => unreachable!("all-fields selection handled above"),
+        }
+    }
+    Ok(selected)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_stream_leaves(
+    value: &Value,
+    path: &mut String,
+    prefix: &str,
+    selected: &mut BTreeMap<String, String>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, limits.max_state_items, "set_stream_fields")?;
+    check_periodically(cancelled, *work_items)?;
+    if !path.is_empty() && !path.starts_with(prefix) && !prefix.starts_with(path.as_str()) {
+        return Ok(());
+    }
+    if let Value::Object(object) = value {
+        for (name, child) in object {
+            charge_transfer_string(
+                name,
+                state_bytes,
+                limits.max_state_bytes,
+                "set_stream_fields",
+            )?;
+            let original_length = path.len();
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(name);
+            collect_stream_leaves(
+                child,
+                path,
+                prefix,
+                selected,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            )?;
+            path.truncate(original_length);
+        }
+        return Ok(());
+    }
+    if path.starts_with(prefix) {
+        insert_stream_field(
+            selected,
+            path,
+            Some(value),
+            state_bytes,
+            work_items,
+            limits,
+            cancelled,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_stream_field(
+    selected: &mut BTreeMap<String, String>,
+    name: &str,
+    value: Option<&Value>,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    if selected.contains_key(name) {
+        return Ok(());
+    }
+    let projected = textual_transform_projection(
+        value,
+        state_bytes,
+        work_items,
+        limits,
+        cancelled,
+        "set_stream_fields",
+    )?
+    .into_owned();
+    // VictoriaLogs' StreamTags.Add deliberately omits empty values. This
+    // includes missing, null, empty strings, and exact object parents.
+    if projected.is_empty() {
+        return Ok(());
+    }
+    *state_bytes = state_bytes
+        .checked_add(size_of::<(String, String)>())
+        .ok_or_else(|| "LogsQL set_stream_fields state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, limits.max_state_bytes, "set_stream_fields")?;
+    charge_transfer_string(
+        name,
+        state_bytes,
+        limits.max_state_bytes,
+        "set_stream_fields",
+    )?;
+    charge_transfer_string(
+        &projected,
+        state_bytes,
+        limits.max_state_bytes,
+        "set_stream_fields",
+    )?;
+    selected.insert(name.to_owned(), projected);
+    Ok(())
+}
+
+fn bounded_stream_tags(
+    fields: &BTreeMap<String, String>,
+    state_bytes: &mut usize,
+    max_state_bytes: usize,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
+    let mut output_len = 2usize;
+    for (index, (name, value)) in fields.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index != 0 {
+            output_len = output_len
+                .checked_add(1)
+                .ok_or_else(|| "LogsQL set_stream_fields result size overflow".to_string())?;
+        }
+        let quoted_len = go_quoted_string_len(value, cancelled)?;
+        output_len = output_len
+            .checked_add(name.len())
+            .and_then(|length| length.checked_add(1))
+            .and_then(|length| length.checked_add(quoted_len))
+            .ok_or_else(|| "LogsQL set_stream_fields result size overflow".to_string())?;
+    }
+    *state_bytes = state_bytes
+        .checked_add(size_of::<String>())
+        .and_then(|bytes| bytes.checked_add(output_len))
+        .ok_or_else(|| "LogsQL set_stream_fields state size overflow".to_string())?;
+    ensure_first_state_bytes(*state_bytes, max_state_bytes, "set_stream_fields")?;
+
+    let mut output = String::with_capacity(output_len);
+    output.push('{');
+    for (index, (name, value)) in fields.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str(name);
+        output.push('=');
+        append_go_quoted_string(&mut output, value, cancelled)?;
+    }
+    output.push('}');
+    if output.len() != output_len {
+        return Err("LogsQL set_stream_fields result length accounting mismatch".into());
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+fn go_quoted_string_len(value: &str, cancelled: &AtomicBool) -> Result<usize, String> {
+    let mut length = 2usize;
+    for (index, character) in value.chars().enumerate() {
+        check_periodically(cancelled, index)?;
+        let encoded = match character {
+            '"' | '\\' | '\u{7}' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' | '\u{b}' => 2,
+            character if go_is_print(character) => character.len_utf8(),
+            character if character <= '\u{7f}' => 4,
+            character if character <= '\u{ffff}' => 6,
+            _ => 10,
+        };
+        length = length
+            .checked_add(encoded)
+            .ok_or_else(|| "LogsQL set_stream_fields quoted value size overflow".to_string())?;
+    }
+    ensure_active(cancelled)?;
+    Ok(length)
+}
+
+fn append_go_quoted_string(
+    output: &mut String,
+    value: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    output.push('"');
+    for (index, character) in value.chars().enumerate() {
+        check_periodically(cancelled, index)?;
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{7}' => output.push_str("\\a"),
+            '\u{8}' => output.push_str("\\b"),
+            '\u{c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{b}' => output.push_str("\\v"),
+            character if go_is_print(character) => output.push(character),
+            character if character <= '\u{7f}' => {
+                output.push_str("\\x");
+                append_lower_hex(output, character as u32, 2);
+            }
+            character if character <= '\u{ffff}' => {
+                output.push_str("\\u");
+                append_lower_hex(output, character as u32, 4);
+            }
+            character => {
+                output.push_str("\\U");
+                append_lower_hex(output, character as u32, 8);
+            }
+        }
+    }
+    output.push('"');
+    ensure_active(cancelled)
+}
+
+fn append_lower_hex(output: &mut String, value: u32, digits: usize) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for shift in (0..digits).rev().map(|position| position * 4) {
+        output.push(HEX[((value >> shift) & 0xf) as usize] as char);
+    }
+}
+
+fn go_is_print(character: char) -> bool {
+    if character == ' ' {
+        return true;
+    }
+    static PRINT: OnceLock<Regex> = OnceLock::new();
+    PRINT
+        .get_or_init(|| {
+            Regex::new(r"\A[\pL\pM\pN\pP\pS]\z")
+                .expect("Go-compatible Unicode print category regex must compile")
+        })
+        .is_match(character.encode_utf8(&mut [0; 4]))
 }
 
 fn unpack_logfmt_fields(
@@ -11175,6 +11525,146 @@ mod tests {
         let exact = Number::from(9_007_199_254_740_993u64);
         let rounded = Number::from_f64(9_007_199_254_740_992.0).unwrap();
         assert_eq!(compare_numbers(&exact, &rounded), Some(Ordering::Greater));
+    }
+
+    #[test]
+    fn set_stream_fields_is_canonical_rich_conditional_and_bounded() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::SetStreamFields(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected set_stream_fields plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 100,
+            max_state_bytes: 20_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let row = json!({
+            "kind":"admin",
+            "foo":"aaa",
+            "bar":"bb",
+            "empty":"",
+            "null_value":null,
+            "number":2,
+            "flag":false,
+            "array":[1,"x"],
+            "nested":{"leaf":"λ", "empty":""},
+            "quote":"line\n\t\"\\\u{7}\u{7f}\u{200b}λ",
+            "_stream":"old-stream",
+            "_stream_id":"old-id"
+        });
+        let spec = parse_spec(
+            "* | set_stream_fields foo, bar, empty, null_value, number, flag, array, nested*, quote, missing, foo",
+        );
+        let result = set_stream_fields(
+            vec![row.clone()],
+            &spec,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            result[0]["_stream"],
+            r#"{array="[1,\"x\"]",bar="bb",flag="false",foo="aaa",nested.leaf="λ",number="2",quote="line\n\t\"\\\a\x7f\u200bλ"}"#
+        );
+        assert_eq!(result[0]["_stream_id"], "");
+        assert_eq!(result[0]["array"], row["array"]);
+        assert_eq!(result[0]["nested"], row["nested"]);
+        assert_eq!(result[0]["empty"], row["empty"]);
+        assert_eq!(result[0]["null_value"], row["null_value"]);
+
+        let object_parent = parse_spec("* | set_stream_fields nested");
+        let result = set_stream_fields(
+            vec![row.clone()],
+            &object_parent,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(result[0]["_stream"], "{}");
+
+        let condition_miss = parse_spec("* | set_stream_fields if (kind:=user) foo");
+        let unchanged = set_stream_fields(
+            vec![row.clone()],
+            &condition_miss,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(unchanged.as_slice(), std::slice::from_ref(&row));
+
+        let condition_match = parse_spec("* | set_stream_fields if (kind:=admin) foo");
+        let matched = set_stream_fields(
+            vec![row.clone()],
+            &condition_match,
+            TimestampUnit::Microseconds,
+            limits,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(matched[0]["_stream"], r#"{foo="aaa"}"#);
+        assert_eq!(matched[0]["_stream_id"], "");
+
+        let work_error = set_stream_fields(
+            vec![row.clone()],
+            &spec,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_items: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            work_error.contains("LogsQL set_stream_fields"),
+            "{work_error}"
+        );
+        assert!(work_error.contains("max_work_rows=1"), "{work_error}");
+
+        let state_error = set_stream_fields(
+            vec![row.clone()],
+            &spec,
+            TimestampUnit::Microseconds,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("LogsQL set_stream_fields"),
+            "{state_error}"
+        );
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+
+        assert_eq!(go_quoted_string_len("<'>", &cancelled).unwrap(), 5);
+        let mut printable = String::new();
+        append_go_quoted_string(&mut printable, "<'>", &cancelled).unwrap();
+        assert_eq!(printable, "\"<'>\"");
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            set_stream_fields(
+                vec![row],
+                &spec,
+                TimestampUnit::Microseconds,
+                limits,
+                &cancelled,
+            )
+            .unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
     }
 
     #[test]

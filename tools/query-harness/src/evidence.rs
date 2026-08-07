@@ -3044,6 +3044,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "set_stream_fields_narrow",
+                "logs-set-stream-fields-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | set_stream_fields host | fields _stream"#,
+                64,
+                None,
+            ),
+            (
+                "set_stream_fields_wide",
+                "logs-set-stream-fields-wide",
+                r#"query | sort by (_time) asc | limit 64 | set_stream_fields host | fields _stream"#,
+                64,
+                None,
+            ),
+            (
+                "set_stream_fields_control_narrow",
+                "logs-set-stream-fields-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | format '{host="<host>"}' as _stream | fields _stream"#,
+                64,
+                None,
+            ),
+            (
+                "set_stream_fields_control_wide",
+                "logs-set-stream-fields-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | format '{host="<host>"}' as _stream | fields _stream"#,
+                64,
+                None,
+            ),
+            (
                 "generate_sequence_narrow",
                 "logs-generate-sequence-narrow",
                 r#"host:="h00" AND query | generate_sequence 64"#,
@@ -3728,6 +3756,16 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         require_same_public_query_work(&queries, "total_stats_control_wide", "total_stats_wide")?;
         require_same_public_query_work(&queries, "time_add_control_narrow", "time_add_narrow")?;
         require_same_public_query_work(&queries, "time_add_control_wide", "time_add_wide")?;
+        require_same_public_query_work(
+            &queries,
+            "set_stream_fields_control_narrow",
+            "set_stream_fields_narrow",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "set_stream_fields_control_wide",
+            "set_stream_fields_wide",
+        )?;
         require_no_public_query_work(
             &queries,
             &["generate_sequence_narrow", "generate_sequence_wide"],

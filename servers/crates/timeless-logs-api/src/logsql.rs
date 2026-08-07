@@ -315,6 +315,79 @@ fn parse_generate_sequence_pipe(segment: &str) -> Result<PipelineOp, LogsqlError
     Ok(PipelineOp::GenerateSequence(count))
 }
 
+fn parse_set_stream_fields_pipe(
+    segment: &str,
+    context: &mut ParseContext,
+) -> Result<PipelineOp, LogsqlError> {
+    let operation = "set_stream_fields";
+    let command = segment
+        .get(..operation.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL set_stream_fields pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(operation) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL set_stream_fields pipe, not {command:?}"
+        )));
+    }
+    if segment[operation.len()..]
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "unexpected text attached to LogsQL set_stream_fields pipe",
+        ));
+    }
+    let mut rest = segment[operation.len()..].trim_start();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL set_stream_fields requires at least one field",
+        ));
+    }
+
+    let condition = if starts_format_keyword(rest, "if") {
+        rest = rest["if".len()..].trim_start();
+        let (expression, tail) = take_pipeline_condition(rest, operation)?;
+        rest = tail.trim_start();
+        if expression.is_empty() {
+            Some(LogPredicate::True)
+        } else {
+            let tokens = lex_logical_tokens(expression)?;
+            let expression = LogicalParser::new(tokens).parse()?;
+            Some(compile_logical_expression(&expression, None, context)?)
+        }
+    } else {
+        None
+    };
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL set_stream_fields requires at least one field after its condition",
+        ));
+    }
+
+    let fields = split_top_level(rest, ',')?
+        .into_iter()
+        .map(|field| {
+            let field = field.trim();
+            if field.is_empty() {
+                return Err(LogsqlError::malformed(
+                    "LogsQL set_stream_fields requires a field after each comma",
+                ));
+            }
+            if field.starts_with('(') {
+                return Err(LogsqlError::malformed(
+                    "LogsQL set_stream_fields fields cannot be parenthesized",
+                ));
+            }
+            parse_delete_field(field)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PipelineOp::SetStreamFields(SetStreamFieldsSpec {
+        fields,
+        condition,
+    }))
+}
+
 fn parse_delete_field(value: &str) -> Result<PipelineField, LogsqlError> {
     if value == "*" {
         return Ok(PipelineField::All);
@@ -4277,6 +4350,13 @@ fn is_generate_sequence_pipe(segment: &str) -> bool {
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
+fn is_set_stream_fields_pipe(segment: &str) -> bool {
+    let operation = "set_stream_fields";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_json_values_pipe(segment: &str) -> bool {
     let operation = "json_values";
     segment
@@ -5881,6 +5961,12 @@ pub(crate) struct TimeAddSpec {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct SetStreamFieldsSpec {
+    pub fields: Vec<PipelineField>,
+    pub condition: Option<LogPredicate>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
@@ -5936,6 +6022,7 @@ pub(crate) enum PipelineOp {
     UnpackWords(UnpackWordsSpec),
     TimeAdd(TimeAddSpec),
     GenerateSequence(u64),
+    SetStreamFields(SetStreamFieldsSpec),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6410,6 +6497,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_generate_sequence_pipe(segment) => {
                 pipeline.push(parse_generate_sequence_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_set_stream_fields_pipe(segment) => {
+                pipeline.push(parse_set_stream_fields_pipe(segment, context)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_drop_empty_fields_pipe(segment) => {
@@ -10650,6 +10741,45 @@ mod tests {
             assert!(
                 parse(inline_rows, TimestampUnit::Microseconds).is_ok(),
                 "{inline_rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_nineteen_set_stream_fields_grammar_is_strict() {
+        for query in [
+            "* | set_stream_fields foo, bar",
+            "* | SET_STREAM_FIELDS foo*, *",
+            r#"* | set_stream_fields "if", "by", "as""#,
+            "* | set_stream_fields if (kind:=admin) foo, nested*",
+            "* | set_stream_fields if () foo",
+        ] {
+            let plan = parse(query, TimestampUnit::Microseconds).unwrap();
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert!(
+                matches!(plan.pipeline.as_slice(), [PipelineOp::SetStreamFields(_)]),
+                "{query:?}: {:?}",
+                plan.pipeline
+            );
+        }
+
+        for malformed in [
+            "* | set_stream_fields",
+            "* | set_stream_fields if",
+            "* | set_stream_fields if kind:=admin foo",
+            "* | set_stream_fields if (kind:=admin)",
+            "* | set_stream_fields ,foo",
+            "* | set_stream_fields foo,",
+            "* | set_stream_fields foo,,bar",
+            "* | set_stream_fields foo bar",
+            "* | set_stream_fields foo*bar",
+            "* | set_stream_fields (foo)",
+            "* | set_stream_fields foo *",
+            "* | set_stream_fields.extra foo",
+        ] {
+            assert!(
+                parse(malformed, TimestampUnit::Microseconds).is_err(),
+                "{malformed:?} silently broadened"
             );
         }
     }

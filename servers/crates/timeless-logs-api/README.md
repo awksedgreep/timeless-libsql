@@ -2057,6 +2057,39 @@ not source-dependent storage behavior. The complete workload leaves all 8,192
 entries durable, four raw blocks unchanged, and zero queued/in-flight work;
 logs RSS HWM is 107,436 KiB.
 
+## LogsQL result stream synthesis
+
+`set_stream_fields [if (<filter>)] <field-filter>, ...` builds the current
+row's `_stream` result column without changing durable storage:
+
+```text
+* | set_stream_fields service, host
+* | set_stream_fields if (level:error) service, context*
+* | fields service, host | set_stream_fields *
+```
+
+Exact, trailing-prefix-wildcard, and all-current-field selectors are
+supported with strict comma-separated grammar. Wildcards recursively flatten
+rich objects to dotted leaves while arrays stay atomic. Missing, null, empty,
+and exact object-parent values are omitted; retained numbers, booleans, and
+arrays use the normal compact textual projection. Field names are sorted
+bytewise and values use Go `strconv.Quote`-compatible escaping to produce
+`{name="value",...}`. Matching rows receive `_stream_id=""`; rows skipped by
+the optional condition preserve their current `_stream` and `_stream_id`.
+
+The operation is bounded by the request's work, state, result, response,
+deadline, and cancellation limits. It observes earlier pipes, composes with
+later pipes, and leaves every source row unchanged through optimize, shutdown,
+and reopen. This result synthesis does not claim the ingestion-owned stream
+identity deferred by `LQL-F35`, `LQL-F36`, and `LQL-P50`.
+
+Core SQLite/libSQL has no exact portable equivalent for dynamic current-row
+field filters plus Go Unicode/control-byte quoting. Direct users can build a
+fixed application-specific string from public `logs` rows, but it is not
+advertised as LogsQL parity. Since the required rows have already crossed the
+public boundary, no extension opcode, private-table path, format change, or
+authoritative 8,192-entry batching change is involved.
+
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for

@@ -2553,6 +2553,52 @@ database/WAL/SHM bytes. Logs RSS HWM was 107,436 KiB and metrics HWM was
 50,720 KiB. `QSF-245`–`QSF-246` retain the semantic, storage, latency, and
 memory verdicts.
 
+## LogsQL result stream synthesis
+
+`set_stream_fields` builds a canonical VictoriaLogs stream-tag string from
+the fields in each current pipeline row:
+
+```text
+* | set_stream_fields service, host
+* | set_stream_fields if (level:error) service, context*
+* | fields service, host | set_stream_fields *
+```
+
+The command and optional `if` keyword are case-insensitive. A condition must
+be parenthesized. At least one comma-separated field filter is required;
+filters are exact names, a single trailing `*` prefix, or the all-field `*`.
+Missing commas, leading/trailing commas, parenthesized field lists,
+mid-name wildcards, attached command suffixes, and trailing text fail before
+the public storage scan.
+
+Selection observes the current row after all earlier pipes. Exact fields are
+selected as named. Prefix and all-field filters recursively flatten retained
+objects to dotted leaves; arrays stay atomic. The existing LogsQL textual
+projection turns numbers, booleans, and arrays into compact text. Missing,
+JSON null, empty strings, and exact object parents contribute no tag. Overlap
+is deduplicated, field names are sorted bytewise, and every value is quoted
+with Go `strconv.Quote` semantics, including `\\a`, `\\v`, `\\xNN`, Unicode
+print categories, and lower-case Unicode escapes. The result is written to
+`_stream` as `{name="value",...}`, and a matched row's `_stream_id` becomes
+the empty string. If the optional condition is false, both current columns
+are preserved unchanged.
+
+This pipe changes only the response row. It does not declare ingestion stream
+fields, compute a tenant-scoped identity, build a stream index, or mutate
+durable metadata. Those separate storage semantics remain explicitly deferred
+under `LQL-F35`, `LQL-F36`, and `LQL-P50`. Work, selected state, generated
+text, result rows, response bytes, deadline, and cancellation are bounded by
+the normal query limits; optimize, shutdown, and reopen preserve the source.
+
+There is [no honest portable SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent).
+SQLite JSON1 can enumerate a known JSON tree, but core SQL cannot reproduce
+both dynamic current-pipeline field filters and exact Go quoting. A fixed
+application may concatenate known fields after applying its own compatible
+quoting function, but that is application behavior rather than the public
+LogsQL contract. Because this transform runs after one required public
+`logs` scan, adding a special extension primitive would not avoid storage
+reads, decode, or public-row crossing.
+
 
 ## LogsQL upper-step quantiles and population deviation
 

@@ -5554,6 +5554,79 @@
         {"case": "numeric-two", "total": "2"},
         {"case": "format-row", "total": "2"}
       ]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-sorts-selected-fields-and-clears-id",
+      "query": "case:=state-string | set_stream_fields state_group, probe | fields case, _stream",
+      "expected_rows": [{"case": "state-string", "_stream": "{probe=\"value\",state_group=\"state\"}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-selects-all-current-columns",
+      "query": "case:=state-string | fields probe | set_stream_fields * | fields _stream",
+      "expected_rows": [{"_stream": "{probe=\"value\"}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-omits-empty-values",
+      "query": "case:=state-empty | set_stream_fields probe, never_present | fields case, _stream",
+      "expected_rows": [{"case": "state-empty", "_stream": "{}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-selects-prefix-columns",
+      "query": "case:=format-row | set_stream_fields math_* | fields case, _stream",
+      "expected_rows": [{"case": "format-row", "_stream": "{math_a=\"2\",math_array=\"[1,2]\",math_b=\"3\",math_bad=\"nope\",math_bytes=\"1.5KiB\",math_duration=\"10m5s\",math_ipv4=\"123.45.67.89\",math_nested.value=\"4\",math_timestamp=\"2024-05-30T01:02:03Z\"}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-uses-go-string-escaping",
+      "query": "case:=quote-double | set_stream_fields _msg | fields case, _stream",
+      "expected_rows": [{"case": "quote-double", "_stream": "{_msg=\"line one\\nline two\\t\\\"quoted\\\"\\\\slash\"}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-accepts-quoted-spaced-fields",
+      "query": "case:=format-row | set_stream_fields \"math abs\", \"math left field\" | fields case, _stream",
+      "expected_rows": [{"case": "format-row", "_stream": "{math abs=\"7\",math left field=\"2\"}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-observes-prior-pipes",
+      "query": "case:=state-string | format generated as synthetic | set_stream_fields synthetic | fields case, _stream",
+      "expected_rows": [{"case": "state-string", "_stream": "{synthetic=\"generated\"}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-condition-preserves-unmatched-stream",
+      "query": "state_group:=state | set_stream_fields if (case:=state-string) probe | fields case, _stream, _time",
+      "required_ignored_fields": ["_time"],
+      "result_order": "unordered",
+      "expected_rows": [
+        {"case": "state-missing", "_stream": "{case=\"state-missing\"}"},
+        {"case": "state-null", "_stream": "{case=\"state-null\"}"},
+        {"case": "state-empty", "_stream": "{case=\"state-empty\"}"},
+        {"case": "state-string", "_stream": "{probe=\"value\"}"},
+        {"case": "state-zero", "_stream": "{case=\"state-zero\"}"},
+        {"case": "state-false", "_stream": "{case=\"state-false\"}"}
+      ]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-condition-supports-query-backed-values",
+      "query": "state_group:=state | set_stream_fields if (case:in(case:=state-string | fields case)) probe | fields case, _stream, _time",
+      "required_ignored_fields": ["_time"],
+      "result_order": "unordered",
+      "expected_rows": [
+        {"case": "state-missing", "_stream": "{case=\"state-missing\"}"},
+        {"case": "state-null", "_stream": "{case=\"state-null\"}"},
+        {"case": "state-empty", "_stream": "{case=\"state-empty\"}"},
+        {"case": "state-string", "_stream": "{probe=\"value\"}"},
+        {"case": "state-zero", "_stream": "{case=\"state-zero\"}"},
+        {"case": "state-false", "_stream": "{case=\"state-false\"}"}
+      ]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-name-is-case-insensitive",
+      "query": "case:=state-string | SeT_StReAm_FiElDs probe | fields case, _stream",
+      "expected_rows": [{"case": "state-string", "_stream": "{probe=\"value\"}"}]
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-clears-stream-id",
+      "query": "case:=state-string | set_stream_fields probe | stats count_empty(_stream_id) as empty",
+      "expected_rows": [{"empty": "1"}]
     }
   ],
   "sample_cases": [
@@ -9154,6 +9227,62 @@
     {
       "id": "LQL-F41-common-case-rejects-unquoted-wildcard",
       "query": "equals_common_case(*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-requires-a-field",
+      "query": "* | set_stream_fields",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-bare-if-is-invalid",
+      "query": "* | set_stream_fields if",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-condition-requires-parentheses",
+      "query": "* | set_stream_fields if case:=state-string probe",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-requires-commas",
+      "query": "* | set_stream_fields foo bar",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-rejects-leading-comma",
+      "query": "* | set_stream_fields ,foo",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-rejects-trailing-comma",
+      "query": "* | set_stream_fields foo,",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-rejects-attached-suffix",
+      "query": "* | set_stream_fields.extra foo",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P49-set-stream-fields-rejects-mid-field-wildcards",
+      "query": "* | set_stream_fields foo*bar",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

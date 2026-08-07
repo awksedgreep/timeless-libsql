@@ -299,6 +299,26 @@ row-local transform after the required public scan and decode. Exact-build
 versus the control; the measured tokenization, JSON allocation, and response
 expansion happen after that boundary and do not justify an extension scalar.
 
+`LQL-P49` intentionally has no SQL recipe. `set_stream_fields` selects exact,
+prefix, or all fields from the current pipeline schema; recursively exposes
+rich object leaves under dotted names; omits missing, null, empty, and exact
+object-parent values; sorts names bytewise; and quotes every textual value
+with Go `strconv.Quote` semantics. SQLite JSON1 can enumerate a persisted JSON
+tree, but it does not represent arbitrary fields introduced or removed by
+earlier LogsQL pipes. Core `json_quote()` also uses JSON control escapes rather
+than Go's `\\a`, `\\v`, and `\\xNN` forms and cannot reproduce Go's exact
+Unicode-print policy. A fixed query plus an application-defined Go-quoting UDF
+can deliberately build a useful string, but that is not a portable public
+SQLite/libSQL equivalent.
+
+The Rust logs API owns field-filter grammar, optional current-row conditions,
+rich flattening, canonical tag rendering, `_stream`/`_stream_id` response
+semantics, limits, cancellation, and envelopes. It does not compute or mutate
+the ingestion-owned tenant stream identity deferred by `LQL-F35`, `LQL-F36`,
+and `LQL-P50`. Every candidate value has already crossed one bounded public
+`logs` scan, so an extension scalar or private-table path would not avoid
+block reads, decode, payload transfer, or row crossing and is not justified.
+
 `LQL-F41` intentionally has no complete SQL recipe. Direct users can expand a
 known phrase in their application and bind the resulting strings to an `IN`
 predicate for `equals_common_case`, but core SQLite `upper()`/`lower()` do not

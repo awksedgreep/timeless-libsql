@@ -1442,3 +1442,22 @@ defers the row because it stores none of that identity. The fixture remains
 167 source rows and now contains 356 row-query cases, one stochastic case,
 513 error cases, and 530 statistics/pipeline cases: 1,400 cases total, all
 passing against the immutable image. The fixture now contains 1400 cases.
+
+`LQL-P49` adds eleven successful statistics/pipeline witnesses and eight parser
+errors for `set_stream_fields`. They pin exact, trailing-prefix-wildcard, and
+all-current-column selection; bytewise field sorting; empty-value omission;
+Go string escaping; quoted field names containing spaces; visibility of prior
+pipeline writes; direct and query-backed conditions; conditionally preserved
+`_stream`/`_stream_id`; empty stream IDs on transformed rows;
+ASCII-case-insensitive command spelling; required parenthesized conditions and
+commas; and strict wildcard/command boundaries.
+Source audit at immutable commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers
+`pipe_set_stream_fields.go`, its parser/processor tests, `stream_tags.go`, and
+the shared field-filter/prefix helpers. The upstream pipe rewrites only result
+columns: it sorts selected nonempty current values into canonical stream tags,
+clears `_stream_id` on transformed rows, and preserves both current columns
+when its condition is false. It does not mutate stored stream identity. The
+fixture remains 167 source rows and now contains 356 row-query cases, one
+stochastic case, 521 error cases, and 541 statistics/pipeline cases: 1,419
+cases total, all passing against the immutable image. The fixture now contains 1419 cases.

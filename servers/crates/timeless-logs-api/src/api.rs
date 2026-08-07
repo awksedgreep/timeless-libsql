@@ -302,6 +302,11 @@ fn resolve_query_backed_plan<'a>(
                         resolve_query_backed_predicate(storage, predicate, resolution).await?;
                     }
                 }
+                crate::logsql::PipelineOp::SetStreamFields(spec) => {
+                    if let Some(predicate) = &mut spec.condition {
+                        resolve_query_backed_predicate(storage, predicate, resolution).await?;
+                    }
+                }
                 crate::logsql::PipelineOp::Join(spec) => {
                     resolve_join_source(storage, spec, resolution).await?;
                 }
@@ -1097,6 +1102,11 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                 }
             }
             crate::logsql::PipelineOp::Unroll(spec) => {
+                if let Some(predicate) = &mut spec.condition {
+                    apply_query_backed_predicate_limits(predicate, limits)?;
+                }
+            }
+            crate::logsql::PipelineOp::SetStreamFields(spec) => {
                 if let Some(predicate) = &mut spec.condition {
                     apply_query_backed_predicate_limits(predicate, limits)?;
                 }

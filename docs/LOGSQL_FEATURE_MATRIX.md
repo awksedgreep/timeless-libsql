@@ -152,7 +152,7 @@ extension.
 | `LQL-P46` | `total_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P47` | `time_add` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-time_add)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P48` | `generate_sequence` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-062-generate-a-bounded-decimal-string-sequence); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-generate_sequence)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P49` | `set_stream_fields` | deferred | no | none | `DEFER` | DEFER |
+| `LQL-P49` | `set_stream_fields` | in progress | no | none | `API` | P3 |
 | `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
 
 `LQL-P47` is a bounded Rust API transform over one public `logs` scan.
@@ -198,6 +198,29 @@ payload, match, and returned-row work. The 6.6% lower wide-form p95 is ordinary
 loopback variation between semantically identical scan-free requests, not a
 storage effect. `SQL-LOG-062` gives direct users the bounded recursive CTE;
 there is no extension primitive because correct execution reads no storage.
+
+`LQL-P49` is a bounded Rust API result transform, not a persisted stream
+mutation and not a substitute for the deferred `LQL-F35`/`LQL-F36` storage
+identity. `set_stream_fields [if (<filter>)] <field-filter>, ...` selects
+exact, trailing-prefix-wildcard, or all fields from each current pipeline row.
+For Timeless rich rows, wildcard selection recursively exposes object leaves
+under dotted names while arrays remain atomic compact JSON. Missing, null,
+empty, and exact object-parent values are omitted. Selected values use the
+existing textual projection; names are sorted bytewise and values use Go
+`strconv.Quote`-compatible escaping before the canonical
+`{name="value",...}` string is written to `_stream`. A matching row receives
+an empty `_stream_id`; an unmatched conditional row preserves both current
+columns. Durable metadata remains unchanged through optimize and reopen.
+
+There is [no honest portable SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent):
+core SQLite/libSQL has neither the dynamic current-row field-filter contract
+nor Go's Unicode-print and control-byte quoting. Fixed application-defined
+concatenation is useful but is not LogsQL parity. Every selected value has
+already crossed the bounded public `logs` row boundary, so a language opcode
+or private-table path in the extension would not prune blocks, avoid decode,
+or reduce row crossing. Grammar, condition evaluation, recursive selection,
+canonicalization, limits, cancellation, and response semantics remain in the
+Rust logs API.
 
 `LQL-P10` is deliberately deferred, not approximated. VictoriaLogs
 `block_stats` exposes one row per physical field column with its internal

@@ -1641,6 +1641,28 @@ same complete versioned identity contract as `LQL-F35`, including the public
 latency benchmark for deliberately rejected syntax, and no extension or
 storage contract changed.
 
+`LQL-P49` is closed as an applicable result-transform row rather than being
+incorrectly grouped with stored stream identity. Pinned VictoriaLogs 1.52.0
+source and eleven successful plus eight error witnesses establish that
+`set_stream_fields` selects exact/prefix/all fields from each current row,
+omits empty values, sorts names, Go-quotes values, writes `_stream`, clears
+`_stream_id` on matching rows, resolves direct or query-backed optional
+conditions, and preserves both columns when a condition is false. It does not
+mutate persisted stream fields or IDs.
+
+The Rust logs API implements that complete bounded transform over public rich
+rows. Wildcards recursively expose object leaves under dotted names, arrays
+remain atomic compact JSON, overlap is deterministic, earlier and later pipes
+compose, strict syntax fails before storage, and work/state/result/response/
+deadline/cancellation limits remain cumulative. Real-extension coverage pins
+native nested values, immutable durable metadata, optimize, shutdown, and
+reopen. There is deliberately no SQL recipe: portable core SQLite/libSQL
+cannot combine the dynamic current-pipeline schema with Go Unicode/control-
+byte quoting. Since every value already crossed the public row boundary, no
+extension primitive, private access, storage format, authoritative batching,
+compression, index, retention, transaction, migration, optimize, or
+maintenance behavior changes.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

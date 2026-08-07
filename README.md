@@ -705,7 +705,13 @@ likewise rejected before reads rather than treated as ordinary metadata;
 bare text, nested `foo._stream_id`, projections, and inline `rows` data remain
 available. Ordinary `service = :service` SQL remains available as row
 filtering, but it is not labeled stream-selector parity; see the `LQL-F35`
-and `LQL-F36` no-SQL dispositions. The LogsQL API
+and `LQL-F36` no-SQL dispositions. Separately, `set_stream_fields` is a
+bounded response-only transform: it selects exact/prefix/all fields from the
+current rich row, emits a bytewise-sorted Go-quoted `_stream`, clears
+`_stream_id` only on matching rows, and never claims or mutates a stored stream
+identity. Core SQL has no exact dynamic-field plus Go-quoting equivalent, and
+the transform occurs after the public row boundary, so it remains in the Rust
+API without a storage opcode. The LogsQL API
 includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
 exact-prefix matching, and static multi-exact `in(...)` membership over bounded
 public rows while retaining Timeless's rich JSON types, plus static
