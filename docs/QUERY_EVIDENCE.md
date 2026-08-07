@@ -4531,6 +4531,72 @@ storage work provides no evidence for a new extension primitive. No private
 shadow table, Elixir/BEAM/NIF/process fallback, CI workflow or invocation,
 tag, release, or downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `join`
+
+The checked-in
+[`2026-08-06_session18_lql_p43_join.json`](evidence/2026-08-06_session18_lql_p43_join.json)
+was captured from exact release extension and server build
+`8c718dceccfb56f251f7f54084976cc69233de7e` and has SHA-256
+`5ceb485d44c1a6d074ab6d9f2cdfd7e2a2bb80345f897300a2d5d76d0f2d3431`.
+Each candidate and control performs two independently planned public scans,
+sorts and limits each side to 64 rows, and returns an identical 64-row,
+1,280-byte response. The candidate materializes the rich right rows, indexes
+their exact textual `range_key`, joins them into `joined`, and projects that
+field. The control resolves the same right keys through query-backed
+`in(...)`, formats the same `joined` value, and projects it. This is an honest
+equal-output control for complete request-local RHS materialization, index
+construction, lookup, and rich merge work after the unavoidable reads.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | public scans/request | candidate blocks/scan | decoded entries/scan | extension payload bytes/scan | public rows/scan |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| query-backed `join`, indexed host | 64 | 1,280 | 6.568 | 6.875 | 7.299 | 2 | 1 | 1,024 | 235,778 | 128 |
+| query-backed `join`, full fixture | 64 | 1,280 | 66.254 | 73.000 | 73.984 | 2 | 4 | 8,192 | 1,914,055 | 8,192 |
+| query-backed `in(...)` control, indexed host | 64 | 1,280 | 5.934 | 6.225 | 6.666 | 2 | 1 | 1,024 | 235,778 | 128 |
+| query-backed `in(...)` control, full fixture | 64 | 1,280 | 65.809 | 72.087 | 72.452 | 2 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Join p95 is 10.4% above the narrow control and 1.3% above the wide control.
+Request-attributed API averages are 5.663/66.109 ms versus
+4.935/65.786 ms, or 14.7%/0.5% higher. Every equal-width pair executes
+exactly 100 public queries across 50 measured requests and has byte-identical
+candidate-block selection, entry decode, payload reads, matches, public-row
+returns, result cardinality, and response bytes. The join's richer retained
+state deliberately reserves 192 additional work items per request—64 rows
+plus two object members per row—so its outer scan requests 192 fewer entries
+than the control. `QSF-234` and `QSF-235` record the two evidence failures
+that made scan multiplicity and this exact state reservation explicit rather
+than weakening either physical-work assertion.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+15.861 ms and the explicit durability barrier took 36.064 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 103,508 KiB, 1,580 KiB above
+LQL-P42 after four additional two-scan shapes; metrics HWM was 53,020 KiB,
+196 KiB above it. Both are retained as whole-process complete-workload
+variation. Cancellation ended with zero requests in flight and zero cancelled
+requests at capture. RHS retention, textual indexing, duplicate buckets,
+matching, and rich merge construction remain bounded Rust API work. An
+extension primitive would avoid neither public scan, decode, payload crossing,
+nor row crossing, so executable `SQL-LOG-057` remains the direct-user
+foundation and no LogsQL-specific extension opcode is justified.
+
+The complete 1,249-case pinned VictoriaLogs v1.52.0 corpus passes live. Direct
+parser/evaluator and real-extension regressions pin strict grammar,
+default-left/inner and duplicate semantics, complete retained rich fidelity,
+work/state/result/response/deadline limits, cancellation, immutable source
+rows, optimize, flush, shutdown, and reopen. Final local gates pass: 140 logs
+library tests, two logs binary tests, all 69 logs and 90 metrics
+real-extension tests, both complete Rust workspaces, the 34-test Rust query
+harness, all six focused correctness profiles, the standalone DB-health
+lifecycle gate, all 45 CLI/crash/transaction sections, documentation/oracle
+contracts, formatting, and Clippy with warnings denied. All 123 executable SQL
+recipes and 161 statements pass through the public release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

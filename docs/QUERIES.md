@@ -2168,6 +2168,21 @@ grammar and rich merge policy. Both scans and payload crossings are required,
 so no language-specific extension primitive or private storage access is
 justified.
 
+Exact release build `8c718dceccfb56f251f7f54084976cc69233de7e`
+measures a 64-row query-backed join at 6.568/6.875/7.299 ms narrow and
+66.254/73.000/73.984 ms wide p50/p95/p99. The independent query-backed
+`in(...)` controls return the same 64 rows and 1,280 bytes at
+5.934/6.225/6.666 and 65.809/72.087/72.452 ms. Join p95 is therefore 10.4%
+higher narrow and 1.3% higher wide; request-attributed API work is 14.7% and
+0.5% higher. Each request executes exactly two public scans. Candidate and
+control read the same one/four blocks per scan, decode 1,024/8,192 entries,
+read 235,778/1,914,055 payload bytes, and cross 128/8,192 public rows per
+scan. Join explicitly reserves 192 additional work items for its 64 retained
+two-field right rows, so its outer requested ceiling is lower without
+changing physical storage work. The bounded RHS materialization, index, and
+rich merge cost is accepted above the public storage boundary; it does not
+justify moving LogsQL syntax or a join map into the extension.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

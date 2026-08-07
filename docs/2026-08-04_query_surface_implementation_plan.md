@@ -1209,6 +1209,30 @@ remains four raw blocks; queues and in-flight cancellation are zero. No
 extension primitive, private table, storage contract, or authoritative
 batching behavior changed.
 
+Session 18's `LQL-P43` row is closed as an API-owned bounded join over two
+public `logs` scans, with `SQL-LOG-057` as the deterministic one-key
+left/inner direct-user foundation. Pinned VictoriaLogs source plus the
+complete 1,249-case live oracle establish strict key/source/modifier grammar,
+default-left and optional-inner behavior, missing/null/empty textual key
+equivalence, duplicate expansion, deterministic left/right order, right-key
+removal, nonempty-left collision precedence, prefixes, and strict errors.
+Timeless additionally preserves complete typed/nested right values and fails
+scalar-parent conflicts explicitly instead of flattening them.
+
+Recursive query-backed plans share the parent request clock and cumulative
+work/state/result/response/deadline limits; RHS rows, rich state, textual-key
+indexes, duplicate buckets, and output cardinality are all bounded and
+cancellable. `QSF-233` records the unchanged storage boundary. Exact release
+build `8c718dceccfb56f251f7f54084976cc69233de7e` measures
+6.875/73.000 ms narrow/wide p95 versus 6.225/72.087 ms equal-output
+query-backed `in(...)` controls. `QSF-236` accepts the +10.4%/+1.3% endpoint
+tail and +14.7%/+0.5% request-attributed API work after exactly two scans and
+byte-identical physical storage work. `QSF-234`–`QSF-235` pin the evidence
+harness's explicit two-scan and 192-item RHS-state reservation contracts. All
+8,192 entries complete durably; storage remains four raw blocks; queued and
+in-flight work are zero. No extension primitive, private table, storage
+contract, or authoritative batching behavior changed.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,
