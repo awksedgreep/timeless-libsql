@@ -2837,6 +2837,19 @@ result ordering, dynamic LogsQL syntax, limits, cancellation, and HTTP
 envelopes stay in the Rust API. The operation already requires the public row
 scan, so no private table or extension primitive is justified.
 
+Exact release build `63081644c87fa67fe1c9874ea375195146262433`
+measures histogram aggregation at 3.317/4.329/5.812 ms narrow and
+37.928/39.536/42.954 ms wide p50/p95/p99. Equal-scan bounded `values`
+controls measure 3.341/3.517/3.611 and 37.326/38.826/44.811 ms. Histogram
+p95 is 23.1%/1.8% higher and request-attributed API means are 6.9%/2.0%
+higher. The 268/278-byte candidate responses contain five nonempty bucket
+objects; the controls are 164 bytes.
+
+Every pair reads byte-identical public storage work: one/four blocks,
+1,024/8,192 decoded entries, 235,778/1,914,055 payload bytes, and
+128/8,192 materialized rows. The checked artifact and accepted bounded-
+composition verdict are recorded in `QSF-250`.
+
 ## Public log storage statistics
 
 Embedded hosts can inspect log storage and schedule maintenance through the

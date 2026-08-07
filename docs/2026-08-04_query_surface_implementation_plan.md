@@ -1402,8 +1402,16 @@ fixed 488-counter stack state, process-wide immutable range labels,
 cumulative multi-expression work, response-state accounting, cancellation
 and reader reuse, immutable sources, optimize, flush, shutdown, and reopen.
 `QSF-249` records the semantic and unchanged-storage boundary. Exact-build
-performance, physical-work equality, storage, and HWM evidence remain the
-final exit criterion before `LQL-S13` ships.
+release evidence records 4.329/39.536 ms narrow/wide p95 versus
+3.517/38.826 ms equal-scan bounded-`values` controls, or 23.1%/1.8% higher.
+Request-attributed API means are 6.9%/2.0% higher. Every pair reads the same
+one/four blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload
+bytes, and 128/8,192 public rows. All 8,192 fixture entries complete durably;
+storage remains four raw blocks; queued and in-flight work are zero; and logs
+HWM is 102,964 KiB. `QSF-250` records the accepted exact-build verdict. No
+extension primitive, private table, storage contract, batching, compression,
+index, retention, transaction, migration, optimize, or maintenance behavior
+changed. `LQL-S13` is closed.
 
 ### Session 19: experimental and data-model dispositions
 

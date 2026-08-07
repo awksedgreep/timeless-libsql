@@ -1060,7 +1060,7 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S10` | `any` / `field_min` / `field_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-046-deterministic-any-and-numeric-companion-field-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)) | shipped | `ROWS`, `SQL` | `API` | P3 |
-| `LQL-S13` | `histogram` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-064-bounded-histogram-over-one-native-number-path)) | in progress | `ROWS`, `SQL` | `API` | P3 |
+| `LQL-S13` | `histogram` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-064-bounded-histogram-over-one-native-number-path)) | shipped | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S15` | total `count/first/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
 
@@ -1227,8 +1227,22 @@ Public `SQL-LOG-064` gives direct users an ordinary fixed-path native-number
 histogram over the public `logs` table. Textual duration/byte parsing, natural
 result order, LogsQL grammar, limits, cancellation, and envelopes remain Rust
 API composition after the unavoidable row crossing; no extension primitive
-or private storage access is warranted. Exact-build performance, physical-
-work equality, storage, and HWM evidence remain the final exit criterion.
+or private storage access is warranted.
+
+Exact release build `63081644c87fa67fe1c9874ea375195146262433`
+measures histogram aggregation at 3.317/4.329/5.812 ms narrow and
+37.928/39.536/42.954 ms wide p50/p95/p99. Equal-scan bounded `values`
+controls measure 3.341/3.517/3.611 and 37.326/38.826/44.811 ms. Candidate
+p95 is 23.1%/1.8% higher; request-attributed API means are
+3.008/37.328 ms versus 2.813/36.612 ms, or 6.9%/2.0% higher. Candidate
+responses are 268/278 bytes versus 164-byte controls.
+
+Every equal-width pair performs identical public storage work: one/four
+candidate blocks, 1,024/8,192 decoded entries, 235,778/1,914,055 payload
+bytes, and 128/8,192 public rows. `QSF-250` accepts the fixed bounded
+histogram/label-sort/encoding cost, unchanged four-block storage, zero queue
+and in-flight work, and 102,964 KiB complete-workload logs HWM. `LQL-S13` is
+closed.
 
 ## Query options and HTTP behavior
 

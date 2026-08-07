@@ -4977,6 +4977,67 @@ public batch/SQL contracts are unchanged. No extension opcode, private shadow
 table, language fallback, tag, release, or downstream repository was used or
 modified.
 
+## Session 18 LogsQL P3: bounded logarithmic `histogram`
+
+The checked-in
+[`2026-08-07_session18_lql_s13_histogram.json`](evidence/2026-08-07_session18_lql_s13_histogram.json)
+was captured from exact release extension and server build
+`63081644c87fa67fe1c9874ea375195146262433` and has SHA-256
+`3deeadafc7c57442e0953f4586264d1f86ab8cc87486b4073a983566a68c940d`.
+Candidate shapes aggregate the retained native `context.attempt` field into
+one Victoria-compatible histogram JSON string. Controls return one bounded
+`values` statistics row from the same exact sources, preserving public
+storage work while isolating the fixed bucket update, natural label sort, and
+encoding cost.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/request | decoded entries/request | extension payload bytes/request | public rows/request |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| histogram, indexed host | 1 | 268 | 3.317 | 4.329 | 5.812 | 1 | 1,024 | 235,778 | 128 |
+| histogram, full fixture | 1 | 278 | 37.928 | 39.536 | 42.954 | 4 | 8,192 | 1,914,055 | 8,192 |
+| bounded-values control, indexed host | 1 | 164 | 3.341 | 3.517 | 3.611 | 1 | 1,024 | 235,778 | 128 |
+| bounded-values control, full fixture | 1 | 164 | 37.326 | 38.826 | 44.811 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Candidate p95 is 23.1% higher narrow and 1.8% higher wide.
+Request-attributed API means are 3.008/37.328 ms versus
+2.813/36.612 ms, or 6.9%/2.0% higher. Candidate responses add 104/114
+bytes for the compact nonempty `vmrange`/native-hit objects. Across 50
+measured requests per shape, each candidate/control pair nevertheless
+records exactly the same public query, candidate-block, decoded-entry,
+payload-byte, matched-row, returned-row, and bounded-request work.
+
+All 8,192 rich fixture entries completed durably with zero queued work.
+Admission took 14.416 ms and the explicit durability barrier took 38.072 ms.
+Storage remains exactly four raw blocks, 1,914,055 logical payload bytes, and
+2,022,736 physical database/WAL/SHM bytes. Logs HWM was 102,964 KiB, 3,944
+KiB below LQL-S12 after four additional one-scan shapes; metrics HWM was
+52,840 KiB, 1,408 KiB above it. Both complete-workload maxima are retained as
+whole-process variation. Cancellation ended with zero requests in flight and
+zero cancelled requests at capture.
+
+The complete 1,388-case pinned VictoriaLogs v1.52.0 corpus passes live.
+Direct parser/evaluator and real-extension regressions pin strict statistics
+and standalone grammar, exact logarithmic bounds, textual/native numeric
+input, duration and byte sizes, skipped negative/NaN/IPv4/timestamp/rich
+values, natural output order, empty input, cumulative limits, cancellation
+and reader reuse, immutable rich nested rows, optimize, flush, shutdown, and
+reopen. Executable `SQL-LOG-064` proves the fixed-path native-number math/
+group/JSON foundation through the public SQLite/libSQL interface.
+
+Final local gates pass: 154 logs library tests, two logs binary tests, all 76
+logs and 90 metrics real-extension tests, the complete default root workspace
+and server workspace targets, the 36-test Rust query harness, all six focused
+correctness profiles, the standalone DB-health lifecycle gate, all 45
+CLI/crash/transaction sections including 150,000 oracle operations and five
+kill-9 rounds, the complete 1,388-case live oracle, documentation/oracle
+contracts, formatting, and Clippy with warnings denied. All 130 executable SQL
+recipes and 168 statements pass through the public release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No extension opcode, private shadow
+table, language fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

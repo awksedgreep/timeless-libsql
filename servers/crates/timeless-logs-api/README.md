@@ -40,7 +40,7 @@ The authoritative language contract is the
 Rust API rows at this revision are listed below for the executable contract
 audit; native GET parameters do not expand this LogsQL claim.
 
-<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F38 LQL-F39 LQL-F40 LQL-F41 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P17 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P25 LQL-P26 LQL-P27 LQL-P28 LQL-P29 LQL-P30 LQL-P31 LQL-P32 LQL-P33 LQL-P34 LQL-P35 LQL-P36 LQL-P37 LQL-P38 LQL-P39 LQL-P40 LQL-P41 LQL-P42 LQL-P43 LQL-P44 LQL-P45 LQL-P46 LQL-P47 LQL-P48 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 LQL-S12 -->
+<!-- query-contract-shipped: LQL-F01 LQL-F02 LQL-F03 LQL-F04 LQL-F05 LQL-F06 LQL-F07 LQL-F08 LQL-F09 LQL-F10 LQL-F11 LQL-F12 LQL-F13 LQL-F14 LQL-F15 LQL-F16 LQL-F17 LQL-F18 LQL-F19 LQL-F20 LQL-F21 LQL-F22 LQL-F23 LQL-F24 LQL-F25 LQL-F26 LQL-F27 LQL-F28 LQL-F29 LQL-F30 LQL-F31 LQL-F32 LQL-F33 LQL-F34 LQL-F37 LQL-F38 LQL-F39 LQL-F40 LQL-F41 LQL-P01 LQL-P02 LQL-P03 LQL-P04 LQL-P05 LQL-P06 LQL-P07 LQL-P08 LQL-P09 LQL-P12 LQL-P13 LQL-P14 LQL-P15 LQL-P16 LQL-P17 LQL-P18 LQL-P19 LQL-P20 LQL-P21 LQL-P22 LQL-P23 LQL-P24 LQL-P25 LQL-P26 LQL-P27 LQL-P28 LQL-P29 LQL-P30 LQL-P31 LQL-P32 LQL-P33 LQL-P34 LQL-P35 LQL-P36 LQL-P37 LQL-P38 LQL-P39 LQL-P40 LQL-P41 LQL-P42 LQL-P43 LQL-P44 LQL-P45 LQL-P46 LQL-P47 LQL-P48 LQL-Q01 LQL-Q02 LQL-Q07 LQL-Q08 LQL-S01 LQL-S02 LQL-S03 LQL-S04 LQL-S05 LQL-S06 LQL-S07 LQL-S08 LQL-S09 LQL-S10 LQL-S11 LQL-S12 LQL-S13 -->
 
 The POST grammar includes wildcard selection; upper-exclusive relative
 windows; RFC3339 and integer Unix s/ms/us/ns absolute bounds with open or
@@ -141,7 +141,8 @@ the same public decode.
 The implemented statistics are `count`, `count_empty`, `count_uniq`,
 `count_uniq_hash`, `uniq_values`, `values`, `sum`, `avg`, `min`, `max`,
 `median`, `quantile`, `stddev`, `sum_len`, `any`, `field_min`, `field_max`,
-`row_any`, `row_min`, `row_max`, `json_values`, `rate`, and `rate_sum`.
+`row_any`, `row_min`, `row_max`, `json_values`, `histogram`, `rate`, and
+`rate_sum`.
 Missing, null, and empty remain distinct;
 `count_empty` deliberately counts all three for compatibility. Exact unique
 counts use complete typed tuples, while `count_uniq_hash` uses a documented
@@ -247,6 +248,20 @@ and materialize 128/8,192 public rows. The 3,663-byte typed-object response
 versus the 451-byte unique-value control explains part of the bounded
 API-owned cost; `QSF-248` records the accepted verdict and unchanged storage
 boundary.
+
+`histogram(field)` accepts exactly one exact field as a statistics expression
+or standalone shorthand. It uses VictoriaMetrics' fixed 486 logarithmic
+middle buckets plus lower/upper buckets, accepts native numbers and the
+VictoriaLogs decimal/general-number/duration/byte textual forms, ignores
+negative/NaN/IPv4/timestamp/rich nonnumeric values, and emits one naturally
+ordered JSON-array string of nonempty `vmrange`/native-hit objects. Work,
+fixed bucket state, multiple expressions, output, deadline, and cancellation
+are bounded. Executable
+[`SQL-LOG-064`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-064-bounded-histogram-over-one-native-number-path)
+provides the fixed-path native-number foundation through the public `logs`
+table. Exact release evidence and `QSF-250` pin identical public storage work
+against bounded `values` controls; no private table or extension primitive is
+used.
 
 Typed metadata comparisons accept `>`, `>=`, `<`, `<=`, and open or closed
 `range` bounds without coercing numeric strings or losing integer precision.
