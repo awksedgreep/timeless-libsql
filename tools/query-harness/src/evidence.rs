@@ -313,6 +313,18 @@ fn require_same_public_query_work(
     control_key: &str,
     sampled_key: &str,
 ) -> Result<()> {
+    require_same_public_query_work_with_scans(queries, control_key, sampled_key, 1)
+}
+
+fn require_same_public_query_work_with_scans(
+    queries: &Map<String, Value>,
+    control_key: &str,
+    sampled_key: &str,
+    scans_per_request: u64,
+) -> Result<()> {
+    if scans_per_request == 0 {
+        bail!("public query evidence must require at least one scan per request");
+    }
     let control = queries
         .get(control_key)
         .with_context(|| format!("missing evidence control {control_key}"))?;
@@ -323,6 +335,18 @@ fn require_same_public_query_work(
         .get("iterations")
         .and_then(Value::as_u64)
         .with_context(|| format!("missing evidence iterations for {control_key}"))?;
+    let sampled_iterations = sampled
+        .get("iterations")
+        .and_then(Value::as_u64)
+        .with_context(|| format!("missing evidence iterations for {sampled_key}"))?;
+    if sampled_iterations != iterations {
+        bail!(
+            "sample evidence {control_key}/{sampled_key} changed measured iterations: {iterations} != {sampled_iterations}"
+        );
+    }
+    let expected_queries = iterations
+        .checked_mul(scans_per_request)
+        .context("public query evidence query-count overflow")?;
     for (key, evidence) in [(control_key, control), (sampled_key, sampled)] {
         let query_count = evidence
             .pointer("/stats_delta/query_count")
@@ -332,9 +356,9 @@ fn require_same_public_query_work(
             .pointer("/stats_delta/native_count_count")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if query_count != iterations || native_count != 0 {
+        if query_count != expected_queries || native_count != 0 {
             bail!(
-                "sample evidence {key} must use {iterations} public row queries and no native-count fast path; got query_count={query_count}, native_count_count={native_count}"
+                "sample evidence {key} must use {expected_queries} public row queries ({scans_per_request} scans/request across {iterations} requests) and no native-count fast path; got query_count={query_count}, native_count_count={native_count}"
             );
         }
     }
@@ -3416,8 +3440,13 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         )?;
         require_same_public_query_work(&queries, "unroll_control_narrow", "unroll_narrow")?;
         require_same_public_query_work(&queries, "unroll_control_wide", "unroll_wide")?;
-        require_same_public_query_work(&queries, "join_control_narrow", "join_narrow")?;
-        require_same_public_query_work(&queries, "join_control_wide", "join_wide")?;
+        require_same_public_query_work_with_scans(
+            &queries,
+            "join_control_narrow",
+            "join_narrow",
+            2,
+        )?;
+        require_same_public_query_work_with_scans(&queries, "join_control_wide", "join_wide", 2)?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
@@ -3601,6 +3630,33 @@ mod tests {
         );
         let error = require_same_public_query_work(&queries, "control", "sampled").unwrap_err();
         assert!(format!("{error:#}").contains("native-count fast path"));
+    }
+
+    #[test]
+    fn multi_scan_controls_must_declare_the_exact_scan_count() {
+        let public = || {
+            json!({
+                "iterations": 50,
+                "stats_delta": {
+                    "query_count": 100,
+                    "query_bounded_requested_entries": 10_000_100,
+                    "query_candidate_blocks": 400,
+                    "query_decoded_entries": 819_200,
+                    "query_payload_bytes_read": 191_405_500,
+                    "query_matched_entries": 819_200,
+                    "query_returned_entries": 6_400,
+                }
+            })
+        };
+        let queries = Map::from_iter([
+            ("control".to_owned(), public()),
+            ("sampled".to_owned(), public()),
+        ]);
+
+        require_same_public_query_work_with_scans(&queries, "control", "sampled", 2).unwrap();
+
+        let error = require_same_public_query_work(&queries, "control", "sampled").unwrap_err();
+        assert!(format!("{error:#}").contains("1 scans/request"));
     }
 
     #[test]
