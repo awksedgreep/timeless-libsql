@@ -398,6 +398,8 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "max_value_len" => Value::Integer(128),
         "keep_const_fields" => Value::Integer(0),
         "timestamp_units_per_second" => Value::Integer(1_000),
+        "logical_start_ts" => Value::Integer(1_250),
+        "logical_end_ts" => Value::Integer(2_250),
         "start_ts" => Value::Integer(1_000),
         "end_ts" if identifier == "SQL-LOG-050" => Value::Integer(1_000),
         "end_ts" => Value::Integer(2_000),
@@ -483,6 +485,9 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "total_first_offset" | "total_last_offset" => Value::Integer(1),
         "time_add_offset_native" => Value::Integer(250),
         "time_add_subnative_ns" => Value::Integer(500_000),
+        "time_offset_native" => Value::Integer(250),
+        "time_offset_subnative_ns" => Value::Integer(500_000),
+        "native_unit_ns" => Value::Integer(1_000_000),
         "generate_sequence_count" => Value::Integer(3),
         "json_values_path_1" => Value::Text("$.host".to_owned()),
         "json_values_path_2" => Value::Text("$.duration_ms".to_owned()),
@@ -1986,6 +1991,7 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
     let generate_sequence_rows = recipe_values("SQL-LOG-062", 0)?;
     let json_values_rows = recipe_values("SQL-LOG-063", 0)?;
     let histogram_rows = recipe_values("SQL-LOG-064", 0)?;
+    let time_offset_rows = recipe_values("SQL-LOG-065", 0)?;
     if [
         bounded,
         substring,
@@ -2357,6 +2363,73 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
         )]]
     {
         bail!("SQL-LOG-064 native-number histogram changed: {histogram_rows:?}");
+    }
+    let time_offset = time_offset_rows
+        .iter()
+        .map(|row| {
+            (
+                row.first().cloned(),
+                row.get(1).cloned(),
+                row.get(2).cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if time_offset
+        != [(
+            Some(Value::Integer(1_000)),
+            Some(Value::Integer(1_250)),
+            Some(Value::Integer(500_000)),
+        )]
+    {
+        bail!("SQL-LOG-065 query time offset changed: {time_offset_rows:?}");
+    }
+    let negative_time_offset_rows = {
+        let sql = recipe_sql("SQL-LOG-065", 0)?;
+        let mut statement = connection.prepare(&sql)?;
+        for index in 1..=statement.parameter_count() {
+            let name = statement
+                .parameter_name(index)
+                .context("SQL-LOG-065 parameter must be named")?
+                .trim_start_matches(':');
+            let value = match name {
+                "logical_start_ts" => Value::Integer(750),
+                "logical_end_ts" => Value::Integer(1_750),
+                "time_offset_native" => Value::Integer(-250),
+                "time_offset_subnative_ns" => Value::Integer(-500_000),
+                _ => parameter("SQL-LOG-065", name),
+            };
+            statement.raw_bind_parameter(index, value)?;
+        }
+        let columns = statement.column_count();
+        let mut query = statement.raw_query();
+        let mut rows = Vec::new();
+        while let Some(row) = query.next()? {
+            rows.push(
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<Value>>>()?,
+            );
+        }
+        rows
+    };
+    let negative_time_offset = negative_time_offset_rows
+        .iter()
+        .map(|row| {
+            (
+                row.first().cloned(),
+                row.get(1).cloned(),
+                row.get(2).cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if negative_time_offset
+        != [(
+            Some(Value::Integer(2_000)),
+            Some(Value::Integer(1_750)),
+            Some(Value::Integer(-500_000)),
+        )]
+    {
+        bail!("SQL-LOG-065 negative query time offset changed: {negative_time_offset_rows:?}");
     }
     let join_sql = recipe_sql("SQL-LOG-057", 0)?;
     let measured_join =
@@ -4685,13 +4758,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 133);
+        assert_eq!(recipes.len(), 134);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            165
+            166
         );
         assert_eq!(
             recipes
@@ -4699,7 +4772,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            171
+            172
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

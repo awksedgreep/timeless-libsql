@@ -1237,6 +1237,11 @@ fn victorialogs_query(case: &Map<String, Value>, base_us: i64) -> Result<String>
                 .single()
                 .with_context(|| format!("query_times.{name} is outside RFC3339 range"))?
                 .to_rfc3339_opts(SecondsFormat::Micros, true),
+            "rfc3339_auto" => Utc
+                .timestamp_micros(at_us)
+                .single()
+                .with_context(|| format!("query_times.{name} is outside RFC3339 range"))?
+                .to_rfc3339_opts(SecondsFormat::AutoSi, true),
             "unix_s" => {
                 if at_us % 1_000_000 != 0 {
                     bail!("query_times.{name} is not an exact Unix second");

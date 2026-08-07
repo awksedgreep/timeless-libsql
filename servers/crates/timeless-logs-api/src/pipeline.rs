@@ -100,6 +100,18 @@ pub(crate) fn response_row(row: QueryRow, timestamp_unit: TimestampUnit) -> Resu
     Ok(Value::Object(object))
 }
 
+pub(crate) fn response_row_with_time_offset(
+    row: QueryRow,
+    timestamp_unit: TimestampUnit,
+    time_offset_ns: i64,
+) -> Result<Value, String> {
+    let mut row = response_row(row, timestamp_unit)?;
+    if time_offset_ns != 0 {
+        shift_query_time_value(&mut row, time_offset_ns)?;
+    }
+    Ok(row)
+}
+
 pub(crate) fn format_timestamp(ts: i64, timestamp_unit: TimestampUnit) -> Result<String, String> {
     let (datetime, format) = match timestamp_unit {
         TimestampUnit::Milliseconds => (
@@ -173,6 +185,33 @@ fn time_add_fields(
             Ok(row)
         })
         .collect()
+}
+
+fn query_time_offset_fields(
+    mut rows: Vec<Value>,
+    offset_ns: i64,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    for (index, row) in rows.iter_mut().enumerate() {
+        check_periodically(cancelled, index)?;
+        shift_query_time_value(row, offset_ns)?;
+    }
+    Ok(rows)
+}
+
+fn shift_query_time_value(row: &mut Value, offset_ns: i64) -> Result<(), String> {
+    let Some(object) = row.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(timestamp) = object.get("_time").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let timestamp_ns = parse_victorialogs_timestamp_ns(timestamp)
+        .ok_or_else(|| format!("cannot shift invalid query result timestamp {timestamp:?}"))?;
+    let shifted = format_victorialogs_timestamp_ns(add_victorialogs_time(timestamp_ns, offset_ns))
+        .ok_or_else(|| format!("shifted query result timestamp {timestamp:?} is out of range"))?;
+    object.insert("_time".into(), Value::String(shifted));
+    Ok(())
 }
 
 fn parse_victorialogs_timestamp_ns(source: &str) -> Option<i64> {
@@ -464,6 +503,9 @@ pub(crate) fn execute(
             }
             PipelineOp::TimeAdd(spec) => {
                 time_add_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
+            PipelineOp::QueryTimeOffset(offset_ns) => {
+                query_time_offset_fields(rows, *offset_ns, execution.cancelled)?
             }
             PipelineOp::GenerateSequence(count) => {
                 generate_sequence_rows(*count, execution.limits, execution.cancelled)?

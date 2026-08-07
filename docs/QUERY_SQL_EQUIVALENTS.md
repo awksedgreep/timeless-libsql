@@ -175,6 +175,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-062`](#sql-log-062-generate-a-bounded-decimal-string-sequence) | `LQL-P48` | current foundation | input-independent bounded recursive sequence of decimal strings using core SQLite/libSQL; API owns LogsQL numeric grammar, replacement semantics, limits, cancellation, composition, and envelopes |
 | [`SQL-LOG-063`](#sql-log-063-bounded-typed-json-values-from-fixed-public-paths) | `LQL-S12` | current foundation | one JSON-array string of fixed exact retained paths from bounded public log rows, with missing omission, explicit-null/native-type fidelity, and deterministic native-number ordering; API owns dynamic selectors, complete natural sorting, top-k, grammar, limits, cancellation, and envelopes |
 | [`SQL-LOG-064`](#sql-log-064-bounded-histogram-over-one-native-number-path) | `LQL-S13` | current foundation | bounded Victoria-compatible logarithmic bucket assignment over one fixed public native-number path; API owns textual number/duration/byte parsing, natural result order, grammar, cumulative limits, cancellation, and envelopes |
+| [`SQL-LOG-065`](#sql-log-065-offset-public-log-query-time-without-rounding) | `LQL-Q04` | current foundation | exact integer source-bound translation plus an explicit sub-native nanosecond remainder over the public `logs` table; API owns LogsQL option grammar, inherited query scope, timestamp rendering, pipeline order, limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -10231,6 +10232,147 @@ no extension primitive or private table access is justified. Direct
 regression: `tests/cli.sh` section 45 and the Rust SQL harness;
 HTTP/oracle/optimize/reopen regression:
 `session_eighteen_histogram_is_exact_bounded_rich_and_durable`.
+
+### SQL-LOG-065: offset public log query time without rounding
+
+Bind inclusive logical timestamp bounds, the whole-native-unit portion of the
+query offset, its signed sub-native nanosecond remainder, the table's native
+unit in nanoseconds, and positive work/result limits. Timestamps use the
+public `logs` table's configured unit: milliseconds unless
+`timestamp_unit='us'` was selected when the table was created. Split the
+offset so `abs(:time_offset_subnative_ns) < :native_unit_ns`; use
+`:native_unit_ns = 1000000` for milliseconds or `1000` for microseconds.
+
+The source interval is the logical interval shifted backward by the offset.
+Because stored timestamps are integers, its inclusive lower bound uses a
+ceiling and its inclusive upper bound uses a floor. The signed remainder is
+kept explicit, so a positive sub-native offset lowers the upper source bound
+by one native unit while a negative remainder raises the lower source bound
+by one. No floating-point timestamp arithmetic or SQLite date/time function
+is involved.
+
+```sql
+WITH
+inputs AS (
+  SELECT
+    CAST(:logical_start_ts AS INTEGER) AS logical_start_ts,
+    CAST(:logical_end_ts AS INTEGER) AS logical_end_ts,
+    CAST(:time_offset_native AS INTEGER) AS time_offset_native,
+    CAST(:time_offset_subnative_ns AS INTEGER) AS time_offset_subnative_ns,
+    CAST(:native_unit_ns AS INTEGER) AS native_unit_ns,
+    CAST(:max_work_entries AS INTEGER) AS work_limit,
+    CAST(:max_result_rows AS INTEGER) AS result_limit
+  WHERE :logical_start_ts <= :logical_end_ts
+    AND :native_unit_ns > 0
+    AND :time_offset_subnative_ns > -:native_unit_ns
+    AND :time_offset_subnative_ns < :native_unit_ns
+    AND :max_work_entries > 0
+    AND :max_result_rows > 0
+),
+base_bounds AS (
+  SELECT
+    CASE
+      WHEN time_offset_native > 0
+        AND logical_start_ts < -9223372036854775808 + time_offset_native
+        THEN -9223372036854775808
+      WHEN time_offset_native < 0
+        AND logical_start_ts > 9223372036854775807 + time_offset_native
+        THEN 9223372036854775807
+      ELSE logical_start_ts - time_offset_native
+    END AS base_start_ts,
+    CASE
+      WHEN time_offset_native > 0
+        AND logical_end_ts < -9223372036854775808 + time_offset_native
+        THEN -9223372036854775808
+      WHEN time_offset_native < 0
+        AND logical_end_ts > 9223372036854775807 + time_offset_native
+        THEN 9223372036854775807
+      ELSE logical_end_ts - time_offset_native
+    END AS base_end_ts,
+    time_offset_native,
+    time_offset_subnative_ns,
+    work_limit,
+    result_limit
+  FROM inputs
+),
+bounds AS (
+  SELECT
+    CASE
+      WHEN time_offset_subnative_ns < 0
+        AND base_start_ts < 9223372036854775807
+        THEN base_start_ts + 1
+      ELSE base_start_ts
+    END AS source_start_ts,
+    CASE
+      WHEN time_offset_subnative_ns > 0
+        AND base_end_ts > -9223372036854775808
+        THEN base_end_ts - 1
+      ELSE base_end_ts
+    END AS source_end_ts,
+    time_offset_native,
+    time_offset_subnative_ns,
+    work_limit,
+    result_limit
+  FROM base_bounds
+),
+source AS MATERIALIZED (
+  SELECT logs.ts, logs.level, logs.message, logs.metadata
+  FROM logs, bounds
+  WHERE logs.ts >= bounds.source_start_ts
+    AND logs.ts <= bounds.source_end_ts
+    AND logs.max_work_entries = bounds.work_limit
+)
+SELECT
+  source.ts AS source_ts,
+  CASE
+    WHEN bounds.time_offset_native > 0
+      AND source.ts > 9223372036854775807 - bounds.time_offset_native
+      THEN 9223372036854775807
+    WHEN bounds.time_offset_native < 0
+      AND source.ts < -9223372036854775808 - bounds.time_offset_native
+      THEN -9223372036854775808
+    ELSE source.ts + bounds.time_offset_native
+  END AS shifted_ts,
+  bounds.time_offset_subnative_ns AS subnative_remainder_ns,
+  source.level,
+  source.message,
+  source.metadata
+FROM source, bounds
+ORDER BY source.ts, source.level, source.message, source.metadata
+LIMIT (SELECT result_limit FROM bounds);
+```
+
+For the executable millisecond fixture, bind logical bounds `1250` and
+`2250`, offset components `250` and `500000`, native unit `1000000`, work
+limit `100000`, and result limit `100`. The logical interval represents
+`[1250ms, 2250ms]` after a `250.5ms` query offset. Its exact integer source
+interval is `[1000ms, 1999ms]`, so only the row at `1000` is returned as
+`(source_ts, shifted_ts, subnative_remainder_ns) = (1000, 1250, 500000)`.
+The row at `2000` is correctly excluded because its shifted timestamp would
+be `2250.5ms`, outside the inclusive logical upper bound.
+The Rust SQL harness also binds logical bounds `750`/`1750` with offset
+components `-250`/`-500000`; the exact source interval is `[1001, 2000]`, so
+only source row `2000` is returned as `(2000, 1750, -500000)`. This pins both
+directions of the sub-native ceiling/floor rule.
+
+This is the direct-SQL storage-bound and native-time foundation for
+`LQL-Q04`, not a LogsQL parser in the extension. The Rust logs API owns the
+case-insensitive `options` keyword; case-sensitive `time_offset` name;
+VictoriaLogs duration grammar; duplicate-last and trailing-comma behavior;
+nested query inheritance and explicit replacement; day/week range
+composition; RFC3339Nano output; exact sub-native saturation; leading-filter
+optimizer order; work/result/response/deadline limits; cancellation; and HTTP
+envelopes. A caller using the SQL recipe must add the explicit signed
+remainder after converting `shifted_ts` to its timestamp representation.
+
+Both paths use only the documented `logs` virtual table. Ordinary bounded SQL
+already performs the exact source-bound translation and exposes complete rich
+rows, so a language-specific extension primitive would not eliminate a block
+read, decode, allocation, or public row crossing. Storage formats, batching,
+compression, indexes, optimize behavior, transactions, and migration remain
+unchanged. Direct regression: `tests/cli.sh` section 45 and the Rust SQL
+harness; HTTP/oracle/optimize/reopen regression:
+`session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_queries`.
 
 ## Adding the next recipe
 

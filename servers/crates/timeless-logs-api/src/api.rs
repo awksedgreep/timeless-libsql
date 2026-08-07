@@ -142,7 +142,7 @@ async fn query_get(
     if let Err((reason, limit)) = apply_query_limits(&mut spec, limit_explicit, limits) {
         return query_limit_error(reason, limit);
     }
-    query_response(&storage, spec, limits, limits.deadline).await
+    query_response(&storage, spec, 0, limits, limits.deadline).await
 }
 
 #[derive(Deserialize, Default)]
@@ -718,7 +718,14 @@ async fn query_post(
     } else if plan.output == LogsqlOutput::Pipeline {
         pipeline_response(&storage, plan, execution_limits, limits.deadline).await
     } else {
-        query_response(&storage, plan.spec, execution_limits, limits.deadline).await
+        query_response(
+            &storage,
+            plan.spec,
+            plan.time_offset_ns,
+            execution_limits,
+            limits.deadline,
+        )
+        .await
     }
 }
 
@@ -780,6 +787,7 @@ fn rate_window_seconds(spec: &QuerySpec, timestamp_unit: TimestampUnit) -> Optio
 async fn query_response(
     storage: &Storage,
     spec: QuerySpec,
+    time_offset_ns: i64,
     limits: LogsQueryLimits,
     reported_deadline: Duration,
 ) -> Response<Body> {
@@ -790,7 +798,12 @@ async fn query_response(
             let row_count = rows.len();
             let mut body = BoundedBuffer::new(limits.max_response_bytes);
             for row in rows {
-                match pipeline::response_row(row, storage.timestamp_unit()).and_then(|value| {
+                match pipeline::response_row_with_time_offset(
+                    row,
+                    storage.timestamp_unit(),
+                    time_offset_ns,
+                )
+                .and_then(|value| {
                     serde_json::to_writer(&mut body, &value)
                         .map_err(|error| format!("encode result row: {error}"))?;
                     body.write_all(b"\n")

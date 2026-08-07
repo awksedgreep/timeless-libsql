@@ -3044,6 +3044,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "time_offset_narrow",
+                "logs-time-offset-narrow",
+                r#"options(time_offset=1s) host:="h00" AND query | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
+                "time_offset_wide",
+                "logs-time-offset-wide",
+                r#"options(time_offset=1s) query | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
+                "time_offset_control_narrow",
+                "logs-time-offset-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
+                "time_offset_control_wide",
+                "logs-time-offset-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields _time"#,
+                64,
+                None,
+            ),
+            (
                 "set_stream_fields_narrow",
                 "logs-set-stream-fields-narrow",
                 r#"host:="h00" AND query | sort by (_time) asc | limit 64 | set_stream_fields host | fields _stream"#,
@@ -3756,6 +3784,12 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         require_same_public_query_work(&queries, "total_stats_control_wide", "total_stats_wide")?;
         require_same_public_query_work(&queries, "time_add_control_narrow", "time_add_narrow")?;
         require_same_public_query_work(&queries, "time_add_control_wide", "time_add_wide")?;
+        require_same_public_query_work(
+            &queries,
+            "time_offset_control_narrow",
+            "time_offset_narrow",
+        )?;
+        require_same_public_query_work(&queries, "time_offset_control_wide", "time_offset_wide")?;
         require_same_public_query_work(
             &queries,
             "set_stream_fields_control_narrow",

@@ -207,6 +207,103 @@
       "expected_cases": ["phrase-exact"]
     },
     {
+      "id": "LQL-Q04-positive-offset-shifts-storage-bounds",
+      "query": "options(time_offset=1s) page_group:=page _time:[{start},{end}) | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-Q04-negative-offset-shifts-storage-bounds",
+      "query": "options(time_offset=-1s) page_group:=page _time:[{start},{end}) | fields case",
+      "query_times": {
+        "start": {"offset_us": 0, "format": "rfc3339"},
+        "end": {"offset_us": 2000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-Q04-last-duplicate-offset-wins-with-a-trailing-comma",
+      "query": "options(time_offset=10s, time_offset=1s,) page_group:=page _time:[{start},{end}) | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-Q04-quoted-compound-fractional-offset",
+      "query": "options(time_offset=\"1.5s500ms\") page_group:=page _time:[{start},{end}) | fields case",
+      "query_times": {
+        "start": {"offset_us": 3000000, "format": "rfc3339"},
+        "end": {"offset_us": 5000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-Q04-options-keyword-is-case-insensitive",
+      "query": "OPTIONS(time_offset=0s) case:=phrase-exact | fields case",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-Q04-shifted-time-is-visible-to-later-pipes",
+      "query": "options(time_offset=1s) page_group:=page | format '<_time>' as observed | filter observed:=\"{shifted}\" | fields case",
+      "query_times": {
+        "shifted": {"offset_us": 2000000, "format": "rfc3339_auto"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0"]
+    },
+    {
+      "id": "LQL-Q04-leading-filter-is-merged-before-the-result-shift",
+      "query": "options(time_offset=1s) page_group:=page | filter _time:[{start},{end}) | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-1", "page-2"]
+    },
+    {
+      "id": "LQL-Q04-outer-offset-is-inherited-by-a-query-backed-filter",
+      "query": "options(time_offset=1s) case:in(page_group:=page _time:[{start},{end}) | fields case) | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-Q04-inner-offset-overrides-the-inherited-value",
+      "query": "options(time_offset=10s) case:in(options(time_offset=1s) page_group:=page _time:[{start},{end}) | fields case) | fields case",
+      "query_times": {
+        "start": {"offset_us": 2000000, "format": "rfc3339"},
+        "end": {"offset_us": 4000000, "format": "rfc3339"}
+      },
+      "status": 200,
+      "expected_cases": ["page-0", "page-1"]
+    },
+    {
+      "id": "LQL-Q04-offset-composes-with-day-range",
+      "query": "options(time_offset=1h) day_group:=day _time:day_range[11:00,12:00) | fields case",
+      "status": 200,
+      "expected_cases": ["day-start"]
+    },
+    {
+      "id": "LQL-Q04-offset-composes-with-week-range",
+      "query": "options(time_offset=1h) week_group:=week _time:week_range[Mon,Mon] | fields case",
+      "status": 200,
+      "expected_cases": ["week-sun-late", "week-mon-early", "week-mon"]
+    },
+    {
       "id": "LQL-F35-bare-stream-selector-equality",
       "query": "{case=\"phrase-exact\"}",
       "status": 200,
@@ -5744,6 +5841,62 @@
     {
       "id": "LQL-Q03-options-still-require-a-query",
       "query": "options(concurrency=1)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-time-offset-requires-a-value",
+      "query": "options(time_offset=) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-time-offset-requires-a-duration",
+      "query": "options(time_offset=1) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-time-offset-rejects-a-leading-plus",
+      "query": "options(time_offset=+1s) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-time-offset-rejects-an-unknown-unit",
+      "query": "options(time_offset=1hour) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-option-name-is-case-sensitive",
+      "query": "options(TIME_OFFSET=1s) *",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-options-require-a-closing-parenthesis",
+      "query": "options(time_offset=1s",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-options-still-require-a-query",
+      "query": "options(time_offset=1s)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-Q04-time-offset-rejects-an-invalid-quoted-duration",
+      "query": "options(time_offset=\"one second\") *",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"

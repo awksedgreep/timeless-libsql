@@ -414,6 +414,7 @@ async fn session_sixteen_exact_rich_batch_stays_decodable_across_readers_and_reo
         StatusCode::NO_CONTENT
     );
     storage.barrier().await.unwrap();
+
     let stats = storage.stats().await.unwrap();
     assert_eq!(stats.total_entries, 8_192);
     assert_eq!(stats.buffered_entries, 0);
@@ -16057,6 +16058,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .unwrap();
     assert_eq!(reused_after_time_add_cancel.status(), StatusCode::OK);
 
+    let cancelled_before_time_offset = storage.stats().await.unwrap().api_query_cancelled;
+    let time_offset_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "options(time_offset=1ns) * | fields _time | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(time_offset_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_time_offset
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_time_offset);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_time_offset_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            "options(time_offset=1ns) level:error | fields _time | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_time_offset_cancel.status(), StatusCode::OK);
+
     let cancelled_before_uniq = storage.stats().await.unwrap().api_query_cancelled;
     let uniq_timeout = router_with_limits(
         storage.clone(),
@@ -18377,6 +18413,212 @@ async fn session_nineteen_query_parallelism_options_fail_explicitly_without_stor
     assert_eq!(
         ndjson_values(&to_bytes(ordinary.into_body(), usize::MAX).await.unwrap()).len(),
         1
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_queries() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("time-offset-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(
+                [
+                    r#"{"_time":1800000001000000,"_msg":"offset zero","level":"notice","case":"offset-0","offset_group":"offset","nested":{"number":1},"array":[1,true,null,"x"]}"#,
+                    r#"{"_time":1800000002000000,"_msg":"offset one","level":"warning","case":"offset-1","offset_group":"offset","nested":{"number":2},"array":[2,false,null,"y"]}"#,
+                    r#"{"_time":1800000003000000,"_msg":"offset two","level":"error","case":"offset-2","offset_group":"offset","nested":{"number":3},"array":[3,true,null,"z"]}"#,
+                    r#"{"_time":1800000004000000,"_msg":"offset three","level":"critical","case":"offset-3","offset_group":"offset","nested":{"number":4},"array":[4,false,null,"λ"]}"#,
+                ]
+                .join("\n"),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    let shifted_raw = pipeline_rows(&app, "options(time_offset=500ns) case:=offset-0").await;
+    assert_eq!(shifted_raw.len(), 1);
+    assert_eq!(shifted_raw[0]["_time"], "2027-01-15T08:00:01.0000005Z");
+    assert_eq!(shifted_raw[0]["nested"], serde_json::json!({"number": 1}));
+    assert_eq!(
+        shifted_raw[0]["array"],
+        serde_json::json!([1, true, null, "x"])
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "options(time_offset=1s) offset_group:=offset _time:[1800000002000000,1800000004000000) | sort by (_time) asc | fields case, _time, nested, array",
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case": "offset-0",
+                "_time": "2027-01-15T08:00:02Z",
+                "nested": {"number": 1},
+                "array": [1, true, null, "x"],
+            }),
+            serde_json::json!({
+                "case": "offset-1",
+                "_time": "2027-01-15T08:00:03Z",
+                "nested": {"number": 2},
+                "array": [2, false, null, "y"],
+            }),
+        ]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "options(time_offset=500ns) case:=offset-0 | fields case, _time",
+        )
+        .await,
+        [serde_json::json!({
+            "case": "offset-0",
+            "_time": "2027-01-15T08:00:01.0000005Z",
+        })]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "options(time_offset=1s) offset_group:=offset | filter _time:[1800000002000000,1800000004000000) | sort by (_time) asc | fields case, _time",
+        )
+        .await,
+        [
+            serde_json::json!({"case": "offset-1", "_time": "2027-01-15T08:00:03Z"}),
+            serde_json::json!({"case": "offset-2", "_time": "2027-01-15T08:00:04Z"}),
+        ]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "options(time_offset=1s) case:in(offset_group:=offset _time:[1800000002000000,1800000004000000) | fields case) | sort by (_time) asc | fields case",
+        )
+        .await,
+        [
+            serde_json::json!({"case": "offset-0"}),
+            serde_json::json!({"case": "offset-1"}),
+        ]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "options(time_offset=10s) case:in(options(time_offset=1s) offset_group:=offset _time:[1800000002000000,1800000004000000) | fields case) | sort by (_time) asc | fields case",
+        )
+        .await,
+        [
+            serde_json::json!({"case": "offset-0"}),
+            serde_json::json!({"case": "offset-1"}),
+        ]
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            "options(time_offset=1s) offset_group:=offset _time:[1800000002000000,1800000004000000) | stats count()",
+        )
+        .await,
+        [serde_json::json!({"total": 2})]
+    );
+
+    let before = storage.stats().await.unwrap();
+    let invalid = app
+        .clone()
+        .oneshot(logsql_request("options(time_offset=+1s) *"))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let after = storage.stats().await.unwrap();
+    assert_eq!(after.api_query_count, before.api_query_count);
+    assert_eq!(after.query_count, before.query_count);
+    assert_eq!(
+        after.query_payload_bytes_read,
+        before.query_payload_bytes_read
+    );
+    assert_eq!(after.query_decoded_entries, before.query_decoded_entries);
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(
+                "options(time_offset=1ns) offset_group:=offset | fields _time",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(
+        pipeline_rows(
+            &reopened_app,
+            "options(time_offset=-1s) offset_group:=offset _time:[1800000000000000,1800000002000000) | sort by (_time) asc | fields case, _time, nested, array",
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case": "offset-0",
+                "_time": "2027-01-15T08:00:00Z",
+                "nested": {"number": 1},
+                "array": [1, true, null, "x"],
+            }),
+            serde_json::json!({
+                "case": "offset-1",
+                "_time": "2027-01-15T08:00:01Z",
+                "nested": {"number": 2},
+                "array": [2, false, null, "y"],
+            }),
+        ]
     );
     reopened.shutdown().await.unwrap();
 }

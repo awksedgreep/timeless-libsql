@@ -2668,6 +2668,55 @@ applications likewise may run independent statements concurrently, but there
 is no SQL statement equivalent to this resource contract.
 
 
+## LogsQL query time offsets
+
+A leading `time_offset` query option shifts the query's logical clock without
+rewriting retained log timestamps:
+
+```text
+options(time_offset=1h) service:=api _time:1d | sort by (_time) asc
+options(time_offset=-250.5ms) level:error | fields _time, _msg
+options(time_offset="1h30m", time_offset=2h) * | stats count()
+```
+
+`options` is case-insensitive; the option name `time_offset` is
+case-sensitive. Values use the VictoriaLogs signed compound-duration grammar.
+Negative, fractional, compound, and quoted durations are accepted. A leading
+`+`, missing unit, unknown unit, missing assignment/value, malformed quoted
+duration, unmatched parenthesis, or missing following query fails before any
+public storage read. Repeated assignments use the last value, and a trailing
+comma is accepted.
+
+The storage interval is shifted backward by the offset and returned `_time`
+values are shifted forward. Timeless performs source-bound arithmetic in
+signed nanoseconds, then uses an exact ceiling for the inclusive lower bound
+and floor for the inclusive upper bound at the table's configured millisecond
+or microsecond unit. Sub-native offsets therefore never disappear through
+integer truncation. Response timestamps remain canonical UTC with up to
+nanosecond precision; retained rows are never mutated.
+
+Nested query expressions inherit the surrounding offset. An inner
+`options(time_offset=...)` replaces it rather than adding to it, including an
+explicit zero. Day/week filters compose with the same logical clock. Matching
+VictoriaLogs' optimizer, consecutive leading `filter` pipes compare original
+source timestamps because they are folded into the storage predicate; a
+filter after another result pipe compares the shifted `_time`. This order is
+intentional and regression-tested.
+
+The option uses the normal work, result-row, response-byte, deadline, and
+cancellation limits. A timed-out request cancels its SQLite/Rust work and
+returns the reader to the pool. `generate_sequence` replaces its source and
+therefore has no retained timestamp to offset; aggregate-only output without
+`_time` is unchanged after source selection.
+
+Direct SQLite/libSQL users can apply the same exact source-bound translation
+with [`SQL-LOG-065`](QUERY_SQL_EQUIVALENTS.md#sql-log-065-offset-public-log-query-time-without-rounding).
+That executable recipe uses only the public `logs` table and carries an
+explicit signed sub-native remainder for response formatting. LogsQL parsing,
+nested scope, pipeline order, RFC3339Nano rendering, limits, cancellation,
+and HTTP envelopes remain Rust API responsibilities; there is no
+language-specific extension opcode.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

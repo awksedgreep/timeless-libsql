@@ -1711,6 +1711,26 @@ merge/order, exact work accounting, cancellation, and reader-reuse evidence.
 No extension, storage, batching, compression, index, transaction, migration,
 optimize, or maintenance contract changed.
 
+`LQL-Q04` is now implemented as a scoped Rust API query option. Eleven
+successful and eight error witnesses pass the complete 1,460-case immutable
+VictoriaLogs fixture. The planner shifts logical storage bounds backward by
+the signed offset with exact retained-unit ceil/floor handling, while one
+cancellation-aware result transform shifts `_time` forward with nanosecond
+precision. Nested queries inherit the offset and explicit inner values replace
+it; day/week filters compose; duplicate values use the last assignment; and
+malformed options fail before storage.
+
+Pinned source also establishes the non-obvious optimizer order: consecutive
+leading `filter` pipes are folded into the storage predicate after query-option
+bound translation and therefore see source timestamps, while later pipes see
+shifted result timestamps. Real-extension coverage pins that order, rich
+metadata/array fidelity, limits, cancellation, immutable storage, optimize,
+flush, shutdown, and reopen. Executable `SQL-LOG-065` gives direct users exact
+integer source-bound translation plus an explicit signed sub-native remainder
+through only the public `logs` table. No extension primitive, private access,
+storage format, authoritative batching, compression, index, retention,
+transaction, migration, optimize, or maintenance behavior changed.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

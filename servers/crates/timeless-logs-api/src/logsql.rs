@@ -34,6 +34,10 @@ pub enum LogsqlOutput {
 pub struct LogsqlPlan {
     pub spec: QuerySpec,
     pub output: LogsqlOutput,
+    /// VictoriaLogs query-time offset in nanoseconds. Row responses apply it
+    /// after storage selection; API-owned pipelines receive an internal
+    /// offset operation at the exact upstream position.
+    pub time_offset_ns: i64,
     /// Distinguishes an explicit `limit`/`head` from the API default so a
     /// tighter server policy can lower only the default without rewriting a
     /// caller's request.
@@ -51,6 +55,7 @@ const MAX_COMMON_CASE_STATE_BYTES: usize = 4 * 1024 * 1024;
 struct ParseContext {
     timestamp_unit: TimestampUnit,
     query_now: i64,
+    inherited_time_offset_ns: i64,
     query_backed_depth: usize,
     query_backed_lists: usize,
     common_case_values: usize,
@@ -6021,6 +6026,10 @@ pub(crate) enum PipelineOp {
     UnpackSyslog(UnpackSyslogSpec),
     UnpackWords(UnpackWordsSpec),
     TimeAdd(TimeAddSpec),
+    /// Internal query-option operation. This is not user pipeline syntax and
+    /// does not consume pipeline state; it shifts the storage-owned `_time`
+    /// value before observable downstream pipes.
+    QueryTimeOffset(i64),
     GenerateSequence(u64),
     SetStreamFields(SetStreamFieldsSpec),
 }
@@ -6077,6 +6086,7 @@ pub fn parse_at(
     let mut context = ParseContext {
         timestamp_unit,
         query_now,
+        inherited_time_offset_ns: 0,
         query_backed_depth: 0,
         query_backed_lists: 0,
         common_case_values: 0,
@@ -6086,11 +6096,24 @@ pub fn parse_at(
 }
 
 fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlPlan, LogsqlError> {
+    let inherited = context.inherited_time_offset_ns;
+    let result = parse_with_scoped_context(query, context);
+    context.inherited_time_offset_ns = inherited;
+    result
+}
+
+fn parse_with_scoped_context(
+    query: &str,
+    context: &mut ParseContext,
+) -> Result<LogsqlPlan, LogsqlError> {
     let timestamp_unit = context.timestamp_unit;
     let query_now = context.query_now;
     let prepared_query = prepare_query_layout(query)?;
-    let query = prepared_query.as_ref();
-    reject_deferred_query_parallelism_options(query)?;
+    let prepared_query = prepared_query.as_ref();
+    reject_deferred_query_parallelism_options(prepared_query)?;
+    let (query, explicit_time_offset_ns) = parse_leading_query_options(prepared_query)?;
+    let time_offset_ns = explicit_time_offset_ns.unwrap_or(context.inherited_time_offset_ns);
+    context.inherited_time_offset_ns = time_offset_ns;
     reject_deferred_stream_context_pipe(query)?;
     reject_deferred_stream_selectors(query)?;
     reject_deferred_stream_id_filters(query)?;
@@ -6580,6 +6603,23 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
         pipeline.drain(..last_sequence);
         spec = QuerySpec::default();
     }
+    let generated_source = matches!(pipeline.first(), Some(PipelineOp::GenerateSequence(_)));
+    if time_offset_ns != 0 && !generated_source {
+        apply_query_time_offset(&mut spec, time_offset_ns, timestamp_unit);
+        if output == LogsqlOutput::Pipeline
+            && !matches!(pipeline.first(), Some(PipelineOp::QueryStats))
+        {
+            // VictoriaLogs merges only consecutive leading filter pipes into
+            // the storage predicate after applying the query option. Those
+            // filters therefore observe source time; every later pipe sees
+            // the shifted result time.
+            let insertion = pipeline
+                .iter()
+                .take_while(|operation| matches!(operation, PipelineOp::Filter(_)))
+                .count();
+            pipeline.insert(insertion, PipelineOp::QueryTimeOffset(time_offset_ns));
+        }
+    }
     let cardinality_owned_by_pipeline = pipeline.iter().any(|operation| {
         matches!(
             operation,
@@ -6601,6 +6641,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
     Ok(LogsqlPlan {
         spec,
         output,
+        time_offset_ns,
         limit_explicit,
         pipeline,
         implicit_result_limit,
@@ -9384,6 +9425,133 @@ fn source_line_column(source: &str, byte_offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+/// Parse one optional leading VictoriaLogs `options(...)` clause and return
+/// the query body plus an explicit `time_offset`, if present.
+///
+/// Option names are deliberately case-sensitive, while the `options` keyword
+/// is case-insensitive. A duplicate option uses its last value and one
+/// trailing comma is accepted, matching the pinned VictoriaLogs parser.
+fn parse_leading_query_options(query: &str) -> Result<(&str, Option<i64>), LogsqlError> {
+    const KEYWORD: &str = "options";
+
+    let trimmed = query.trim_start();
+    let Some(keyword) = trimmed.get(..KEYWORD.len()) else {
+        return Ok((query, None));
+    };
+    if !keyword.eq_ignore_ascii_case(KEYWORD)
+        || trimmed[KEYWORD.len()..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Ok((query, None));
+    }
+    let after_keyword = trimmed[KEYWORD.len()..].trim_start();
+    if !after_keyword.starts_with('(') {
+        return Ok((query, None));
+    }
+    let close = matching_parenthesis(after_keyword, 0)
+        .map_err(|_| LogsqlError::malformed("unterminated LogsQL options(...) clause"))?;
+    let body = after_keyword[close + 1..].trim_start();
+    if body.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL options(...) must be followed by a query",
+        ));
+    }
+
+    let mut inner = after_keyword[1..close].trim();
+    if let Some(without_trailing_comma) = inner.strip_suffix(',') {
+        inner = without_trailing_comma.trim_end();
+    }
+    if inner.is_empty() {
+        return Ok((body, None));
+    }
+
+    let mut time_offset_ns = None;
+    for item in split_top_level(inner, ',')? {
+        let Some((name, value)) = split_query_option_assignment(&item) else {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL query option {item:?} requires '='"
+            )));
+        };
+        let name = name.trim();
+        let name = quoted_value(name)?.unwrap_or_else(|| name.to_owned());
+        if name.is_empty() {
+            return Err(LogsqlError::malformed(
+                "LogsQL query option name must not be empty",
+            ));
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL {name} query option requires a value"
+            )));
+        }
+
+        match name.as_str() {
+            "time_offset" => {
+                let duration = quoted_value(value)?.unwrap_or_else(|| value.to_owned());
+                time_offset_ns = Some(
+                    parse_victorialogs_human_duration(&duration).ok_or_else(|| {
+                        LogsqlError::malformed(format!(
+                            "invalid LogsQL time_offset duration {duration:?}"
+                        ))
+                    })?,
+                );
+            }
+            // The all-depth Q03 detector normally handles these before this
+            // parser. Keep the boundary explicit for quoted option names.
+            "concurrency" | "parallel_readers" => {
+                return Err(LogsqlError::unsupported(format!(
+                    "LogsQL {name} query option is deferred: Timeless does not implement VictoriaLogs intra-query worker or reader fan-out"
+                )))
+            }
+            "global_filter" | "ignore_global_time_filter" => {
+                return Err(LogsqlError::unsupported(format!(
+                    "LogsQL {name} query option is not implemented yet"
+                )))
+            }
+            "allow_partial_response" => {
+                return Err(LogsqlError::unsupported(
+                    "LogsQL allow_partial_response query option is not implemented yet",
+                ))
+            }
+            _ => {
+                return Err(LogsqlError::malformed(format!(
+                    "unknown LogsQL query option {name:?}"
+                )))
+            }
+        }
+    }
+    Ok((body, time_offset_ns))
+}
+
+fn split_query_option_assignment(item: &str) -> Option<(&str, &str)> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (index, character) in item.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' | '[' => depth = depth.saturating_add(1),
+            ')' | ']' => depth = depth.saturating_sub(1),
+            '=' if depth == 0 => return Some((&item[..index], &item[index + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Reject VictoriaLogs stream selectors before planning or storage access.
 ///
 /// An unquoted `{` is reserved for `_stream:{...}` (the `_stream:` prefix is
@@ -9836,16 +10004,17 @@ fn logsql_terms(input: &str) -> Result<Vec<LogsqlTerm>, LogsqlError> {
             continue;
         }
         current.push(character);
-        if current.starts_with("_time:[") || current.starts_with("_time:(") {
-            time_range = true;
-        }
-        if !time_range
-            && matches!(character, '(' | '[')
-            && current
-                .get(..current.len() - 1)
-                .is_some_and(is_time_range_prefix)
-        {
-            numeric_range = true;
+        if matches!(character, '(' | '[') {
+            let prefix = &current[..current.len() - 1];
+            let active_prefix = prefix
+                .rsplit(|character: char| character.is_whitespace() || character == '(')
+                .next()
+                .unwrap_or(prefix);
+            if active_prefix == "_time:" {
+                time_range = true;
+            } else if is_time_range_prefix(active_prefix) {
+                numeric_range = true;
+            }
         }
         if time_range && matches!(character, ']' | ')') {
             time_range = false;
@@ -10828,6 +10997,80 @@ fn duration_from_millis(duration: i64, timestamp_unit: TimestampUnit) -> i64 {
     }
 }
 
+fn apply_query_time_offset(
+    spec: &mut QuerySpec,
+    time_offset_ns: i64,
+    timestamp_unit: TimestampUnit,
+) {
+    spec.ts_min = spec
+        .ts_min
+        .map(|bound| shift_native_lower_bound(bound, time_offset_ns, timestamp_unit));
+    spec.ts_max = spec
+        .ts_max
+        .map(|bound| shift_native_upper_bound(bound, time_offset_ns, timestamp_unit));
+    if let Some(predicate) = spec.predicate.as_mut() {
+        apply_query_time_offset_to_predicate(predicate, time_offset_ns, timestamp_unit);
+    }
+}
+
+fn apply_query_time_offset_to_predicate(
+    predicate: &mut LogPredicate,
+    time_offset_ns: i64,
+    timestamp_unit: TimestampUnit,
+) {
+    match predicate {
+        LogPredicate::And(predicates) | LogPredicate::Or(predicates) => {
+            for predicate in predicates {
+                apply_query_time_offset_to_predicate(predicate, time_offset_ns, timestamp_unit);
+            }
+        }
+        LogPredicate::Not(predicate) => {
+            apply_query_time_offset_to_predicate(predicate, time_offset_ns, timestamp_unit)
+        }
+        LogPredicate::Timestamp { minimum, maximum } => {
+            *minimum = minimum
+                .map(|bound| shift_native_lower_bound(bound, time_offset_ns, timestamp_unit));
+            *maximum = maximum
+                .map(|bound| shift_native_upper_bound(bound, time_offset_ns, timestamp_unit));
+        }
+        LogPredicate::DayRange { offset_ns, .. } | LogPredicate::WeekRange { offset_ns, .. } => {
+            *offset_ns = offset_ns.saturating_add(time_offset_ns);
+        }
+        _ => {}
+    }
+}
+
+fn shift_native_lower_bound(bound: i64, time_offset_ns: i64, timestamp_unit: TimestampUnit) -> i64 {
+    let nanoseconds_per_unit = timestamp_unit_nanoseconds(timestamp_unit);
+    let shifted = i128::from(bound) * nanoseconds_per_unit - i128::from(time_offset_ns);
+    let floor = shifted.div_euclid(nanoseconds_per_unit);
+    let ceiling = floor + i128::from(shifted.rem_euclid(nanoseconds_per_unit) != 0);
+    clamp_native_timestamp(ceiling)
+}
+
+fn shift_native_upper_bound(bound: i64, time_offset_ns: i64, timestamp_unit: TimestampUnit) -> i64 {
+    let nanoseconds_per_unit = timestamp_unit_nanoseconds(timestamp_unit);
+    let shifted = i128::from(bound) * nanoseconds_per_unit - i128::from(time_offset_ns);
+    clamp_native_timestamp(shifted.div_euclid(nanoseconds_per_unit))
+}
+
+fn timestamp_unit_nanoseconds(timestamp_unit: TimestampUnit) -> i128 {
+    match timestamp_unit {
+        TimestampUnit::Milliseconds => 1_000_000,
+        TimestampUnit::Microseconds => 1_000,
+    }
+}
+
+fn clamp_native_timestamp(timestamp: i128) -> i64 {
+    i64::try_from(timestamp).unwrap_or_else(|_| {
+        if timestamp.is_negative() {
+            i64::MIN
+        } else {
+            i64::MAX
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11057,6 +11300,125 @@ mod tests {
                 parse(ordinary_data, TimestampUnit::Microseconds).is_ok(),
                 "{ordinary_data:?}"
             );
+        }
+    }
+
+    #[test]
+    fn session_nineteen_time_offset_shifts_query_bounds_before_storage() {
+        let plan = parse_at(
+            "options(time_offset=1s) _time:[1800000002000000,1800000004000000)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(plan.spec.ts_min, Some(1_800_000_001_000_000));
+        assert_eq!(plan.spec.ts_max, Some(1_800_000_002_999_999));
+        assert_eq!(plan.time_offset_ns, 1_000_000_000);
+
+        let negative = parse_at(
+            "options(time_offset=-1s) _time:[1800000000000000,1800000002000000)",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(negative.spec.ts_min, Some(1_800_000_001_000_000));
+        assert_eq!(negative.spec.ts_max, Some(1_800_000_002_999_999));
+
+        let positive_subunit = parse_at(
+            "options(time_offset=500ns) _time:[1800000000000000,1800000000000001]",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(positive_subunit.spec.ts_min, Some(1_800_000_000_000_000));
+        assert_eq!(positive_subunit.spec.ts_max, Some(1_800_000_000_000_000));
+
+        let negative_subunit = parse_at(
+            "options(time_offset=-500ns) _time:[1800000000000000,1800000000000001]",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(negative_subunit.spec.ts_min, Some(1_800_000_000_000_001));
+        assert_eq!(negative_subunit.spec.ts_max, Some(1_800_000_000_000_001));
+    }
+
+    #[test]
+    fn session_nineteen_time_offset_grammar_pipeline_order_and_repeating_ranges_are_exact() {
+        let plan = parse_at(
+            "OPTIONS(time_offset=1s, time_offset=500ns,) * | fields _time",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(plan.time_offset_ns, 500);
+        assert!(matches!(
+            plan.pipeline.as_slice(),
+            [PipelineOp::QueryTimeOffset(500), PipelineOp::Project(_)]
+        ));
+
+        let leading_filters = parse_at(
+            "options(time_offset=1s) * | filter _time:1m | filter level:=error | fields _time",
+            TimestampUnit::Microseconds,
+            1_800_000_000_000_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            leading_filters.pipeline.as_slice(),
+            [
+                PipelineOp::Filter(_),
+                PipelineOp::Filter(_),
+                PipelineOp::QueryTimeOffset(1_000_000_000),
+                PipelineOp::Project(_)
+            ]
+        ));
+
+        let day = parse_at(
+            "options(time_offset=1h) _time:day_range[10:00,12:00) offset 2h",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            day.spec.predicate,
+            Some(LogPredicate::DayRange {
+                offset_ns: 10_800_000_000_000,
+                ..
+            })
+        ));
+        let week = parse_at(
+            "options(time_offset=-1h) _time:week_range[Mon,Fri] offset 2h",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            week.spec.predicate,
+            Some(LogPredicate::WeekRange {
+                offset_ns: 3_600_000_000_000,
+                ..
+            })
+        ));
+
+        assert_eq!(
+            parse_at("options() *", TimestampUnit::Microseconds, 0)
+                .unwrap()
+                .time_offset_ns,
+            0
+        );
+        for malformed in [
+            "options(time_offset=) *",
+            "options(time_offset=1) *",
+            "options(time_offset=+1s) *",
+            "options(time_offset=1hour) *",
+            "options(TIME_OFFSET=1s) *",
+            "options(time_offset=1s",
+            "options(time_offset=1s)",
+            "options(time_offset=\"one second\") *",
+            "options(time_offset=1s,,) *",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
         }
     }
 
@@ -11677,6 +12039,7 @@ mod tests {
         let mut context = ParseContext {
             timestamp_unit: TimestampUnit::Microseconds,
             query_now: 0,
+            inherited_time_offset_ns: 0,
             query_backed_depth: 0,
             query_backed_lists: 0,
             common_case_values: 0,

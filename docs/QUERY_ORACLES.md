@@ -1503,3 +1503,27 @@ syntax.
 The fixture remains 167 source rows and now contains 367 row-query cases, one
 stochastic case, 532 error cases, and 541 statistics/pipeline cases: 1,441
 cases total, all passing against the immutable image. The fixture now contains 1441 cases.
+
+`LQL-Q04` adds eleven successful row-query witnesses and eight parser errors
+for leading `options(time_offset=<duration>)`. They pin positive and negative
+source-bound translation, sub-native and compound fractional durations,
+quoted values, duplicate-last-wins and trailing-comma behavior,
+case-insensitive `options` with a case-sensitive option name, shifted result
+timestamps, leading-versus-later filter order, nested inheritance and explicit
+replacement, day/week ranges, and strict malformed or missing values.
+
+Source audit at immutable commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers `parser.go`, query-option
+tests, `storage_search.go`, time-filter initialization, and the query
+optimizer. VictoriaLogs shifts storage bounds backward by `time_offset`, then
+shifts returned `_time` values forward. Nested queries inherit the outer
+offset unless they declare their own value, including explicit zero. Day and
+week filters compose with the same offset. Consecutive leading `filter` pipes
+are optimized into the storage predicate after option-bound rewriting, so
+their time comparisons observe original source timestamps; later pipes
+observe the shifted result time. A source-replacing `generate_sequence` has no
+retained timestamp to shift.
+
+The fixture remains 167 source rows and now contains 378 row-query cases, one
+stochastic case, 540 error cases, and 541 statistics/pipeline cases: 1,460
+cases total, all passing against the immutable image. The fixture now contains 1460 cases.
