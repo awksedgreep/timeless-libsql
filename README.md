@@ -1014,6 +1014,14 @@ zip, raw token behavior, conditions, rich mutation, and HTTP semantics remain
 in the Rust API after the same public scan. No extension opcode, private table,
 storage format, or authoritative 8,192-entry batching behavior is changed.
 
+Exact-build p50/p95/p99 is 3.552/3.896/4.049 ms narrow and
+35.071/39.121/40.075 ms wide while returning 128 rows and 2,112 bytes, versus
+3.220/3.670/4.680 and 34.595/39.180/39.443 ms for 64-row, 1,408-byte array-
+concat controls. `QSF-231` accepts the +6.1%/-0.2% p95 and +8.3%/-0.0%
+request-attributed API mean after identical public storage reads; the
+candidate's doubled cardinality and 704 extra response bytes remain part of
+the honest endpoint measurement.
+
 Standalone unquoted
 wildcards in `in`, `contains_any`, and `contains_all` are field-independent
 no-ops. Query-backed forms require a subquery ending in one exact `fields`,

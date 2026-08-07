@@ -1198,8 +1198,16 @@ The bounded Rust evaluator enforces cumulative work, state, result,
 response, deadline, and cancellation limits; query-backed conditions inherit
 the parent request limits; overlapping destinations fail actionably; and
 optimize, shutdown, and reopen leave source rows unchanged. `QSF-230` records
-the semantic/storage boundary. Exact release performance, storage-work, HWM,
-and final row disposition remain required before this row closes.
+the semantic/storage boundary. Exact release build
+`eff28bb74482bcadcec292b27f28c4462f663a73` measures 3.896/39.121 ms
+narrow/wide p95 while returning 128 rows and 2,112 bytes, versus
+3.670/39.180 ms for 64-row, 1,408-byte array-concat controls. `QSF-231`
+accepts the +6.1%/-0.2% p95 and +8.3%/-0.0% request-attributed API mean after
+identical public storage work, with the doubled cardinality and 704 additional
+response bytes retained honestly. All 8,192 entries complete durably; storage
+remains four raw blocks; queues and in-flight cancellation are zero. No
+extension primitive, private table, storage contract, or authoritative
+batching behavior changed.
 
 ### Session 19: experimental and data-model dispositions
 

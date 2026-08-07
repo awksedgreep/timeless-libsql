@@ -5842,20 +5842,6 @@ async fn session_seventeen_pack_json_is_rich_bounded_and_durable() {
     )
     .unwrap();
     assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
-    let conflict = app
-        .clone()
-        .oneshot(logsql_request(
-            r#"case:="unroll-expand" | unroll scalar.child"#,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let conflict = serde_json::from_slice::<serde_json::Value>(
-        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
-    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
-
     let work_limited = router_with_limits(
         storage.clone(),
         LogsQueryLimits {
@@ -8041,6 +8027,20 @@ async fn session_eighteen_unroll_is_exact_rich_bounded_and_durable() {
         .clone()
         .oneshot(logsql_request(
             r#"case:="unroll-expand" | unroll (nested, nested.array)"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let conflict = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(conflict.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(conflict["reason"], "field_conflict", "{conflict}");
+
+    let conflict = app
+        .clone()
+        .oneshot(logsql_request(
+            r#"case:="unroll-expand" | unroll scalar.child"#,
         ))
         .await
         .unwrap();

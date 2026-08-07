@@ -2101,6 +2101,15 @@ complete semantics stay in bounded Rust composition after the same public
 scan. No extension primitive, private table, durable format, compression,
 index, or authoritative 8,192-entry batch contract changes.
 
+Exact-build p50/p95/p99 is 3.552/3.896/4.049 ms narrow and
+35.071/39.121/40.075 ms wide while returning 128 rows and 2,112 bytes. The
+array-concat controls measure 3.220/3.670/4.680 and
+34.595/39.180/39.443 ms while returning 64 rows and 1,408 bytes. `QSF-231`
+accepts the +6.1%/-0.2% p95 and +8.3%/-0.0% request-attributed API mean after
+identical public block, decode, payload, and row work. The candidate's doubled
+cardinality and 704 additional bytes are retained in the endpoint result; no
+independent equal-cardinality expansion control exists at this boundary.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

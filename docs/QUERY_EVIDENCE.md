@@ -4467,6 +4467,70 @@ no evidence for a new extension primitive. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `unroll`
+
+The checked-in
+[`2026-08-06_session18_lql_p42_unroll.json`](evidence/2026-08-06_session18_lql_p42_unroll.json)
+was captured from exact release extension and server build
+`eff28bb74482bcadcec292b27f28c4462f663a73` and has SHA-256
+`49179a9003845760ec2d8bc591e9664a2beac4dd244b5b624bc517f296a69ba3`.
+Each shape sorts and materializes the full public candidate set and applies a
+deterministic 64-row limit. The candidate then expands the retained two-value
+`tags` array into 128 rows; the control concatenates the same array and
+returns 64 rows. There is no independent equal-cardinality expanding control
+at this boundary, so the differing cardinality and response bytes are
+reported rather than hidden. Every equal-width pair still performs identical
+public block selection, decode, payload reads, row materialization, sorting,
+limiting, and source projection.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| two-value `unroll`, indexed host | 128 | 2,112 | 3.552 | 3.896 | 4.049 | 1 | 1,024 | 235,778 | 128 |
+| two-value `unroll`, full fixture | 128 | 2,112 | 35.071 | 39.121 | 40.075 | 4 | 8,192 | 1,914,055 | 8,192 |
+| array-concat control, indexed host | 64 | 1,408 | 3.220 | 3.670 | 4.680 | 1 | 1,024 | 235,778 | 128 |
+| array-concat control, full fixture | 64 | 1,408 | 34.595 | 39.180 | 39.443 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+The expansion p95 is 6.1% above the narrow control and 0.2% below the wide
+control. Request-attributed API averages are 2.815/34.607 ms versus
+2.599/34.616 ms, or 8.3% higher/0.0% lower. These comparisons include twice
+the result cardinality and 704 additional response bytes, so they bound the
+complete endpoint cost but do not isolate an array-expansion kernel. Source
+snapshotting, native traversal, two output rows per selected row, allocation,
+and request-local writes remain bounded post-scan Rust API work. An extension
+primitive would not avoid any measured storage read, decode, payload, or
+public-row crossing.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+14.058 ms and the explicit durability barrier took 37.563 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 101,928 KiB, 2,316 KiB above
+LQL-P40; metrics HWM was 52,824 KiB, 768 KiB above it. Both are retained as
+whole-process workload variation; the candidate also retains twice as many
+result rows. Cancellation ended with zero requests in flight and zero
+cancelled requests at capture. Direct evaluator and HTTP regressions pin
+source/result/work/state/response bounds, deadline cancellation, and reader
+reuse.
+
+All 1,223 pinned VictoriaLogs v1.52.0 cases pass live. The final local gates
+also pass: 138 logs library tests, 68 logs real-extension tests, 90 metrics
+real-extension tests, both complete Rust workspaces, the six focused storage
+correctness profiles, all 45 CLI/crash/transaction sections, DB-health, the
+33-test Rust query harness, documentation contracts, Clippy with warnings
+denied, and formatting. The executable SQL cookbook contains 122 recipes and
+160 statements, all of which run through the public release extension. The
+first complete LogsQL run exposed `QSF-232`: a scalar-parent assertion was in
+the wrong fixture and selected no row. Moving it into the durable `unroll`
+fixture made the promised HTTP 422 conflict observable; the complete 68-test
+rerun passes without a product-code waiver.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. Direct SQLite/libSQL users have
+executable single-canonical-array `SQL-LOG-056`; the measured identical public
+storage work provides no evidence for a new extension primitive. No private
+shadow table, Elixir/BEAM/NIF/process fallback, CI workflow or invocation,
+tag, release, or downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in
