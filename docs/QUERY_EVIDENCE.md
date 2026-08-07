@@ -4662,6 +4662,73 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `running_stats`
+
+The checked-in
+[`2026-08-06_session18_lql_p45_running_stats.json`](evidence/2026-08-06_session18_lql_p45_running_stats.json)
+was captured from exact release extension and server build
+`3f4ef107973f73361cfd90eff6e31ea53bd58f0c` and has SHA-256
+`b58634502d9d9c771fc1079620f3d4de029e0a5207bc8ed9601917ad3f9b84de`.
+Each candidate and control performs one public scan, sorts the same candidate
+set chronologically, limits the response to 64 rows, and performs identical
+physical storage work. The candidate partitions by service and severity and
+writes a cumulative count. The control writes one constant field after the
+same sort and limit; it isolates the bounded grouping, partitioned ordering,
+state update, and result write without pretending the response values or
+field-name lengths are identical.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| grouped `running_stats count()`, indexed host | 64 | 951 | 3.174 | 3.437 | 3.524 | 1 | 1,024 | 235,778 | 128 |
+| grouped `running_stats count()`, full fixture | 64 | 951 | 44.922 | 48.000 | 49.893 | 4 | 8,192 | 1,914,055 | 8,192 |
+| time-sort/constant control, indexed host | 64 | 1,024 | 3.207 | 3.771 | 4.821 | 1 | 1,024 | 235,778 | 128 |
+| time-sort/constant control, full fixture | 64 | 1,024 | 34.292 | 38.690 | 39.518 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Running statistics p95 is 8.9% below the narrow control and 24.1% above the
+wide control. Request-attributed API averages are 2.467/44.051 ms versus
+2.554/33.894 ms, or 3.4% lower/30.0% higher. Every equal-width pair executes
+exactly 50 public queries and has byte-identical candidate-block selection,
+entry decode, payload reads, matches, public-row returns, and requested work.
+The candidate's shorter 951-byte response versus 1,024 bytes is an honest
+consequence of the projected field names and cumulative values. The evidence
+harness requires physical-work equality and does not erase that output
+difference.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+16.403 ms and the explicit durability barrier took 39.731 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 102,368 KiB, 856 KiB above
+LQL-P44 after four additional one-scan shapes; metrics HWM was 50,756 KiB,
+2,704 KiB below it. Both are retained as whole-process complete-workload
+variation. Cancellation ended with zero requests in flight and zero cancelled
+requests at capture. The measured wide partition/sort/state cost remains
+bounded Rust API work. Fixed-key SQLite window functions already give direct
+users the useful foundation, and an extension primitive would avoid neither
+scan, decode, payload crossing, nor row crossing.
+
+The complete 1,300-case pinned VictoriaLogs v1.52.0 corpus passes live. Direct
+parser/evaluator and real-extension regressions pin strict grammar, numeric
+microsecond chronology, stable ties, independent groups, cumulative count,
+sum, natural-order typed min/max, offset first/last, recursive prefix/all
+selection, rich exact values, alias snapshots and conflicts,
+work/state/result/response/deadline limits, cancellation, immutable source
+rows, optimize, flush, shutdown, and reopen. Executable `SQL-LOG-059` proves
+the fixed-key numeric window foundation through the public release extension.
+
+Final local gates pass: 144 logs library tests, two logs binary tests, all 71
+logs and 90 metrics real-extension tests, both complete Rust workspaces, the
+35-test Rust query harness, all six focused correctness profiles, the
+standalone DB-health lifecycle gate, all 45 CLI/crash/transaction sections,
+documentation/oracle contracts, formatting, and Clippy with warnings denied.
+All 125 executable SQL recipes and 163 statements pass through the public
+release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

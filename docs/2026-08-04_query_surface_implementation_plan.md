@@ -1258,6 +1258,29 @@ storage remains four raw blocks; queued and in-flight work are zero. No
 extension primitive, private table, storage contract, or authoritative
 batching behavior changed. `LQL-P44` is closed.
 
+Session 18's `LQL-P45` row is closed as API-owned bounded running state over
+one public `logs` scan, with `SQL-LOG-059` as the direct-user fixed-key SQLite
+window foundation. Pinned VictoriaLogs source plus the complete 1,300-case
+live oracle establish strict grouping/expression grammar, count, sum,
+natural-order min/max, offset first/last, recursive prefix selection, and
+explicit failures. Timeless deliberately corrects the upstream
+variable-width formatted-time ordering bug by using numeric microsecond
+chronology, keeps stable ties and deterministic lexical group order, and
+preserves native rich exact values.
+
+Group keys, sorting, recursive traversal, accumulators, offset history,
+generated values, cardinality, response bytes, deadlines, and cancellation
+are cumulative and bounded. Complete real-extension coverage pins alias
+snapshots/conflicts, limits, immutable source rows, optimize, shutdown, and
+reopen. `QSF-239` records the semantic and unchanged-storage boundary. Exact
+release build `3f4ef107973f73361cfd90eff6e31ea53bd58f0c` measures
+3.437/48.000 ms narrow/wide p95 versus 3.771/38.690 ms same-scan controls.
+`QSF-240` accepts the -8.9%/+24.1% endpoint tail and -3.4%/+30.0%
+request-attributed API mean after byte-identical public storage work. All
+8,192 entries complete durably; storage remains four raw blocks; queued and
+in-flight work are zero. No extension primitive, private table, storage
+contract, or authoritative batching behavior changed. `LQL-P45` is closed.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

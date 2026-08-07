@@ -148,7 +148,7 @@ extension.
 | `LQL-P42` | `unroll` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-056-unroll-one-json-array)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P43` | `join` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P44` | `union` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-058-bounded-ordered-union-of-two-public-log-scans)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P45` | `running_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P45` | `running_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P46` | `total_stats` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P47` | `time_add` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P48` | `generate_sequence` | missing | no | `SQL` | `API` | P3 |

@@ -2306,6 +2306,20 @@ Rust API owns dynamic LogsQL grammar, natural ordering, complete rich values,
 limits, cancellation, and envelopes. No extension primitive or storage-format
 change is needed.
 
+Exact release build `3f4ef107973f73361cfd90eff6e31ea53bd58f0c`
+measures grouped running count at 3.174/3.437/3.524 ms narrow and
+44.922/48.000/49.893 ms wide p50/p95/p99. Same-scan time-sort/constant
+controls measure 3.207/3.771/4.821 and 34.292/38.690/39.518 ms. Running
+statistics p95 is 8.9% lower/24.1% higher; request-attributed API means are
+2.467/44.051 ms versus 2.554/33.894 ms, or 3.4% lower/30.0% higher. Every
+pair reads the identical one/four blocks, decodes 1,024/8,192 entries, reads
+235,778/1,914,055 payload bytes, and materializes 128/8,192 public rows.
+The 64-row candidate/control responses are 951/1,024 bytes because their
+projected names and values differ. The accepted wide partition/sort/state
+cost is bounded language composition after the same public scan; fixed-key
+SQLite windows already serve direct users, so it does not justify an
+extension primitive.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and
