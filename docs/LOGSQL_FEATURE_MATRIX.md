@@ -147,7 +147,7 @@ extension.
 | `LQL-P41` | `json_array_len` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-043-top-level-json-array-length)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P42` | `unroll` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-056-unroll-one-json-array)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P43` | `join` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P44` | `union` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-058-bounded-ordered-union-of-two-public-log-scans)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P44` | `union` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-058-bounded-ordered-union-of-two-public-log-scans)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P45` | `running_stats` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P46` | `total_stats` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P47` | `time_add` | missing | no | `SQL` | `API` | P3 |

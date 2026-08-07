@@ -4597,6 +4597,71 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `union`
+
+The checked-in
+[`2026-08-06_session18_lql_p44_union.json`](evidence/2026-08-06_session18_lql_p44_union.json)
+was captured from exact release extension and server build
+`c3ce658ed9475691fc8e4a51e9fe0e02fb57fe7c` and has SHA-256
+`e9d434b4e0bc6d1ede914377fcfec13984e06b88d5b430939fd9de16f83da404`.
+Each candidate and control performs two independently planned public scans,
+sorts and limits each side to 64 rows, and returns identical 128-row,
+2,560-byte output. The candidate appends the complete rich query source. The
+control resolves the same source keys through query-backed `in(...)`, writes
+two identical values, unrolls them, and projects the same constant field.
+This is an honest equal-output control for retaining and cloning one bounded
+source after the unavoidable reads.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | public scans/request | candidate blocks/scan | decoded entries/scan | extension payload bytes/scan | public rows/scan |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| query-backed `union`, indexed host | 128 | 2,560 | 6.442 | 6.794 | 6.917 | 2 | 1 | 1,024 | 235,778 | 128 |
+| query-backed `union`, full fixture | 128 | 2,560 | 67.816 | 74.143 | 75.364 | 2 | 4 | 8,192 | 1,914,055 | 8,192 |
+| query-backed `in(...)`/`unroll` control, indexed host | 128 | 2,560 | 5.846 | 6.363 | 7.126 | 2 | 1 | 1,024 | 235,778 | 128 |
+| query-backed `in(...)`/`unroll` control, full fixture | 128 | 2,560 | 68.604 | 73.714 | 79.489 | 2 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Union p95 is 6.8% above the narrow control and 0.6% above the wide control.
+Request-attributed API averages are 5.370/67.574 ms versus
+4.931/67.884 ms, or 8.9% higher/0.5% lower. Every equal-width pair executes
+exactly 100 public queries across 50 measured requests and has byte-identical
+candidate-block selection, entry decode, payload reads, matches, public-row
+returns, result cardinality, and response bytes. Retaining 64 one-member rich
+source rows deliberately reserves 128 additional work items per request, so
+the candidate's outer scan requests exactly 128 fewer entries than the
+control. The evidence harness requires that exact delta as well as exact scan
+multiplicity and physical storage equality.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+13.750 ms and the explicit durability barrier took 44.750 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 101,512 KiB, 1,996 KiB below
+LQL-P43 after four additional two-scan shapes; metrics HWM was 53,460 KiB,
+440 KiB above it. Both are retained as whole-process complete-workload
+variation. Cancellation ended with zero requests in flight and zero cancelled
+requests at capture. Retained-source traversal and cloning remain bounded
+Rust API work. Ordinary `UNION ALL` already gives direct users the useful
+composition, and an extension primitive would avoid neither scan, decode,
+payload crossing, nor row crossing.
+
+The complete 1,267-case pinned VictoriaLogs v1.52.0 corpus passes live. Direct
+parser/evaluator and real-extension regressions pin strict query/inline
+grammar, recursively query-backed sources, empty-source behavior, duplicate
+preservation, deterministic Timeless left/source order, complete retained
+rich fidelity, subsequent pipeline composition, cumulative
+work/state/result/response/deadline limits, cancellation, immutable source
+rows, optimize, flush, shutdown, and reopen. Final local gates pass: 142 logs
+library tests, two logs binary tests, all 70 logs and 90 metrics
+real-extension tests, both complete Rust workspaces, the 34-test Rust query
+harness, all six focused correctness profiles, the standalone DB-health
+lifecycle gate, all 45 CLI/crash/transaction sections, documentation/oracle
+contracts, formatting, and Clippy with warnings denied. All 124 executable SQL
+recipes and 162 statements pass through the public release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

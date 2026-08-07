@@ -2230,6 +2230,21 @@ owns LogsQL grammar, recursive planning, limits, cancellation, and envelopes.
 No extension primitive, private table, storage format, or authoritative
 8,192-entry batching behavior changes.
 
+Exact release build `c3ce658ed9475691fc8e4a51e9fe0e02fb57fe7c`
+measures query-backed union at 6.442/6.794/6.917 ms narrow and
+67.816/74.143/75.364 ms wide p50/p95/p99. Equal-output two-scan controls
+measure 5.846/6.363/7.126 and 68.604/73.714/79.489 ms. Union p95 is
+6.8%/0.6% higher; request-attributed API means are 5.370/67.574 ms versus
+4.931/67.884 ms, or 8.9% higher/0.5% lower. Every request performs exactly
+two public scans and returns the same 128 rows/2,560 bytes. Each candidate
+and control reads the same one/four blocks per scan, decodes 1,024/8,192
+entries, reads 235,778/1,914,055 payload bytes, and returns 128/8,192 public
+rows per scan. The candidate deliberately reserves exactly 128 additional
+work items per request for 64 retained one-member source rows; all physical
+storage counters remain identical. The bounded post-scan cost is accepted
+above the public storage boundary and provides no evidence for a new
+extension primitive.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

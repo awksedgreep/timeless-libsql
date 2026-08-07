@@ -1247,8 +1247,16 @@ Recursive query-backed plans share the parent clock and cumulative
 work/state/result/response/deadline limits. Complete typed/nested source rows,
 inline text rows, traversal, cloning, cardinality, and cancellation are
 bounded; optimize, shutdown, and reopen leave public source rows unchanged.
-`QSF-237` records the semantic and unchanged-storage boundary. Exact-build
-performance/HWM evidence remains required before this row closes.
+`QSF-237` records the semantic and unchanged-storage boundary. Exact release
+build `c3ce658ed9475691fc8e4a51e9fe0e02fb57fe7c` measures
+6.794/74.143 ms narrow/wide p95 versus 6.363/73.714 ms equal-output two-scan
+controls. `QSF-238` accepts the +6.8%/+0.6% endpoint tail and
++8.9%/-0.5% request-attributed API mean after byte-identical physical
+storage work. The explicit evidence contract pins two scans and exactly 128
+retained-source work items per request. All 8,192 entries complete durably;
+storage remains four raw blocks; queued and in-flight work are zero. No
+extension primitive, private table, storage contract, or authoritative
+batching behavior changed. `LQL-P44` is closed.
 
 ### Session 19: experimental and data-model dispositions
 
