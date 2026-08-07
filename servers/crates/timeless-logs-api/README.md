@@ -1785,6 +1785,55 @@ and public-row work. Union reserves exactly 128 additional work items per
 request for 64 retained one-member source rows. This bounded post-scan cost
 does not justify moving the language operation into the extension.
 
+## LogsQL bounded running statistics
+
+`running_stats` preserves input cardinality while adding cumulative state:
+
+```text
+* | running_stats count() as rows
+* | running_stats by (service, level) sum(duration_ms) as elapsed
+* | running_stats (service) min(duration_ms) as minimum, max(duration_ms) as maximum
+* | running_stats first(message) offset 1 as second_message, last(message) offset 1 as previous_message
+* | running_stats sum(payload.*) as nested_total
+```
+
+The command, grouping keyword, and function names are case-insensitive. Groups
+use `by (field, ...)` or `(field, ...)` and require exact fields. Count, sum,
+minimum, and maximum accept exact, prefix, or all-field selectors; first and
+last require one exact field and an optional nonnegative offset. Results may
+have explicit exact aliases or canonical names such as `count(*)`. Invalid
+groups, selectors, destinations, arity, offsets, commas, suffixes, duplicate
+aliases, and trailing tokens fail before execution.
+
+Rows are ordered by numeric microsecond time with stable ties inside each
+textual group, and groups have deterministic lexical order. This deliberately
+corrects VictoriaLogs' internal formatted-string sort, which can put 31
+microseconds before 30 microseconds when RFC3339 fractions have different
+widths. The upstream public contract promises time order inside a group but
+does not promise cross-group order.
+
+Whole-row count advances on every row; selected count advances once when any
+selected value is nonempty. Sum accepts finite textual/native numbers, skips
+missing, null, empty, invalid, `NaN`, and infinity inputs, and exposes initial
+state as `"NaN"`. Finite overflow is `"+Inf"`/`"-Inf"`. Minimum and maximum
+use the complete LogsQL natural comparator and preserve the winning native
+rich value. First selects a fixed offset from the beginning; last selects an
+offset behind the current row. Prefix/all selectors recurse through retained
+object leaves while arrays stay atomic. Exact fields can retain whole nested
+objects. All expressions read the original row before aliases are written;
+later pipes see the generated fields, existing scalar destinations are
+overwritten, and scalar-parent conflicts return HTTP 422.
+
+Keys, sort state, recursive traversal, accumulators, offset history, work,
+result rows, response bytes, deadline, and cancellation are bounded. One
+public `logs` scan supplies immutable rich rows, which remain unchanged across
+optimize, shutdown, and reopen. Executable
+[`SQL-LOG-059`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)
+provides fixed-key numeric SQLite windows for direct users. Rust owns dynamic
+LogsQL grammar, natural/rich semantics, limits, cancellation, and envelopes;
+no private table, extension query opcode, storage format, or authoritative
+8,192-entry batching behavior changes.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

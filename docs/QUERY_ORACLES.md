@@ -1122,3 +1122,32 @@ left-then-source order. VictoriaLogs also emits no response row for inline
 row-query cases, one stochastic case, 448 error cases, and 472
 statistics/pipeline cases: 1,267 cases total, all passing against the
 immutable image. The fixture now contains 1267 cases.
+
+`LQL-P45` adds seventeen exact pipeline cases and sixteen error cases for
+`running_stats`. They pin the upstream pipe's implicit lexical `_time` order;
+whole-row, exact-field, and prefix-field counts; numeric sum; natural min/max;
+independent `by (...)` and shorthand `(...)` groups; case-insensitive pipe
+spelling; `first`/`last` offsets; canonical omitted aliases; subsequent
+pipeline visibility; result-field overwrite; empty input; initial `NaN`;
+rejection of textual `NaN` and infinities as sum inputs after finite state;
+and strict function, group, field-filter, alias, offset, comma, tail, and
+termination errors. Source audit covers `pipe_running_stats.go`, all six
+`running_stats_*.go` processors, their unit tests, and the checked language
+reference at immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+
+The source materializes every input row, partitions by textual group keys,
+sorts groups by their encoded key and rows by the formatted `_time` string,
+and updates `count`, `sum`, `min`, `max`, `first`, and `last` state before
+forwarding each row.
+The public reference promises time order inside a group but does not promise
+cross-group order. Missing exact fields project as empty text; nonnumeric sums
+are skipped and remain `NaN` until a finite number appears; textual `NaN`,
+`+Inf`, and `-Inf` are likewise skipped. The pinned source's string
+comparison is not chronological when RFC3339 fractional seconds have different
+printed widths: `...000031Z` sorts before `...00003Z`. The upstream fixture pins
+that observed behavior; Timeless selects numeric microsecond order and records
+the intentional compatibility deviation in the P45 storage finding. The
+fixture now contains 167 source rows, 346 row-query cases, one stochastic
+case, 464 error cases, and 489 statistics/pipeline cases: 1,300 cases total,
+all passing against the immutable image. The fixture now contains 1300 cases.

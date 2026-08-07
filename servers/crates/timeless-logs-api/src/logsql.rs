@@ -90,6 +90,16 @@ pub(crate) enum StatsKind {
     RateSum,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunningStatsKind {
+    Count,
+    Sum,
+    Min,
+    Max,
+    First { offset: usize },
+    Last { offset: usize },
+}
+
 fn parse_field_values_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     let rest = segment
         .strip_prefix("field_values")
@@ -518,6 +528,210 @@ fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlErr
         limit,
         quantile,
     })
+}
+
+fn parse_running_stats_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    const OPERATION: &str = "running_stats";
+    let command = segment
+        .get(..OPERATION.len())
+        .ok_or_else(|| LogsqlError::malformed("LogsQL running_stats pipe is empty"))?;
+    if !command.eq_ignore_ascii_case(OPERATION) {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL running_stats pipe, not {command:?}"
+        )));
+    }
+    let command_tail = &segment[OPERATION.len()..];
+    if command_tail
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_whitespace())
+    {
+        return Err(LogsqlError::malformed(
+            "LogsQL running_stats requires whitespace before its arguments",
+        ));
+    }
+    let mut rest = command_tail.trim_start();
+    let mut group_by = Vec::new();
+    if starts_format_keyword(rest, "by") {
+        rest = rest["by".len()..].trim_start();
+        let (fields, tail) = parse_running_stats_group(rest)?;
+        group_by = fields;
+        rest = tail;
+    } else if rest.starts_with('(') {
+        let (fields, tail) = parse_running_stats_group(rest)?;
+        group_by = fields;
+        rest = tail;
+    }
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL running_stats requires at least one function",
+        ));
+    }
+
+    let expressions = split_top_level(rest, ',')?
+        .into_iter()
+        .map(|expression| parse_running_stats_expression(expression.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut aliases = BTreeSet::new();
+    for expression in &expressions {
+        if !aliases.insert(expression.alias_name.clone()) {
+            return Err(LogsqlError::malformed(format!(
+                "duplicate LogsQL running_stats result name {:?}",
+                expression.alias_name
+            )));
+        }
+    }
+    Ok(PipelineOp::RunningStats(RunningStatsSpec {
+        group_by,
+        expressions,
+    }))
+}
+
+fn parse_running_stats_group(rest: &str) -> Result<(Vec<PipelineField>, &str), LogsqlError> {
+    if !rest.starts_with('(') {
+        return Err(LogsqlError::malformed(
+            "LogsQL running_stats by requires parenthesized fields",
+        ));
+    }
+    let close = matching_parenthesis(rest, 0)
+        .map_err(|_| LogsqlError::malformed("unterminated LogsQL running_stats group fields"))?;
+    let source = rest[1..close].trim();
+    if source.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL running_stats group requires at least one field",
+        ));
+    }
+    let fields = split_top_level(source, ',')?
+        .into_iter()
+        .map(|field| parse_running_stats_exact_field(field.trim(), "group"))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((fields, rest[close + 1..].trim_start()))
+}
+
+fn parse_running_stats_expression(expression: &str) -> Result<RunningStatsExpression, LogsqlError> {
+    let open = expression.find('(').ok_or_else(|| {
+        LogsqlError::malformed(format!(
+            "LogsQL running_stats function requires parentheses: {expression:?}"
+        ))
+    })?;
+    let close = matching_parenthesis(expression, open).map_err(|_| {
+        LogsqlError::malformed(format!(
+            "unterminated LogsQL running_stats function {expression:?}"
+        ))
+    })?;
+    let function_source = expression[..open].trim();
+    let function = function_source.to_ascii_lowercase();
+    let args_source = expression[open + 1..close].trim();
+    let mut fields = if args_source.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(args_source, ',')?
+            .into_iter()
+            .map(|field| parse_pipeline_field(field.trim(), true))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut tail = pipeline_words(expression[close + 1..].trim())?;
+
+    let mut offset = 0usize;
+    let kind = match function.as_str() {
+        "count" | "sum" | "min" | "max" => {
+            if fields.is_empty() {
+                fields.push(PipelineField::All);
+            }
+            match function.as_str() {
+                "count" => RunningStatsKind::Count,
+                "sum" => RunningStatsKind::Sum,
+                "min" => RunningStatsKind::Min,
+                "max" => RunningStatsKind::Max,
+                _ => unreachable!(),
+            }
+        }
+        "first" | "last" => {
+            if fields.len() != 1 {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL running_stats {function} requires exactly one field"
+                )));
+            }
+            if !matches!(fields.first(), Some(PipelineField::Exact { .. })) {
+                return Err(LogsqlError::malformed(format!(
+                    "LogsQL running_stats {function} requires an exact field"
+                )));
+            }
+            if tail
+                .first()
+                .is_some_and(|token| token.eq_ignore_ascii_case("offset"))
+            {
+                if tail.len() < 2 {
+                    return Err(LogsqlError::malformed(format!(
+                        "LogsQL running_stats {function} offset requires a value"
+                    )));
+                }
+                offset =
+                    parse_pipeline_usize(&format!("running_stats {function} offset"), &tail[1])?;
+                tail.drain(..2);
+            }
+            if function == "first" {
+                RunningStatsKind::First { offset }
+            } else {
+                RunningStatsKind::Last { offset }
+            }
+        }
+        _ => {
+            return Err(LogsqlError::malformed(format!(
+                "unsupported LogsQL running_stats function {function_source:?}"
+            )))
+        }
+    };
+
+    let canonical_args = if args_source.is_empty() {
+        "*"
+    } else {
+        args_source
+    };
+    let mut canonical = format!("{function}({canonical_args})");
+    if offset > 0 {
+        canonical.push_str(&format!(" offset {offset}"));
+    }
+    let explicit_alias = match tail.as_slice() {
+        [] => None,
+        [keyword] if keyword.eq_ignore_ascii_case("as") => {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL running_stats {function} alias requires a value"
+            )))
+        }
+        [keyword, alias] if keyword.eq_ignore_ascii_case("as") => Some(alias.as_str()),
+        [alias] => Some(alias.as_str()),
+        _ => {
+            return Err(LogsqlError::malformed(format!(
+                "unexpected LogsQL running_stats {function} token {:?}",
+                tail.first().map_or("", String::as_str)
+            )))
+        }
+    };
+    let alias = if let Some(alias) = explicit_alias {
+        parse_pipeline_field(alias, false)?
+    } else {
+        PipelineField::Exact {
+            path: vec![canonical.clone()],
+            name: canonical,
+        }
+    };
+    let alias_name = pipeline_field_name(&alias)?;
+    Ok(RunningStatsExpression {
+        kind,
+        fields,
+        alias,
+        alias_name,
+    })
+}
+
+fn parse_running_stats_exact_field(source: &str, role: &str) -> Result<PipelineField, LogsqlError> {
+    match parse_pipeline_field(source, false)? {
+        field @ PipelineField::Exact { .. } => Ok(field),
+        PipelineField::Prefix { .. } | PipelineField::All => Err(LogsqlError::malformed(format!(
+            "LogsQL running_stats {role} requires an exact field"
+        ))),
+    }
 }
 
 fn parse_first_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
@@ -3646,6 +3860,13 @@ fn is_union_pipe(segment: &str) -> bool {
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
+fn is_running_stats_pipe(segment: &str) -> bool {
+    let operation = "running_stats";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
     let operation = "drop_empty_fields";
     segment
@@ -4772,6 +4993,20 @@ pub(crate) struct StatsExpression {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunningStatsExpression {
+    pub kind: RunningStatsKind,
+    pub fields: Vec<PipelineField>,
+    pub alias: PipelineField,
+    pub alias_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunningStatsSpec {
+    pub group_by: Vec<PipelineField>,
+    pub expressions: Vec<RunningStatsExpression>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PipelineSortField {
     pub field: PipelineField,
     pub descending: bool,
@@ -5137,6 +5372,7 @@ pub(crate) enum PipelineOp {
     Delete(Vec<PipelineField>),
     Filter(LogPredicate),
     Stats(Vec<StatsExpression>),
+    RunningStats(RunningStatsSpec),
     QueryStats,
     First(FirstSpec),
     Last(FirstSpec),
@@ -5612,6 +5848,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
             }
             _ if is_union_pipe(segment) => {
                 pipeline.push(parse_union_pipe(segment, context)?);
+                has_session_thirteen_pipeline = true;
+            }
+            _ if is_running_stats_pipe(segment) => {
+                pipeline.push(parse_running_stats_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
             _ if is_drop_empty_fields_pipe(segment) => {
@@ -11773,6 +12013,76 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("nesting exceeds 8"), "{error:?}");
+    }
+
+    #[test]
+    fn session_eighteen_running_stats_grammar_is_complete_and_strict() {
+        for query in [
+            "* | running_stats count() as running",
+            "* | RUNNING_STATS by (service, level) sum(value) total, count(p*) as seen",
+            "* | running_stats (service) first(message) offset 2 as initial, last(message) previous",
+            r#"* | running_stats by ("group name") min(value) as "minimum value", max(*)"#,
+            "* | running_stats count(), sum(value) as running | filter running:>0",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            assert_eq!(plan.implicit_result_limit, Some(100), "{query:?}");
+        }
+
+        let plan = parse_at(
+            "* | running_stats by (service) count(), first(value) offset 2 as initial, last(value) previous",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::RunningStats(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected running_stats plan: {plan:?}");
+        };
+        assert_eq!(spec.group_by.len(), 1);
+        assert_eq!(spec.expressions.len(), 3);
+        assert_eq!(spec.expressions[0].kind, RunningStatsKind::Count);
+        assert_eq!(spec.expressions[0].alias_name, "count(*)");
+        assert_eq!(
+            spec.expressions[0].alias,
+            PipelineField::Exact {
+                path: vec!["count(*)".into()],
+                name: "count(*)".into(),
+            }
+        );
+        assert_eq!(
+            spec.expressions[1].kind,
+            RunningStatsKind::First { offset: 2 }
+        );
+        assert_eq!(spec.expressions[1].alias_name, "initial");
+        assert_eq!(
+            spec.expressions[2].kind,
+            RunningStatsKind::Last { offset: 0 }
+        );
+        assert_eq!(spec.expressions[2].alias_name, "previous");
+
+        for malformed in [
+            "* | running_stats",
+            "* | running_stats by",
+            "* | running_stats foo()",
+            "* | running_stats count",
+            "* | running_stats by (*) count()",
+            "* | running_stats by (host*) count()",
+            "* | running_stats count() as x*",
+            "* | running_stats sum() x, count() x",
+            "* | running_stats first() as x",
+            "* | running_stats first(a*) as x",
+            "* | running_stats first(a, b) as x",
+            "* | running_stats last(a) offset -1 as x",
+            "* | running_stats first(a) offset nope as x",
+            "* | running_stats count() as x trailing",
+            "* | running_stats count() as x,,sum(n) as y",
+            "* | running_stats sum(n",
+            "* | running_stats.extra count()",
+        ] {
+            let error = parse_at(malformed, TimestampUnit::Microseconds, 0).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Malformed, "{malformed:?}");
+        }
     }
 
     #[test]

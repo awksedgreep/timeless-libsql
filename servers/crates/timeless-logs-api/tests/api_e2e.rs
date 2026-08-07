@@ -8660,6 +8660,260 @@ async fn session_eighteen_union_is_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_running_stats_are_rich_bounded_chronological_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("running-stats-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let base = 1_800_000_000_000_000_i64;
+    let entries = [
+        (
+            4,
+            "b-four",
+            serde_json::json!({
+                "running_group":"running", "case":"b-four", "group":"b",
+                "n":2, "source":{"nested":[1,false,null]},
+                "prefix_values":{"direct":1,"nested":{"value":"2"}}
+            }),
+        ),
+        (
+            2,
+            "a-two",
+            serde_json::json!({
+                "running_group":"running", "case":"a-two", "group":"a",
+                "n":"2.5", "source":null
+            }),
+        ),
+        (
+            3,
+            "b-three",
+            serde_json::json!({
+                "running_group":"running", "case":"b-three", "group":"b",
+                "n":"10", "source":[1,false,null]
+            }),
+        ),
+        (
+            1,
+            "a-one",
+            serde_json::json!({
+                "running_group":"running", "case":"a-one", "group":"a", "n":-2
+            }),
+        ),
+    ]
+    .into_iter()
+    .map(|(offset, message, metadata)| LogEntry {
+        ts: base + offset,
+        level: 1,
+        severity: "info".into(),
+        message: message.into(),
+        metadata_json: metadata.to_string(),
+    })
+    .collect();
+    storage.ingest(entries).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let query = r#"running_group:="running" | running_stats by (group) count() as running_count, count(source) as source_count, sum(n) as running_sum, min(n) as running_min, max(n) as running_max, first(source) offset 1 as first_source, last(source) offset 1 as previous_source | fields case, running_count, source_count, running_sum, running_min, running_max, first_source, previous_source | limit 10000"#;
+    let rows = pipeline_rows(&app, query).await;
+    assert_eq!(
+        rows,
+        [
+            serde_json::json!({
+                "case":"a-one", "running_count":1, "source_count":0,
+                "running_sum":-2.0, "running_min":-2, "running_max":-2,
+                "first_source":"", "previous_source":""
+            }),
+            serde_json::json!({
+                "case":"a-two", "running_count":2, "source_count":0,
+                "running_sum":0.5, "running_min":-2, "running_max":"2.5",
+                "first_source":null, "previous_source":""
+            }),
+            serde_json::json!({
+                "case":"b-three", "running_count":1, "source_count":1,
+                "running_sum":10.0, "running_min":"10", "running_max":"10",
+                "first_source":"", "previous_source":""
+            }),
+            serde_json::json!({
+                "case":"b-four", "running_count":2, "source_count":2,
+                "running_sum":12.0, "running_min":2, "running_max":"10",
+                "first_source":{"nested":[1,false,null]},
+                "previous_source":[1,false,null]
+            })
+        ],
+        "running_stats must use numeric time, independent groups, typed results, and rich source values"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"running_group:="running" | running_stats count(), sum(n) | fields case, "count(*)", "sum(n)" | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"a-one","count(*)":1,"sum(n)":-2.0}),
+            serde_json::json!({"case":"a-two","count(*)":2,"sum(n)":0.5}),
+            serde_json::json!({"case":"b-three","count(*)":3,"sum(n)":10.5}),
+            serde_json::json!({"case":"b-four","count(*)":4,"sum(n)":12.5})
+        ],
+        "omitted result names must be canonical and usable by later projections"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"running_group:="running" | running_stats count() as running | filter running:>2 | fields case, running | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"b-three","running":3}),
+            serde_json::json!({"case":"b-four","running":4})
+        ],
+        "generated numeric fields must feed subsequent pipes"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"running_group:="running" | running_stats count() as source | fields case, source | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"a-one","source":1}),
+            serde_json::json!({"case":"a-two","source":2}),
+            serde_json::json!({"case":"b-three","source":3}),
+            serde_json::json!({"case":"b-four","source":4})
+        ],
+        "running results deliberately overwrite an existing destination"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"running_group:="running" | running_stats sum(prefix_values.*) as nested_sum, count(prefix_values.nested.*) as nested_count | fields case, nested_sum, nested_count | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"a-one","nested_sum":"NaN","nested_count":0}),
+            serde_json::json!({"case":"a-two","nested_sum":"NaN","nested_count":0}),
+            serde_json::json!({"case":"b-three","nested_sum":"NaN","nested_count":0}),
+            serde_json::json!({"case":"b-four","nested_sum":3.0,"nested_count":1})
+        ],
+        "running prefix selectors must traverse retained nested fields"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"running_group:="running" | math 0 / 0 as nan_value, 1 / 0 as positive_value, -1 / 0 as negative_value | running_stats sum(never_present) as missing_sum, sum(nan_value) as nan_sum, sum(positive_value) as positive_sum, sum(negative_value) as negative_sum | fields case, missing_sum, nan_sum, positive_sum, negative_sum | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"a-one","missing_sum":"NaN","nan_sum":"NaN","positive_sum":"NaN","negative_sum":"NaN"}),
+            serde_json::json!({"case":"a-two","missing_sum":"NaN","nan_sum":"NaN","positive_sum":"NaN","negative_sum":"NaN"}),
+            serde_json::json!({"case":"b-three","missing_sum":"NaN","nan_sum":"NaN","positive_sum":"NaN","negative_sum":"NaN"}),
+            serde_json::json!({"case":"b-four","missing_sum":"NaN","nan_sum":"NaN","positive_sum":"NaN","negative_sum":"NaN"})
+        ],
+        "running sums must expose initial NaN and skip textual NaN or infinity"
+    );
+
+    for malformed in [
+        "* | running_stats",
+        "* | running_stats by",
+        "* | running_stats foo()",
+        "* | running_stats count",
+        "* | running_stats by (*) count()",
+        "* | running_stats by (host*) count()",
+        "* | running_stats count() as x*",
+        "* | running_stats sum() x, count() x",
+        "* | running_stats first() as x",
+        "* | running_stats first(a*) as x",
+        "* | running_stats first(a, b) as x",
+        "* | running_stats last(a) offset -1 as x",
+        "* | running_stats first(a) offset nope as x",
+        "* | running_stats count() as x trailing",
+        "* | running_stats count() as x,,sum(n) as y",
+        "* | running_stats sum(n",
+        "* | running_stats.extra count()",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 3,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"running_group:="running" | sort by (_time) asc | fields case, source, n | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"a-one","n":-2}),
+            serde_json::json!({"case":"a-two","source":null,"n":"2.5"}),
+            serde_json::json!({"case":"b-three","source":[1,false,null],"n":"10"}),
+            serde_json::json!({"case":"b-four","source":{"nested":[1,false,null]},"n":2})
+        ],
+        "running_stats must never mutate stored rows"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(pipeline_rows(&router(reopened.clone()), query).await, rows);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
@@ -14625,6 +14879,41 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
         .await
         .unwrap();
     assert_eq!(reused_after_pipeline_cancel.status(), StatusCode::OK);
+
+    let cancelled_before_running_stats = storage.stats().await.unwrap().api_query_cancelled;
+    let running_stats_timeout = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        "* | running_stats by (service) count() as running | fields running | limit 10000",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(running_stats_timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+    for _ in 0..100 {
+        let stats = storage.stats().await.unwrap();
+        if stats.api_query_cancelled > cancelled_before_running_stats
+            && stats.api_query_in_flight == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let stats = storage.stats().await.unwrap();
+    assert!(stats.api_query_cancelled > cancelled_before_running_stats);
+    assert_eq!(stats.api_query_in_flight, 0);
+    let reused_after_running_stats_cancel = default_app
+        .clone()
+        .oneshot(logsql_request(
+            "level:error | running_stats count() as running | fields running | limit 1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reused_after_running_stats_cancel.status(), StatusCode::OK);
 
     let cancelled_before_uniq = storage.stats().await.unwrap().api_query_cancelled;
     let uniq_timeout = router_with_limits(

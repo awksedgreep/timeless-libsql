@@ -1435,6 +1435,23 @@ fn normalize_unordered_json_array_fields(rows: &[Value], fields: &[String]) -> R
     Ok(rows)
 }
 
+fn remove_required_ignored_fields(rows: &[Value], fields: &[String]) -> Result<Vec<Value>> {
+    let mut rows = rows.to_vec();
+    for (row_index, row) in rows.iter_mut().enumerate() {
+        let object = row
+            .as_object_mut()
+            .context("VictoriaLogs stats result row must be an object")?;
+        for field in fields {
+            if object.remove(field).is_none() {
+                bail!(
+                    "VictoriaLogs stats result row {row_index} is missing required ignored field {field:?}"
+                );
+            }
+        }
+    }
+    Ok(rows)
+}
+
 fn comparable_victorialogs_stats_rows(
     rows: &[Value],
     unordered_fields: &[String],
@@ -1476,7 +1493,10 @@ fn victorialogs_stats_cases(client: &Client, base: &str, fixture: &Value) -> Res
             .and_then(Value::as_array)
             .context("stats case expected_rows")?;
         let unordered_fields = sorted_strings(case.get("unordered_json_array_fields"))?;
+        let required_ignored_fields = sorted_strings(case.get("required_ignored_fields"))?;
         let unordered_rows = case.get("result_order").and_then(Value::as_str) == Some("unordered");
+        let actual = remove_required_ignored_fields(&actual, &required_ignored_fields)
+            .with_context(|| format!("normalize VictoriaLogs stats row for {}", case_id(case)))?;
         let actual_comparable =
             comparable_victorialogs_stats_rows(&actual, &unordered_fields, unordered_rows)?;
         let expected_comparable =
@@ -1827,6 +1847,11 @@ mod tests {
                 if !unordered_fields.is_empty() {
                     assert_eq!(name, "stats_cases", "{identifier}");
                 }
+                let required_ignored_fields = sorted_strings(case.get("required_ignored_fields"))
+                    .unwrap_or_else(|error| panic!("{identifier}: {error}"));
+                if !required_ignored_fields.is_empty() {
+                    assert_eq!(name, "stats_cases", "{identifier}");
+                }
                 if name == "sample_cases" {
                     let iterations = case
                         .get("iterations")
@@ -1974,6 +1999,20 @@ mod tests {
             comparable_victorialogs_stats_rows(&reversed, &[], true).unwrap(),
             "only an explicit unordered result contract ignores row order"
         );
+    }
+
+    #[test]
+    fn victorialogs_stats_required_ignored_fields_are_verified_before_comparison() {
+        let rows = vec![json!({"_time": "dynamic", "case": "row"})];
+        let fields = vec!["_time".to_owned()];
+        assert_eq!(
+            remove_required_ignored_fields(&rows, &fields).unwrap(),
+            [json!({"case": "row"})]
+        );
+
+        let error = remove_required_ignored_fields(&[json!({"case": "row"})], &fields)
+            .expect_err("the dynamic field must be present before it is ignored");
+        assert!(error.to_string().contains("missing required ignored field"));
     }
 
     #[test]

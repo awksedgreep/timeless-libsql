@@ -2923,6 +2923,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "running_stats_narrow",
+                "logs-running-stats-narrow",
+                r#"host:="h00" AND query | running_stats by (service, level) count() as running | limit 64 | fields running"#,
+                64,
+                None,
+            ),
+            (
+                "running_stats_wide",
+                "logs-running-stats-wide",
+                r#"query | running_stats by (service, level) count() as running | limit 64 | fields running"#,
+                64,
+                None,
+            ),
+            (
+                "running_stats_control_narrow",
+                "logs-running-stats-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | math 1 as running | fields running"#,
+                64,
+                None,
+            ),
+            (
+                "running_stats_control_wide",
+                "logs-running-stats-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | math 1 as running | fields running"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3518,6 +3546,16 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             "union_wide",
             2,
             128,
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "running_stats_control_narrow",
+            "running_stats_narrow",
+        )?;
+        require_same_public_query_work(
+            &queries,
+            "running_stats_control_wide",
+            "running_stats_wide",
         )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;

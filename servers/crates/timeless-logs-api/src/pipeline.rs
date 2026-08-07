@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem::size_of;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -25,9 +25,10 @@ use crate::logsql::{
     CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
     JoinSpec, JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec,
     PackJsonSpec, PackLogfmtSpec, PipelineField, PipelineOp, QueryRowsSource,
-    RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, SplitSpec, StatsExpression,
-    StatsKind, TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec,
-    UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
+    RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, RunningStatsExpression,
+    RunningStatsKind, RunningStatsSpec, SplitSpec, StatsExpression, StatsKind, TopSpec,
+    UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec,
+    UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -183,6 +184,9 @@ pub(crate) fn execute(
                 execution.limits,
                 execution.cancelled,
             )?)],
+            PipelineOp::RunningStats(spec) => {
+                running_stats_rows(rows, spec, execution.limits, execution.cancelled)?
+            }
             PipelineOp::QueryStats => vec![Value::Object(query_stats(
                 execution.report,
                 execution
@@ -5337,6 +5341,525 @@ fn union_rows(
     }
     ensure_active(cancelled)?;
     Ok(rows)
+}
+
+#[derive(Debug)]
+struct RunningSortKey {
+    row_index: usize,
+    group: Vec<String>,
+    timestamp_us: Option<i64>,
+    timestamp_text: String,
+}
+
+enum RunningAccumulator {
+    Count(u64),
+    Sum(f64),
+    Min {
+        selected: Option<(String, Value)>,
+    },
+    Max {
+        selected: Option<(String, Value)>,
+    },
+    First {
+        offset: usize,
+        rows_seen: usize,
+        selected: Option<Value>,
+    },
+    Last {
+        offset: usize,
+        values: VecDeque<Value>,
+    },
+}
+
+impl RunningAccumulator {
+    fn new(kind: RunningStatsKind) -> Result<Self, String> {
+        Ok(match kind {
+            RunningStatsKind::Count => Self::Count(0),
+            RunningStatsKind::Sum => Self::Sum(f64::NAN),
+            RunningStatsKind::Min => Self::Min { selected: None },
+            RunningStatsKind::Max => Self::Max { selected: None },
+            RunningStatsKind::First { offset } => Self::First {
+                offset,
+                rows_seen: 0,
+                selected: None,
+            },
+            RunningStatsKind::Last { offset } => {
+                offset.checked_add(1).ok_or_else(|| {
+                    "LogsQL running_stats last offset exceeds the supported range".to_string()
+                })?;
+                Self::Last {
+                    offset,
+                    values: VecDeque::new(),
+                }
+            }
+        })
+    }
+
+    fn update(
+        &mut self,
+        expression: &RunningStatsExpression,
+        row: &Value,
+        state_bytes: &mut usize,
+        work_items: &mut usize,
+        limits: PipelineLimits,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, String> {
+        charge_transfer_work(work_items, limits.max_state_items, "running_stats")?;
+        ensure_active(cancelled)?;
+        match self {
+            Self::Count(total) => {
+                if expression
+                    .fields
+                    .iter()
+                    .any(|field| matches!(field, PipelineField::All))
+                {
+                    *total = total.saturating_add(1);
+                } else {
+                    let mut matched = false;
+                    for value in running_selected_values(
+                        row,
+                        &expression.fields,
+                        work_items,
+                        limits.max_state_items,
+                        cancelled,
+                    )? {
+                        if value.is_some_and(is_nonempty) {
+                            matched = true;
+                        }
+                    }
+                    if matched {
+                        *total = total.saturating_add(1);
+                    }
+                }
+                Ok(Value::from(*total))
+            }
+            Self::Sum(sum) => {
+                for value in running_selected_values(
+                    row,
+                    &expression.fields,
+                    work_items,
+                    limits.max_state_items,
+                    cancelled,
+                )? {
+                    let text = projected_text(value);
+                    let Ok(number) = text.parse::<f64>() else {
+                        continue;
+                    };
+                    if !number.is_finite() {
+                        continue;
+                    }
+                    if sum.is_nan() {
+                        *sum = number;
+                    } else {
+                        *sum += number;
+                    }
+                }
+                Ok(running_number(*sum))
+            }
+            Self::Min { selected } => update_running_extreme(
+                selected,
+                false,
+                expression,
+                row,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            ),
+            Self::Max { selected } => update_running_extreme(
+                selected,
+                true,
+                expression,
+                row,
+                state_bytes,
+                work_items,
+                limits,
+                cancelled,
+            ),
+            Self::First {
+                offset,
+                rows_seen,
+                selected,
+            } => {
+                if *rows_seen == *offset {
+                    let value = running_exact_value(row, &expression.fields)?;
+                    charge_transfer_value(
+                        &value,
+                        state_bytes,
+                        limits.max_state_bytes,
+                        cancelled,
+                        work_items,
+                        limits.max_state_items,
+                        "running_stats",
+                    )?;
+                    *selected = Some(value);
+                }
+                *rows_seen = rows_seen.saturating_add(1);
+                Ok(selected
+                    .clone()
+                    .unwrap_or_else(|| Value::String(String::new())))
+            }
+            Self::Last { offset, values } => {
+                let value = running_exact_value(row, &expression.fields)?;
+                charge_transfer_value(
+                    &value,
+                    state_bytes,
+                    limits.max_state_bytes,
+                    cancelled,
+                    work_items,
+                    limits.max_state_items,
+                    "running_stats",
+                )?;
+                values.push_back(value);
+                let capacity = offset.checked_add(1).ok_or_else(|| {
+                    "LogsQL running_stats last offset exceeds the supported range".to_string()
+                })?;
+                if values.len() > capacity {
+                    values.pop_front();
+                }
+                Ok(if values.len() <= *offset {
+                    Value::String(String::new())
+                } else {
+                    values
+                        .front()
+                        .cloned()
+                        .unwrap_or_else(|| Value::String(String::new()))
+                })
+            }
+        }
+    }
+}
+
+fn running_stats_rows(
+    rows: Vec<Value>,
+    spec: &RunningStatsSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    ensure_active(cancelled)?;
+    if rows.len() > limits.max_state_items {
+        return Err(format!(
+            "LogsQL running_stats exceeds max_work_rows={}",
+            limits.max_state_items
+        ));
+    }
+
+    let row_slots_bytes = size_of::<Option<Value>>()
+        .checked_mul(rows.len())
+        .and_then(|bytes| {
+            size_of::<Value>()
+                .checked_mul(rows.len())
+                .and_then(|row_bytes| bytes.checked_add(row_bytes))
+        })
+        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
+    let mut persistent_bytes = size_of::<Vec<RunningSortKey>>()
+        .checked_add(size_of::<Vec<Option<Value>>>())
+        .and_then(|bytes| bytes.checked_add(size_of::<Vec<Value>>()))
+        .and_then(|bytes| bytes.checked_add(row_slots_bytes))
+        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
+    ensure_first_state_bytes(persistent_bytes, limits.max_state_bytes, "running_stats")?;
+
+    let mut work_items = 0usize;
+    let mut keys = Vec::with_capacity(rows.len());
+    for (row_index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "running_stats")?;
+        let mut group = Vec::with_capacity(spec.group_by.len());
+        persistent_bytes = persistent_bytes
+            .checked_add(size_of::<RunningSortKey>())
+            .and_then(|bytes| bytes.checked_add(size_of::<Vec<String>>()))
+            .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
+        for field in &spec.group_by {
+            let PipelineField::Exact { path, .. } = field else {
+                return Err("LogsQL running_stats group field is not exact".into());
+            };
+            charge_transfer_work(&mut work_items, limits.max_state_items, "running_stats")?;
+            let value = projected_text(field_value(row, path)).into_owned();
+            charge_transfer_string(
+                &value,
+                &mut persistent_bytes,
+                limits.max_state_bytes,
+                "running_stats",
+            )?;
+            group.push(value);
+        }
+        let timestamp_text = projected_text(row.get("_time")).into_owned();
+        charge_transfer_string(
+            &timestamp_text,
+            &mut persistent_bytes,
+            limits.max_state_bytes,
+            "running_stats",
+        )?;
+        let timestamp_us = DateTime::parse_from_rfc3339(&timestamp_text)
+            .ok()
+            .map(|timestamp| timestamp.timestamp_micros());
+        keys.push(RunningSortKey {
+            row_index,
+            group,
+            timestamp_us,
+            timestamp_text,
+        });
+    }
+
+    let cancelled_during_sort = Cell::new(false);
+    keys.sort_by(|left, right| {
+        if cancelled.load(AtomicOrdering::Relaxed) {
+            cancelled_during_sort.set(true);
+            return Ordering::Equal;
+        }
+        left.group
+            .cmp(&right.group)
+            .then_with(|| running_timestamp_comparison(left, right))
+            .then_with(|| left.row_index.cmp(&right.row_index))
+    });
+    if cancelled_during_sort.get() {
+        return Err("LogsQL pipeline cancelled".into());
+    }
+    ensure_active(cancelled)?;
+
+    let mut row_slots = rows.into_iter().map(Some).collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(row_slots.len());
+    let mut current_group = None::<Vec<String>>;
+    let mut accumulators = Vec::<RunningAccumulator>::new();
+    let accumulator_base = size_of::<Vec<RunningAccumulator>>()
+        .checked_add(
+            size_of::<RunningAccumulator>()
+                .checked_mul(spec.expressions.len())
+                .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?,
+        )
+        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
+    let mut group_bytes = 0usize;
+    for (position, key) in keys.into_iter().enumerate() {
+        check_periodically(cancelled, position)?;
+        if current_group.as_ref() != Some(&key.group) {
+            current_group = Some(key.group);
+            accumulators = spec
+                .expressions
+                .iter()
+                .map(|expression| RunningAccumulator::new(expression.kind))
+                .collect::<Result<Vec<_>, _>>()?;
+            group_bytes = accumulator_base;
+        }
+        ensure_running_stats_bytes(persistent_bytes, group_bytes, limits.max_state_bytes)?;
+        let mut row = row_slots
+            .get_mut(key.row_index)
+            .and_then(Option::take)
+            .ok_or_else(|| "LogsQL running_stats selected a row twice".to_string())?;
+        let mut generated = Vec::with_capacity(spec.expressions.len());
+        for (expression, accumulator) in spec.expressions.iter().zip(&mut accumulators) {
+            let value = accumulator.update(
+                expression,
+                &row,
+                &mut group_bytes,
+                &mut work_items,
+                limits,
+                cancelled,
+            )?;
+            ensure_running_stats_bytes(persistent_bytes, group_bytes, limits.max_state_bytes)?;
+            generated.push((expression, value));
+        }
+        for (expression, value) in generated {
+            charge_transfer_string(
+                &expression.alias_name,
+                &mut persistent_bytes,
+                limits.max_state_bytes,
+                "running_stats",
+            )?;
+            charge_transfer_value(
+                &value,
+                &mut persistent_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                &mut work_items,
+                limits.max_state_items,
+                "running_stats",
+            )?;
+            ensure_running_stats_bytes(persistent_bytes, group_bytes, limits.max_state_bytes)?;
+            let PipelineField::Exact { path, .. } = &expression.alias else {
+                return Err("LogsQL running_stats result field is not exact".into());
+            };
+            let object = row
+                .as_object_mut()
+                .ok_or_else(|| "LogsQL running_stats input row is not a JSON object".to_string())?;
+            insert_path(object, path, value)
+                .map_err(|error| format!("LogsQL running_stats destination conflict: {error}"))?;
+        }
+        output.push(row);
+    }
+    ensure_active(cancelled)?;
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_running_extreme(
+    selected: &mut Option<(String, Value)>,
+    maximum: bool,
+    expression: &RunningStatsExpression,
+    row: &Value,
+    state_bytes: &mut usize,
+    work_items: &mut usize,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Value, String> {
+    for value in running_selected_values(
+        row,
+        &expression.fields,
+        work_items,
+        limits.max_state_items,
+        cancelled,
+    )? {
+        let text = projected_text(value).into_owned();
+        let replace = selected.as_ref().is_none_or(|(current, _)| {
+            let ordering = logsql_sort_comparison(&text, current);
+            if maximum {
+                ordering == Ordering::Greater
+            } else {
+                ordering == Ordering::Less
+            }
+        });
+        if replace {
+            let value = running_value(value);
+            charge_transfer_string(&text, state_bytes, limits.max_state_bytes, "running_stats")?;
+            charge_transfer_value(
+                &value,
+                state_bytes,
+                limits.max_state_bytes,
+                cancelled,
+                work_items,
+                limits.max_state_items,
+                "running_stats",
+            )?;
+            *selected = Some((text, value));
+        }
+    }
+    Ok(selected
+        .as_ref()
+        .map_or_else(|| Value::String(String::new()), |(_, value)| value.clone()))
+}
+
+fn running_selected_values<'a>(
+    row: &'a Value,
+    fields: &[PipelineField],
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Option<&'a Value>>, String> {
+    let mut output = Vec::new();
+    for field in fields {
+        ensure_active(cancelled)?;
+        match field {
+            PipelineField::Exact { path, .. } => {
+                charge_transfer_work(work_items, max_work_items, "running_stats")?;
+                output.push(field_value(row, path));
+            }
+            PipelineField::Prefix { prefix } => collect_running_leaves(
+                row,
+                &mut String::new(),
+                Some(prefix),
+                &mut output,
+                work_items,
+                max_work_items,
+                cancelled,
+            )?,
+            PipelineField::All => collect_running_leaves(
+                row,
+                &mut String::new(),
+                None,
+                &mut output,
+                work_items,
+                max_work_items,
+                cancelled,
+            )?,
+        }
+    }
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_running_leaves<'a>(
+    value: &'a Value,
+    path: &mut String,
+    prefix: Option<&str>,
+    output: &mut Vec<Option<&'a Value>>,
+    work_items: &mut usize,
+    max_work_items: usize,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    charge_transfer_work(work_items, max_work_items, "running_stats")?;
+    check_periodically(cancelled, *work_items)?;
+    if prefix.is_some_and(|prefix| {
+        !path.is_empty() && !path.starts_with(prefix) && !prefix.starts_with(path.as_str())
+    }) {
+        return Ok(());
+    }
+    if let Value::Object(object) = value {
+        if object.is_empty() {
+            return Ok(());
+        }
+        for (name, child) in object {
+            let original_len = path.len();
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(name);
+            collect_running_leaves(
+                child,
+                path,
+                prefix,
+                output,
+                work_items,
+                max_work_items,
+                cancelled,
+            )?;
+            path.truncate(original_len);
+        }
+        return Ok(());
+    }
+    if prefix.is_none_or(|prefix| path.starts_with(prefix)) {
+        output.push(Some(value));
+    }
+    Ok(())
+}
+
+fn running_timestamp_comparison(left: &RunningSortKey, right: &RunningSortKey) -> Ordering {
+    match (left.timestamp_us, right.timestamp_us) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (None, None) => left.timestamp_text.cmp(&right.timestamp_text),
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+    }
+}
+
+fn running_number(value: f64) -> Value {
+    if value.is_nan() {
+        Value::String("NaN".into())
+    } else if value == f64::INFINITY {
+        Value::String("+Inf".into())
+    } else if value == f64::NEG_INFINITY {
+        Value::String("-Inf".into())
+    } else {
+        finite_number(value)
+    }
+}
+
+fn running_value(value: Option<&Value>) -> Value {
+    value
+        .cloned()
+        .unwrap_or_else(|| Value::String(String::new()))
+}
+
+fn running_exact_value(row: &Value, fields: &[PipelineField]) -> Result<Value, String> {
+    let Some(PipelineField::Exact { path, .. }) = fields.first() else {
+        return Err("LogsQL running_stats first/last field is not exact".into());
+    };
+    Ok(running_value(field_value(row, path)))
+}
+
+fn ensure_running_stats_bytes(persistent: usize, group: usize, limit: usize) -> Result<(), String> {
+    let used = persistent
+        .checked_add(group)
+        .ok_or_else(|| "LogsQL running_stats state size overflow".to_string())?;
+    ensure_first_state_bytes(used, limit, "running_stats")
 }
 
 fn ensure_join_result_capacity(current: usize, limit: usize) -> Result<(), String> {
@@ -12533,6 +13056,208 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             union_rows(left_rows, &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn running_stats_are_chronological_grouped_rich_and_bounded() {
+        let source = vec![
+            json!({
+                "_time":"2026-08-06T00:00:00.000004Z",
+                "case":"b-four",
+                "group":"b",
+                "n":2,
+                "source":{"nested":[1,false,null]}
+            }),
+            json!({
+                "_time":"2026-08-06T00:00:00.000002Z",
+                "case":"a-two",
+                "group":"a",
+                "n":"2.5",
+                "source":null
+            }),
+            json!({
+                "_time":"2026-08-06T00:00:00.000003Z",
+                "case":"b-three",
+                "group":"b",
+                "n":"10",
+                "source":[1,false,null]
+            }),
+            json!({
+                "_time":"2026-08-06T00:00:00.000001Z",
+                "case":"a-one",
+                "group":"a",
+                "n":-2
+            }),
+        ];
+        let plan = crate::logsql::parse_at(
+            "* | running_stats by (group) count() as running_count, count(source) as source_count, sum(n) as running_sum, min(n) as running_min, max(n) as running_max, first(source) offset 1 as first_source, last(source) offset 1 as previous_source",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let limits = PipelineLimits {
+            max_result_rows: 20,
+            max_state_items: 100_000,
+            max_state_bytes: 2_000_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let result = execute(
+            source.clone(),
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &plan.pipeline,
+                implicit_result_limit: plan.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.iter().map(|row| &row["case"]).collect::<Vec<_>>(),
+            [
+                &json!("a-one"),
+                &json!("a-two"),
+                &json!("b-three"),
+                &json!("b-four")
+            ]
+        );
+        assert_eq!(result[0]["running_count"], 1);
+        assert_eq!(result[0]["source_count"], 0);
+        assert_eq!(result[0]["running_sum"], -2.0);
+        assert_eq!(result[0]["running_min"], -2);
+        assert_eq!(result[0]["running_max"], -2);
+        assert_eq!(result[0]["first_source"], "");
+        assert_eq!(result[0]["previous_source"], "");
+        assert_eq!(result[1]["running_count"], 2);
+        assert_eq!(result[1]["source_count"], 0);
+        assert_eq!(result[1]["running_sum"], 0.5);
+        assert_eq!(result[1]["first_source"], Value::Null);
+        assert_eq!(result[1]["previous_source"], "");
+        assert_eq!(result[2]["running_count"], 1);
+        assert_eq!(result[2]["running_sum"], 10.0);
+        assert_eq!(result[3]["running_count"], 2);
+        assert_eq!(result[3]["source_count"], 2);
+        assert_eq!(result[3]["running_sum"], 12.0);
+        assert_eq!(result[3]["running_min"], 2);
+        assert_eq!(result[3]["running_max"], "10");
+        assert_eq!(result[3]["first_source"], source[0]["source"]);
+        assert_eq!(result[3]["previous_source"], source[2]["source"]);
+        assert_eq!(source[0]["source"]["nested"], json!([1, false, null]));
+
+        let chronological = crate::logsql::parse_at(
+            "* | running_stats count() as running",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let chronological = execute(
+            vec![
+                json!({"_time":"2026-08-06T00:00:00.000031Z","case":"later"}),
+                json!({"_time":"2026-08-06T00:00:00.00003Z","case":"earlier"}),
+            ],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &chronological.pipeline,
+                implicit_result_limit: chronological.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(chronological[0]["case"], "earlier");
+        assert_eq!(chronological[0]["running"], 1);
+        assert_eq!(chronological[1]["case"], "later");
+        assert_eq!(chronological[1]["running"], 2);
+
+        let recursive_prefix = crate::logsql::parse_at(
+            "* | running_stats sum(payload.*) as nested_sum, count(payload.nested.*) as nested_count",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let recursive_prefix = execute(
+            vec![
+                json!({
+                    "_time":"2026-08-06T00:00:00.000001Z",
+                    "payload":{"direct":1,"nested":{"value":"2"}}
+                }),
+                json!({
+                    "_time":"2026-08-06T00:00:00.000002Z",
+                    "payload":{"direct":3,"nested":{"value":""}}
+                }),
+            ],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &recursive_prefix.pipeline,
+                implicit_result_limit: recursive_prefix.implicit_result_limit,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &cancelled,
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(recursive_prefix[0]["nested_sum"], 3.0);
+        assert_eq!(recursive_prefix[0]["nested_count"], 1);
+        assert_eq!(recursive_prefix[1]["nested_sum"], 6.0);
+        assert_eq!(recursive_prefix[1]["nested_count"], 1);
+
+        let [PipelineOp::RunningStats(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected running_stats plan: {plan:?}");
+        };
+        for (limited, expected) in [
+            (
+                PipelineLimits {
+                    max_state_items: 1,
+                    ..limits
+                },
+                "max_work_rows=1",
+            ),
+            (
+                PipelineLimits {
+                    max_state_bytes: 1,
+                    ..limits
+                },
+                "max_response_bytes=1",
+            ),
+        ] {
+            let error = running_stats_rows(source.clone(), spec, limited, &cancelled).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+
+        let conflict_plan = crate::logsql::parse_at(
+            "* | running_stats count() as nested.value",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let [PipelineOp::RunningStats(conflict_spec)] = conflict_plan.pipeline.as_slice() else {
+            panic!("unexpected running_stats plan: {conflict_plan:?}");
+        };
+        let conflict = running_stats_rows(
+            vec![json!({"_time":"2026-08-06T00:00:00Z","nested":"scalar"})],
+            conflict_spec,
+            limits,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(
+            conflict.contains("LogsQL running_stats destination conflict"),
+            "{conflict}"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            running_stats_rows(source, spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

@@ -2245,6 +2245,67 @@ storage counters remain identical. The bounded post-scan cost is accepted
 above the public storage boundary and provides no evidence for a new
 extension primitive.
 
+## LogsQL bounded running statistics
+
+`running_stats` adds one or more cumulative fields while preserving input
+cardinality:
+
+```text
+* | running_stats count() as rows
+* | running_stats by (service, level) sum(duration_ms) as elapsed
+* | running_stats (service) min(duration_ms) as minimum, max(duration_ms) as maximum
+* | running_stats first(message) offset 1 as second_message, last(message) offset 1 as previous_message
+* | running_stats sum(payload.*) as nested_total
+```
+
+The command, grouping keyword, and function names are case-insensitive. The
+optional group is written as `by (field, ...)` or `(field, ...)` and accepts
+only nonempty exact fields. `count`, `sum`, `min`, and `max` accept exact,
+prefix, or all-current-field selectors; omitted arguments mean all. `first`
+and `last` require one exact field and accept a nonnegative `offset`. Each
+function may use `as result` or a bare result name. Omitted names are
+canonical, such as `count(*)` and `sum(duration_ms)`. Duplicate or wildcard
+destinations and malformed groups, arity, offsets, commas, suffixes, or
+trailing tokens fail explicitly.
+
+Timeless orders each group by parsed numeric microsecond time with stable
+input-order ties, then emits groups in deterministic lexical key order.
+VictoriaLogs sorts formatted `_time` strings internally; unequal RFC3339
+fraction widths can therefore place 31 microseconds before 30 microseconds.
+Timeless deliberately chooses chronological numeric order. The upstream
+public contract does not promise cross-group order, so portable callers
+should add an explicit later sort when they require a different final order.
+
+`count()` counts rows. A selected-field count advances once when any selected
+value is nonempty. `sum` accepts finite textual or native numbers and skips
+missing, null, empty, nonnumeric, `NaN`, and infinity inputs. State is
+`"NaN"` until the first finite number; any later finite overflow is rendered
+as `"+Inf"` or `"-Inf"`, because JSON has no nonfinite number. `min` and `max`
+use the complete LogsQL natural textual order but retain the winning Timeless
+value's native string, number, boolean, array, object, or null type. `first`
+selects the fixed zero-based offset from the beginning; `last` selects the
+offset behind the current row. Missing or not-yet-available first/last state
+is an empty string.
+
+Prefix and all-field selectors recursively traverse retained object leaves;
+arrays remain atomic rich values. Exact selectors can retain complete nested
+objects. Every expression reads the original current row before any result
+alias is written, so expressions in the same pipe cannot accidentally depend
+on one another. Results are visible to later pipes and deliberately overwrite
+an existing scalar destination. Descending through a scalar parent returns
+HTTP 422 rather than flattening or mutating durable metadata.
+
+Sorting keys, groups, recursive traversal, accumulators, offset history,
+generated values, result rows, response bytes, deadline, and cancellation are
+bounded by the existing request limits. The operator uses one public `logs`
+scan, never a private shadow table, and leaves source rows unchanged through
+optimize, shutdown, and reopen. Its ordinary-SQL foundation is
+[`SQL-LOG-059`](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key):
+SQLite windows provide fixed-key numeric running state directly, while the
+Rust API owns dynamic LogsQL grammar, natural ordering, complete rich values,
+limits, cancellation, and envelopes. No extension primitive or storage-format
+change is needed.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and
