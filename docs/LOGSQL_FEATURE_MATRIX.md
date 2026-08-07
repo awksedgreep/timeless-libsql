@@ -1327,7 +1327,7 @@ closed.
 | `LQL-Q02` | field projection in response ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-010-field-names-and-typed-projection)) | shipped | `API` | P1 | Ordered `fields`/`keep` stages choose response fields; `_time`/`_msg` are retained only when selected, dotted metadata reconstructs its nested shape, and missing paths remain absent. |
 | `LQL-Q03` | concurrency/parallel-reader options ([no SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-19-architecture-disposition-logsql-query-parallelism)) | deferred | `DEFER` | DEFER | VictoriaLogs controls CPU workers and I/O readers inside each query. Timeless executes one public SQLite cursor per query; its server reader pool and auth admission cap independent requests and are not equivalent. |
 | `LQL-Q04` | `time_offset` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-065-offset-public-log-query-time-without-rounding); [evidence](QUERY_EVIDENCE.md#session-19-logsql-query-time-offsets)) | shipped | `API` | P2 | Exact positive/negative/sub-native source bounds, nested inheritance/replacement, leading-filter optimizer order, nanosecond results, strict errors, limits, cancellation, optimize, and reopen are pinned by `session_nineteen_time_offset_shifts_storage_results_pipes_and_nested_queries`. |
-| `LQL-Q05` | `global_filter` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-066-apply-one-global-predicate-to-every-public-log-scan)) | in progress | `API` | P3 | Query-wide compiled-predicate composition, nested inheritance/replacement, query-backed filter initialization, declaration-time `time_offset` scope, strict filter-only grammar, limits, optimize, and reopen are pinned without textual substitution. Exact-build evidence remains before shipment. |
+| `LQL-Q05` | `global_filter` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-066-apply-one-global-predicate-to-every-public-log-scan); [evidence](QUERY_EVIDENCE.md#session-19-logsql-global-filters)) | shipped | `API` | P3 | Query-wide compiled-predicate composition, nested inheritance/replacement, query-backed filter initialization, declaration-time `time_offset` scope, strict filter-only grammar, limits, cancellation, optimize, and reopen are pinned by `session_nineteen_global_filter_applies_to_every_public_query_scope`. |
 | `LQL-Q06` | partial-response option | missing | `API` | P3 | Default remains fail-closed; never silently return incomplete rows. |
 | `LQL-Q07` | cancellation, deadline, row/response/sample limits | shipped | `API` | P0 | Hard defaults cap result rows, decoded/examined entries, response bytes, and wall time. Capability-advertised `max_work_entries` guards row/count/value reads before decode; dropped requests cancel SQLite/Rust work and readers remain reusable. |
 | `LQL-Q08` | stable VictoriaLogs-compatible errors | shipped | `API` | P0 | Timeless intentionally improves the upstream 400 text envelope: malformed syntax is stable JSON HTTP 400 and unsupported capability is stable JSON HTTP 422, with neither reaching storage. See `QSF-063`. |
@@ -1384,8 +1384,15 @@ cumulative limits, rich fidelity, cancellation, flush, optimize, shutdown,
 and reopen. `SQL-LOG-066` gives direct users the ordinary-SQL equivalent:
 repeat the same predicate as a conjunct in every independently bounded public
 `logs` scan. No language-specific extension primitive or private storage path
-is warranted. Exact-build performance, HWM, and final row disposition remain
-before shipment.
+is warranted. Exact release build `72a392a0ed28f7c61c3c816a2c300c8caa588400`
+measures 3.322/6.102/7.881 ms narrow and 35.171/38.893/39.238 ms wide
+p50/p95/p99. Equal-public-work controls measure 3.493/5.040/7.254 and
+38.350/40.365/41.518 ms. The narrow p95 is 21.1% higher despite a lower p50
+and only 4.1% higher request-attributed API mean; the wide p95/API mean are
+3.6%/6.8% lower. Every pair has identical blocks, decoded entries, payload
+bytes, matched rows, returned public rows, 64-row/2,560-byte responses, and
+unchanged four-block storage. `QSF-273`–`QSF-276` close the row without a new
+extension primitive.
 
 ## Higher-order library boundary
 

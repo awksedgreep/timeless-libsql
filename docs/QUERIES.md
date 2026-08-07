@@ -2773,6 +2773,16 @@ query-backed initialization, cumulative limits, cancellation, and HTTP
 envelopes remain Rust API responsibilities. Ordinary SQL already provides the
 useful storage operation, so no global-filter extension opcode is exposed.
 
+Exact release build `72a392a0ed28f7c61c3c816a2c300c8caa588400`
+measures 64-row global-filter queries at 3.322/6.102/7.881 ms narrow and
+35.171/38.893/39.238 ms wide p50/p95/p99. Equivalent explicit-conjunction
+controls measure 3.493/5.040/7.254 and 38.350/40.365/41.518 ms. The narrow
+p95 tail is 21.1% higher while its p50 is lower and its request-attributed API
+mean is only 4.1% higher; the wide p95/API mean are 3.6%/6.8% lower. Both
+pairs read exactly the same blocks, entries, payload bytes, and public rows
+and return identical 2,560-byte responses. The differences are retained as
+API/parser and whole-run variation, not storage amplification.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

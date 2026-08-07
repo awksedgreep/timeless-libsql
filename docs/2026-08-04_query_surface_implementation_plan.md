@@ -1757,8 +1757,17 @@ fidelity, immutable storage, flush, optimize, shutdown, and reopen. Executable
 `SQL-LOG-066` gives direct users the ordinary-SQL foundation by conjoining one
 shared predicate with each separately bounded public `logs` scan. A planner
 finding requires hidden virtual-table inputs to be bound directly instead of
-through a reorderable joined CTE. Exact-build latency/storage/HWM evidence and
-the final shipped-row audit remain before `LQL-Q05` closes.
+through a reorderable joined CTE.
+
+Exact build `72a392a0ed28f7c61c3c816a2c300c8caa588400` closes the
+row. Global-filter p95 is 6.102/38.893 ms narrow/wide versus 5.040/40.365 ms
+for explicit-conjunction controls: 21.1% higher/3.6% lower. The narrow p50 is
+lower and request-attributed API mean is only 4.1% higher; wide API mean is
+6.8% lower. Every pair has identical candidate blocks, decoded entries,
+payload bytes, matched/returned public rows, 64-row/2,560-byte responses, and
+unchanged four-block storage. `QSF-273`–`QSF-276` retain the complete semantic,
+parser, planner, performance, HWM, and ownership verdicts. `LQL-Q05` is
+shipped without an extension or storage change.
 
 ### Session 20: release-grade public documentation
 

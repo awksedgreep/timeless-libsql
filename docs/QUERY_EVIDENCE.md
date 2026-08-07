@@ -6667,9 +6667,8 @@ maintenance behavior changed.
 
 ## Session 19 LogsQL global filters
 
-`LQL-Q05` has complete semantic, direct-SQL, and real-extension evidence and
-remains in progress only until its exact-build performance artifact is
-captured. Thirteen successful and nine error witnesses pass inside the
+`LQL-Q05` is shipped with semantic, direct-SQL, real-extension, and exact-build
+evidence. Thirteen successful and nine error witnesses pass inside the
 complete 1,482-case immutable VictoriaLogs 1.52.0 fixture. Pinned source and
 exact responses establish global-before-local conjunction, logical
 precedence, duplicate-last behavior with validation of every declaration,
@@ -6704,6 +6703,39 @@ language-specific extension primitive, private access, format, authoritative
 batching, compression, index, rollup, retention, transaction, migration,
 optimize, or maintenance behavior changes.
 
-Exact-build narrow/wide latency, public work, response bytes, durable work,
-physical/logical storage, cancellation, and RSS HWM will be added from the
-clean implementation commit before the matrix row is marked shipped.
+Exact release build `72a392a0ed28f7c61c3c816a2c300c8caa588400`
+produces these loopback measurements over 50 requests after five warmups:
+
+| shape | candidate p50/p95/p99 | equal-work control p50/p95/p99 | p95 delta | API-owned mean delta | result |
+|---|---:|---:|---:|---:|---:|
+| indexed host | 3.322/6.102/7.881 ms | 3.493/5.040/7.254 ms | +21.1% | +4.1% | 64 rows / 2,560 bytes |
+| full fixture | 35.171/38.893/39.238 ms | 38.350/40.365/41.518 ms | -3.6% | -6.8% | 64 rows / 2,560 bytes |
+
+Candidate and explicit-conjunction control each execute one public query per
+request. The narrow pair considers one block, decodes 1,024 entries, reads
+235,778 payload bytes, and matches/returns 128 public rows before the shared
+sort/limit. The wide pair considers four blocks, decodes, matches, and returns
+all 8,192 entries, and reads 1,914,055 payload bytes. The narrow candidate's
+p50 is lower despite its visible p95 tail, and its request-attributed API mean
+is only 4.1% higher; both wide measures favor the candidate. The complete
+physical-work and response equality rules out storage amplification or an
+extension-primitive opportunity. The tails are retained honestly as bounded
+parser/composition and whole-run variation.
+
+All 8,192 log entries completed durably with zero queued work. Admission took
+14.861 ms and the ordered durability barrier 37.930 ms. Storage remained four
+raw blocks, 1,914,055 logical bytes, and 2,022,736 physical database/WAL/SHM
+bytes. Logs RSS HWM was 108,052 KiB. The companion metrics workloads completed
+136,953 points with zero failed or queued points; metrics storage was 224,688
+logical bytes, 409,600 index bytes, and 1,542,312 physical bytes, with 50,332
+KiB RSS HWM. These are complete-workload process maxima, not allocations
+attributed to `global_filter`. Cancellation ended with zero requests in flight;
+the dedicated regression separately forces cancellation and reader reuse.
+
+The artifact is
+[`2026-08-07_session19_lql_q05_global_filter.json`](evidence/2026-08-07_session19_lql_q05_global_filter.json)
+(SHA-256 `2b15a39185563a2b81a02c879aa94b97f4fe9b4460b25a59bf875776c80fd078`).
+`QSF-273`–`QSF-276` retain the semantic, parser, SQLite hidden-input,
+performance, memory, and ownership verdicts. No extension primitive, private
+access, storage format, authoritative batching, compression, index, rollup,
+retention, transaction, migration, optimize, or maintenance behavior changed.
