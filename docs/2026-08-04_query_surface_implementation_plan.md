@@ -1945,8 +1945,9 @@ failure. Its SHA-256 is
 the exact query artifact SHA-256 is
 `d576b5bcb3729f79d6e81f4793181551c3c99fd9c9a6bbdb877164c2b7e39660`.
 
-The successful gate set includes 48 Rust query-contract tests; 135 public-SQL
-recipes/173 statements; live immutable Prometheus 549, VictoriaMetrics 196,
+The successful gate set includes 49 Rust query-contract tests, including the
+all-signal public-storage-boundary regression; 135 public-SQL recipes/173
+statements; live immutable Prometheus 549, VictoriaMetrics 196,
 and VictoriaLogs 1,498-case runs; root and server format/test/strict
 Clippy/Rustdoc; separate dbhealth validation; 93 metrics and 84 logs
 real-extension contracts plus trace/OTLP/Jaeger suites; all 45 CLI sections
@@ -1960,3 +1961,10 @@ No workflow, tag, publication, downstream repository, dependency pin, or
 TraceQL implementation is part of Session 21. The exact pushed `main` object
 ID and clean-main repeat are handoff evidence because a commit cannot contain
 its own hash.
+
+The final source-boundary audit also closed `QSF-293`: metrics and traces now
+obtain index allocation and trace optimizer-source sampling through additive
+public `timeless_stats` rows, as logs already did. A source-tree contract
+rejects private shadow identifiers in every signal server. This changed no
+storage bytes, authoritative batching, indexes, rollups, retention, migration,
+or optimize predicate.

@@ -303,6 +303,30 @@ frame.
 | `timeless_trace_operations` | `value` | `tbl` R, `service` O. |
 | `timeless_trace_buckets` | `bucket_ts, service, spans, errors, dur_sum, dur_min, dur_max, dur_p50, dur_p95, dur_p99` | `tbl` R, `service_filter` O, `start` R, `stop` R, `step` R. |
 
+### Public storage accounting
+
+`timeless_stats(tbl)` is the only public interface for extension-owned
+physical accounting. Signal servers and embedded applications must not query
+shadow tables or reconstruct their names. Its `key, value` rows are an
+additive contract: consumers select the keys they understand and tolerate new
+keys. `index_bytes` is an INTEGER when SQLite's `dbstat` module is available
+and NULL otherwise; it counts the signal's physical posting/catalog/index
+b-trees, not the database file or result payload.
+
+| Signal | Public storage and maintenance keys |
+|---|---|
+| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
+| logs | `blocks`, `raw_blocks`, `compressed_blocks`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
+| traces | `blocks`, `raw_blocks`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families. |
+
+The logs/traces `optimize_source_*` values use the extension's current raw-or-
+undersized source predicate and authoritative 8,192-entry/span merge target.
+They are a current size sample for bounded maintenance planning, not a promise
+that one optimize command rewrites exactly that many rows. Index allocation
+and optimizer-source totals remain correct after flush, optimize, transaction
+rollback, and reopen because they are derived inside the extension from the
+calling connection's visible state.
+
 Log `filter` is a flat JSON object: `level` selects severity and other string
 members are indexed metadata equality predicates. `message_contains` is the
 same exact predicate as the base table. Missing count/value bounds mean the

@@ -154,7 +154,7 @@ authoritative two-hour release soak.
 ## Storage and query-boundary findings
 
 The append-only [findings log](QUERY_STORAGE_FINDINGS.md) contains `QSF-001`
-through `QSF-292`. The release-significant boundaries are:
+through `QSF-293`. The release-significant boundaries are:
 
 - metric storage remains timestamp-plus-float64; millisecond evaluation,
   lookback, staleness, extrapolation, labels, timestamps, and result envelopes
@@ -168,6 +168,8 @@ through `QSF-292`. The release-significant boundaries are:
   when no honest index exists;
 - stream identity and physical-block diagnostics are not inferred from row
   fields or private shadow tables;
+- every signal server obtains tier/block/index and optimizer-source accounting
+  from public `timeless_stats` rows; only the extension names shadow objects;
 - required hidden virtual-table inputs must be bound directly in each public
   scan because SQLite may reorder joins;
 - `raw-series-v0` remains backward-readable but is not self-identifying;
@@ -239,7 +241,7 @@ cannot embed its own hash.
 
 | gate | result and evidence |
 |---|---|
-| matrix/document contracts | Pass: 48 Rust tests, including negative final-report, fault-evidence, storage-finding, and tracked Markdown-table drift tests. |
+| matrix/document contracts | Pass: 49 Rust tests, including negative all-signal private-storage-boundary, final-report, fault-evidence, storage-finding, and tracked Markdown-table drift tests. |
 | SQL cookbook | Pass: 135 recipes / 173 real-extension statements. |
 | immutable oracles | Pass: manifest/image probes plus live Prometheus 549, VictoriaMetrics 196, and VictoriaLogs 1,498 cases. |
 | root extension | Pass: format, all targets/tests, strict Clippy/Rustdoc, and separate dbhealth artifact/shell gate. |

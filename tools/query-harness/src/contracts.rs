@@ -357,22 +357,60 @@ fn validate_markdown_table_structure(root: &Path) -> Result<Vec<String>> {
     Ok(errors)
 }
 
-fn validate_logs_storage_boundary(root: &Path) -> Result<Vec<String>> {
-    let relative = "servers/crates/timeless-logs-api/src/storage.rs";
-    let path = root.join(relative);
-    if !path.is_file() {
-        return Ok(Vec::new());
+fn rust_source_files(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    if !directory.is_dir() {
+        return Ok(());
     }
-    let source = fs::read_to_string(path)?;
-    Ok(["logs_blocks", "logs_terms", "logs_meta"]
-        .into_iter()
-        .filter(|name| source.contains(name))
-        .map(|name| {
-            format!(
-                "{relative}: server references private extension shadow table {name}; use a public virtual table or scalar"
-            )
-        })
-        .collect())
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            rust_source_files(&path, output)?;
+        } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+            output.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn validate_signal_storage_boundaries(root: &Path) -> Result<Vec<String>> {
+    let signals = [
+        (
+            "metrics",
+            r#"\b(?:metric_samples|metrics)_(?:chunks|chunks_series_ts|series|meta)\b|format!\s*\(\s*"\{\}_(?:chunks|chunks_series_ts|series|meta)""#,
+        ),
+        ("logs", r"\blogs_(?:blocks|blocks_ts|terms|meta)\b"),
+        (
+            "traces",
+            r"\btraces_(?:blocks|blocks_ts|terms|trace_blocks|meta)\b",
+        ),
+    ];
+    let mut errors = Vec::new();
+    for (signal, pattern) in signals {
+        let source_root = root.join(format!("servers/crates/timeless-{signal}-api/src"));
+        let mut files = Vec::new();
+        rust_source_files(&source_root, &mut files)?;
+        files.sort();
+        let private_name = Regex::new(pattern)?;
+        for path in files {
+            let source = fs::read_to_string(&path)?;
+            if let Some(found) = private_name.find(&source) {
+                let relative = path.strip_prefix(root).unwrap_or(&path).display();
+                errors.push(format!(
+                    "{relative}: {signal} server references private extension shadow storage `{}`; use a public virtual table, scalar, command, or timeless_stats row",
+                    found.as_str()
+                ));
+            }
+            for helper in ["qualified_shadow(", "shadow_object("] {
+                if source.contains(helper) {
+                    let relative = path.strip_prefix(root).unwrap_or(&path).display();
+                    errors.push(format!(
+                        "{relative}: {signal} server calls private extension layout helper `{helper}`; use a public virtual table, scalar, command, or timeless_stats row"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(errors)
 }
 
 fn validate_public_sql_inventory(root: &Path) -> Result<Vec<String>> {
@@ -1904,7 +1942,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
         errors.push("missing docs/QUERY_SQL_EQUIVALENTS.md".to_owned());
     }
     errors.extend(validate_local_links(root)?);
-    errors.extend(validate_logs_storage_boundary(root)?);
+    errors.extend(validate_signal_storage_boundaries(root)?);
     errors.extend(validate_public_sql_inventory(root)?);
     errors.extend(validate_public_server_routes(root)?);
     errors.extend(validate_public_server_environment(root)?);
@@ -2221,19 +2259,50 @@ mod tests {
     }
 
     #[test]
-    fn logs_server_private_shadow_table_access_fails() {
+    fn signal_servers_private_shadow_table_access_fails() {
         let fixture = fixture();
-        let source = fixture.path().join("servers/crates/timeless-logs-api/src");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(
-            source.join("storage.rs"),
-            "const BAD: &str = \"SELECT * FROM logs_blocks\";\n",
-        )
-        .unwrap();
-        assert_invalid(
-            fixture.path(),
-            "server references private extension shadow table logs_blocks",
-        );
+        for (signal, source) in [
+            (
+                "metrics",
+                "fn bad(table: &str) { let _ = format!(\"{}_chunks\", table); }\n",
+            ),
+            ("logs", "const BAD: &str = \"SELECT * FROM logs_blocks\";\n"),
+            (
+                "traces",
+                "const BAD: &str = \"SELECT * FROM traces_trace_blocks\";\n",
+            ),
+        ] {
+            let directory = fixture
+                .path()
+                .join(format!("servers/crates/timeless-{signal}-api/src"));
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("storage.rs"), source).unwrap();
+        }
+        let errors = validate_signal_storage_boundaries(fixture.path()).unwrap();
+        assert_eq!(errors.len(), 3, "{errors:#?}");
+        assert!(errors.iter().any(|error| error.contains("metrics server")));
+        assert!(errors.iter().any(|error| error.contains("logs server")));
+        assert!(errors.iter().any(|error| error.contains("traces server")));
+    }
+
+    #[test]
+    fn signal_servers_public_stats_access_passes() {
+        let fixture = fixture();
+        for signal in ["metrics", "logs", "traces"] {
+            let directory = fixture
+                .path()
+                .join(format!("servers/crates/timeless-{signal}-api/src"));
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("storage.rs"),
+                format!(
+                    "const SQL: &str = \"SELECT key,value FROM timeless_stats('{signal}')\";\n"
+                ),
+            )
+            .unwrap();
+        }
+        let errors = validate_signal_storage_boundaries(fixture.path()).unwrap();
+        assert!(errors.is_empty(), "{errors:#?}");
     }
 
     #[test]

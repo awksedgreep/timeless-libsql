@@ -104,6 +104,13 @@ An unregistered route always returns HTTP 422 with
 servers never forward it to Rocket, Phoenix, another process, or another
 storage owner.
 
+The three serialized `StorageStats` responses obtain extension-owned tier,
+block, index-byte, and optimizer-source accounting only from the public
+`timeless_stats` TVF. Servers never query implementation-owned shadow tables.
+Whole-database page/freelist and file/WAL/SHM sizes still come from public
+SQLite PRAGMAs and filesystem metadata. If `dbstat` is unavailable,
+`sqlite_index_bytes` is zero while all logical counts remain available.
+
 ## Metrics requests
 
 GET and POST query endpoints consume URL-encoded parameters. On POST, form

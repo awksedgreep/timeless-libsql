@@ -1088,20 +1088,19 @@ fn optimize_backlog_with_actionable(
     conn: &Connection,
     actionable_spans: u64,
 ) -> Result<(), String> {
-    let (sample_spans, sample_bytes): (i64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(SUM(entry_count), 0),
-                    COALESCE(SUM(length(data)), 0)
-               FROM traces_blocks
-              WHERE codec = 1 OR entry_count < 8192",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|error| format!("inspect traces optimize source bytes: {error}"))?;
+    // The extension owns physical layout and the 8,192-span merge predicate.
+    // It publishes the current source sample through the public stats TVF;
+    // the server uses those values only to choose a bounded maintenance turn.
+    let stats = stat_values(conn)?;
+    let integer = |key: &str| match stats.get(key) {
+        Some(SqlValue::Integer(value)) => (*value).max(0) as u64,
+        Some(SqlValue::Real(value)) => value.max(0.0) as u64,
+        _ => 0,
+    };
     let budget = optimize_span_budget(
         actionable_spans,
-        sample_spans.max(0) as u64,
-        sample_bytes.max(0) as u64,
+        integer("optimize_source_entries"),
+        integer("optimize_source_bytes"),
     );
     run_command(
         conn,
@@ -1404,15 +1403,7 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| format!("read SQLite page accounting: {error}"))?;
-    let sqlite_index_bytes: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat
-              WHERE name IN ('traces_blocks_ts','traces_terms','traces_trace_blocks',
-                             'sqlite_autoindex_traces_meta_1')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("read traces SQLite index bytes: {error}"))?;
+    let sqlite_index_bytes = integer("index_bytes");
     let blocks = integer("blocks");
     let raw_blocks = integer("raw_blocks");
     Ok(StorageStats {

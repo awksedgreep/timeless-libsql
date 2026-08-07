@@ -132,9 +132,9 @@ INSERT INTO traces(traces)   VALUES ('prune:<ns>');  -- drop everything older th
 `optimize:<entries>` is the incremental logs/traces maintenance form. Raw
 compression runs before eligible size-tiered merges, and one complete merge
 cohort may slightly exceed the requested budget so maintenance always makes
-progress. `timeless_stats('logs'|'traces')` exposes actionable/deferred backlog
-plus separate raw and merge entry, byte, and time counters. (`prune:` takes the
-table's own ts unit: seconds / ms / ns.)
+progress. `timeless_stats('logs'|'traces')` exposes actionable/deferred backlog,
+current optimizer-source entries/bytes, and separate raw and merge entry, byte,
+and time counters. (`prune:` takes the table's own ts unit: seconds / ms / ns.)
 
 Retention can also be automatic — declared at CREATE, applied during the
 maintenance the engine already performs (no background threads; the vtab
@@ -457,6 +457,12 @@ SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
 SELECT key, value FROM timeless_stats('metrics')
  WHERE key LIKE 'raw_batch_query_%' ORDER BY key;
 
+-- Logical metric tier counts and physical SQLite index allocation are public;
+-- clients do not need to inspect implementation-owned shadow tables:
+SELECT key, value FROM timeless_stats('metrics')
+ WHERE key IN ('series','chunks','rollup_chunks','disk_points','index_bytes')
+ ORDER BY key;
+
 -- Logs expose block, entry, payload, index, timestamp-unit, and current
 -- optimizer-source totals without exposing extension shadow tables:
 SELECT key, value FROM timeless_stats('logs')
@@ -464,6 +470,13 @@ SELECT key, value FROM timeless_stats('logs')
                'buffered_entries','disk_entries','total_entries',
                'bytes_on_disk','raw_bytes','compressed_bytes','terms',
                'index_bytes','ts_min','ts_max','optimize_source_entries',
+               'optimize_source_bytes')
+ ORDER BY key;
+
+-- Traces expose the same public physical-accounting/maintenance boundary:
+SELECT key, value FROM timeless_stats('traces')
+ WHERE key IN ('blocks','raw_blocks','disk_spans','bytes_on_disk','terms',
+               'trace_index_rows','index_bytes','optimize_source_entries',
                'optimize_source_bytes')
  ORDER BY key;
 

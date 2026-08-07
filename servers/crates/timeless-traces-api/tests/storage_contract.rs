@@ -47,10 +47,13 @@ async fn release_backup_preserves_rich_spans_and_is_no_clobber() {
     assert_eq!(live_stats.checkpoint_errors, 0);
     assert!(live_stats.backup_total_ns > 0);
     assert!(live_stats.checkpoint_total_ns > 0);
+    assert!(live_stats.sqlite_index_bytes > 0);
 
     assert_fixture_persisted(&backup, &extension);
     let restored = Storage::start(backup, extension, 1, 8, Some(DEFAULT_RETENTION)).unwrap();
-    assert_eq!(restored.stats().await.unwrap().total_spans, 1);
+    let restored_stats = restored.stats().await.unwrap();
+    assert_eq!(restored_stats.total_spans, 1);
+    assert!(restored_stats.sqlite_index_bytes > 0);
     restored.shutdown().await.unwrap();
     storage.shutdown().await.unwrap();
 }

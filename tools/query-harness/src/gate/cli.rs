@@ -729,6 +729,9 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     ensure!(stat(&current, "query_stable_location_snapshots")? == 2);
     ensure!(stat(&current, "query_snapshot_payload_max_bytes")? == 0);
     ensure!(stat(&current, "query_blocks_skipped_by_bound")? >= 2);
+    ensure!(stat(&current, "index_bytes")? > 0);
+    ensure!(stat(&current, "optimize_source_entries")? == 12);
+    ensure!(stat(&current, "optimize_source_bytes")? > 0);
     ensure!(
         scalar_i64(
             &connection,
@@ -746,6 +749,23 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     ensure!(stat(&after, "query_count")? == 3);
     ensure!(stat(&after, "query_stable_location_snapshots")? == 3);
     ensure!(stat(&after, "query_snapshot_payload_max_bytes")? == 0);
+    connection.execute_batch("BEGIN")?;
+    connection.execute(
+        "INSERT INTO traces(trace_id,span_id,name,service,kind,status,start_ts,duration_ns) VALUES(?1,?2,'txn','worker','server','ok',99,1)",
+        params![99_i64.to_be_bytes().repeat(2), 99_i64.to_be_bytes()],
+    )?;
+    connection.execute("INSERT INTO traces(traces) VALUES('flush')", [])?;
+    let transaction = stats(&connection, "traces")?;
+    ensure!(stat(&transaction, "optimize_source_entries")? == 13);
+    connection.execute_batch("ROLLBACK")?;
+    let rolled_back = stats(&connection, "traces")?;
+    ensure!(stat(&rolled_back, "optimize_source_entries")? == 12);
+    drop(connection);
+    let reopened = open(extension, database)?;
+    let reopened_stats = stats(&reopened, "traces")?;
+    ensure!(stat(&reopened_stats, "index_bytes")? > 0);
+    ensure!(stat(&reopened_stats, "optimize_source_entries")? == 12);
+    ensure!(stat(&reopened_stats, "optimize_source_bytes")? > 0);
     println!("PASS: trace discovery, bounded streaming reads, and stable snapshots");
     Ok(())
 }

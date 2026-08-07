@@ -177,7 +177,7 @@ use crate::query_frame::{encode_aggregate_frame, encode_latest_frame};
 use crate::query_report::LogQueryReportState;
 use crate::shared::{self, DbGuard, SharedEngine};
 use crate::sql_value::integer_affinity;
-use crate::traces_vtab::TracesTab;
+use crate::traces_vtab::{TracesTab, MERGE_TARGET_ENTRIES as TRACE_MERGE_TARGET_ENTRIES};
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
@@ -4336,15 +4336,6 @@ pub(crate) struct StatsCursor<'vtab> {
     phantom: PhantomData<&'vtab StatsTab>,
 }
 
-fn sum_blob_bytes(database: &str, table: &str, suffix: &str, column: &str) -> Result<i64> {
-    let conn = shared::current_conn().map_err(module_err)?;
-    let sql = format!(
-        "SELECT COALESCE(SUM(length({column})), 0) FROM {}",
-        crate::sql_ident::qualified_shadow(database, table, suffix)
-    );
-    conn.query_row(&sql, [], |r| r.get(0))
-}
-
 fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
     let conn = shared::current_conn().map_err(module_err)?;
     let sql = format!(
@@ -4358,6 +4349,12 @@ struct LogStorageSummary {
     disk_entries: i64,
     bytes_on_disk: i64,
     raw_bytes: i64,
+    optimize_source_entries: i64,
+    optimize_source_bytes: i64,
+}
+
+struct TraceStorageSummary {
+    bytes_on_disk: i64,
     optimize_source_entries: i64,
     optimize_source_bytes: i64,
 }
@@ -4386,27 +4383,84 @@ fn log_storage_summary(database: &str, table: &str) -> Result<LogStorageSummary>
     })
 }
 
-fn log_index_bytes(database: &str, table: &str) -> Option<i64> {
+fn trace_storage_summary(database: &str, table: &str) -> Result<TraceStorageSummary> {
+    let conn = shared::current_conn().map_err(module_err)?;
+    let blocks = crate::sql_ident::qualified_shadow(database, table, "blocks");
+    let sql = format!(
+        "SELECT COALESCE(SUM(length(data)), 0),
+                COALESCE(SUM(CASE WHEN codec = 1 OR entry_count < {TRACE_MERGE_TARGET_ENTRIES}
+                                  THEN entry_count ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN codec = 1 OR entry_count < {TRACE_MERGE_TARGET_ENTRIES}
+                                  THEN length(data) ELSE 0 END), 0)
+           FROM {blocks}"
+    );
+    conn.query_row(&sql, [], |row| {
+        Ok(TraceStorageSummary {
+            bytes_on_disk: row.get(0)?,
+            optimize_source_entries: row.get(1)?,
+            optimize_source_bytes: row.get(2)?,
+        })
+    })
+}
+
+fn storage_index_bytes(database: &str, names: &[String]) -> Option<i64> {
+    if names.is_empty() {
+        return Some(0);
+    }
     let conn = shared::current_conn().ok()?;
     let dbstat = crate::sql_ident::qualified(database, "dbstat");
+    let placeholders = (1..=names.len())
+        .map(|position| format!("?{position}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
         "SELECT COALESCE(SUM(pgsize), 0) FROM {dbstat}
-          WHERE name IN (?1, ?2, ?3, ?4)"
+          WHERE name IN ({placeholders})"
     );
-    conn.query_row(
-        &sql,
-        [
+    conn.query_row(&sql, rusqlite::params_from_iter(names), |row| row.get(0))
+        .ok()
+}
+
+fn autoindex_name(table: &str, suffix: &str) -> String {
+    format!(
+        "sqlite_autoindex_{}_1",
+        crate::sql_ident::shadow_object(table, suffix)
+    )
+}
+
+fn metrics_index_bytes(database: &str, table: &str) -> Option<i64> {
+    storage_index_bytes(
+        database,
+        &[
+            crate::sql_ident::shadow_object(table, "chunks_series_ts"),
+            autoindex_name(table, "series"),
+            autoindex_name(table, "meta"),
+        ],
+    )
+}
+
+fn log_index_bytes(database: &str, table: &str) -> Option<i64> {
+    storage_index_bytes(
+        database,
+        &[
             crate::sql_ident::shadow_object(table, "terms"),
             crate::sql_ident::shadow_object(table, "blocks_ts"),
             crate::sql_ident::shadow_object(table, "meta"),
-            format!(
-                "sqlite_autoindex_{}_1",
-                crate::sql_ident::shadow_object(table, "meta")
-            ),
+            autoindex_name(table, "meta"),
         ],
-        |row| row.get(0),
     )
-    .ok()
+}
+
+fn trace_index_bytes(database: &str, table: &str) -> Option<i64> {
+    storage_index_bytes(
+        database,
+        &[
+            crate::sql_ident::shadow_object(table, "blocks_ts"),
+            crate::sql_ident::shadow_object(table, "terms"),
+            crate::sql_ident::shadow_object(table, "trace_blocks"),
+            autoindex_name(table, "meta"),
+        ],
+    )
 }
 
 unsafe impl VTabCursor for StatsCursor<'_> {
@@ -4542,6 +4596,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 rows.push((
                     "rollup_chunks",
                     Value::Integer(conn.query_row(&sql, [], |r| r.get(0))?),
+                ));
+                rows.push((
+                    "index_bytes",
+                    metrics_index_bytes(&database, &table).map_or(Value::Null, Value::Integer),
                 ));
             }
             TimelessModule::Logs => {
@@ -4878,6 +4936,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let optimize = shared.engine.optimize_profile();
                 let optimize_backlog = shared.engine.optimize_backlog();
                 let gate = shared.write_gate.profile();
+                let storage = trace_storage_summary(&database, &table)?;
                 debug_assert_eq!(buffered as u64, counted_buffered);
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
@@ -4889,10 +4948,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         "total_spans",
                         Value::Integer(disk_spans.saturating_add(counted_buffered) as i64),
                     ),
-                    (
-                        "bytes_on_disk",
-                        Value::Integer(sum_blob_bytes(&database, &table, "blocks", "data")?),
-                    ),
+                    ("bytes_on_disk", Value::Integer(storage.bytes_on_disk)),
                     (
                         "terms",
                         Value::Integer(count_rows(&database, &table, "terms")?),
@@ -4901,8 +4957,20 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         "trace_index_rows",
                         Value::Integer(count_rows(&database, &table, "trace_blocks")?),
                     ),
+                    (
+                        "index_bytes",
+                        trace_index_bytes(&database, &table).map_or(Value::Null, Value::Integer),
+                    ),
                     ("ts_min", opt_ts(ts_min)),
                     ("ts_max", opt_ts(ts_max)),
+                    (
+                        "optimize_source_entries",
+                        Value::Integer(storage.optimize_source_entries),
+                    ),
+                    (
+                        "optimize_source_bytes",
+                        Value::Integer(storage.optimize_source_bytes),
+                    ),
                     ("query_count", Value::Integer(query.query_count as i64)),
                     (
                         "query_cancelled",

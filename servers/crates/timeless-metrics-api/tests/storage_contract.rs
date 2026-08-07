@@ -309,6 +309,7 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     assert_eq!(recovered.buffered_points, 0);
     assert_eq!(recovered.total_points, 4_106);
     assert_eq!(recovered.raw_tier_chunks, 2);
+    assert!(recovered.sqlite_index_bytes > 0);
     assert_eq!(
         recovered.rollup_tiers.as_deref(),
         Some("3600:2592000,86400:31536000,2592000:0")

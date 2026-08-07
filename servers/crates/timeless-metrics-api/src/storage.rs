@@ -43,14 +43,6 @@ impl MetricsTable {
             Self::Poc => "metrics",
         }
     }
-
-    fn chunks(self) -> String {
-        format!("{}_chunks", self.name())
-    }
-
-    fn series(self) -> String {
-        format!("{}_series", self.name())
-    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -1340,26 +1332,12 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
         Some(SqlValue::Text(value)) => Some(value.clone()),
         _ => None,
     };
-    let (raw_tier_chunks, raw_points, rollup_entries): (i64, i64, i64) = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(resolution = 0), 0),
-                    COALESCE(SUM(CASE WHEN resolution = 0 THEN point_count ELSE 0 END), 0),
-                    COALESCE(SUM(resolution > 0), 0)
-               FROM {}",
-                table.chunks()
-            ),
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|error| format!("read metrics chunk units: {error}"))?;
-    let series_index_entries: i64 = conn
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {}", table.series()),
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("read metrics series index entries: {error}"))?;
+    // The extension owns physical layout and publishes the logical tier/index
+    // accounting through its public stats TVF. The server never names or
+    // reconstructs shadow tables.
+    let raw_tier_chunks = integer("chunks");
+    let rollup_entries = integer("rollup_chunks");
+    let series_index_entries = integer("series");
     let (page_count, page_size, freelist_pages): (i64, i64, i64) = conn
         .query_row(
             "SELECT (SELECT page_count FROM pragma_page_count),
@@ -1369,23 +1347,8 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| format!("read SQLite page accounting: {error}"))?;
-    let sqlite_index_bytes: i64 = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(pgsize), 0)
-               FROM dbstat
-              WHERE name IN (
-                '{0}_chunks_series_ts',
-                'sqlite_autoindex_{0}_series_1',
-                'sqlite_autoindex_{0}_meta_1'
-              )",
-                table.name()
-            ),
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("read metrics SQLite index bytes: {error}"))?;
-    let disk_points = integer("disk_points").max(raw_points);
+    let sqlite_index_bytes = integer("index_bytes");
+    let disk_points = integer("disk_points");
     let buffered_points = integer("buffered_points");
     Ok(StorageStats {
         module: text("module").unwrap_or_else(|| "metrics".into()),
@@ -1393,7 +1356,7 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
         series: integer("series"),
         chunks: raw_tier_chunks.saturating_add(rollup_entries),
         raw_tier_chunks,
-        rollup_chunks: integer("rollup_chunks").max(rollup_entries),
+        rollup_chunks: rollup_entries,
         disk_points,
         buffered_points,
         total_points: disk_points.saturating_add(buffered_points),

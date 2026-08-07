@@ -207,6 +207,7 @@ async fn http_batches_leave_the_extension_8192_span_threshold_authoritative() {
     assert_eq!(threshold.buffered_spans, 0);
     assert_eq!(threshold.blocks, 1);
     assert_eq!(threshold.raw_blocks, 1);
+    assert!(threshold.sqlite_index_bytes > 0);
     storage.shutdown().await.unwrap();
 }
 

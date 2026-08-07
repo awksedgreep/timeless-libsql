@@ -71,7 +71,9 @@ artifact exists until a tag is created from the finished, validated `main`.
   deadlines bounded before expensive decode/materialization where the public
   surface can enforce them.
 - Removed signal-server reads of private shadow tables. Servers now use only
-  public virtual tables, scalars, commands, capabilities, and stats.
+  public virtual tables, scalars, commands, capabilities, and stats. Metrics
+  and traces now obtain index allocation and trace optimizer-source sampling
+  from additive `timeless_stats` rows, matching the existing logs boundary.
 - Preserved extension-owned authoritative batching: 4,096 metric points per
   series, 8,192 log entries, and 8,192 rich spans.
 - Split the default loadable-extension feature from opt-in linked Rust
