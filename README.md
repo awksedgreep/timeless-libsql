@@ -696,7 +696,13 @@ the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`,
 `label_keep`, `label_map`, `quantiles`, `distinct`, `increase_pure`,
 `remove_resets`, `interpolate`, `keep_last_value`, `keep_next_value`,
 `drop_common_labels`, `rate_over_sum`, and `WITH` fail before storage until
-each receives its own pinned compatibility row. The LogsQL API
+each receives its own pinned compatibility row. LogsQL stream selectors are
+also explicitly deferred rather than approximated: unquoted `{...}` and
+`_stream:{...}` return a source-positioned pre-storage error because current
+rich-log batches retain row metadata but no ingestion-declared,
+tenant-scoped stream identity. Ordinary `service = :service` SQL remains
+available as row filtering, but it is not labeled stream-selector parity; see
+the `LQL-F35` no-SQL disposition. The LogsQL API
 includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
 exact-prefix matching, and static multi-exact `in(...)` membership over bounded
 public rows while retaining Timeless's rich JSON types, plus static

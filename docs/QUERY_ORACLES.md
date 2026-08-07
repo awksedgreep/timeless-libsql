@@ -1407,3 +1407,19 @@ nested current-row values directly. The fixture remains 167 source rows and
 now contains 346 row-query cases, one stochastic case, 511 error cases, and
 530 statistics/pipeline cases: 1,388 cases total, all passing against the
 immutable image. The fixture now contains 1388 cases.
+
+`LQL-F35` adds four accepted row-query witnesses for VictoriaLogs stream
+selectors. The harness already declares `case` as its sole stream field at
+ingestion, so bare `{case="phrase-exact"}`, the equivalent `_stream:{...}`
+form, regular-expression matching, static `in(...)`, and `or` composition
+exercise the actual stream index rather than an ordinary log-field shortcut.
+Source audit at immutable commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers `log_rows.go`,
+`stream_tags.go`, `stream_id.go`, `stream_filter.go`, `indexdb.go`, and
+`storage_search.go`: nonempty configured fields are canonically sorted and
+hashed, the ID is tenant-scoped, and the stream filter is applied before the
+ordinary filter. Timeless intentionally defers this row because it does not
+store that ingestion-owned identity. The fixture remains 167 source rows and
+now contains 350 row-query cases, one stochastic case, 511 error cases, and
+530 statistics/pipeline cases: 1,392 cases total, all passing against the
+immutable image. The fixture now contains 1392 cases.

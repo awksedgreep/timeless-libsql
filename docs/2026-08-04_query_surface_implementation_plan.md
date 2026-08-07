@@ -1594,6 +1594,30 @@ regression, and evidence before execution is enabled. No benchmark is claimed
 for a catalog the product deliberately rejects, and no extension or storage
 contract changed.
 
+`LQL-F35` is closed as a stream-data-model deferral. Pinned VictoriaLogs
+1.52.0 assigns stream fields during ingestion, removes empty stream values,
+canonically sorts the remaining name/value pairs, combines their 128-bit hash
+with the tenant account/project identity, indexes that identity, and applies
+`{...}` before ordinary row filters. Four live immutable-image witnesses pin
+bare/prefixed equality, regular-expression, static-membership, and disjunction
+forms. Timeless rich-log batch v1 retains row metadata but carries no
+ingestion-declared stream-field set, tenant-scoped canonical stream ID, or
+stream index; treating `{service="api"}` as a row predicate would therefore
+claim false semantics. The POST LogsQL route now returns one stable
+source-positioned HTTP 422 error before any public storage read across base,
+nested filter-pipe, shutdown, and reopen paths, while quoted and commented
+braces remain ordinary text and explicit `rows({...})` objects remain inline
+data. The full parser suite caught and pinned that distinction after the first
+overbroad detector rejected existing `join`, `union`, and discarded-prefix
+`generate_sequence` plans. The native-parameter GET route continues not to
+accept LogsQL text. Shipping needs one versioned design for stream-field
+declaration and canonicalization,
+tenant identity, batch/SQL/block representation, indexes and pruning,
+ingestion defaults/headers, migration/downgrade/corruption, retention,
+optimize, backup, limits, cancellation, and public capabilities. There is no
+SQL recipe or benchmark for deliberately rejected syntax, and no extension or
+storage contract changed.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

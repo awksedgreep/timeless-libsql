@@ -2133,6 +2133,17 @@ VictoriaLogs instead uses HTTP 400 text for both parser classes and encodes a
 stats count as a JSON string; Timeless intentionally retains the stricter
 error distinction and numeric count documented in `QSF-063`.
 
+Unquoted `{...}` and `_stream:{...}` selectors use that explicit HTTP 422
+path before any storage call, with one-based source line and character column.
+Quoted or commented braces remain text, and explicit `rows({...})` objects
+remain inline `join`/`union` data. Timeless does not substitute an ordinary
+metadata filter: VictoriaLogs forms stream identity at ingestion
+from configured nonempty stream fields plus tenant identity, while the current
+public rich-log batches store no such declaration or ID. `LQL-F35` remains
+deferred until the versioned batch/SQL/block/index/migration contract in the
+matrix exists; direct users can still issue ordinary public `service` or JSON
+metadata SQL without calling it stream parity.
+
 The ignored end-to-end contract test pins the storage boundary explicitly:
 
 ```bash

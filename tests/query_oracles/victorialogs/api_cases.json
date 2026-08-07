@@ -171,6 +171,30 @@
   ],
   "query_cases": [
     {
+      "id": "LQL-F35-bare-stream-selector-equality",
+      "query": "{case=\"phrase-exact\"}",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-F35-prefixed-stream-selector-regexp",
+      "query": "_stream:{case=~\"phrase-(exact|case)\"}",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-case"]
+    },
+    {
+      "id": "LQL-F35-stream-selector-static-membership",
+      "query": "{case in(\"phrase-exact\",\"phrase-case\")}",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "phrase-case"]
+    },
+    {
+      "id": "LQL-F35-stream-selector-disjunction",
+      "query": "{case=\"phrase-exact\" or case=\"word-exact\"}",
+      "status": 200,
+      "expected_cases": ["phrase-exact", "word-exact"]
+    },
+    {
       "id": "LQL-F08-phrase-bytes-case-and-word-boundaries",
       "query": "\"ssh: login fail\"",
       "status": 200,

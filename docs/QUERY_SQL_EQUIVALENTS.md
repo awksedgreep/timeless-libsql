@@ -4818,6 +4818,34 @@ Real-extension rejection regression:
 
 ## LogsQL foundations and equivalents
 
+### LQL-F35: no SQL equivalent without stored stream identity
+
+A VictoriaLogs selector such as `{service="api"}` does not mean “read every
+log row whose current `service` field equals `api`.” It selects the
+tenant-scoped identities formed at ingestion from the configured stream-field
+set, then applies ordinary row filters. Timeless rich-log batches and public
+`logs` rows currently retain the service value but not the selected
+stream-field names, their canonical nonempty name/value set, tenant
+account/project identity, or upstream-compatible stream ID.
+
+Consequently, this tempting statement is useful row filtering but is **not**
+an `LQL-F35` equivalent:
+
+```text
+SELECT ts, level, message, metadata
+  FROM logs
+ WHERE service = :service
+ ORDER BY ts, rowid;
+```
+
+No parameterized executable recipe is published for the row. Inventing a hash
+from present metadata would collapse missing declaration state, ingestion
+defaults, empty-value removal, tenancy, migration, and stream-index semantics.
+After a versioned public stream-identity contract is designed and stored, the
+matrix must define its SQL representation and add an executable recipe against
+that representation. Until then the Rust API returns an explicit pre-storage
+unsupported error rather than silently running the row predicate above.
+
 ### SQL-LOG-001: bounded filter, sort, and pagination
 
 Use the virtual table's declared index-key columns for posting-list pruning:

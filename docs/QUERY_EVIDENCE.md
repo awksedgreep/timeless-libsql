@@ -6423,3 +6423,39 @@ not reproduce errors, limits, cancellation, or public storage work. No
 extension primitive, private access, storage format, batching, compression,
 index, rollup, retention, transaction, migration, optimize, or maintenance
 behavior changed.
+
+## Session 19 data-model disposition: LogsQL stream selectors
+
+`LQL-F35` is classified, not enabled. Four deterministic cases pass against
+immutable VictoriaLogs 1.52.0, bringing the complete LogsQL fixture from
+1,388 to 1,392 cases. They pin bare and `_stream:`-prefixed selectors,
+equality, regular expression, static membership, and disjunction over the
+oracle harness's ingestion-declared `case` stream field. Source audit pins the
+upstream boundary: ingestion canonicalizes nonempty configured stream fields,
+hashes them into a tenant-scoped ID, indexes that identity, and applies the
+selector before ordinary row filtering.
+
+The Rust unit regression failed first on the opaque `unsupported LogsQL term`
+message. The real-extension regression now pins source-positioned HTTP 422
+`unsupported_logsql` envelopes across POST base and filter-pipeline forms,
+shutdown, and reopen. The native-parameter GET route remains outside the
+LogsQL grammar. Quoted and commented braces are isolated, one rich retained
+row survives optimize/reopen, and API row-query, native-count, payload-byte,
+and decoded-entry counters remain unchanged for every rejection.
+
+The complete parser suite initially failed three existing plans because an
+overbroad detector treated inline `rows({...})` objects as selectors. The
+corrected scanner tracks explicit case-insensitive `rows` parenthesis groups,
+including their nested groups, while still rejecting selectors in ordinary
+parenthesized subqueries. The existing `join`, `union`, and discarded-prefix
+`generate_sequence` regressions plus the new focused inline-row cases now pin
+that boundary; see `QSF-262`.
+
+There is no SQL recipe: row-wise metadata equality cannot reproduce a stream
+identity that the current public batch and storage formats never recorded.
+There is no narrow/wide latency, cardinality, storage-byte, or RSS benchmark
+for syntax Timeless deliberately does not execute. The exact versioned
+storage prerequisite is recorded in the matrix, plan, SQL disposition,
+`QSF-261`, and `QSF-262`. No extension primitive, private access, storage format,
+authoritative batching, compression, index, rollup, retention, transaction,
+migration, optimize, or maintenance behavior changed.

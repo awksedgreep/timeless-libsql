@@ -6003,6 +6003,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
     let query_now = context.query_now;
     let prepared_query = prepare_query_layout(query)?;
     let query = prepared_query.as_ref();
+    reject_deferred_stream_selectors(query)?;
     let mut spec = QuerySpec {
         limit: 100,
         descending: true,
@@ -9289,6 +9290,58 @@ fn source_line_column(source: &str, byte_offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+/// Reject VictoriaLogs stream selectors before planning or storage access.
+///
+/// An unquoted `{` is reserved for `_stream:{...}` (the `_stream:` prefix is
+/// optional) in LogsQL except inside the grammar's explicit `rows(...)`
+/// inline-data source. Timeless deliberately does not reinterpret a selector
+/// as a row-metadata predicate: VictoriaLogs applies it to an ingestion-owned,
+/// tenant-scoped stream identity before evaluating ordinary row filters.
+/// Comments have already been blanked by `prepare_query_layout`, preserving
+/// source offsets, while quoted braces and inline-row objects remain data.
+fn reject_deferred_stream_selectors(query: &str) -> Result<(), LogsqlError> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut inline_rows_groups = Vec::new();
+    for (index, character) in query.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some(character),
+            '(' => {
+                let prefix = query[..index].trim_end();
+                let identifier_start = prefix
+                    .char_indices()
+                    .rev()
+                    .find(|(_, character)| !character.is_ascii_alphanumeric() && *character != '_')
+                    .map_or(0, |(offset, character)| offset + character.len_utf8());
+                let begins_inline_rows = prefix[identifier_start..].eq_ignore_ascii_case("rows");
+                let nested_inline_rows = inline_rows_groups.last().copied().unwrap_or(false);
+                inline_rows_groups.push(begins_inline_rows || nested_inline_rows);
+            }
+            ')' => {
+                inline_rows_groups.pop();
+            }
+            '{' if !inline_rows_groups.last().copied().unwrap_or(false) => {
+                let (line, column) = source_line_column(query, index);
+                return Err(LogsqlError::unsupported(format!(
+                    "LogsQL stream selector at line {line}, column {column} is deferred: Timeless does not store a VictoriaLogs-compatible stream identity"
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn pipeline_segments(input: &str) -> Result<Vec<&str>, LogsqlError> {
     let mut segments = Vec::new();
     let mut start = 0usize;
@@ -10470,6 +10523,57 @@ mod tests {
             blocks_count.message,
             "unsupported LogsQL pipeline \"blocks_count\""
         );
+    }
+
+    #[test]
+    fn session_nineteen_stream_selectors_fail_with_an_explicit_storage_prerequisite() {
+        for (query, line, column) in [
+            (r#"{case="one"}"#, 1, 1),
+            (r#"_stream:{case=~"one|two"}"#, 1, 9),
+            (r#"λ {case="one"}"#, 1, 3),
+            ("*\n| filter {service=\"api\"}", 2, 10),
+            (r#"* | union ({case="one"})"#, 1, 12),
+        ] {
+            let error = parse(query, TimestampUnit::Microseconds).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Unsupported, "{query:?}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "LogsQL stream selector at line {line}, column {column} is deferred: Timeless does not store a VictoriaLogs-compatible stream identity"
+                ),
+                "{query:?}"
+            );
+        }
+
+        for query in [
+            r#""literal { brace }""#,
+            "'literal { brace }'",
+            "`literal { brace }`",
+        ] {
+            let quoted = parse(query, TimestampUnit::Microseconds).unwrap();
+            assert_eq!(
+                quoted.spec.message_phrase.as_deref(),
+                Some("literal { brace }"),
+                "{query:?}"
+            );
+        }
+
+        let commented = parse(
+            "* # {case=\"ignored\"}\n| limit 1",
+            TimestampUnit::Microseconds,
+        )
+        .unwrap();
+        assert_eq!(commented.spec.limit, 1);
+
+        for inline_rows in [
+            r#"* | union rows({"case":"left","value":"x"})"#,
+            r#"* | join by (case) rows({"case":"left","value":"x"})"#,
+        ] {
+            assert!(
+                parse(inline_rows, TimestampUnit::Microseconds).is_ok(),
+                "{inline_rows:?}"
+            );
+        }
     }
 
     #[test]

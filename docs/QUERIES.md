@@ -611,6 +611,38 @@ operator; `limit 0` means no operator-specific cap, but never disables
 Pipelines fail closed if the bounded public row set would be incomplete; they
 do not aggregate a silently truncated prefix.
 
+### Deferred LogsQL stream selectors
+
+An unquoted selector `{...}` in a LogsQL filter or parenthesized subquery is
+recognized as VictoriaLogs stream syntax and fails before storage with HTTP
+422. The optional `_stream:` prefix has the same boundary:
+
+```json
+{
+  "error": "unsupported_capability",
+  "reason": "unsupported_logsql",
+  "message": "LogsQL stream selector at line 1, column 1 is deferred: Timeless does not store a VictoriaLogs-compatible stream identity"
+}
+```
+
+Line and Unicode-character columns are one-based. Braces inside double-quoted,
+single-quoted, or raw-backtick strings remain text, and braces after a `#`
+comment marker are ignored with the rest of that line. Objects inside the
+explicit case-insensitive `rows({...})` inline-data source remain data for
+`join` and `union`, including when such a source appears in a pipeline prefix
+later discarded by `generate_sequence`. The check still applies to base
+filters, current-row `filter`/`where` pipelines, and nested query text, so
+unsupported syntax cannot silently broaden into a row scan.
+
+VictoriaLogs derives a stream from the configured fields at ingestion,
+canonicalizes the nonempty name/value pairs, hashes them into a tenant-scoped
+identity, indexes it, and applies `{...}` before ordinary row predicates.
+Timeless retains rich row metadata but not that declaration or identity.
+`service = :service` against public SQL is therefore a useful ordinary filter,
+not a stream-selector equivalent. Shipping `LQL-F35` requires the complete
+versioned stream contract named in the matrix and `QSF-261`; there is no honest
+SQL recipe or extension primitive today.
+
 ## Request-local log query statistics
 
 Direct SQLite/libSQL callers can inspect the actual work of one public log
