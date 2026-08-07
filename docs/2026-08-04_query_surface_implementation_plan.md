@@ -1321,11 +1321,17 @@ the upstream textual field model cannot express.
 Every visited row and generated result is work/state/result/response/deadline
 bounded and cancellation leaves the public reader reusable. Source rows remain
 immutable through optimize, shutdown, and reopen. `QSF-243` records the
-semantic and unchanged-storage boundary. Exact-build candidate/control
-performance, physical-work equality, durability, and HWM evidence remain the
-only P47 exit item before the row is closed. No extension primitive, private
-table, storage contract, timestamp format, batching, compression, index,
-retention, transaction, migration, optimize, or maintenance behavior changed.
+semantic and unchanged-storage boundary. Exact release build
+`db274f37b217862ef5ed35d2100675f7d1183b75` measures 3.519/40.756 ms
+narrow/wide p95 versus 3.197/35.390 ms same-scan projection controls, or
++10.1%/+15.2%. Request-attributed API means are +7.6%/+8.3%. Every pair has
+byte-identical public block, decode, payload, match, return, and requested-work
+counters. All 8,192 entries complete durably, storage remains four raw blocks,
+queued and in-flight work are zero, and the complete-workload logs HWM is
+106,108 KiB. `QSF-244` accepts the bounded post-scan cost. No extension
+primitive, private table, storage contract, timestamp format, batching,
+compression, index, retention, transaction, migration, optimize, or
+maintenance behavior changed. `LQL-P47` is closed.
 
 ### Session 19: experimental and data-model dispositions
 

@@ -4798,6 +4798,67 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `time_add`
+
+The checked-in
+[`2026-08-07_session18_lql_p47_time_add.json`](evidence/2026-08-07_session18_lql_p47_time_add.json)
+was captured from exact release extension and server build
+`db274f37b217862ef5ed35d2100675f7d1183b75` and has SHA-256
+`253a5cb9abc99a1758d2e387236179182ee4c8d8f7221bc2ad888a9829d5ee32`.
+Each candidate and control performs one public scan, applies the same
+chronological sort and 64-row limit, and projects only `_time`. The candidate
+then adds one second with the shipped RFC3339Nano semantics; the control omits
+only that transform.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | candidate blocks/query | decoded entries/query | extension payload bytes/query | public rows materialized/query |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `time_add 1s`, indexed host | 64 | 2,539 | 3.243 | 3.519 | 3.640 | 1 | 1,024 | 235,778 | 128 |
+| `time_add 1s`, full fixture | 64 | 2,547 | 36.297 | 40.756 | 41.869 | 4 | 8,192 | 1,914,055 | 8,192 |
+| projection control, indexed host | 64 | 2,560 | 2.884 | 3.197 | 3.303 | 1 | 1,024 | 235,778 | 128 |
+| projection control, full fixture | 64 | 2,560 | 32.900 | 35.390 | 36.245 | 4 | 8,192 | 1,914,055 | 8,192 |
+
+Timestamp addition p95 is 10.1% above the narrow control and 15.2% above the
+wide control. Request-attributed API averages are 2.722/35.182 ms versus
+2.529/32.495 ms, or 7.6%/8.3% higher. Every equal-width pair executes exactly
+50 public queries and has byte-identical candidate-block selection, entry
+decode, payload reads, matches, public-row returns, and requested work. The
+candidate responses are 21/13 bytes smaller because canonical RFC3339Nano
+formatting removes insignificant fractional zeroes. The difference is output
+semantics, not hidden storage work.
+
+All 8,192 rich entries completed durably with zero queued work. Admission took
+14.402 ms and the explicit durability barrier took 39.025 ms. Storage remains
+exactly four raw blocks, 1,914,055 logical payload bytes, and 2,022,736
+physical database/WAL/SHM bytes. Logs HWM was 106,108 KiB, 5,420 KiB above
+LQL-P46 after four additional one-scan shapes; metrics HWM was 51,044 KiB,
+1,196 KiB below it. The whole-process variation and bounded canonical-string
+allocation are retained honestly. Cancellation ended with zero requests in
+flight and zero cancelled requests at capture.
+
+The complete 1,341-case pinned VictoriaLogs v1.52.0 corpus passes live.
+Direct parser/evaluator and real-extension regressions pin strict grammar,
+compound signed duration units, RFC3339Nano and SQL-space parsing, timezone
+normalization, deterministic zone-less UTC, nanosecond output, sentinel-aware
+saturation, invalid-string and native-rich no-op fidelity, exact nested
+mutation, later-pipe visibility, cumulative limits, cancellation and reader
+reuse, immutable source rows, optimize, shutdown, and reopen. Executable
+`SQL-LOG-061` proves the saturating native-unit SQL foundation through the
+public release extension.
+
+Final local gates pass: 148 logs library tests, two logs binary tests, all 73
+logs and 90 metrics real-extension tests, both complete Rust workspaces, the
+35-test Rust query harness, all six focused correctness profiles, the
+standalone DB-health lifecycle gate, all 45 CLI/crash/transaction sections,
+the complete 1,341-case live oracle, documentation/oracle contracts,
+formatting, and Clippy with warnings denied. All 127 executable SQL recipes
+and 165 statements pass through the public release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No private shadow table,
+Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
+downstream repository was used or modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

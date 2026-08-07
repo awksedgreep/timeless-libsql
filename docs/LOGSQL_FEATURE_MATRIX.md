@@ -150,7 +150,7 @@ extension.
 | `LQL-P44` | `union` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-058-bounded-ordered-union-of-two-public-log-scans)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P45` | `running_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P46` | `total_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P47` | `time_add` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time)) | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P47` | `time_add` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-time_add)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P48` | `generate_sequence` | missing | no | `SQL` | `API` | P3 |
 | `LQL-P49` | `set_stream_fields` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
@@ -172,6 +172,16 @@ RFC3339Nano parsing has no honest core-SQL equivalent. Because every row has
 already crossed the public boundary and no block can be pruned, an extension
 primitive or private-table access would not improve the retained storage
 model.
+
+Exact release build `db274f37b217862ef5ed35d2100675f7d1183b75`
+measures `time_add` at 3.243/3.519/3.640 ms narrow and
+36.297/40.756/41.869 ms wide p50/p95/p99. Same-scan projection controls
+measure 2.884/3.197/3.303 and 32.900/35.390/36.245 ms. Candidate p95 is
+10.1%/15.2% higher and request-attributed API means are 7.6%/8.3% higher.
+Every pair executes one public query and has identical block, decode, payload,
+match, return, and requested-work counters. `QSF-244` accepts the bounded
+post-scan timestamp parse/format cost and records the 106,108 KiB whole-process
+logs HWM. The storage boundary and direct-user SQL foundation remain unchanged.
 
 `LQL-P10` is deliberately deferred, not approximated. VictoriaLogs
 `block_stats` exposes one row per physical field column with its internal

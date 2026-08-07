@@ -2382,7 +2382,7 @@ complete-group prepass and rich snapshot writes occur after the same public
 scan; fixed-key full-partition SQL windows already serve direct users, so the
 measured cost does not justify an extension primitive.
 
-+## LogsQL timestamp addition
+## LogsQL timestamp addition
 
 `time_add` adds one VictoriaLogs duration to the default `_time` field or
 one exact current-row field:
@@ -2424,6 +2424,18 @@ gives direct SQLite/libSQL users a saturating native-timestamp shift plus an
 explicit sub-native nanosecond remainder. Core SQLite has no honest generic
 RFC3339Nano equivalent for arbitrary metadata fields, so that semantic remains
 in the Rust API rather than being mislabeled as extension support.
+
+Exact release build `db274f37b217862ef5ed35d2100675f7d1183b75`
+measures 64-row `time_add` at 3.243/3.519/3.640 ms narrow and
+36.297/40.756/41.869 ms wide p50/p95/p99. Equal-cardinality controls with
+the same sort, limit, projection, and public scan measure
+2.884/3.197/3.303 and 32.900/35.390/36.245 ms. The 10.1%/15.2% p95 cost
+is bounded RFC3339Nano parse, saturating addition, canonical formatting, and
+current-row replacement. Each equal-width pair reads the identical one/four
+blocks, decodes 1,024/8,192 entries, reads 235,778/1,914,055 payload bytes,
+matches and returns 128/8,192 public rows, and emits 64 results. The storage
+work proves that moving this language transform into an extension opcode
+would not improve pruning or avoid decode/payload crossing.
 
 
 ## LogsQL upper-step quantiles and population deviation
