@@ -1233,6 +1233,23 @@ harness's explicit two-scan and 192-item RHS-state reservation contracts. All
 in-flight work are zero. No extension primitive, private table, storage
 contract, or authoritative batching behavior changed.
 
+Session 18's `LQL-P44` semantic implementation is complete as API-owned
+bounded ordered concatenation over public `logs` scans, with `SQL-LOG-058` as
+the direct-user `UNION ALL` foundation. Pinned VictoriaLogs source plus the
+complete 1,267-case live oracle establish strict query/inline source grammar,
+duplicate preservation, empty-source behavior, nested composition, later
+statistics, and explicit failures. The live multi-worker oracle may expose
+unsorted source rows in either order, so oracle comparisons sort instead of
+inventing an HTTP response-order promise; Timeless provides deterministic
+left-then-source order in its single-owner evaluator.
+
+Recursive query-backed plans share the parent clock and cumulative
+work/state/result/response/deadline limits. Complete typed/nested source rows,
+inline text rows, traversal, cloning, cardinality, and cancellation are
+bounded; optimize, shutdown, and reopen leave public source rows unchanged.
+`QSF-237` records the semantic and unchanged-storage boundary. Exact-build
+performance/HWM evidence remains required before this row closes.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

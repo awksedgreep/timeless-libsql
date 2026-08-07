@@ -2895,6 +2895,34 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "union_narrow",
+                "logs-union-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | format 'joined' as joined | fields joined | union (host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | format 'joined' as joined | fields joined)"#,
+                128,
+                None,
+            ),
+            (
+                "union_wide",
+                "logs-union-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields range_key | format 'joined' as joined | fields joined | union (query | sort by (_time) asc | limit 64 | fields range_key | format 'joined' as joined | fields joined)"#,
+                128,
+                None,
+            ),
+            (
+                "union_control_narrow",
+                "logs-union-control-narrow",
+                r#"host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key | filter range_key:in(host:="h00" AND query | sort by (_time) asc | limit 64 | fields range_key) | format '["joined","joined"]' as joined | unroll joined | fields joined"#,
+                128,
+                None,
+            ),
+            (
+                "union_control_wide",
+                "logs-union-control-wide",
+                r#"query | sort by (_time) asc | limit 64 | fields range_key | filter range_key:in(query | sort by (_time) asc | limit 64 | fields range_key) | format '["joined","joined"]' as joined | unroll joined | fields joined"#,
+                128,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3477,6 +3505,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
             2,
             192,
         )?;
+        require_same_public_query_work_with_scans(
+            &queries,
+            "union_control_narrow",
+            "union_narrow",
+            2,
+            128,
+        )?;
+        require_same_public_query_work_with_scans(
+            &queries,
+            "union_control_wide",
+            "union_wide",
+            2,
+            128,
+        )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
@@ -3690,6 +3732,17 @@ mod tests {
 
         let error = require_same_public_query_work_with_scans(&queries, "control", "sampled", 2, 0)
             .unwrap_err();
+        assert!(format!("{error:#}").contains("state reservation"));
+
+        let union_queries = Map::from_iter([
+            ("control".to_owned(), public(10_000_100)),
+            ("sampled".to_owned(), public(9_993_700)),
+        ]);
+        require_same_public_query_work_with_scans(&union_queries, "control", "sampled", 2, 128)
+            .unwrap();
+        let error =
+            require_same_public_query_work_with_scans(&union_queries, "control", "sampled", 2, 192)
+                .unwrap_err();
         assert!(format!("{error:#}").contains("state reservation"));
     }
 

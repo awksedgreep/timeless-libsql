@@ -165,6 +165,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-055`](#sql-log-055-concatenate-one-json-array) | `LQL-P40` | current foundation | ordered concatenation of one bounded canonical JSON array from a public metadata path; API owns raw token spelling, bare `NaN`, grammar, rich mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-056`](#sql-log-056-unroll-one-json-array) | `LQL-P42` | current foundation | ordered row expansion of one bounded canonical JSON array from a public metadata path, including one empty result for missing, invalid, scalar, or empty sources; API owns multi-field zip composition, raw token spelling, conditions, rich mutation, limits, cancellation, and envelopes |
 | [`SQL-LOG-057`](#sql-log-057-bounded-left-or-inner-join-on-one-exact-metadata-key) | `LQL-P43` | current foundation | bounded deterministic left/inner join over two public log scans using one exact textual metadata key, with duplicate right matches and separate typed payloads; API owns LogsQL grammar, multiple keys, inline/query sources, rich merging, prefixes, limits, cancellation, and envelopes |
+| [`SQL-LOG-058`](#sql-log-058-bounded-ordered-union-of-two-public-log-scans) | `LQL-P44` | current foundation | bounded `UNION ALL` over two independent public log scans with explicit source/row order and complete typed payloads; API owns LogsQL grammar, inline/query sources, nesting, cumulative limits, cancellation, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -9035,6 +9036,90 @@ either storage read, block decode, or public payload crossing. No extension
 primitive or private shadow-table access is warranted. Direct regression:
 `tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
 regression: `session_eighteen_join_is_rich_bounded_and_durable`.
+
+### SQL-LOG-058: bounded ordered union of two public log scans
+
+Bind inclusive native timestamp bounds, optional left/right levels, separate
+positive work limits for both public scans, and a positive result limit. This
+read-only statement preserves every row and duplicate, returns the complete
+typed public payload, and explicitly orders all left rows before all right
+rows. Each side is independently ordered by timestamp and the remaining
+public columns, so callers do not depend on SQLite compound-query scheduling.
+
+```sql
+WITH
+left_rows AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS source_row,
+    ts,
+    level,
+    message,
+    metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND (:union_left_level IS NULL OR level = :union_left_level)
+    AND max_work_entries = :outer_max_work_entries
+    AND :max_result_rows > 0
+),
+right_rows AS MATERIALIZED (
+  SELECT
+    row_number() OVER (ORDER BY ts, level, message, metadata) AS source_row,
+    ts,
+    level,
+    message,
+    metadata
+  FROM logs
+  WHERE ts >= :start_ts
+    AND ts <= :end_ts
+    AND (:union_right_level IS NULL OR level = :union_right_level)
+    AND max_work_entries = :subquery_max_work_entries
+    AND :max_result_rows > 0
+),
+combined AS (
+  SELECT 0 AS source_order, source_row, ts, level, message, metadata
+  FROM left_rows
+  UNION ALL
+  SELECT 1 AS source_order, source_row, ts, level, message, metadata
+  FROM right_rows
+)
+SELECT source_order, source_row, ts, level, message, metadata
+FROM combined
+ORDER BY source_order, source_row
+LIMIT :max_result_rows;
+```
+
+For the executable fixture, bind `:start_ts`/`:end_ts` to `1000`/`2000`,
+`:outer_max_work_entries` and `:subquery_max_work_entries` to `100000`, and
+`:max_result_rows` to `100`; bind `:union_left_level` and
+`:union_right_level` to SQL `NULL`. The statement returns four rows: both
+fixture logs as source `0`, followed by the same two logs as source `1`.
+Duplicates are retained deliberately. Metadata remains the exact typed JSON
+returned by the public `logs` table, and timestamps remain in the table's
+configured native unit; this fixture uses milliseconds. Binding different
+levels demonstrates two independent query sources without changing the
+storage contract.
+
+This is the honest direct-SQL foundation for `LQL-P44`. An inline source is
+ordinary SQL too: replace `right_rows` with a bounded `VALUES` CTE having the
+same columns. The Rust logs API owns case-insensitive `union` grammar;
+strict scalar `rows(...)` parsing; recursively query-backed sources; left then
+source ordering; empty inline-row behavior; typed and nested query-row
+fidelity; preservation of duplicates; subsequent pipeline composition;
+nested depth/count limits; cumulative result/work/state/response/deadline
+bounds; cancellation; and HTTP envelopes. VictoriaLogs' multi-worker HTTP
+response does not promise an observable row order without a later `sort`, so
+the pinned oracle uses explicit sorting for query-backed comparisons;
+Timeless nevertheless gives its single-owner API deterministic left/source
+order.
+
+The operation necessarily performs two independently bounded public scans.
+Ordinary `UNION ALL` already gives SQLite/libSQL users the useful composition,
+and moving LogsQL syntax into the extension would not eliminate either scan,
+block decode, or public payload crossing. No extension primitive or private
+shadow-table access is warranted. Direct regression: `tests/cli.sh` section
+45 and the Rust SQL harness; HTTP/oracle/optimize/reopen regression:
+`session_eighteen_union_is_rich_bounded_and_durable`.
 
 ## Adding the next recipe
 

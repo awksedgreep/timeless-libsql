@@ -2183,6 +2183,53 @@ changing physical storage work. The bounded RHS materialization, index, and
 rich merge cost is accepted above the public storage boundary; it does not
 justify moving LogsQL syntax or a join map into the extension.
 
+## LogsQL bounded union
+
+LogsQL `union` appends inline rows or the result of another complete LogsQL
+pipeline to the current request-owned rows:
+
+```text
+kind:="request" | union (kind:="deployment" | fields service, owner)
+kind:="request" | union rows({service:"api",owner:"platform"},{service:"worker",owner:"jobs"})
+kind:="request" | union (kind:="deployment" | union rows({service:"local"})) | stats count() as rows
+```
+
+`union` and `rows` are case-insensitive. A source is either one parenthesized
+query or strict `rows(...)`; inline fields accept `:` or `=`, quoted compound
+tokens, optional commas, and dotted retained paths, but values are textual
+scalars. Arrays, objects, missing values, malformed rows, empty subqueries,
+trailing tokens, and attached suffixes fail before storage work. `rows()` is
+an identity. An inline `{}` carries no fields and adds no result row, matching
+the pinned upstream response. Duplicates are preserved.
+
+Query-backed sources recursively use the same parser, request clock, public
+`logs` table, and parent limits. Timeless preserves their strings, numbers,
+booleans, arrays, objects, explicit nulls, empty strings, and nested paths.
+It appends all left rows in their current order and then all source rows in
+their current order; later filters, fields, sorts, limits, and statistics see
+the combined sequence. VictoriaLogs' live multi-worker HTTP response can
+reorder rows without a later `sort`, despite its processor's append-at-flush
+design, so portable LogsQL callers should still sort whenever order is part
+of the contract.
+
+Both scans, retained rich source state, cloned output rows, recursive value
+traversal, nesting/count, result cardinality, response bytes, deadline, and
+cancellation are bounded cumulatively. Composition is request-local and
+leaves durable rows unchanged through optimize, shutdown, and reopen. The
+complete 1,267-case pinned VictoriaLogs fixture covers nine successful and
+nine strict error vectors; the real-extension regression adds retained rich
+fidelity, deterministic ordering, cumulative limits, immutability, and
+durability.
+
+Executable
+[`SQL-LOG-058`](QUERY_SQL_EQUIVALENTS.md#sql-log-058-bounded-ordered-union-of-two-public-log-scans)
+gives direct SQLite/libSQL users the ordinary `UNION ALL` foundation over two
+independently bounded public scans with explicit source order and complete
+typed payloads. Inline sources are ordinary bounded `VALUES` CTEs. The API
+owns LogsQL grammar, recursive planning, limits, cancellation, and envelopes.
+No extension primitive, private table, storage format, or authoritative
+8,192-entry batching behavior changes.
+
 ## LogsQL upper-step quantiles and population deviation
 
 The bounded `stats` pipeline supports textual upper-step `quantile` and

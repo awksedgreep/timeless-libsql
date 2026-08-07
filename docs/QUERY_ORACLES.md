@@ -1101,3 +1101,24 @@ covered separately through the real extension. The fixture still contains
 167 source rows, 346 row-query cases, one stochastic case, 439 error cases,
 and 463 statistics/pipeline cases: 1,249 cases total, all passing against the
 immutable image. The fixture now contains 1249 cases.
+
+`LQL-P44` adds nine exact pipeline/statistics cases and nine error cases for
+`union`. They pin inline and query-backed sources, duplicate preservation,
+empty `rows()` identity, empty inline-object omission, recursive sources,
+later statistics, case-insensitive `union`/`rows`, `:`/`=` inline fields, and
+query-backed statistics as ordinary rows. Missing, empty, invalid,
+unterminated, trailing, nonscalar-inline, and attached-suffix forms fail.
+Source audit covers `pipe_union.go`, `pipe_union_test.go`, shared
+`parseRows`, and the storage union regression at immutable VictoriaLogs
+commit `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
+
+The source processor forwards its input and appends the union source during
+flush, but the live multi-worker HTTP response can expose query/inline rows in
+either order when no later `sort` is present. Oracle cases therefore sort
+when row identity differs instead of claiming an upstream response-order
+guarantee. Timeless's single-owner evaluator deliberately provides stable
+left-then-source order. VictoriaLogs also emits no response row for inline
+`{}` because it has no fields. The fixture now contains 167 source rows, 346
+row-query cases, one stochastic case, 448 error cases, and 472
+statistics/pipeline cases: 1,267 cases total, all passing against the
+immutable image. The fixture now contains 1267 cases.

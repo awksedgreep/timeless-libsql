@@ -23,11 +23,11 @@ use crate::logsql::{
     logsql_field_comparison, logsql_sort_comparison, parse_ipv4_address, parse_ipv6_address,
     parse_logsql_math_number, parse_victorialogs_human_duration, CoalesceSpec, CollapseNumsSpec,
     CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec, FirstSpec, FormatSpec, FormatStep,
-    JoinSource, JoinSpec, JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction,
-    MathSpec, PackJsonSpec, PackLogfmtSpec, PipelineField, PipelineOp, RegexpReplacementStep,
-    RenameSpec, ReplaceRegexpSpec, ReplaceSpec, SplitSpec, StatsExpression, StatsKind, TopSpec,
-    UnaryFieldSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec, UnpackWordsSpec,
-    UnrollSpec,
+    JoinSpec, JsonArrayConcatSpec, MathBinaryOperator, MathExpression, MathFunction, MathSpec,
+    PackJsonSpec, PackLogfmtSpec, PipelineField, PipelineOp, QueryRowsSource,
+    RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec, SplitSpec, StatsExpression,
+    StatsKind, TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec,
+    UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -246,6 +246,9 @@ pub(crate) fn execute(
                 execution.cancelled,
             )?,
             PipelineOp::Join(spec) => join_rows(rows, spec, execution.limits, execution.cancelled)?,
+            PipelineOp::Union(spec) => {
+                union_rows(rows, spec, execution.limits, execution.cancelled)?
+            }
             PipelineOp::DropEmptyFields => {
                 drop_empty_fields(rows, execution.limits, execution.cancelled)?
             }
@@ -5141,7 +5144,7 @@ fn join_rows(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let JoinSource::Rows(right_rows) = &spec.source else {
+    let QueryRowsSource::Rows(right_rows) = &spec.source else {
         return Err("LogsQL join subquery was not resolved before evaluation".into());
     };
 
@@ -5255,6 +5258,85 @@ fn join_rows(
     }
     ensure_active(cancelled)?;
     Ok(output)
+}
+
+fn union_rows(
+    mut rows: Vec<Value>,
+    spec: &UnionSpec,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let QueryRowsSource::Rows(source_rows) = &spec.source else {
+        return Err("LogsQL union subquery was not resolved before evaluation".into());
+    };
+    let appended_rows = source_rows
+        .iter()
+        .filter(|row| !row.as_object().is_some_and(Map::is_empty))
+        .count();
+    let result_rows = rows
+        .len()
+        .checked_add(appended_rows)
+        .ok_or_else(|| "LogsQL union result size overflow".to_string())?;
+    if result_rows > limits.max_result_rows {
+        return Err(format!(
+            "LogsQL union exceeds max_result_rows={}",
+            limits.max_result_rows
+        ));
+    }
+
+    let mut work_items = 0usize;
+    let mut retained_bytes = size_of::<Vec<Value>>()
+        .checked_mul(2)
+        .ok_or_else(|| "LogsQL union state size overflow".to_string())?;
+    ensure_first_state_bytes(retained_bytes, limits.max_state_bytes, "union")?;
+    for (index, row) in rows.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "union")?;
+        charge_transfer_value(
+            row,
+            &mut retained_bytes,
+            limits.max_state_bytes,
+            cancelled,
+            &mut work_items,
+            limits.max_state_items,
+            "union",
+        )?;
+    }
+    for (index, row) in source_rows.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "union")?;
+        charge_transfer_value(
+            row,
+            &mut retained_bytes,
+            limits.max_state_bytes,
+            cancelled,
+            &mut work_items,
+            limits.max_state_items,
+            "union",
+        )?;
+    }
+
+    rows.try_reserve(appended_rows)
+        .map_err(|error| format!("LogsQL union result allocation failed: {error}"))?;
+    for (index, row) in source_rows.iter().enumerate() {
+        check_periodically(cancelled, index)?;
+        if row.as_object().is_some_and(Map::is_empty) {
+            continue;
+        }
+        charge_transfer_work(&mut work_items, limits.max_state_items, "union")?;
+        charge_transfer_value(
+            row,
+            &mut retained_bytes,
+            limits.max_state_bytes,
+            cancelled,
+            &mut work_items,
+            limits.max_state_items,
+            "union",
+        )?;
+        rows.push(row.clone());
+    }
+    ensure_active(cancelled)?;
+    Ok(rows)
 }
 
 fn ensure_join_result_capacity(current: usize, limit: usize) -> Result<(), String> {
@@ -12241,7 +12323,7 @@ mod tests {
         ];
         let spec = JoinSpec {
             fields: vec![exact("case")],
-            source: JoinSource::Rows(right_rows.clone()),
+            source: QueryRowsSource::Rows(right_rows.clone()),
             inner: false,
             prefix: String::new(),
         };
@@ -12292,7 +12374,7 @@ mod tests {
 
         let prefixed = JoinSpec {
             fields: vec![exact("case")],
-            source: JoinSource::Rows(vec![json!({
+            source: QueryRowsSource::Rows(vec![json!({
                 "case":"a",
                 "nested":{"value":7},
                 "flat":"right"
@@ -12312,7 +12394,7 @@ mod tests {
 
         let empty_right = JoinSpec {
             fields: vec![exact("case")],
-            source: JoinSource::Rows(vec![json!({})]),
+            source: QueryRowsSource::Rows(vec![json!({})]),
             inner: false,
             prefix: String::new(),
         };
@@ -12356,7 +12438,7 @@ mod tests {
 
         let conflict = JoinSpec {
             fields: vec![exact("case")],
-            source: JoinSource::Rows(vec![json!({"case":"a","nested":{"child":1}})]),
+            source: QueryRowsSource::Rows(vec![json!({"case":"a","nested":{"child":1}})]),
             inner: false,
             prefix: String::new(),
         };
@@ -12375,6 +12457,82 @@ mod tests {
         cancelled.store(true, AtomicOrdering::Release);
         assert_eq!(
             join_rows(left_rows, &spec, limits, &cancelled).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+    }
+
+    #[test]
+    fn union_appends_rich_rows_in_order_and_observes_bounds() {
+        let left_rows = vec![
+            json!({"side":"left","nested":{"typed":[1,false,null]}}),
+            json!({"side":"duplicate"}),
+        ];
+        let source_rows = vec![
+            json!({"side":"right","nested":{"object":{"value":2}}}),
+            json!({}),
+            json!({"side":"duplicate"}),
+        ];
+        let spec = UnionSpec {
+            source: QueryRowsSource::Rows(source_rows.clone()),
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 1_000,
+            max_state_bytes: 100_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            union_rows(left_rows.clone(), &spec, limits, &cancelled).unwrap(),
+            [
+                json!({"side":"left","nested":{"typed":[1,false,null]}}),
+                json!({"side":"duplicate"}),
+                json!({"side":"right","nested":{"object":{"value":2}}}),
+                json!({"side":"duplicate"})
+            ],
+            "union must preserve left/source order and duplicates while empty inline rows carry no fields"
+        );
+        assert_eq!(source_rows[0]["nested"]["object"]["value"], 2);
+
+        for (limited, expected) in [
+            (
+                PipelineLimits {
+                    max_result_rows: 3,
+                    ..limits
+                },
+                "max_result_rows=3",
+            ),
+            (
+                PipelineLimits {
+                    max_state_items: 1,
+                    ..limits
+                },
+                "max_work_rows=1",
+            ),
+            (
+                PipelineLimits {
+                    max_state_bytes: 1,
+                    ..limits
+                },
+                "max_response_bytes=1",
+            ),
+        ] {
+            let error = union_rows(left_rows.clone(), &spec, limited, &cancelled).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+
+        let unresolved = UnionSpec {
+            source: QueryRowsSource::Query(Box::new(
+                crate::parse_logsql("*", TimestampUnit::Microseconds).expect("wildcard plan"),
+            )),
+        };
+        assert_eq!(
+            union_rows(left_rows.clone(), &unresolved, limits, &cancelled).unwrap_err(),
+            "LogsQL union subquery was not resolved before evaluation"
+        );
+
+        cancelled.store(true, AtomicOrdering::Release);
+        assert_eq!(
+            union_rows(left_rows, &spec, limits, &cancelled).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
     }

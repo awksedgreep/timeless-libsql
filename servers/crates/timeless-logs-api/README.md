@@ -1742,6 +1742,39 @@ work; the join additionally reserves exactly 192 bounded work items for its
 RHS materialization, indexing, and rich merging after the unavoidable public
 reads, not a reason for a language-specific extension primitive.
 
+LogsQL `union` appends an inline or query-backed source to current rows:
+
+```text
+kind:="request" | union (kind:="deployment" | fields service, owner)
+kind:="request" | union rows({service:"api",owner:"platform"})
+kind:="request" | union (kind:="deployment" | union rows({service:"local"})) | stats count() as rows
+```
+
+The command and `rows` keyword are case-insensitive. A source is exactly one
+parenthesized LogsQL query or strict scalar `rows(...)`. Inline fields accept
+`:`/`=`, quotes, optional commas, and retained dotted paths; malformed rows,
+nonscalar values, empty queries, trailing tokens, and attached suffixes fail
+before storage. `rows()` is an identity, an empty `{}` adds no field-bearing
+result, and duplicates remain duplicates.
+
+Nested sources recursively use the same parser, clock, public `logs` table,
+and parent limits. Query-backed rows retain complete typed/nested metadata.
+Timeless deterministically returns current rows followed by source rows, and
+subsequent pipes consume the combined sequence. The pinned VictoriaLogs
+multi-worker HTTP response requires an explicit later sort for portable order,
+so the upstream oracle does not invent an order guarantee. Both scans,
+retained/cloned rich state, recursive work, nesting/count, result rows,
+response bytes, deadlines, and cancellation are bounded. Request-local
+composition leaves storage unchanged through optimize, shutdown, and reopen.
+
+The complete 1,267-case pinned oracle supplies nine successful and nine strict
+failure vectors. Executable
+[`SQL-LOG-058`](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-058-bounded-ordered-union-of-two-public-log-scans)
+uses ordinary `UNION ALL` over two independently bounded public scans with
+explicit source order and typed payloads. Rust owns LogsQL planning and
+envelopes; no private table, extension language primitive, storage format, or
+authoritative 8,192-entry batching behavior changes.
+
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for
 same-run equal-cardinality time-sort controls. Every pair reads the identical

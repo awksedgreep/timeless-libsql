@@ -8428,6 +8428,238 @@ async fn session_eighteen_join_is_rich_bounded_and_durable() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_union_is_rich_bounded_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("union-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        2,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let entries = [
+        (
+            1,
+            "left-a",
+            serde_json::json!({
+                "union_group":"left", "case":"left-a",
+                "typed":[1,false,null], "nested":{"side":"left"}
+            }),
+        ),
+        (
+            2,
+            "left-duplicate",
+            serde_json::json!({"union_group":"left", "case":"duplicate"}),
+        ),
+        (
+            11,
+            "right-a",
+            serde_json::json!({
+                "union_group":"right", "case":"right-a",
+                "typed":{"object":{"value":2}}, "nested":{"side":"right"}
+            }),
+        ),
+        (
+            12,
+            "right-duplicate",
+            serde_json::json!({"union_group":"right", "case":"duplicate"}),
+        ),
+    ]
+    .into_iter()
+    .map(|(offset, message, metadata)| LogEntry {
+        ts: 1_800_000_000_000_000 + offset,
+        level: 1,
+        severity: "info".into(),
+        message: message.into(),
+        metadata_json: metadata.to_string(),
+    })
+    .collect();
+    storage.ingest(entries).await.unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let query = r#"union_group:="left" | sort by (_time) asc | fields case, typed, nested | union (union_group:="right" | sort by (_time) asc | fields case, typed, nested) | limit 10000"#;
+    let rows = pipeline_rows(&app, query).await;
+    assert_eq!(
+        rows,
+        [
+            serde_json::json!({
+                "case":"left-a", "typed":[1,false,null],
+                "nested":{"side":"left"}
+            }),
+            serde_json::json!({"case":"duplicate"}),
+            serde_json::json!({
+                "case":"right-a", "typed":{"object":{"value":2}},
+                "nested":{"side":"right"}
+            }),
+            serde_json::json!({"case":"duplicate"})
+        ],
+        "union must preserve complete rich rows, duplicates, and deterministic left/source order"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"union_group:="left" case:="left-a" | fields case, nested | UnIoN RoWs({case=inline flag=true nested.value=7},{}) | fields case, nested, flag"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"left-a","nested":{"side":"left"}}),
+            serde_json::json!({"case":"inline","nested":{"value":"7"},"flag":"true"})
+        ],
+        "inline rows are textual and empty inline rows carry no result fields"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"union_group:="left" case:="left-a" | fields case | union (union_group:="right" case:="right-a" | fields case | union rows({case:nested})) | fields case"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"left-a"}),
+            serde_json::json!({"case":"right-a"}),
+            serde_json::json!({"case":"nested"})
+        ],
+        "nested query-backed unions must append depth-first"
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"union_group:="left" | union (union_group:="right") | stats count() as rows"#,
+        )
+        .await,
+        [serde_json::json!({"rows":4})]
+    );
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"union_group:="left" case:="left-a" | fields case | union (union_group:="right" | stats count() as rows) | fields case, rows"#,
+        )
+        .await,
+        [
+            serde_json::json!({"case":"left-a"}),
+            serde_json::json!({"rows":2})
+        ],
+        "query-backed statistics must append as ordinary rows"
+    );
+
+    for malformed in [
+        "* | union",
+        "* | union()",
+        "* | union(foo | count)",
+        "* | union (foo) trailing",
+        "* | union rows",
+        "* | union rows(",
+        "* | union rows({case})",
+        "* | union rows({,})",
+        "* | union rows({case:[]})",
+        "* | union.extra (*)",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 3,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+    let inherited_limit = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 3,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request(
+        r#"union_group:="left" | union (union_group:="right" | limit 10000)"#,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(inherited_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let inherited_limit = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(inherited_limit.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inherited_limit["reason"], "max_result_rows");
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"union_group:in("left","right") | sort by (_time) asc | fields case, typed, nested | limit 10000"#,
+        )
+        .await,
+        [
+            serde_json::json!({
+                "case":"left-a", "typed":[1,false,null],
+                "nested":{"side":"left"}
+            }),
+            serde_json::json!({"case":"duplicate"}),
+            serde_json::json!({
+                "case":"right-a", "typed":{"object":{"value":2}},
+                "nested":{"side":"right"}
+            }),
+            serde_json::json!({"case":"duplicate"})
+        ],
+        "request-local union composition must not mutate durable rows"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(pipeline_rows(&router(reopened.clone()), query).await, rows);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

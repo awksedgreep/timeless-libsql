@@ -445,6 +445,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "join_key_path" => Value::Text("$.service".to_owned()),
         "join_left_level" | "join_right_level" => Value::Null,
         "join_inner" => Value::Integer(0),
+        "union_left_level" | "union_right_level" => Value::Null,
         "stats_source_path" => Value::Text("$.duration_ms".to_owned()),
         "sum_len_source_path" => Value::Text("$.duration_ms".to_owned()),
         "any_source_path" => Value::Text("$.host".to_owned()),
@@ -4333,13 +4334,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 123);
+        assert_eq!(recipes.len(), 124);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            155
+            156
         );
         assert_eq!(
             recipes
@@ -4347,7 +4348,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            161
+            162
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

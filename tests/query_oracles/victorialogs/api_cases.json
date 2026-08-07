@@ -4970,6 +4970,68 @@
       "id": "LQL-P43-join-on-is-case-insensitive-and-prefix-may-precede-inner",
       "query": "case:=state-string | JoIn On (case) rows({\"case\":\"state-string\",\"extra\":\"joined\"}) prefix \"rhs.\" inner | fields case, rhs.extra",
       "expected_rows": [{"case": "state-string", "rhs.extra": "joined"}]
+    },
+    {
+      "id": "LQL-P44-union-appends-inline-rows-after-left-input",
+      "query": "case:=state-string | union rows({\"case\":\"inline-one\",\"probe\":\"first\"},{\"case\":\"inline-two\",\"probe\":\"second\"}) | fields case, probe | sort by (case) asc",
+      "expected_rows": [
+        {"case": "inline-one", "probe": "first"},
+        {"case": "inline-two", "probe": "second"},
+        {"case": "state-string", "probe": "value"}
+      ]
+    },
+    {
+      "id": "LQL-P44-union-appends-query-results-after-left-input",
+      "query": "case:=state-string | union (case:=state-empty | fields case, probe) | fields case, probe | sort by (case) asc",
+      "expected_rows": [
+        {"case": "state-empty"},
+        {"case": "state-string", "probe": "value"}
+      ]
+    },
+    {
+      "id": "LQL-P44-union-preserves-duplicate-rows",
+      "query": "case:=state-string | fields case, probe | union (case:=state-string | fields case, probe)",
+      "expected_rows": [
+        {"case": "state-string", "probe": "value"},
+        {"case": "state-string", "probe": "value"}
+      ]
+    },
+    {
+      "id": "LQL-P44-union-empty-inline-source-is-identity",
+      "query": "case:=state-string | union rows() | fields case, probe",
+      "expected_rows": [{"case": "state-string", "probe": "value"}]
+    },
+    {
+      "id": "LQL-P44-union-appends-an-empty-inline-row",
+      "query": "case:=state-string | fields case | union rows({}) | fields case",
+      "expected_rows": [{"case": "state-string"}]
+    },
+    {
+      "id": "LQL-P44-union-nested-sources-append-depth-first",
+      "query": "case:=state-string | union (case:=state-empty | fields case, probe | union rows({\"case\":\"nested-inline\",\"probe\":\"three\"})) | fields case, probe | sort by (case) asc",
+      "expected_rows": [
+        {"case": "nested-inline", "probe": "three"},
+        {"case": "state-empty"},
+        {"case": "state-string", "probe": "value"}
+      ]
+    },
+    {
+      "id": "LQL-P44-union-composes-with-subsequent-statistics",
+      "query": "case:=state-string | union rows({\"case\":\"inline-one\"},{\"case\":\"inline-two\"}) | stats count() as rows",
+      "expected_rows": [{"rows": "3"}]
+    },
+    {
+      "id": "LQL-P44-union-is-case-insensitive-and-accepts-equals-fields",
+      "query": "case:=state-string | UnIoN RoWs({case=inline-equals probe=right}) | fields case, probe | sort by (case) asc",
+      "expected_rows": [
+        {"case": "inline-equals", "probe": "right"},
+        {"case": "state-string", "probe": "value"}
+      ]
+    },
+    {
+      "id": "LQL-P44-union-query-statistics-append-as-a-row",
+      "query": "case:=state-string | fields case | union (state_group:=state | stats count() as rows) | fields case, rows | sort by (case) asc",
+      "expected_rows": [{"rows": "6"}, {"case": "state-string"}]
     }
   ],
   "sample_cases": [
@@ -7940,6 +8002,69 @@
     {
       "id": "LQL-P43-join-rejects-attached-suffix",
       "query": "* | join.extra by (case) (*)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-requires-a-source",
+      "query": "* | union",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rejects-an-empty-subquery",
+      "query": "* | union()",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rejects-an-invalid-subquery",
+      "query": "* | union(foo | count)",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rejects-a-trailing-token",
+      "query": "* | union (foo) trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rows-requires-parentheses",
+      "query": "* | union rows",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rejects-an-unterminated-rows-source",
+      "query": "* | union rows(",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rejects-an-inline-field-without-a-value",
+      "query": "* | union rows({case})",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rejects-an-inline-array-value",
+      "query": "* | union rows({case:[]})",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P44-union-rejects-an-attached-suffix",
+      "query": "* | union.extra (*)",
       "status": 400,
       "content_type": "text/plain; charset=utf-8",
       "body_contains": "cannot parse `query` arg"
