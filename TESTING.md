@@ -1,16 +1,52 @@
-# Testing & Benchmarking Guide
+# Testing and benchmark runbook
 
-Everything here assumes a release build of the extension first:
+This is the canonical entry point for validating `timeless-libsql`. Run all
+commands from the repository root unless a section says otherwise. The
+[query release report](docs/QUERY_RELEASE_REPORT.md) records the most recent
+complete result; this file defines how to reproduce it.
+
+## Requirements
+
+- Rust 1.95 or newer and Cargo.
+- `sqlite3` 3.34.1 or newer with loadable extensions enabled.
+- A C compiler and CMake for bundled SQLite and compression dependencies.
+- Docker only for refreshing the pinned Prometheus, VictoriaMetrics, and
+  VictoriaLogs oracles.
+- Linux for the complete signal-process fault and RSS-watermark gate. Core,
+  extension, SQL, and most API tests also run on macOS.
+
+On macOS, `/usr/bin/sqlite3` disables extension loading. Install SQLite with
+Homebrew and put its `bin` directory first in `PATH` before running the shell
+suites.
+
+## Tooling migration status
+
+The extension, API, query-contract, SQL-equivalence, fixture, crash-workload,
+and persistent-host test logic is Rust. Shell files only orchestrate the
+SQLite CLI and Rust binaries.
+
+The following older utilities are still Python and are being replaced in
+bounded sessions. Their replacement commands and this inventory must change
+in the same commit:
+
+- `tools/production_gate.py`: production fault and soak gate;
+- `tools/package_release.py`: deterministic native artifact packager;
+- `servers/crates/timeless-metrics-api/bench_shell.py`;
+- `servers/crates/timeless-traces-api/bench/*.py`; and
+- `tools/bench/session6_log_compaction.py`.
+
+Do not describe the complete repository as Python-free until
+`git ls-files '*.py'` returns no paths and the final command below passes:
 
 ```sh
-cargo build --release -p timeless-ext
-# artifact: target/release/libtimeless_ext.so   (.dylib on macOS)
+test -z "$(git ls-files '*.py')"
 ```
 
-## The 60-second smoke test
+## Sixty-second smoke test
 
 ```sh
-sqlite3 /tmp/t.db \
+cargo build --release -p timeless-ext --locked
+sqlite3 /tmp/timeless-smoke.db \
   ".load target/release/libtimeless_ext" \
   "CREATE VIRTUAL TABLE m USING timeless_metrics;
    INSERT INTO m(name, ts, value) VALUES ('cpu', 1, 42.5);
@@ -18,148 +54,245 @@ sqlite3 /tmp/t.db \
    SELECT * FROM m;"
 ```
 
-Prints `cpu|1|42.5|{}`. If `.load` fails on macOS, see the macOS section —
-it's almost certainly Apple's system sqlite3, not the build.
+The final command prints `cpu|1|42.5|{}`.
 
-## Test suites
+## Complete local correctness gate
 
-### Rust tests (fast, no extension involved)
+The order matters. Build the current extension before running API contracts
+so a stale `target/debug` or `target/release` library cannot masquerade as the
+current source.
 
-```sh
-cargo test -p timeless-codec        # column encoders: exactness, adaptive
-                                    # strategy selection, hostile inputs
-cargo test -p timeless-core        # engines: round-trip, recovery, txn
-                                    # journal, compression honesty (bit-exact
-                                    # 1M-point verification), dup-min_ts
-                                    # regression, block/span engines
-```
-
-What lives where:
-- `timeless-core/tests/roundtrip.rs` — write → query-before-flush → flush →
-  aggregate → shutdown → cold-recovery lifecycle
-- `timeless-core/tests/compression_honesty.rs` — every point of 1M verified
-  bit-exact after recovery; bytes measured from disk, not bookkeeping
-- `timeless-core/tests/store_seam.rs` — FsStore/ChunkStore seam + recovery
-- `timeless-core/tests/txn_journal.rs` — rollback of buffers, intra-txn
-  flushes, optimize-in-txn
-- `timeless-core/tests/dup_min_ts.rs` — the (series,min_ts) shadowing
-  regression (found by the oracle, fixed here and upstream)
-- unit tests inside `src/blocks/` and `src/spans/` — codecs, partitioned
-  flush, term pruning read-count proofs, merge caps
-
-### The CLI suite (the real integration harness)
+### 1. Extension and engine workspace
 
 ```sh
-./tests/cli.sh          # 45 sections, a few minutes; needs sqlite3 + Rust/Cargo
+cargo fmt --all -- --check
+cargo build --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS='-D warnings' \
+  cargo doc --workspace --no-deps --locked
 ```
 
-The extension is a cdylib, so end-to-end behavior is tested through the
-sqlite3 CLI plus persistent Rust SQLite hosts: vtab lifecycles for all three
-signals, pushdown proofs (with `EXPLAIN QUERY PLAN` assertions), reopen
-recovery, prune/optimize/compact, append-only enforcement, transaction
-rollback (including auto-flush inside `BEGIN`), Tier 2 batch blobs,
-malformed-input rejection, Prometheus ingest, rich trace row/batch fidelity
-at the exact 8,192-span threshold, multi-connection and multi-process sharing,
-and the oracle and crash suites. The standalone `tools/query-harness` crate
-builds binary fixtures, drives cases that require more than one live SQLite
-connection or process, and decodes packed public frames. The release gate
-neither imports nor executes Python. Every section prints `PASS:`; the script
-exits nonzero on the first failure.
+Do **not** run `cargo test --workspace --all-targets` at the repository root.
+That option overrides the standalone `dbhealth-ext` test-harness boundary and
+tries to link two loadable extensions that intentionally export the same
+SQLite entry-point name. `cargo test --workspace` is the supported root test;
+dbhealth is validated separately below. Root Clippy may use `--all-targets`
+because it checks rather than links the conflicting test binary.
 
-### The oracle (randomized property testing)
+### 2. Release extension and signal APIs
+
+Build identities are part of the test contract:
 
 ```sh
-cd tools/bench
-cargo run --release --bin oracle -- ../../target/release/libtimeless_ext.so
-# or replay specific seeds:
-cargo run --release --bin oracle -- ../../target/release/libtimeless_ext.so 42 1337
+build_commit="$(git rev-parse HEAD)"
+
+TIMELESS_BUILD_COMMIT="$build_commit" \
+  cargo build --release -p timeless-ext --locked
+
+TIMELESS_BUILD_COMMIT="$build_commit" \
+  cargo build --release --workspace \
+    --manifest-path servers/Cargo.toml --locked
+
+cargo fmt --manifest-path servers/Cargo.toml --all -- --check
+
+TIMELESS_EXT_PATH="$PWD/target/release/libtimeless_ext.so" \
+TIMELESS_EXT_TEST_PATH="$PWD/target/release/libtimeless_ext.so" \
+  cargo test --workspace --manifest-path servers/Cargo.toml \
+    --locked -- --include-ignored
+
+cargo clippy --workspace --all-targets \
+  --manifest-path servers/Cargo.toml --locked -- -D warnings
+
+RUSTDOCFLAGS='-D warnings' \
+  cargo doc --workspace --manifest-path servers/Cargo.toml \
+    --no-deps --locked
 ```
 
-~50k randomized operations per seed across all three vtabs and mirrored
-plain tables in the same database — inserts, flush/optimize/compact at
-random points, every pushdown plan family, explicit transactions with
-rollback, prunes. Every query result is compared against the plain-table
-mirror, order-insensitive, floats by bit pattern. On mismatch it prints the
-seed and op index — rerun with that seed to reproduce deterministically.
-This harness found a real engine bug (chunk-index shadowing); trust it.
+Use `libtimeless_ext.dylib` instead of `.so` on macOS. The
+`--include-ignored` run is intentional: it enables the metrics and logs
+contracts that require the real release extension. It also covers trace,
+OTLP, Jaeger, rich-field fidelity, shutdown, backup, queue, cancellation, and
+8,192-span batching behavior.
 
-### The crash suite
+### 3. Rust query harness and executable documentation
 
 ```sh
-./tests/crash.sh target/release/libtimeless_ext.so
+cargo test --manifest-path tools/query-harness/Cargo.toml --locked
+cargo clippy --manifest-path tools/query-harness/Cargo.toml \
+  --all-targets --locked -- -D warnings
+
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- contracts
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- oracle validate
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- sql \
+  --extension "$PWD/target/release/libtimeless_ext.so"
 ```
 
-Five rounds: spawn a long ingest with periodic flushes and watermark
-logging, `kill -9` it at a random moment, reopen, then assert
-`PRAGMA integrity_check` is clean, all flushed watermarks are present, and
-no `_terms`/`_trace_blocks` row dangles. The durability contract being
-proven: **flushed = durable, buffered = lost, never corrupt.**
+These commands validate matrix IDs and states, shipped-row test references,
+documentation links and inventories, immutable oracle pins, release evidence,
+and all public SQL equivalents. The SQL command currently executes 135
+recipes and 173 statements through the real extension.
+
+### 4. SQLite CLI, transactions, crashes, and dbhealth
+
+```sh
+tests/cli.sh
+tests/dbhealth.sh
+
+for section in r1 r2 r3 r4 r8 logs-rich; do
+  TIMELESS_EXT="$PWD/target/release/libtimeless_ext.so" \
+    tests/correctness.sh "$section"
+done
+```
+
+`tests/cli.sh` is the comprehensive 45-section direct-SQL gate. It includes
+150,000 randomized operations, five random-timing `SIGKILL` recoveries,
+transaction/savepoint rollback, cold reopen, storage/index consistency, all
+three signals, public stats and query surfaces, and the SQL cookbook. Run
+`tests/crash.sh target/release/libtimeless_ext.so` only when you want the
+five-round crash subset independently.
+
+`tests/dbhealth.sh` builds and loads `libdbhealth_ext` separately. Never build
+`timeless-ext` and `dbhealth-ext` with two `-p` arguments in one Cargo
+invocation; their feature variants are deliberately separate products.
+
+### 5. Embedded Rust and direct libSQL
+
+```sh
+cargo run --locked -p timeless-ext \
+  --no-default-features --features embedded --example embedded
+
+cargo run --manifest-path tools/libsql-check/Cargo.toml --locked -- \
+  target/release/libtimeless_ext.so
+```
+
+The first command statically registers the production telemetry modules in a
+Rust host. The second uses libSQL 0.9.30 directly, loads the release extension
+on multiple connections, verifies all three signals, closes the database, and
+repeats exact reads after reopen.
+
+## Pinned upstream semantic oracles
+
+Normal development validates checked-in fixtures without network access via
+`oracle validate`. Refreshing the actual upstream evidence is explicit,
+requires Docker and network access, and uses immutable image digests:
+
+```sh
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- oracle probe
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- oracle prometheus-smoke
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- oracle prometheus-api
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- oracle victoria-metrics-api
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- oracle victoria-logs-api
+```
+
+These commands own and remove uniquely named temporary containers. They may
+refresh checked fixture files, so review `git diff` afterward. See
+[the oracle contract](docs/QUERY_ORACLES.md) before changing a pin.
+
+## Query performance evidence
+
+Evidence capture requires a clean worktree and exact matching extension and
+server build identities:
+
+```sh
+build_commit="$(git rev-parse HEAD)"
+TIMELESS_BUILD_COMMIT="$build_commit" \
+  cargo build --release -p timeless-ext --locked
+TIMELESS_BUILD_COMMIT="$build_commit" \
+  cargo build --release --manifest-path servers/Cargo.toml \
+    -p timeless-metrics-api -p timeless-logs-api --locked
+
+cargo run --release --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- evidence \
+  --output "/tmp/timeless-query-evidence.json"
+```
+
+The JSON records durable completed work, p50/p95/p99, cardinality, public
+storage work, response and extension bytes, cancellation behavior, physical
+storage, and RSS HWM. Do not commit a new evidence artifact without updating
+the owning matrix rows and findings in the same session.
+
+## Production fault and soak gates
+
+Until its Rust replacement lands, the production process/fault runner remains
+the explicitly listed Python exception:
+
+```sh
+python3 tools/production_gate.py \
+  --mode short \
+  --output /tmp/timeless-production-short.json
+
+python3 tools/production_gate.py \
+  --mode release \
+  --output /tmp/timeless-production-two-hour.json
+```
+
+Short mode defaults to 120 seconds. Release mode requires at least two hours
+per concurrently running signal. Both exercise durable writes and queries,
+backups, cancellation/disconnect storms, startup descriptor and disk faults,
+graceful and abnormal restarts, storage/WAL/resource watermarks, and final
+durability barriers. The Rust port must preserve the JSON schema and all
+failure gates before this section changes commands.
+
+## Native package validation
+
+Until its Rust replacement lands, candidate packaging remains the second
+explicit Python exception:
+
+```sh
+python3 tools/package_release.py \
+  --target x86_64-unknown-linux-gnu \
+  --output /tmp/timeless-dist
+```
+
+This is a local candidate build, not a tag or publication. The replacement
+must preserve deterministic archives, inner and outer checksums, exact build
+identity, manifest, SPDX SBOM, license notices, install/remove behavior, and
+data/config preservation. See [ARTIFACTS.md](docs/ARTIFACTS.md).
 
 ## Benchmarks
 
-All live in `tools/bench` (standalone crate, bundled SQLite — no system
-sqlite3 needed, works identically on macOS). Run from `tools/bench/`:
-
-| binary | args | measures | runtime |
-|---|---|---|---|
-| `bench` | `<path-to-.so>` | metrics: plain vs Tier 1 vs Tier 2 ingest rates, file sizes, query timings, bit-exact spot checks | ~1 min |
-| `bench-logs` | `<path-to-.so>` | logs: 1M realistic entries, ingest, file size vs plain, level/service/LIKE query timings vs plain-table oracle counts | ~1 min |
-| `bench-traces` | `<path-to-.so>` | traces: 1M spans, size vs plain-table-WITH-trace_id-index, trace lookup / status / service+range timings | ~2 min |
-| `bench-codec` | none | codec-level bake-off on identical blocks (no SQLite): per-column bytes and encode/decode MB/s across codec generations | ~1 min |
-| `oracle` | `<path-to-.so> [seeds]` | correctness, not speed (above) | ~10 s |
+The maintained general extension benchmarks already live in the detached
+Rust `tools/bench` crate:
 
 ```sh
-cd tools/bench
-cargo run --release --bin bench        -- ../../target/release/libtimeless_ext.so
-cargo run --release --bin bench-logs   -- ../../target/release/libtimeless_ext.so
-cargo run --release --bin bench-traces -- ../../target/release/libtimeless_ext.so
-cargo run --release --bin bench-codec
+cargo run --release --manifest-path tools/bench/Cargo.toml \
+  --bin bench -- target/release/libtimeless_ext.so
+cargo run --release --manifest-path tools/bench/Cargo.toml \
+  --bin bench-logs -- target/release/libtimeless_ext.so
+cargo run --release --manifest-path tools/bench/Cargo.toml \
+  --bin bench-traces -- target/release/libtimeless_ext.so
+cargo run --release --manifest-path tools/bench/Cargo.toml \
+  --bin bench-codec
+cargo run --release --manifest-path tools/bench/Cargo.toml \
+  --bin query-read -- target/release/libtimeless_ext.so
 ```
 
-Datasets are generated by a deterministic PRNG (`src/datasets.rs`) — same
-data every run, on every machine, so numbers are comparable across hosts.
+Several historical API and maintenance benchmark drivers are still Python;
+they are named in the migration inventory above. Their Rust ports must retain
+the same fixture, completed-work barrier, percentile method, storage counters,
+and RSS accounting before the Python originals are removed.
 
-### Rules for fair numbers
+For comparable numbers:
 
-1. **Release builds only.** Debug-build numbers are meaningless (5–20x off).
-2. **File sizes are measured after connection close** (WAL folded in). The
-   bench binaries do this; if you measure manually, close first.
-3. **Run everything twice**, quote the second run. First runs pay page-cache
-   and allocator warmup; the recorded reference numbers treat ±15% between
-   runs as noise (query timings under 10ms are especially jittery).
-4. **Ingest rates**: `bench` measures insert time only (encode excluded for
-   Tier 2 — the blob is built outside the clock, since a real client
-   prepares batches off the hot path). Flush/optimize are reported
-   separately because they're paid at flush cadence, not per point.
-5. **Compression ratios depend on data shape more than anything.** The
-   generators are deliberately hostile (ms-jitter timestamps, per-point
-   noise, random IDs). Friendly data (regular scrape intervals, slow-moving
-   gauges) compresses 10–30x better. Both are real; quote which one you ran.
+1. use release builds;
+2. run twice and report the second run;
+3. close connections before reporting main-file size;
+4. separate admission from flush/optimize durability time;
+5. report logical and physical storage plus WAL/SHM; and
+6. identify the exact commit, host, fixture, and result cardinality.
 
-Reference numbers from the original dev machine (Linux x86, i7-class) are in
-[RESULTS.md](RESULTS.md) — compare yours against those tables.
+## Test ownership and automatic execution
 
-## Two extensions, one build caveat
-
-`libtimeless_ext` and `libdbhealth_ext` share source but are separate
-products with disjoint entry points (dbhealth builds timeless-ext with
-`default-features = false`). Build them in separate invocations — or
-just `cargo build --release`, which is fine. The one spelling to avoid
-is selecting both with `-p` in a single command
-(`cargo build -p timeless-ext -p dbhealth-ext`): the two feature
-variants of the dual-crate-type timeless-ext under fat LTO trip rustc's
-"failed to load bitcode" issue. `tests/dbhealth.sh` builds its .so the
-right way.
-
-## macOS / Apple Silicon notes
-
-- **Apple's system `/usr/bin/sqlite3` disables extension loading** — `.load`
-  fails with "not authorized" no matter what you do. `brew install sqlite`
-  and use `$(brew --prefix sqlite)/bin/sqlite3`, or skip the CLI entirely:
-  the bench binaries and oracle bundle their own SQLite and work everywhere.
-- The artifact is `libtimeless_ext.dylib`, not `.so`.
-- `tests/cli.sh` needs the brew sqlite3 first in PATH; `tests/crash.sh` and
-  the oracle care only about the extension path you pass.
-- Interesting comparisons to record on Apple Silicon: Tier 2 ingest rate
-  (memory-bandwidth-bound) and the decode MB/s lines from `bench-codec`
-  (pco and zstd both scale with wide cores).
+This repository has no scheduled, branch-push, or pull-request test trigger.
+Manual workflows run only when explicitly dispatched; release builds run only
+for `v*` tags. This runbook is authoritative for local execution. Adding or
+changing an automatic trigger requires a separate explicit owner request.

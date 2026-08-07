@@ -5,6 +5,10 @@ pinned upstream-oracle refreshes, public SQL recipe execution, and reproducible
 query evidence capture. It is a detached Cargo workspace so query tooling does
 not become part of the extension or signal-server dependency graphs.
 
+The repository-wide command order, prerequisites, and distinction between
+local, live-oracle, evidence, fault/soak, embedding, packaging, and benchmark
+gates are maintained in [TESTING.md](../../TESTING.md).
+
 Run every unit and negative-path regression:
 
 ```bash

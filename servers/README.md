@@ -28,6 +28,10 @@ the public ABI instead of privately linking storage into the servers.
 
 From the repository root:
 
+The canonical ordering and complete local, oracle, fault, embedding, and
+packaging gate inventory is in [TESTING.md](../TESTING.md). The commands below
+are the signal-server subset.
+
 ```bash
 cargo build --release -p timeless-ext
 cargo build --release --workspace --manifest-path servers/Cargo.toml
