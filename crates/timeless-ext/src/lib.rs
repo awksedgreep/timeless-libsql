@@ -45,6 +45,11 @@
 // unused by design — silence dead-code for that config wholesale.
 #![cfg_attr(not(feature = "entrypoints"), allow(dead_code))]
 
+#[cfg(all(feature = "entrypoints", feature = "embedded"))]
+compile_error!(
+    "features `entrypoints` and `embedded` are mutually exclusive; use default features for the loadable artifact or --no-default-features --features embedded for a linked Rust host"
+);
+
 mod batch;
 mod capabilities;
 mod flatjson;

@@ -414,12 +414,16 @@ x86-64 and AArch64 macOS. Linux loadable extensions use `.so`; macOS uses
 `.dylib`. The archive contains the telemetry extension and the three
 signal-specific binaries. `dbhealth` is a separate extension artifact and is
 not registered by these servers. Other targets may compile from source but
-are not claimed as checked release artifacts here.
+are not claimed as checked release artifacts here. Exact archive paths,
+checksums, manifest/SBOM content, install layout, removal behavior, and the
+distinction between unreleased source and a published artifact are in the
+[artifact inventory](ARTIFACTS.md).
 
 The binaries use TCP, a local SQLite/libSQL-compatible database file, WAL
 mode, and the loadable extension API. A direct Rust embedding that does not
-need HTTP should use `timeless_ext::register_telemetry` and the public SQL
-contracts instead of launching a signal server.
+need HTTP should use the mutually exclusive `embedded` crate feature,
+`timeless_ext::register_telemetry`, and the
+[embedded guide](EMBEDDED_RUST.md) instead of launching a signal server.
 
 Before replacing either side of the binary/extension pair, follow the
 [compatibility statement](COMPATIBILITY.md) and

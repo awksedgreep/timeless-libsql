@@ -44,6 +44,13 @@ artifact exists until a tag is created from the finished, validated `main`.
 - Rich trace batch/codec versions preserving parents, kind/status and status
   description, typed attributes, events, resource, and instrumentation scope,
   while retaining legacy span formats.
+- An executable in-process Rust embedding mode that registers the same three
+  production SQL/storage/query surfaces without HTTP, a NIF, or a sidecar,
+  plus a direct libSQL gate covering typed logs, complete rich spans,
+  multi-connection reads, and durable reopen.
+- Canonical source-checked SQL, server, compatibility, upgrade, embedded-Rust,
+  sqld, and artifact/install references that distinguish unreleased source
+  capability from actually published artifacts.
 
 ### Changed
 
@@ -61,6 +68,9 @@ artifact exists until a tag is created from the finished, validated `main`.
   public virtual tables, scalars, commands, capabilities, and stats.
 - Preserved extension-owned authoritative batching: 4,096 metric points per
   series, 8,192 log entries, and 8,192 rich spans.
+- Split the default loadable-extension feature from opt-in linked Rust
+  embedding. The default `.so`/`.dylib` ABI is unchanged; embedded hosts use
+  `default-features = false, features = ["embedded"]`.
 
 ### Compatibility
 
@@ -85,6 +95,11 @@ artifact exists until a tag is created from the finished, validated `main`.
   deletion—in [the storage findings log](docs/QUERY_STORAGE_FINDINGS.md).
 - Corrected public documentation that implied an unavailable Unix-socket
   server transport or an unimplemented default trace-retention duration.
+- Corrected a public Rust embedding API that compiled in loadable-extension
+  mode but could not initialize SQLite in an ordinary host, and replaced a
+  compatibility-spike libSQL smoke with complete production-signal coverage.
+- Removed floating sqld `main`/`latest`, private-shadow inspection, implicit-
+  transaction, and unbounded replication claims from the deployment guide.
 
 ## [0.3.0] — 2026-07-30
 

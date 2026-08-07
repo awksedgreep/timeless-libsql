@@ -12,8 +12,12 @@ build = "build.rs"
 # its own, separate loadable extension.
 crate-type = ["lib", "cdylib"]
 
+[[example]]
+name = "embedded"
+required-features = ["embedded"]
+
 [dependencies]
-rusqlite = { version = "0.40.1", features = ["functions", "vtab", "loadable_extension"] }
+rusqlite = { version = "0.40.1", features = ["functions", "vtab"] }
 timeless-core = { path = "../timeless-core" }
 # F8 label matchers ({"re": ...} in TVF filters). SQL-user convenience
 # only — the waist and the layers above it keep their own matcher
@@ -26,4 +30,8 @@ default = ["entrypoints"]
 # The sqlite3_*_init entry points. dbhealth-ext disables this so its
 # .so exports ONLY its own entry points (SQLite falls back to
 # sqlite3_extension_init first — two extensions must not share it).
-entrypoints = []
+entrypoints = ["rusqlite/loadable_extension"]
+# Link against the host's SQLite library for in-process Rust embedding.
+# This must not be combined with `entrypoints`: rusqlite's loadable-extension
+# mode obtains its SQLite API from dlopen initialization instead of linking it.
+embedded = []

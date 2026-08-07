@@ -1,4 +1,15 @@
-# timeless-libsql — Hero POC Project Plan
+# Historical design plan: timeless-libsql hero POC
+
+<!-- document-status: historical-design -->
+
+> This is the preserved July 2026 design and decision record, not the current
+> product roadmap or public API. Several original non-goals and success
+> criteria were later implemented or superseded. Use the
+> [SQL API reference](docs/SQL_API_REFERENCE.md),
+> [query feature maps](docs/QUERY_FEATURES.md), and
+> [current implementation plan](docs/2026-08-04_query_surface_implementation_plan.md)
+> for supported behavior. Historical POC wording below is retained as evidence
+> of the decisions actually made.
 
 **Pitch:** VictoriaMetrics-class compression with a SQL interface, inside any
 SQLite/libSQL database, one `.load` away. "FTS5 for telemetry," starting with

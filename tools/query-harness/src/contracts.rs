@@ -733,6 +733,326 @@ fn validate_public_compatibility_versions(root: &Path) -> Result<Vec<String>> {
     Ok(errors)
 }
 
+fn inline_code(value: &str) -> Result<Vec<String>> {
+    let code = Regex::new(r"`([^`]+)`")?;
+    Ok(code
+        .captures_iter(value)
+        .map(|captures| captures[1].to_owned())
+        .collect())
+}
+
+fn validate_public_artifact_inventory(root: &Path) -> Result<Vec<String>> {
+    let source_relative = "tools/package_release.py";
+    let source_path = root.join(source_relative);
+    if !source_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(&source_path)?;
+    let document_relative = "docs/ARTIFACTS.md";
+    let document_path = root.join(document_relative);
+    if !document_path.is_file() {
+        return Ok(vec![format!(
+            "missing {document_relative} for the native package inventory"
+        )]);
+    }
+    let document = fs::read_to_string(&document_path)?;
+    let mut errors = Vec::new();
+
+    let targets_block = Regex::new(r"(?s)SUPPORTED_TARGETS\s*=\s*\{(.*?)\n\}")?
+        .captures(&source)
+        .and_then(|captures| captures.get(1))
+        .context("tools/package_release.py: cannot derive SUPPORTED_TARGETS")?
+        .as_str();
+    let target_row = Regex::new(r#""([^"]+)"\s*:\s*\("([^"]+)",\s*"([^"]+)"\)"#)?;
+    let expected_targets: BTreeMap<String, String> = target_row
+        .captures_iter(targets_block)
+        .map(|captures| {
+            (
+                captures[1].to_owned(),
+                format!("lib/libtimeless_ext.{}", &captures[2]),
+            )
+        })
+        .collect();
+    if expected_targets.is_empty() {
+        bail!("{source_relative}: SUPPORTED_TARGETS has no recognized entries");
+    }
+
+    let (target_region, mut marker_errors) =
+        marked_region(&document, document_relative, "public-artifact-targets")?;
+    errors.append(&mut marker_errors);
+    let mut documented_targets = BTreeMap::new();
+    for (offset, line) in target_region.lines().enumerate() {
+        if !line.starts_with('|') {
+            continue;
+        }
+        let values = cells(line);
+        if values.len() != 3 {
+            continue;
+        }
+        let target = inline_code(values[0])?;
+        let extension = inline_code(values[2])?;
+        if target.len() != 1 || !target[0].contains("-") {
+            continue;
+        }
+        if extension.len() != 1 {
+            errors.push(format!(
+                "{document_relative}:{}: artifact target must name exactly one extension path",
+                offset + 1
+            ));
+            continue;
+        }
+        if documented_targets
+            .insert(target[0].clone(), extension[0].clone())
+            .is_some()
+        {
+            errors.push(format!(
+                "{document_relative}:{}: duplicate artifact target {}",
+                offset + 1,
+                target[0]
+            ));
+        }
+    }
+    if documented_targets != expected_targets {
+        errors.push(format!(
+            "{document_relative}: native target inventory differs; source={expected_targets:?}, documented={documented_targets:?}"
+        ));
+    }
+
+    let binaries_block = Regex::new(r"(?s)BINARIES\s*=\s*\((.*?)\)")?
+        .captures(&source)
+        .and_then(|captures| captures.get(1))
+        .context("tools/package_release.py: cannot derive BINARIES")?
+        .as_str();
+    let quoted = Regex::new(r#""([^"]+)""#)?;
+    let mut expected_files: BTreeSet<String> = quoted
+        .captures_iter(binaries_block)
+        .map(|captures| format!("bin/{}", &captures[1]))
+        .collect();
+    let staged_path = Regex::new(r#"stage\s*/\s*"([^"]+)"(?:\s*/\s*"([^"]+)")?"#)?;
+    for captures in staged_path.captures_iter(&source) {
+        let first = &captures[1];
+        let path = captures.get(2).map_or_else(
+            || first.to_owned(),
+            |second| format!("{first}/{}", second.as_str()),
+        );
+        if path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains('.'))
+        {
+            expected_files.insert(path);
+        }
+    }
+    for suffix in expected_targets
+        .values()
+        .filter_map(|path| path.rsplit_once('.'))
+    {
+        expected_files.insert(format!("{}.{}", suffix.0, suffix.1));
+    }
+
+    let (file_region, mut marker_errors) =
+        marked_region(&document, document_relative, "public-artifact-files")?;
+    errors.append(&mut marker_errors);
+    let mut documented_files = BTreeSet::new();
+    for line in file_region.lines() {
+        if !line.starts_with('|') {
+            continue;
+        }
+        let values = cells(line);
+        if values.len() != 2 {
+            continue;
+        }
+        for path in inline_code(values[0])? {
+            if path.contains('/') || path.contains('.') {
+                documented_files.insert(path);
+            }
+        }
+    }
+    if documented_files != expected_files {
+        errors.push(format!(
+            "{document_relative}: archive file inventory differs; source={expected_files:?}, documented={documented_files:?}"
+        ));
+    }
+    Ok(errors)
+}
+
+fn validate_public_embedding_contract(root: &Path) -> Result<Vec<String>> {
+    let manifest_relative = "crates/timeless-ext/Cargo.toml";
+    let manifest_path = root.join(manifest_relative);
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let manifest = fs::read_to_string(&manifest_path)?;
+    let document_relative = "docs/EMBEDDED_RUST.md";
+    let document_path = root.join(document_relative);
+    if !document_path.is_file() {
+        return Ok(vec![format!(
+            "missing {document_relative} for the public Rust embedding API"
+        )]);
+    }
+    let document = fs::read_to_string(&document_path)?;
+    let rusqlite_version = required_capture(
+        &manifest,
+        r#"(?m)^rusqlite\s*=\s*\{\s*version\s*=\s*"([^"]+)""#,
+        manifest_relative,
+        "rusqlite version",
+    )?;
+    let lock_relative = "tools/libsql-check/Cargo.lock";
+    let lock = fs::read_to_string(root.join(lock_relative))?;
+    let libsql_version = required_capture(
+        &lock,
+        r#"(?ms)^name\s*=\s*"libsql"\s*\nversion\s*=\s*"([^"]+)""#,
+        lock_relative,
+        "libsql gate version",
+    )?;
+    let expected = BTreeMap::from([
+        ("direct_libsql_gate_version".to_owned(), libsql_version),
+        (
+            "dynamic_libsql_gate".to_owned(),
+            "tools/libsql-check/src/main.rs".to_owned(),
+        ),
+        ("rusqlite_version".to_owned(), rusqlite_version),
+        (
+            "static_example".to_owned(),
+            "crates/timeless-ext/examples/embedded.rs".to_owned(),
+        ),
+        (
+            "timeless_ext_embedded_feature".to_owned(),
+            "embedded".to_owned(),
+        ),
+        (
+            "timeless_ext_loadable_feature".to_owned(),
+            "entrypoints".to_owned(),
+        ),
+    ]);
+    let (region, mut errors) =
+        marked_region(&document, document_relative, "public-embedding-contract")?;
+    let row = Regex::new(r#"(?m)^\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|"#)?;
+    let documented: BTreeMap<String, String> = row
+        .captures_iter(region)
+        .map(|captures| (captures[1].to_owned(), captures[2].to_owned()))
+        .collect();
+    if documented != expected {
+        errors.push(format!(
+            "{document_relative}: embedding contract differs; source={expected:?}, documented={documented:?}"
+        ));
+    }
+
+    for (needle, description) in [
+        (
+            "entrypoints = [\"rusqlite/loadable_extension\"]",
+            "entrypoints must select rusqlite loadable-extension mode",
+        ),
+        ("embedded = []", "embedded feature must remain explicit"),
+        (
+            "required-features = [\"embedded\"]",
+            "embedded example must require the linked feature",
+        ),
+    ] {
+        if !manifest.contains(needle) {
+            errors.push(format!("{manifest_relative}: {description}"));
+        }
+    }
+
+    let library_relative = "crates/timeless-ext/src/lib.rs";
+    let library = fs::read_to_string(root.join(library_relative))?;
+    for needle in [
+        "pub fn register_telemetry",
+        "pub fn register_dbhealth",
+        "feature = \"entrypoints\"",
+        "feature = \"embedded\"",
+    ] {
+        if !library.contains(needle) {
+            errors.push(format!(
+                "{library_relative}: embedding source is missing {needle}"
+            ));
+        }
+    }
+
+    for relative in [
+        "crates/timeless-ext/examples/embedded.rs",
+        "tools/libsql-check/src/main.rs",
+    ] {
+        let path = root.join(relative);
+        if !path.is_file() {
+            errors.push(format!("missing {relative}"));
+            continue;
+        }
+        let source = fs::read_to_string(path)?;
+        for needle in [
+            "timeless_metrics",
+            "timeless_logs",
+            "timeless_traces",
+            "status_description",
+            "events",
+            "resource",
+            "instrumentation_scope",
+        ] {
+            if !source.contains(needle) {
+                errors.push(format!("{relative}: production smoke is missing {needle}"));
+            }
+        }
+        if source.contains("USING timeless_spike") {
+            errors.push(format!(
+                "{relative}: production embedding smoke must not create timeless_spike"
+            ));
+        }
+    }
+    let gate_relative = "tools/libsql-check/src/main.rs";
+    let gate = fs::read_to_string(root.join(gate_relative))?;
+    if gate.matches("Builder::new_local(&database_path)").count() < 2 {
+        errors.push(format!(
+            "{gate_relative}: direct libSQL gate must close and reopen the durable database"
+        ));
+    }
+    Ok(errors)
+}
+
+fn validate_canonical_documentation_wording(root: &Path) -> Result<Vec<String>> {
+    let forbidden = [
+        (":latest", "floating container tag"),
+        ("built from libsql main", "floating libSQL branch"),
+        ("shadow-table inspection", "private shadow-table inspection"),
+        ("everything works verbatim", "unbounded compatibility claim"),
+    ];
+    let mut errors = Vec::new();
+    for relative in [
+        "README.md",
+        "docs/GUIDE.md",
+        "docs/SQL_API_REFERENCE.md",
+        "docs/SERVER_API_REFERENCE.md",
+        "docs/EMBEDDED_RUST.md",
+        "docs/SQLD.md",
+        "docs/ARTIFACTS.md",
+    ] {
+        let path = root.join(relative);
+        if !path.is_file() {
+            continue;
+        }
+        let content = fs::read_to_string(path)?.to_lowercase();
+        for (needle, description) in forbidden {
+            if content.contains(needle) {
+                errors.push(format!("{relative}: contains stale {description}"));
+            }
+        }
+    }
+    for (relative, marker) in [
+        ("PLAN.md", "<!-- document-status: historical-design -->"),
+        (
+            "RESULTS.md",
+            "<!-- document-status: historical-benchmark -->",
+        ),
+    ] {
+        let path = root.join(relative);
+        if path.is_file() && !fs::read_to_string(path)?.contains(marker) {
+            errors.push(format!(
+                "{relative}: development history must carry {marker}"
+            ));
+        }
+    }
+    Ok(errors)
+}
+
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -1045,6 +1365,9 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_public_server_routes(root)?);
     errors.extend(validate_public_server_environment(root)?);
     errors.extend(validate_public_compatibility_versions(root)?);
+    errors.extend(validate_public_artifact_inventory(root)?);
+    errors.extend(validate_public_embedding_contract(root)?);
+    errors.extend(validate_canonical_documentation_wording(root)?);
     Ok(errors)
 }
 
@@ -1411,5 +1734,153 @@ mod tests {
             .iter()
             .any(|error| error.contains("extension_workspace differs")));
         assert!(errors.iter().any(|error| error.contains("release target")));
+    }
+
+    #[test]
+    fn public_artifact_inventory_must_match_packager_targets_and_payloads() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("tools")).unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(
+            root.join("tools/package_release.py"),
+            r#"SUPPORTED_TARGETS = {
+    "x86_64-unknown-linux-gnu": ("so", "linux"),
+    "aarch64-apple-darwin": ("dylib", "macos"),
+}
+BINARIES = ("timeless-metrics-api", "timeless-logs-api", "timeless-traces-api")
+stage / "bin"
+stage / "lib"
+stage / "licenses" / "timeless-libsql-MIT.txt"
+stage / "install.sh"
+stage / "uninstall.sh"
+stage / "SBOM.spdx.json"
+stage / "THIRD_PARTY_LICENSES.txt"
+stage / "artifact-manifest.json"
+stage / "SHA256SUMS"
+"#,
+        )
+        .unwrap();
+        let document = r#"# Artifacts
+
+<!-- public-artifact-targets:start -->
+
+| Rust target | Platform | Extension file |
+|---|---|---|
+| `x86_64-unknown-linux-gnu` | Linux | `lib/libtimeless_ext.so` |
+| `aarch64-apple-darwin` | macOS | `lib/libtimeless_ext.dylib` |
+
+<!-- public-artifact-targets:end -->
+
+<!-- public-artifact-files:start -->
+
+| Archive path | Contract |
+|---|---|
+| `bin/timeless-metrics-api` | binary |
+| `bin/timeless-logs-api` | binary |
+| `bin/timeless-traces-api` | binary |
+| `lib/libtimeless_ext.so` or `lib/libtimeless_ext.dylib` | extension |
+| `install.sh` | installer |
+| `uninstall.sh` | remover |
+| `licenses/timeless-libsql-MIT.txt` | license |
+| `SBOM.spdx.json` | sbom |
+| `THIRD_PARTY_LICENSES.txt` | notices |
+| `artifact-manifest.json` | manifest |
+| `SHA256SUMS` | checksums |
+
+<!-- public-artifact-files:end -->
+"#;
+        let path = root.join("docs/ARTIFACTS.md");
+        fs::write(&path, document).unwrap();
+        assert!(validate_public_artifact_inventory(root).unwrap().is_empty());
+
+        fs::write(
+            &path,
+            document.replace("`bin/timeless-traces-api`", "`bin/timeless-generic-api`"),
+        )
+        .unwrap();
+        let errors = validate_public_artifact_inventory(root).unwrap();
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("archive file inventory differs")));
+    }
+
+    #[test]
+    fn public_embedding_contract_rejects_compatibility_spike_as_smoke() {
+        let temporary = TempDir::new().unwrap();
+        let root = temporary.path();
+        for relative in [
+            "crates/timeless-ext/examples",
+            "crates/timeless-ext/src",
+            "tools/libsql-check/src",
+            "docs",
+        ] {
+            fs::create_dir_all(root.join(relative)).unwrap();
+        }
+        fs::write(
+            root.join("crates/timeless-ext/Cargo.toml"),
+            r#"[[example]]
+name = "embedded"
+required-features = ["embedded"]
+[dependencies]
+rusqlite = { version = "0.40.1", features = ["functions", "vtab"] }
+[features]
+default = ["entrypoints"]
+entrypoints = ["rusqlite/loadable_extension"]
+embedded = []
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("tools/libsql-check/Cargo.lock"),
+            "[[package]]\nname = \"libsql\"\nversion = \"0.9.30\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("crates/timeless-ext/src/lib.rs"),
+            "#[cfg(feature = \"entrypoints\")] fn load() {}\n\
+             #[cfg(feature = \"embedded\")] fn linked() {}\n\
+             pub fn register_telemetry() {}\n\
+             pub fn register_dbhealth() {}\n",
+        )
+        .unwrap();
+        let smoke = "timeless_metrics timeless_logs timeless_traces \
+                     status_description events resource instrumentation_scope";
+        fs::write(root.join("crates/timeless-ext/examples/embedded.rs"), smoke).unwrap();
+        let gate = format!(
+            "{smoke}\nBuilder::new_local(&database_path)\nBuilder::new_local(&database_path)\n"
+        );
+        let gate_path = root.join("tools/libsql-check/src/main.rs");
+        fs::write(&gate_path, &gate).unwrap();
+        fs::write(
+            root.join("docs/EMBEDDED_RUST.md"),
+            r#"# Embedded
+
+<!-- public-embedding-contract:start -->
+
+| Contract key | Current value |
+|---|---|
+| `timeless_ext_embedded_feature` | `embedded` |
+| `timeless_ext_loadable_feature` | `entrypoints` |
+| `rusqlite_version` | `0.40.1` |
+| `direct_libsql_gate_version` | `0.9.30` |
+| `static_example` | `crates/timeless-ext/examples/embedded.rs` |
+| `dynamic_libsql_gate` | `tools/libsql-check/src/main.rs` |
+
+<!-- public-embedding-contract:end -->
+"#,
+        )
+        .unwrap();
+        assert!(validate_public_embedding_contract(root).unwrap().is_empty());
+
+        fs::write(
+            &gate_path,
+            format!("{gate}CREATE VIRTUAL TABLE spike USING timeless_spike;\n"),
+        )
+        .unwrap();
+        let errors = validate_public_embedding_contract(root).unwrap();
+        assert!(errors.iter().any(
+            |error| error.contains("production embedding smoke must not create timeless_spike")
+        ));
     }
 }

@@ -263,8 +263,9 @@ Design constraints that make this v2, not v1:
   hash-suffixed labels to cap cardinality).
 - Label cardinality is the classic monitoring foot-gun; cap distinct query
   labels (e.g. top-N by cost per interval, rest as `{"query":"_other"}`).
-- Overhead is per-statement, not per-sample; must be benchmarked and
-  published in RESULTS.md before it defaults anywhere.
+- Overhead is per-statement, not per-sample; it must be benchmarked and
+  published as current evidence before it defaults anywhere. `RESULTS.md` is
+  a historical baseline archive, not that future release gate.
 
 Also v2, cheap but compile-flag-gated: `dbstat`-derived per-table/index page
 counts and fill factor (`{"object":"idx_orders_email"}`), guarded by a

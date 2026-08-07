@@ -29,7 +29,7 @@ adaptive columnar encoding) and stored in shadow tables **inside the same
 database file** — so transactions, backup, and libSQL replication come from
 the host, while compression, pruning, and predicate pushdown come from the
 engines. Works in the `sqlite3` CLI, the rusqlite/libsql crates, and
-self-hosted `sqld` (SQL over HTTP, zero client changes).
+self-hosted `sqld` (SQL over HTTP through Hrana).
 
 ## Why
 
@@ -39,7 +39,8 @@ ClickHouse) with its own storage, backup, and replication story. This
 extension keeps telemetry *in the database you already have*:
 
 - **One file.** Metrics, logs, traces, and your application data — same
-  `.db`, same `BEGIN/COMMIT`, same backup, same libSQL replication stream.
+  `.db`, same `BEGIN/COMMIT`, same coordinated backup, and the same
+  host-supported replication mechanism for committed pages.
 - **6–200x smaller.** Lossless compression, verified bit-exact per point
   after flush and cold recovery (see [Numbers](#numbers)).
 - **It's just SQL.** No query DSL: indexed dimensions are real (hidden)
@@ -48,25 +49,25 @@ extension keeps telemetry *in the database you already have*:
 - **Append-only with honest retention.** DELETE/UPDATE are rejected;
   retention is an explicit `'prune:<ts>'` command.
 
-**Born for the edge.** Compression happens at the point of collection —
-points buffer in memory and land in the WAL only as compressed blocks —
-so libSQL replication (to a hub, to S3-compatible storage via bottomless,
-to an embedded replica) ships the *compressed* bytes, never the raw
-points. On a metered uplink that is the whole story. One device recording
-100 metrics at 1 Hz for a month:
+**Born for the edge.** Compression happens before a successful flush writes
+durable database pages. Host-supported libSQL replication or backup therefore
+operates on committed compressed block state rather than one Timeless row per
+sample. Actual network bytes also include page, WAL, protocol, retry, and
+checkpoint behavior and must be measured for the chosen host. For one device
+recording 100 metrics at 1 Hz for a month, the logical stored payload before
+that host overhead is:
 
-| storage | wire format | monthly upstream |
+| storage | durable representation | logical monthly payload |
 |---|---|---:|
 | plain SQLite table | raw rows (~52.6 B/pt) | **~13.6 GB** |
 | timeless, hostile data | pco blocks (8.3 B/pt) | **~2.2 GB** |
 | timeless, friendly data | pco blocks (0.23 B/pt) | **~60 MB** |
 
-For IoT on cellular backhaul the flush cadence doubles as radio
-discipline — one batched, compressed write per interval instead of a
-row-trickle keeping the modem awake — and with [dbhealth](docs/DBHEALTH.md)
-on the same device, every unit self-monitors and its health history rides
-the same replication stream home. Sensors at the edge, pennies on the
-uplink, one file to sync.
+An embedded application controls flush cadence and can pair the same database
+with [dbhealth](docs/DBHEALTH.md). The host—not this extension—owns network
+transport, replication topology, retry policy, and the measured bandwidth
+result. The [embedded](docs/EMBEDDED_RUST.md) and [sqld](docs/SQLD.md) guides
+define that boundary.
 
 ## Quick start
 
@@ -98,7 +99,10 @@ is the canonical inventory of binaries, routes, configuration, authentication,
 limits, lifecycle, backup, errors, and checked platforms.
 Versioning and operational changes are defined by the
 [changelog](CHANGELOG.md), [compatibility statement](docs/COMPATIBILITY.md),
-and [upgrade/rollback guide](docs/UPGRADE.md).
+and [upgrade/rollback guide](docs/UPGRADE.md). Standalone users should start
+with the [embedded Rust guide](docs/EMBEDDED_RUST.md),
+[self-hosted sqld guide](docs/SQLD.md), and
+[release artifact/install inventory](docs/ARTIFACTS.md).
 
 ## The three virtual tables
 
@@ -197,7 +201,8 @@ Three ingest paths, one durability contract (same buffers, same flush):
 1. **Tier 1 — SQL rows** (above): ~2.3M pts/s. The compatibility floor;
    works from any SQLite client.
 2. **Tier 2 — batch blob**: a packed columnar blob (version byte `0x01`,
-   then series table + ts/value arrays, spec in [PLAN.md](PLAN.md)) inserted
+   then series table + ts/value arrays, spec in the
+   [SQL API reference](docs/SQL_API_REFERENCE.md#ingestion-batch-formats)) inserted
    into the hidden column: **23.8M pts/s**. For agents that batch off the
    hot path.
 3. **Prometheus exposition text**: any non-batch blob is parsed as a raw
@@ -1156,14 +1161,14 @@ what makes `sqld`'s connection pool work safely:
 ```sh
 sqld --extensions-path ./ext-dir   # sha256 trusted.lst; loads into every connection
 # curl one request: CREATE VIRTUAL TABLE → INSERT → 'flush'
-# curl another (fresh pooled connection): rows come back, name pushdown, 0.19ms
+# close the stream; a second request reads the flushed rows through public SQL
 ```
 
 ## Numbers
 
 Measured 2026-07-22 on an Apple M5 Pro (macOS, Rust 1.97), second run
-quoted per [TESTING.md](TESTING.md); Linux reference run in
-[RESULTS.md](RESULTS.md). All datasets are deterministic and deliberately
+quoted per [TESTING.md](TESTING.md); the Linux run is retained in the
+[historical benchmark archive](RESULTS.md). All datasets are deterministic and deliberately
 hostile (ms-jitter timestamps, per-point noise, random ids) — friendly data
 compresses far better. Every number is lossless: bit-exact f64 round-trips
 verified after flush + cold recovery.
@@ -1265,10 +1270,14 @@ window, and rollup kernels; and the first read after publishing a flush.
 See [TESTING.md](TESTING.md) for the full guide and the rules for fair
 benchmark numbers.
 
-Rust hosts that provide their own loadable-extension entry points can call
+Rust hosts can build `timeless-ext` with
+`default-features = false, features = ["embedded"]` and call
 `timeless_ext::register_telemetry(&connection)` to register the three
-telemetry tables and query TVFs. The embedding surface deliberately excludes
-the development spike and separately packaged dbhealth modules.
+telemetry tables and query TVFs without a loadable artifact. The
+[embedded guide](docs/EMBEDDED_RUST.md) includes an executable example,
+shutdown/durability rules, and the direct libSQL gate. The embedding surface
+deliberately excludes the compatibility spike and separately packaged
+dbhealth modules.
 
 ## Status & limits
 
@@ -1294,12 +1303,13 @@ crates/
   timeless-core/    engines: pco chunk store (metrics), columnar block store
                     (logs), span block store (traces) — no SQLite dependency
   timeless-codec/   typed column encoders with adaptive strategy selection
-  timeless-ext/     the loadable extension: three vtabs + shadow-table stores
+  timeless-ext/     loadable extension and opt-in embedded Rust registration:
+                    three vtabs + public query surfaces + shadow-table stores
 tests/              cli.sh (integration), crash.sh (kill -9 durability)
 tools/bench/        bench, bench-logs, bench-traces, bench-codec, oracle
                     (bundled SQLite — no system sqlite3 needed)
-PLAN.md             design history and decision log
-RESULTS.md          measured results, honest asterisks, known limits
+PLAN.md             historical design and decision record (not current API)
+RESULTS.md          historical benchmark archive (not current release evidence)
 TESTING.md          how to run everything yourself
 ```
 

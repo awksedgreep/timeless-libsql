@@ -29,10 +29,12 @@ sqlite3 telemetry.db ".load ./target/release/libtimeless_ext.so"
 
 Linux uses `.so`; macOS uses `.dylib`. The artifact exports
 `sqlite3_extension_init`, `sqlite3_timelessext_init`, and
-`sqlite3_timeless_ext_init`. A Rust host can instead link the
-`timeless-ext` crate and call `timeless_ext::register_telemetry(&connection)`.
-That embedding call installs the production telemetry modules and capability
-scalar, but not the compatibility-only `timeless_spike` module or dbhealth.
+`sqlite3_timeless_ext_init`. A Rust host can instead link the `timeless-ext`
+crate with `default-features = false, features = ["embedded"]` and call
+`timeless_ext::register_telemetry(&connection)`. The complete executable
+procedure is in the [embedded Rust guide](EMBEDDED_RUST.md). That embedding
+call installs the production telemetry modules and capability scalar, but not
+the compatibility-only `timeless_spike` module or dbhealth.
 
 Build `dbhealth` independently with `cargo build --release -p dbhealth-ext`.
 Its artifact registers only `dbhealth` and its `timeless_health` alias. A Rust

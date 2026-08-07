@@ -1860,6 +1860,48 @@ retain that peer floor; data ABI 1 and every storage format remain unchanged.
 Rust regressions and a source-derived eight-axis documentation contract prevent
 another tag/source identity collision without breaking patch compatibility.
 
+Session 20d closes the remaining embedding, sqld, artifact, install/removal,
+and stale-development-wording work. The public Rust API now has two explicit,
+mutually exclusive build modes: the default `entrypoints` feature preserves
+the loadable `.so`/`.dylib`, while
+`--no-default-features --features embedded` links a host SQLite API. The
+executable static example registers only production telemetry and validates
+metrics, typed nested logs, and rich spans. `QSF-287` records the audit defect
+that previously let this API compile and then panic before registration.
+
+The detached Rust `libsql-check` gate no longer treats the compatibility-only
+spike module as product evidence or deletes a fixed `/tmp` path. It owns a
+temporary database, loads the release artifact on independent writer/reader
+connections, verifies the negotiated production inventory and all three
+signals, closes the database, and repeats exact reads after reopen. `QSF-288`
+records that correction. The sqld guide is pinned to the checksum-verified
+official `libsql-server-v0.24.32` release at full commit
+`40c272de85ee4e62d722c5ccae5da2e76b4253a1`; live Hrana pipelines proved
+capability negotiation, all three flushes, packed metrics, typed logs,
+complete rich spans, a closed-stream read, and graceful shutdown. It no longer
+claims an implicit pipeline transaction, floating `main`/`latest`, private
+shadow inspection, or unmeasured provider/replication behavior (`QSF-289`).
+
+`docs/ARTIFACTS.md` separates unreleased source from publication and gives the
+exact four native targets, archive paths, two checksum scopes,
+manifest/SBOM/license inventory, immutable install layout, ownership-aware
+removal, and coordinated backup/rollback boundary. Rust contracts derive the
+target and payload sets from the existing packager and reject missing, extra,
+or renamed rows (`QSF-290`). `PLAN.md` and `RESULTS.md` are now explicitly
+marked historical design/benchmark evidence; current README/GUIDE replication
+and sqld claims are bounded to committed host-managed state.
+
+Session 20's implementation exit is complete through maintained local Rust,
+real-extension, CLI, and documentation gates. No workflow was added or
+changed: automatic CI remains prohibited, so wiring any new example into a
+hosted workflow requires a separate explicit owner request. The complete
+verification included 43 Rust query-harness tests, both embedding modes,
+libSQL 0.9.30 close/reopen, checksum-pinned sqld HTTP, root/server tests and
+Clippy, separate dbhealth build, strict Rustdoc, 93 real-extension metrics
+tests, 84 real-extension logs tests, trace suites, and all 45 CLI sections
+with 150,000 randomized operations, five kill-9 rounds, and 135 executable
+recipes/173 SQL statements.
+
 ### Session 21: final release gate and report
 
 Run all extension, crash, transaction, migration, storage, API, parser,

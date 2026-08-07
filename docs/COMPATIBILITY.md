@@ -71,6 +71,7 @@ These independent versions must not be conflated:
 | any version with a different `data_abi` | current servers | unsupported | The server refuses before virtual-table initialization. |
 | current extension with a future-schema database | current servers | unsupported/fail closed | The server does not downgrade or mutate a future ledger. |
 | current extension loaded directly by SQLite/libSQL | supported | The host must negotiate capabilities and own maintenance, backup, concurrency, and limits. |
+| current `timeless-ext` linked into a Rust host with only the `embedded` feature | supported | The host registers every connection and owns the same maintenance, backup, concurrency, and limit duties; `entrypoints` and `embedded` are mutually exclusive build modes. |
 
 The `minimum_*_version` fields are necessary but not sufficient. An artifact
 at the numeric floor can still be rejected for a missing signal batch or
@@ -126,5 +127,7 @@ SQLite pages/WAL records. A host may use SQLite backup, libSQL replication, or
 sqld around the complete database. Timeless does not claim that copying only
 virtual rows or shadow-table subsets creates a compatible replica.
 
-See the [upgrade guide](UPGRADE.md) before replacing artifacts and the
-[SQL API reference](SQL_API_REFERENCE.md) for the exact public surface.
+See the [upgrade guide](UPGRADE.md) before replacing artifacts, the
+[SQL API reference](SQL_API_REFERENCE.md) for the exact public surface, and
+the [embedded Rust](EMBEDDED_RUST.md), [sqld](SQLD.md), and
+[artifact](ARTIFACTS.md) guides for each host boundary.

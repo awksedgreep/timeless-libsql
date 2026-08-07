@@ -10,4 +10,6 @@ edition = "2021"
 
 [dependencies]
 libsql = { version = "0.9", default-features = false, features = ["core"] }
+serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }

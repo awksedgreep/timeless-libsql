@@ -191,7 +191,8 @@ cron and you have a metrics pipeline in one file.
 
 (There is also a high-throughput packed binary format — ~24M points/sec — for
 programs that batch off the hot path; see the Tier 2 spec in
-[PLAN.md](../PLAN.md). For hand-written SQL you won't need it.)
+[the SQL API reference](SQL_API_REFERENCE.md#ingestion-batch-formats). For
+hand-written SQL you won't need it.)
 
 ### Typical queries
 
@@ -669,9 +670,11 @@ status: unset | ok | error
 
 ---
 
-*Want this over the network? [SQLD.md](SQLD.md) serves these same tables
-over HTTP with self-hosted sqld — everything in this guide works verbatim
-through it, from any language ([interactive tour](tour.livemd)). Want the
-internals — how compression works, benchmark methodology, the durability
-proof? See the [README](../README.md), [RESULTS.md](../RESULTS.md), and
+*Want public SQL over the network? [SQLD.md](SQLD.md) shows the pinned
+self-hosted sqld/Hrana boundary. The SQL schemas and commands are the same;
+transactions, authentication, limits, maintenance, shutdown, and typed wire
+values remain host responsibilities and must follow that guide. Want the
+internals—how compression works, benchmark methodology, and the durability
+proof? See the [README](../README.md),
+[historical benchmark archive](../RESULTS.md), and
 [TESTING.md](../TESTING.md).*

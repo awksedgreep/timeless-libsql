@@ -1,8 +1,18 @@
-# timeless-libsql — Hero POC Results
+# Historical benchmark archive: timeless-libsql hero POC
+
+<!-- document-status: historical-benchmark -->
+
+> These July 2026 measurements are preserved baseline evidence, not current
+> 0.4 release numbers or a compatibility claim. Reproduce current behavior with
+> [TESTING.md](TESTING.md) and use checked query artifacts in
+> [docs/QUERY_EVIDENCE.md](docs/QUERY_EVIDENCE.md). The original Linux sqld
+> run used an unrecorded floating libSQL `main` revision and is therefore not a
+> reproducible sqld compatibility pin; the maintained deployment boundary is
+> [docs/SQLD.md](docs/SQLD.md).
 
 Two working days (2026-07-22), Sessions 1–4 of PLAN.md. All four success
 criteria met (one with an honest asterisk). Reference machine: Arch Linux,
-Rust 1.97, SQLite 3.53, sqld built from libsql main. Re-run 2026-07-22 on
+Rust 1.97, SQLite 3.53, sqld built from the unrecorded revision noted above. Re-run 2026-07-22 on
 Apple M5 Pro (macOS 26.5, Rust 1.97.1, bundled SQLite) — second-run numbers
 per TESTING.md; on-disk sizes were byte-identical across both machines
 (deterministic datasets), so the storage table needs no second column.
