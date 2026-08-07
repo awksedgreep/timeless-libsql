@@ -51,6 +51,10 @@ artifact exists until a tag is created from the finished, validated `main`.
 - Canonical source-checked SQL, server, compatibility, upgrade, embedded-Rust,
   sqld, and artifact/install references that distinguish unreleased source
   capability from actually published artifacts.
+- A source-checked final query release report with exact matrix dispositions,
+  pinned-oracle coverage, Session 0 versus final evidence, storage findings,
+  artifact inventory, deferred prerequisites, and higher-order Elixir
+  interface recommendations.
 
 ### Changed
 

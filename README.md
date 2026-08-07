@@ -102,7 +102,9 @@ Versioning and operational changes are defined by the
 and [upgrade/rollback guide](docs/UPGRADE.md). Standalone users should start
 with the [embedded Rust guide](docs/EMBEDDED_RUST.md),
 [self-hosted sqld guide](docs/SQLD.md), and
-[release artifact/install inventory](docs/ARTIFACTS.md).
+[release artifact/install inventory](docs/ARTIFACTS.md). The checked query,
+benchmark, deferred-work, and higher-order interface verdict is in the
+[query release report](docs/QUERY_RELEASE_REPORT.md).
 
 ## The three virtual tables
 
@@ -688,6 +690,7 @@ must be tested before it can be marked shipped:
 - [Pinned query semantic oracles](docs/QUERY_ORACLES.md)
 - [Query benchmark and evidence protocol](docs/QUERY_EVIDENCE.md)
 - [Sequential query implementation plan](docs/2026-08-04_query_surface_implementation_plan.md)
+- [Final query and public-surface release report](docs/QUERY_RELEASE_REPORT.md)
 
 PromQL, the explicitly named MetricsQL compatibility tier, and LogsQL
 parsing/evaluation live in the Rust signal APIs. MetricsQL-only syntax never

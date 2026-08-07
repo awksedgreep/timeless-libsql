@@ -6840,3 +6840,92 @@ startup/embedding negotiation call, not a data query. `QSF-280` and
 schema, existing capability member, ingestion byte, result byte, batching,
 compression, index, rollup, retention, migration, transaction, or maintenance
 behavior changed.
+
+## Session 21 storage-model disposition: LogsQL block diagnostics
+
+`LQL-P10` and `LQL-P11` remain deferred with an explicit public-storage
+prerequisite. VictoriaLogs `block_stats` returns physical per-block/per-field
+details: row count, internal codec type, dictionary item/byte counts,
+value/Bloom bytes, stream identity, and data-part path. `blocks_count` counts
+the physical blocks that its query plan processes. Both are debugging views
+of one engine's layout, not retained log semantics.
+
+The Timeless public `logs` row surface deliberately hides private shadow
+tables, host paths, and codec-specific layout. Existing cumulative candidate-
+block counters measure process work across statements and cannot be relabelled
+as either query result. SQLite page counts, logical result rows, and the four
+raw blocks produced by the current 8,192-entry evidence fixture are also
+different contracts. There is therefore no honest ordinary SQL recipe and no
+reason to give the Rust API private-table access.
+
+The existing parser and real-extension regressions return stable HTTP 422
+`unsupported_capability` errors for both names before public storage work.
+Shipping either row requires a versioned public diagnostic snapshot with
+stable logical definitions, a disclosure policy for paths and stream
+identity, bounded work and response size, cancellation, snapshot consistency,
+and compatibility across codec, optimize, migration, transaction, and reopen
+changes. `blocks_count` additionally needs a definition that remains meaningful
+when the planner changes. `QSF-291` records the boundary. No implementation,
+format, index, or maintenance behavior changed.
+
+## Session 21 final query release evidence
+
+The exact-build artifact
+[`2026-08-07_query_release_gate.json`](evidence/2026-08-07_query_release_gate.json)
+(SHA-256 `d576b5bcb3729f79d6e81f4793181551c3c99fd9c9a6bbdb877164c2b7e39660`)
+measures extension and server source
+`178f75f7f3b1284c6b3940ae7af0986b9e2fe940`. It executes 184 metric and 307
+log query shapes for five warmups and 50 measured iterations each. Both
+signals cross an explicit durability barrier before reads, and the command
+requires a clean graceful shutdown.
+
+The Session 0 and final p50/p95/p99 values in milliseconds are:
+
+| signal/query | Session 0 | final | final result cardinality | final response bytes |
+|---|---:|---:|---:|---:|
+| metrics exact/narrow | 0.354 / 0.821 / 0.984 | 0.952 / 1.177 / 1.309 | 1 | 164 |
+| metrics wide selector | 2.825 / 3.259 / 3.261 | 3.531 / 4.072 / 5.167 | 512 | 53,497 |
+| logs indexed/narrow | 6.253 / 6.990 / 7.443 | 12.110 / 13.631 / 13.701 | 100 | 27,228 |
+| logs full/wide | 17.870 / 19.155 / 19.544 | 39.162 / 41.780 / 43.041 | 8,192 | 2,249,775 |
+
+The comparison retains the slower tails but does not falsely attribute all of
+them to language evaluation. The final metric workload has 3,163 series and
+136,953 cumulative points after its resource-limit fixture, versus 512 series
+and 16,384 points in Session 0. The final log fixture retains the same 8,192
+entries but increases its lossless wire payload from 1,318,143 to 2,143,279
+bytes, and the final narrow query returns a deterministic 100-row page rather
+than the earlier 1,024 rows. RSS HWM follows all 491 query shapes, not only the
+four rows in the table.
+
+Primary metrics ingestion durably completes 36,928 points with zero failures
+or queue residue after 8.506 ms admission and a 92.992 ms flush barrier. Its
+logical payload is 224,688 bytes, live SQLite/WAL/SHM footprint is 1,542,312
+bytes, and complete-suite HWM is 53,096 KiB. The limit fixture then reaches
+136,953 cumulative completed points without failures or residue.
+
+Logs durably completes all 8,192 rich entries with zero queued or in-flight
+work after 16.250 ms admission and a 39.798 ms barrier. The authoritative
+batch becomes four raw blocks, uses 1,914,055 logical bytes and 2,022,736 live
+physical bytes, and reaches 104,576 KiB complete-suite HWM. Cancellation
+regressions independently force dropped work and reader reuse; zero cancelled
+requests at capture means only that no request remained cancelled or active at
+the final snapshot.
+
+`QSF-292` preserves this final comparison and its non-equivalent-workload
+caveat. The complete compatibility, artifact, deferred-prerequisite, and
+higher-order interface verdict is in the
+[query release report](QUERY_RELEASE_REPORT.md).
+
+The independent short production fault artifact
+[`2026-08-07_query_fault_gate.json`](evidence/2026-08-07_query_fault_gate.json)
+has SHA-256
+`d4c927dc2b01327207dda49444fbbfa502c7b810d3e714de0a4f43fe2a1ede37`.
+Its 120.001-second run executes 12 successful scheduled fault events across
+metrics, logs, and traces: descriptor/startup and disk-full recovery, slow
+disconnect/cancellation storms, backups under load, graceful restart, and
+`SIGKILL` restart. Every signal accepts and durably completes 30,784 records
+across five process generations, reports no failure, and finishes with an
+`ok` barrier. RSS HWM is 15,100 KiB metrics, 47,392 KiB logs, and 55,324 KiB
+traces. The checked-in two-hour release soak remains the sustained resource
+authority; this shorter current-build drill verifies the independent fault
+surfaces without pretending to replace that soak.

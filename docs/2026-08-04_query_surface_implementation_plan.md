@@ -1920,3 +1920,40 @@ TraceQL remains outside this plan. Trace storage/query findings still enter
 `QUERY_STORAGE_FINDINGS.md`; the final report recommends a later trace matrix
 organized around selectors, relationship traversal, span/event attributes,
 aggregates, structural operators, limits, and public SQL/storage foundations.
+
+#### Session 21 completion evidence
+
+The final matrix audit leaves all 216 rows terminal: 191 shipped, 11
+experimental, and 14 deferred behind explicit prerequisites. The Rust
+documentation contract derives that summary, requires every non-shipped ID in
+the final report, checks exact query-build identities and durable barriers,
+and rejects absent or failed owned fault evidence. `LQL-P10` and `LQL-P11`
+received the missing physical-block-diagnostics prerequisite and explicit
+no-SQL disposition without exposing private storage.
+
+The exact-build query artifact for implementation source
+`178f75f7f3b1284c6b3940ae7af0986b9e2fe940` executes 184 metric and 307 log
+shapes for 24,550 measured requests and reports the required Session 0 versus
+final p50/p95/p99, completed work, storage, result bytes, and HWM. The current
+two-minute fault artifact passes all 12 scheduled events and durably completes
+30,784 records per signal across five process generations with no final
+failure. Its SHA-256 is
+`d4c927dc2b01327207dda49444fbbfa502c7b810d3e714de0a4f43fe2a1ede37`;
+the exact query artifact SHA-256 is
+`d576b5bcb3729f79d6e81f4793181551c3c99fd9c9a6bbdb877164c2b7e39660`.
+
+The successful gate set includes 46 Rust query-contract tests; 135 public-SQL
+recipes/173 statements; live immutable Prometheus 549, VictoriaMetrics 196,
+and VictoriaLogs 1,498-case runs; root and server format/test/strict
+Clippy/Rustdoc; separate dbhealth validation; 93 metrics and 84 logs
+real-extension contracts plus trace/OTLP/Jaeger suites; all 45 CLI sections
+with 150,000 randomized operations and five kill-9 rounds; static embedding;
+direct libSQL 0.9.30 multi-connection/cold-reopen; and a native Linux x86-64
+package/checksum/manifest/SBOM/notice/install/removal/preservation drill. The
+checked-in two-hour release soak remains the sustained-resource authority; it
+was not repeated as an unnecessary second two-hour run.
+
+No workflow, tag, publication, downstream repository, dependency pin, or
+TraceQL implementation is part of Session 21. The exact pushed `main` object
+ID and clean-main repeat are handoff evidence because a commit cannot contain
+its own hash.

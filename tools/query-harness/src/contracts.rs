@@ -1210,6 +1210,396 @@ fn shipped_marker(path: &Path) -> Result<(BTreeSet<String>, Vec<String>)> {
     ))
 }
 
+fn matrix_terminal_summary(rows: &[MatrixRow]) -> String {
+    let mut groups: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
+    for row in rows {
+        let family = row.identifier.split('-').next().unwrap_or("unknown");
+        *groups
+            .entry(family)
+            .or_default()
+            .entry(row.status.as_str())
+            .or_default() += 1;
+    }
+    groups
+        .into_iter()
+        .map(|(family, statuses)| {
+            let statuses = statuses
+                .into_iter()
+                .map(|(status, count)| format!("{status}={count}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{family} {statuses}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn latency_triplet(evidence: &serde_json::Value, signal: &str, query: &str) -> Option<String> {
+    let latency = evidence.pointer(&format!("/{signal}/queries/{query}/latency_ns"))?;
+    let millis = |name: &str| {
+        latency
+            .get(name)?
+            .as_u64()
+            .map(|value| value as f64 / 1_000_000.0)
+    };
+    Some(format!(
+        "{:.3} / {:.3} / {:.3}",
+        millis("p50")?,
+        millis("p95")?,
+        millis("p99")?
+    ))
+}
+
+fn validate_query_release_fault_evidence(
+    root: &Path,
+    report: &str,
+    report_relative: &str,
+) -> Result<Vec<String>> {
+    let mut errors = Vec::new();
+    let evidence_marker = Regex::new(r"<!--\s*query-release-fault-evidence:\s*([^\s]+)\s*-->")?;
+    let Some(evidence_relative) = evidence_marker
+        .captures(report)
+        .map(|captures| captures[1].to_owned())
+    else {
+        return Ok(vec![format!(
+            "{report_relative}: missing query-release-fault-evidence marker"
+        )]);
+    };
+    if !evidence_relative.starts_with("docs/evidence/") || evidence_relative.contains("..") {
+        return Ok(vec![format!(
+            "{report_relative}: fault evidence must be an owned docs/evidence path"
+        )]);
+    }
+    let evidence_path = root.join(&evidence_relative);
+    if !evidence_path.is_file() {
+        return Ok(vec![format!(
+            "{report_relative}: fault evidence does not exist: {evidence_relative}"
+        )]);
+    }
+    let evidence: serde_json::Value = serde_json::from_str(&fs::read_to_string(&evidence_path)?)
+        .with_context(|| format!("decode fault evidence {evidence_relative}"))?;
+
+    if evidence.get("verdict").and_then(serde_json::Value::as_str) != Some("passed") {
+        errors.push(format!("{evidence_relative}: fault verdict is not passed"));
+    }
+    if !matches!(
+        evidence.get("mode").and_then(serde_json::Value::as_str),
+        Some("short" | "release")
+    ) {
+        errors.push(format!("{evidence_relative}: unknown fault-gate mode"));
+    }
+    if evidence
+        .get("configured_duration_seconds")
+        .and_then(serde_json::Value::as_f64)
+        .is_none_or(|duration| duration < 120.0)
+    {
+        errors.push(format!(
+            "{evidence_relative}: fault-gate duration is shorter than 120 seconds"
+        ));
+    }
+    if evidence
+        .get("failures")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|failures| !failures.is_empty())
+    {
+        errors.push(format!(
+            "{evidence_relative}: fault-gate failures are present"
+        ));
+    }
+
+    let faults = evidence.get("faults").and_then(serde_json::Value::as_array);
+    let fault_names = faults
+        .into_iter()
+        .flatten()
+        .filter_map(|fault| fault.get("fault").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    for required in [
+        "metrics_startup_descriptor_disk_faults",
+        "logs_startup_descriptor_disk_faults",
+        "traces_startup_descriptor_disk_faults",
+        "slow_disconnect_cancellation_storm",
+        "metrics_backup_overlap",
+        "logs_backup_overlap",
+        "traces_backup_overlap",
+        "graceful_restart",
+        "sigkill_restart",
+    ] {
+        if !fault_names.contains(&required) {
+            errors.push(format!(
+                "{evidence_relative}: required fault {required} was not exercised"
+            ));
+        }
+    }
+    if faults.is_none_or(|events| {
+        events
+            .iter()
+            .any(|event| event.get("result").and_then(serde_json::Value::as_str) != Some("passed"))
+    }) {
+        errors.push(format!(
+            "{evidence_relative}: one or more fault events did not pass"
+        ));
+    }
+
+    let mut completed = Vec::new();
+    for signal in ["metrics", "logs", "traces"] {
+        let signal_pointer = format!("/signals/{signal}");
+        let signal_evidence = evidence.pointer(&signal_pointer);
+        let durable = signal_evidence
+            .and_then(|value| value.get("accepted_and_durable_records"))
+            .and_then(serde_json::Value::as_u64);
+        if durable.is_none_or(|value| value == 0) {
+            errors.push(format!(
+                "{evidence_relative}: {signal} has no accepted durable work"
+            ));
+        } else if let Some(durable) = durable {
+            completed.push(durable);
+        }
+        if signal_evidence
+            .and_then(|value| value.get("errors"))
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|signal_errors| !signal_errors.is_empty())
+        {
+            errors.push(format!("{evidence_relative}: {signal} errors are present"));
+        }
+        if signal_evidence
+            .and_then(|value| value.get("process_generations"))
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|generations| generations < 5)
+        {
+            errors.push(format!(
+                "{evidence_relative}: {signal} did not survive the scheduled restarts"
+            ));
+        }
+        let rss = signal_evidence
+            .and_then(|value| value.get("rss_hwm_kib"))
+            .and_then(serde_json::Value::as_u64);
+        let rss_limit = evidence
+            .pointer(&format!("/limits/max_rss_kib/{signal}"))
+            .and_then(serde_json::Value::as_u64);
+        if rss.is_none() || rss_limit.is_none() || rss > rss_limit {
+            errors.push(format!(
+                "{evidence_relative}: {signal} RSS HWM is absent or above its declared limit"
+            ));
+        }
+        if evidence
+            .pointer(&format!("/final_barriers/{signal}/status"))
+            .and_then(serde_json::Value::as_str)
+            != Some("ok")
+        {
+            errors.push(format!(
+                "{evidence_relative}: {signal} final durability barrier is not ok"
+            ));
+        }
+    }
+    completed.sort_unstable();
+    completed.dedup();
+    if completed.len() != 1 {
+        errors.push(format!(
+            "{evidence_relative}: signals do not report equal durable work"
+        ));
+    }
+
+    let event_count = faults.map_or(0, Vec::len);
+    let records_per_signal = completed.first().copied().unwrap_or_default();
+    let expected_summary = format!("events={event_count} records_per_signal={records_per_signal}");
+    let summary_marker = Regex::new(r"<!--\s*query-release-fault-summary:\s*(.*?)\s*-->")?;
+    let actual_summary = summary_marker
+        .captures(report)
+        .map(|captures| captures[1].trim().to_owned());
+    if actual_summary.as_deref() != Some(expected_summary.as_str()) {
+        errors.push(format!(
+            "{report_relative}: fault summary differs; expected {expected_summary:?}, got {actual_summary:?}"
+        ));
+    }
+
+    Ok(errors)
+}
+
+fn validate_query_release_report(root: &Path, rows: &[MatrixRow]) -> Result<Vec<String>> {
+    let plan = root.join("docs/2026-08-04_query_surface_implementation_plan.md");
+    if !plan.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let relative = "docs/QUERY_RELEASE_REPORT.md";
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(vec![format!("missing {relative}")]);
+    }
+    let content = fs::read_to_string(&path)?;
+    let mut errors = Vec::new();
+
+    let summary_marker = Regex::new(r"<!--\s*query-release-matrix-summary:\s*(.*?)\s*-->")?;
+    let expected_summary = matrix_terminal_summary(rows);
+    let actual_summary = summary_marker
+        .captures(&content)
+        .map(|captures| captures[1].trim().to_owned());
+    if actual_summary.as_deref() != Some(expected_summary.as_str()) {
+        errors.push(format!(
+            "{relative}: matrix summary differs; expected {expected_summary:?}, got {actual_summary:?}"
+        ));
+    }
+
+    for row in rows.iter().filter(|row| row.status != "shipped") {
+        if !content.contains(&format!("`{}`", row.identifier)) {
+            errors.push(format!(
+                "{relative}: terminal non-shipped row {} has no explicit report disposition",
+                row.identifier
+            ));
+        }
+    }
+
+    errors.extend(validate_query_release_fault_evidence(
+        root, &content, relative,
+    )?);
+
+    let evidence_marker = Regex::new(r"<!--\s*query-release-evidence:\s*([^\s]+)\s*-->")?;
+    let Some(evidence_relative) = evidence_marker
+        .captures(&content)
+        .map(|captures| captures[1].to_owned())
+    else {
+        errors.push(format!("{relative}: missing query-release-evidence marker"));
+        return Ok(errors);
+    };
+    if !evidence_relative.starts_with("docs/evidence/") || evidence_relative.contains("..") {
+        errors.push(format!(
+            "{relative}: release evidence must be an owned docs/evidence path"
+        ));
+        return Ok(errors);
+    }
+    let evidence_path = root.join(&evidence_relative);
+    if !evidence_path.is_file() {
+        errors.push(format!(
+            "{relative}: release evidence does not exist: {evidence_relative}"
+        ));
+        return Ok(errors);
+    }
+    let evidence: serde_json::Value = serde_json::from_str(&fs::read_to_string(&evidence_path)?)
+        .with_context(|| format!("decode release evidence {evidence_relative}"))?;
+    let source_commit = evidence
+        .get("git_commit")
+        .and_then(serde_json::Value::as_str);
+    for pointer in [
+        "/extension_build/commit",
+        "/metrics/build/commit",
+        "/logs/build/commit",
+    ] {
+        if evidence
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            != source_commit
+        {
+            errors.push(format!(
+                "{evidence_relative}: {pointer} does not match the evidence source commit"
+            ));
+        }
+    }
+    if source_commit.is_none_or(|commit| !content.contains(commit)) {
+        errors.push(format!(
+            "{relative}: report does not name the exact measured source commit"
+        ));
+    }
+
+    for (signal, completed_pointer, fixture_pointer) in [
+        (
+            "metrics",
+            "/metrics/ingestion/completed_points",
+            "/metrics/fixture/logical_points",
+        ),
+        (
+            "logs",
+            "/logs/ingestion/completed_entries",
+            "/logs/fixture/logical_entries",
+        ),
+    ] {
+        let completed = evidence
+            .pointer(completed_pointer)
+            .and_then(serde_json::Value::as_u64);
+        let fixture = evidence
+            .pointer(fixture_pointer)
+            .and_then(serde_json::Value::as_u64);
+        if completed.is_none() || completed != fixture {
+            errors.push(format!(
+                "{evidence_relative}: {signal} durable completed work does not equal the fixture"
+            ));
+        }
+    }
+    for pointer in [
+        "/metrics/ingestion/failed_points",
+        "/metrics/ingestion/queued_points",
+        "/logs/ingestion/queued_entries",
+        "/logs/cancellation/in_flight_at_capture",
+    ] {
+        if evidence
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_u64)
+            != Some(0)
+        {
+            errors.push(format!(
+                "{evidence_relative}: {pointer} must be zero at the release evidence barrier"
+            ));
+        }
+    }
+
+    let metric_shapes = evidence
+        .pointer("/metrics/queries")
+        .and_then(serde_json::Value::as_object)
+        .map(serde_json::Map::len)
+        .unwrap_or_default();
+    let log_shapes = evidence
+        .pointer("/logs/queries")
+        .and_then(serde_json::Value::as_object)
+        .map(serde_json::Map::len)
+        .unwrap_or_default();
+    let iterations = evidence
+        .pointer("/workload/iterations")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let workload_summary = format!(
+        "metric_shapes={metric_shapes} log_shapes={log_shapes} measured_iterations={}",
+        (metric_shapes + log_shapes) as u64 * iterations
+    );
+    let workload_marker = Regex::new(r"<!--\s*query-release-workload-summary:\s*(.*?)\s*-->")?;
+    let actual_workload = workload_marker
+        .captures(&content)
+        .map(|captures| captures[1].trim().to_owned());
+    if actual_workload.as_deref() != Some(workload_summary.as_str()) {
+        errors.push(format!(
+            "{relative}: workload summary differs; expected {workload_summary:?}, got {actual_workload:?}"
+        ));
+    }
+
+    let baseline_path = root.join("docs/evidence/2026-08-04_query_baseline.json");
+    if !baseline_path.is_file() {
+        errors.push(format!("{relative}: missing Session 0 comparison evidence"));
+    } else {
+        let baseline: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(baseline_path)?)?;
+        for (signal, query) in [
+            ("metrics", "narrow"),
+            ("metrics", "wide"),
+            ("logs", "narrow"),
+            ("logs", "wide"),
+        ] {
+            for (label, document) in [("Session 0", &baseline), ("final", &evidence)] {
+                let Some(triplet) = latency_triplet(document, signal, query) else {
+                    errors.push(format!(
+                        "{relative}: {label} evidence lacks {signal}/{query} p50/p95/p99"
+                    ));
+                    continue;
+                };
+                if !content.contains(&triplet) {
+                    errors.push(format!(
+                        "{relative}: {label} {signal}/{query} latency {triplet} is not reported"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(errors)
+}
+
 pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     let id_pattern = Regex::new(r"^(?:PQL-[SORFH]\d{2}|MQL-\d{2}|LQL-[FPSQ]\d{2})$")?;
     let recipe_link = Regex::new(r"\[[^\]]*\]\((QUERY_SQL_EQUIVALENTS\.md#[^)]+)\)")?;
@@ -1367,6 +1757,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_public_compatibility_versions(root)?);
     errors.extend(validate_public_artifact_inventory(root)?);
     errors.extend(validate_public_embedding_contract(root)?);
+    errors.extend(validate_query_release_report(root, &rows)?);
     errors.extend(validate_canonical_documentation_wording(root)?);
     Ok(errors)
 }
@@ -1455,6 +1846,58 @@ mod tests {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let root = manifest.parent().unwrap().parent().unwrap();
         assert_eq!(validate(root).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn final_report_is_required_when_the_release_plan_exists() {
+        let fixture = fixture();
+        fs::write(
+            fixture
+                .path()
+                .join("docs/2026-08-04_query_surface_implementation_plan.md"),
+            "# Release plan\n",
+        )
+        .unwrap();
+        assert_invalid(fixture.path(), "missing docs/QUERY_RELEASE_REPORT.md");
+    }
+
+    #[test]
+    fn final_report_matrix_summary_is_derived_from_the_matrices() {
+        let fixture = fixture();
+        fs::write(
+            fixture
+                .path()
+                .join("docs/2026-08-04_query_surface_implementation_plan.md"),
+            "# Release plan\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/QUERY_RELEASE_REPORT.md"),
+            "# Report\n\n<!-- query-release-matrix-summary: PQL shipped=999 -->\n",
+        )
+        .unwrap();
+        assert_invalid(fixture.path(), "matrix summary differs");
+    }
+
+    #[test]
+    fn final_report_requires_owned_fault_evidence() {
+        let fixture = fixture();
+        fs::write(
+            fixture
+                .path()
+                .join("docs/2026-08-04_query_surface_implementation_plan.md"),
+            "# Release plan\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/QUERY_RELEASE_REPORT.md"),
+            "# Report\n\n<!-- query-release-matrix-summary: LQL missing=1; PQL shipped=1 -->\n",
+        )
+        .unwrap();
+        assert_invalid(
+            fixture.path(),
+            "missing query-release-fault-evidence marker",
+        );
     }
 
     #[test]

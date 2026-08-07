@@ -265,6 +265,18 @@ users may deliberately write such a byte-substring chain when that weaker
 contract is wanted, but it is not an honest LogsQL equivalent. The matrix
 therefore keeps this row `ROWS`/`API`, not `SQL` or `EXT`.
 
+`LQL-P10` and `LQL-P11` intentionally have no SQL recipe. VictoriaLogs
+`block_stats` reports physical per-block/per-field codec types, dictionary,
+value and Bloom-filter bytes, stream identity, and data-part paths;
+`blocks_count` counts the physical blocks its plan processed. The public
+Timeless `logs` row surface deliberately does not expose private block tables,
+host paths, or codec-layout details. Counting returned rows, candidate blocks
+in process-local cumulative stats, or SQLite pages would describe different
+things and must not be advertised as either pipe. Shipping requires a
+versioned, bounded public diagnostic snapshot whose logical meanings and
+disclosure policy remain stable across optimize, codec, planner, migration,
+and reopen changes. Until then both pipes fail explicitly before storage.
+
 `LQL-P25` intentionally has no SQL recipe. VictoriaLogs `hash` is specifically
 seed-zero xxHash64 masked to 53 bits and rendered as an exact decimal integer.
 Core SQLite and libSQL expose no portable xxHash64 scalar, and an expression

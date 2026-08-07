@@ -13,6 +13,7 @@ belongs in a higher-order Timeless library.
 - [Pinned semantic oracles](QUERY_ORACLES.md)
 - [Query evidence protocol](QUERY_EVIDENCE.md)
 - [Sequential implementation plan](2026-08-04_query_surface_implementation_plan.md)
+- [Final query and public-surface release report](QUERY_RELEASE_REPORT.md)
 - [SQL query cookbook](QUERIES.md)
 
 The baseline represented by the first version of these maps is commit

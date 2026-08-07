@@ -113,8 +113,8 @@ extension.
 | `LQL-P07` | `delete` / `drop` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-025-delete-exact-retained-metadata-fields)) | shipped | no | `SQL` | `API` | P2 |
 | `LQL-P08` | `filter` / `where` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-011-current-row-filter-and-empty-counts)) | shipped | no | `SQL` | `API` | P1 |
 | `LQL-P09` | `stats` ([count SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-003-exact-count), [bucket SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-006-counts-by-field-and-time-bucket)) | shipped | partial | `COUNT`, `SQL` | `API` | P0 |
-| `LQL-P10` | `block_stats` | deferred | no | none | `DEFER` | DEFER |
-| `LQL-P11` | `blocks_count` | deferred | no | none | `DEFER` | DEFER |
+| `LQL-P10` | `block_stats` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-21-storage-model-disposition-logsql-block-diagnostics)) | deferred | no | none | `DEFER` | DEFER |
+| `LQL-P11` | `blocks_count` ([no exact SQL equivalent](QUERY_SQL_EQUIVALENTS.md#rows-without-an-honest-sql-equivalent); [disposition](QUERY_EVIDENCE.md#session-21-storage-model-disposition-logsql-block-diagnostics)) | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P12` | `query_stats` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)) | shipped | no | `STATS`, `SQL` | `API` | P2 |
 | `LQL-P13` | `first` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-027-first-numeric-rows-per-partition)) | shipped | no | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-P14` | `last` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-028-last-numeric-rows-per-partition)) | shipped | no | `ROWS`, `SQL` | `API` | P2 |
