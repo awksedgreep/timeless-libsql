@@ -1423,3 +1423,22 @@ store that ingestion-owned identity. The fixture remains 167 source rows and
 now contains 350 row-query cases, one stochastic case, 511 error cases, and
 530 statistics/pipeline cases: 1,392 cases total, all passing against the
 immutable image. The fixture now contains 1392 cases.
+
+`LQL-F36` adds six accepted row-query witnesses and two parser-error witnesses
+for the reserved `_stream_id` filter. A one-row immutable-image probe derived
+`case="phrase-exact"` as
+`00000000000000000b1801f1dd598ec73134b3ae3165d0fd`; the checked fixture then
+proves that exact and quoted forms select that stream, static `in(...)`
+ignores a valid-but-absent ID, and query-backed `in(...)` consumes projected
+IDs. Separate witnesses pin ASCII-case-insensitive unquoted field spelling,
+whitespace before `:`, the required 48-hex shape, and rejection of generic
+empty equality. Source audit at commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5` covers `stream_id.go`,
+`filter_stream_id.go`, `parser.go`, `block_header.go`, and
+`storage_search.go`: the first 8 bytes encode tenant account/project, the
+remaining 16 bytes are the canonical stream hash, blocks are ordered by ID,
+and exact/static/query-backed filters become block-search sets. Timeless
+defers the row because it stores none of that identity. The fixture remains
+167 source rows and now contains 356 row-query cases, one stochastic case,
+513 error cases, and 530 statistics/pipeline cases: 1,400 cases total, all
+passing against the immutable image. The fixture now contains 1400 cases.

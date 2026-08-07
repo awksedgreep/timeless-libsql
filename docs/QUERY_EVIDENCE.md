@@ -6459,3 +6459,33 @@ storage prerequisite is recorded in the matrix, plan, SQL disposition,
 `QSF-261`, and `QSF-262`. No extension primitive, private access, storage format,
 authoritative batching, compression, index, rollup, retention, transaction,
 migration, optimize, or maintenance behavior changed.
+
+## Session 19 data-model disposition: LogsQL stream IDs
+
+`LQL-F36` is classified, not enabled. Six accepted and two error cases pass
+against immutable VictoriaLogs 1.52.0, bringing the complete LogsQL fixture
+from 1,392 to 1,400 cases. They pin a positive exact 48-hex ID derived from the
+fixture's own `case="phrase-exact"` stream, quoted syntax, static and
+query-backed membership, case-insensitive unquoted spelling, whitespace, and
+strict malformed-ID behavior. The source audit confirms that `_stream_id` is
+the 8-byte tenant identity plus 16-byte canonical stream hash and is a
+physical block/search key, not ordinary row metadata.
+
+The Rust regression failed first because `_stream_id:<id>` returned a valid
+plan containing `MetadataExact { path: ["_stream_id"], ... }`. The corrected
+pre-parser returns a source-positioned HTTP 422 before storage for exact,
+quoted, static-list, query-backed, base, filter-pipe, shutdown, and reopen
+forms. It distinguishes bare/message text, nested `foo._stream_id`, field
+projection, comments, and explicit `rows({...})` data. One retained row with
+nested `_stream_id`, integer, array, null, and boolean data remains exact
+after optimize/reopen; API row-query, native-count, payload-byte, and
+decoded-entry counters remain unchanged for every rejection.
+
+There is no SQL recipe or benchmark: current public tables expose no tenant
+prefix, canonical stream hash, compatible ID, or stream index. JSON extraction
+over a nested application field remains useful row SQL but is not relabeled
+as `LQL-F36`. The exact versioned prerequisite is shared with `LQL-F35` and
+recorded in the matrix, plan, SQL disposition, and `QSF-263`. No extension
+primitive, private access, storage format, authoritative batching,
+compression, index, rollup, retention, transaction, migration, optimize, or
+maintenance behavior changed.

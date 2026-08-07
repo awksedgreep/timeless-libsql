@@ -6004,6 +6004,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
     let prepared_query = prepare_query_layout(query)?;
     let query = prepared_query.as_ref();
     reject_deferred_stream_selectors(query)?;
+    reject_deferred_stream_id_filters(query)?;
     let mut spec = QuerySpec {
         limit: 100,
         descending: true,
@@ -9317,15 +9318,7 @@ fn reject_deferred_stream_selectors(query: &str) -> Result<(), LogsqlError> {
         match character {
             '"' | '\'' | '`' => quote = Some(character),
             '(' => {
-                let prefix = query[..index].trim_end();
-                let identifier_start = prefix
-                    .char_indices()
-                    .rev()
-                    .find(|(_, character)| !character.is_ascii_alphanumeric() && *character != '_')
-                    .map_or(0, |(offset, character)| offset + character.len_utf8());
-                let begins_inline_rows = prefix[identifier_start..].eq_ignore_ascii_case("rows");
-                let nested_inline_rows = inline_rows_groups.last().copied().unwrap_or(false);
-                inline_rows_groups.push(begins_inline_rows || nested_inline_rows);
+                enter_parenthesized_group(query, index, &mut inline_rows_groups);
             }
             ')' => {
                 inline_rows_groups.pop();
@@ -9340,6 +9333,91 @@ fn reject_deferred_stream_selectors(query: &str) -> Result<(), LogsqlError> {
         }
     }
     Ok(())
+}
+
+/// Reject the reserved VictoriaLogs `_stream_id:<id>` filter before Timeless
+/// can reinterpret it as ordinary row metadata equality.
+///
+/// Bare `_stream_id` words, values containing that text, projections, nested
+/// metadata paths, and inline `rows(...)` objects remain ordinary data. Both
+/// quoted and unquoted top-level field spellings are recognized.
+fn reject_deferred_stream_id_filters(query: &str) -> Result<(), LogsqlError> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut inline_rows_groups = Vec::new();
+    for (index, character) in query.char_indices() {
+        if let Some((delimiter, quote_start)) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' && delimiter != '`' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+                let after_quote = index + character.len_utf8();
+                let is_stream_id_field = !inline_rows_groups.last().copied().unwrap_or(false)
+                    && quoted_value(&query[quote_start..after_quote])?.as_deref()
+                        == Some("_stream_id")
+                    && query[after_quote..]
+                        .chars()
+                        .find(|character| !character.is_whitespace())
+                        == Some(':');
+                if is_stream_id_field {
+                    return deferred_stream_id_error(query, quote_start);
+                }
+            }
+            continue;
+        }
+        match character {
+            '"' | '\'' | '`' => quote = Some((character, index)),
+            '(' => enter_parenthesized_group(query, index, &mut inline_rows_groups),
+            ')' => {
+                inline_rows_groups.pop();
+            }
+            '_' if !inline_rows_groups.last().copied().unwrap_or(false)
+                && query[index..]
+                    .get(.."_stream_id".len())
+                    .is_some_and(|field| field.eq_ignore_ascii_case("_stream_id")) =>
+            {
+                let before_is_field_boundary = query[..index]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|character| !logsql_word_char(character) && character != '.');
+                let after_name = index + "_stream_id".len();
+                let after_is_field_boundary = query[after_name..]
+                    .chars()
+                    .next()
+                    .is_none_or(|character| !logsql_word_char(character) && character != '.');
+                let followed_by_colon = query[after_name..]
+                    .chars()
+                    .find(|character| !character.is_whitespace())
+                    == Some(':');
+                if before_is_field_boundary && after_is_field_boundary && followed_by_colon {
+                    return deferred_stream_id_error(query, index);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn enter_parenthesized_group(query: &str, open: usize, inline_rows_groups: &mut Vec<bool>) {
+    let prefix = query[..open].trim_end();
+    let identifier_start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_ascii_alphanumeric() && *character != '_')
+        .map_or(0, |(offset, character)| offset + character.len_utf8());
+    let begins_inline_rows = prefix[identifier_start..].eq_ignore_ascii_case("rows");
+    let nested_inline_rows = inline_rows_groups.last().copied().unwrap_or(false);
+    inline_rows_groups.push(begins_inline_rows || nested_inline_rows);
+}
+
+fn deferred_stream_id_error(query: &str, offset: usize) -> Result<(), LogsqlError> {
+    let (line, column) = source_line_column(query, offset);
+    Err(LogsqlError::unsupported(format!(
+        "LogsQL _stream_id filter at line {line}, column {column} is deferred: Timeless does not store a VictoriaLogs-compatible stream identity"
+    )))
 }
 
 fn pipeline_segments(input: &str) -> Result<Vec<&str>, LogsqlError> {
@@ -10572,6 +10650,46 @@ mod tests {
             assert!(
                 parse(inline_rows, TimestampUnit::Microseconds).is_ok(),
                 "{inline_rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_nineteen_stream_id_filters_fail_with_an_explicit_storage_prerequisite() {
+        const STREAM_ID: &str = "0000007b000001c8302bc96e02e54e5524b3a68ec271e55e";
+        for (query, line, column) in [
+            (format!("_stream_id:{STREAM_ID}"), 1, 1),
+            (format!("_STREAM_ID : {STREAM_ID}"), 1, 1),
+            (format!(r#""_stream_id":"{STREAM_ID}""#), 1, 1),
+            (format!(r#"'_stream_id':"{STREAM_ID}""#), 1, 1),
+            (format!(r#"`_stream_id`:{STREAM_ID}"#), 1, 1),
+            (format!("λ _stream_id:{STREAM_ID}"), 1, 3),
+            (format!("*\n| filter _stream_id:{STREAM_ID}"), 2, 10),
+            (format!("_stream_id:in({STREAM_ID}, {STREAM_ID})"), 1, 1),
+        ] {
+            let error = parse(&query, TimestampUnit::Microseconds).unwrap_err();
+            assert_eq!(error.kind, LogsqlErrorKind::Unsupported, "{query:?}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "LogsQL _stream_id filter at line {line}, column {column} is deferred: Timeless does not store a VictoriaLogs-compatible stream identity"
+                ),
+                "{query:?}"
+            );
+        }
+
+        for ordinary_data in [
+            "_stream_id",
+            r#""_stream_id""#,
+            r#"service:"_stream_id""#,
+            r#"nested._stream_id:"literal""#,
+            "* # _stream_id:000000000000000000000000000000000000000000000000",
+            "* | fields _stream_id",
+            r#"* | union rows({"_stream_id":"literal"})"#,
+        ] {
+            assert!(
+                parse(ordinary_data, TimestampUnit::Microseconds).is_ok(),
+                "{ordinary_data:?}"
             );
         }
     }

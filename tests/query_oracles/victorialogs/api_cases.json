@@ -195,6 +195,42 @@
       "expected_cases": ["phrase-exact", "word-exact"]
     },
     {
+      "id": "LQL-F36-exact-stream-id",
+      "query": "_stream_id:00000000000000000b1801f1dd598ec73134b3ae3165d0fd",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-F36-quoted-stream-id-field-and-value",
+      "query": "\"_stream_id\":\"00000000000000000b1801f1dd598ec73134b3ae3165d0fd\"",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-F36-static-stream-id-membership",
+      "query": "_stream_id:in(000000000000000000000000000000000000000000000000,00000000000000000b1801f1dd598ec73134b3ae3165d0fd)",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-F36-query-backed-stream-id-membership",
+      "query": "_stream_id:in(case:\"phrase-case\" | fields _stream_id)",
+      "status": 200,
+      "expected_cases": ["phrase-case"]
+    },
+    {
+      "id": "LQL-F36-unquoted-field-is-case-insensitive",
+      "query": "_STREAM_ID:00000000000000000b1801f1dd598ec73134b3ae3165d0fd",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
+      "id": "LQL-F36-whitespace-before-colon",
+      "query": "_stream_id : 00000000000000000b1801f1dd598ec73134b3ae3165d0fd",
+      "status": 200,
+      "expected_cases": ["phrase-exact"]
+    },
+    {
       "id": "LQL-F08-phrase-bytes-case-and-word-boundaries",
       "query": "\"ssh: login fail\"",
       "status": 200,
@@ -5531,6 +5567,20 @@
     }
   ],
   "error_cases": [
+    {
+      "id": "LQL-F36-stream-id-requires-48-hex-digits",
+      "query": "_stream_id:foo",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-F36-stream-id-rejects-generic-empty-equality",
+      "query": "\"_stream_id\":=\"\"",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
     {
       "id": "LQL-S12-json-values-requires-parentheses",
       "query": "state_group:=state | stats json_values",

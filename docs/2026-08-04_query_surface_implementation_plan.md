@@ -1618,6 +1618,29 @@ optimize, backup, limits, cancellation, and public capabilities. There is no
 SQL recipe or benchmark for deliberately rejected syntax, and no extension or
 storage contract changed.
 
+`LQL-F36` is closed as the companion stream-ID data-model deferral. Pinned
+VictoriaLogs 1.52.0 exposes a lowercase 48-hex `_stream_id` made from the
+8-byte tenant account/project prefix plus the 16-byte canonical stream hash;
+blocks are ordered by that identity and exact/static/query-backed filters are
+converted to stream-ID sets before block search. Six accepted live witnesses
+pin exact and quoted spellings, static and query-backed `in(...)`,
+case-insensitive unquoted keywords, and whitespace before the colon; two error
+witnesses pin malformed IDs and the invalid generic-empty-equality form. The
+fixture-derived `case="phrase-exact"` ID is deterministic and was obtained
+from the immutable image rather than reimplemented.
+
+Timeless previously accepted `_stream_id:<id>` as arbitrary metadata equality,
+silently reading the wrong data model and usually returning no rows. The POST
+LogsQL route now returns one stable source-positioned HTTP 422 before storage
+for top-level exact, quoted, static-list, query-backed, base, and filter-pipe
+forms across shutdown/reopen. Bare words and message values, nested
+`foo._stream_id` metadata, field projections, comments, and explicit
+`rows({...})` objects remain ordinary retained data. Shipping requires the
+same complete versioned identity contract as `LQL-F35`, including the public
+48-hex representation and collision/tenant rules. There is no SQL recipe or
+latency benchmark for deliberately rejected syntax, and no extension or
+storage contract changed.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

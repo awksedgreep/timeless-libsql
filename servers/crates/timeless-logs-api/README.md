@@ -2144,6 +2144,15 @@ deferred until the versioned batch/SQL/block/index/migration contract in the
 matrix exists; direct users can still issue ordinary public `service` or JSON
 metadata SQL without calling it stream parity.
 
+Reserved top-level `_stream_id:<48-hex>` filters follow the same data-model
+boundary. Exact and quoted IDs, static/query-backed membership, and
+case-insensitive unquoted spellings fail with source-positioned HTTP 422
+before storage. Bare/message text, nested `payload._stream_id` metadata,
+projections, comments, and explicit `rows({...})` objects remain valid row
+data. Timeless does not expose a synthetic ID or reinterpret an application
+field as VictoriaLogs' tenant-scoped block key; see `LQL-F36` and the no-SQL
+disposition.
+
 The ignored end-to-end contract test pins the storage boundary explicitly:
 
 ```bash

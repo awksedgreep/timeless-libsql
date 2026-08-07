@@ -700,9 +700,12 @@ each receives its own pinned compatibility row. LogsQL stream selectors are
 also explicitly deferred rather than approximated: unquoted `{...}` and
 `_stream:{...}` return a source-positioned pre-storage error because current
 rich-log batches retain row metadata but no ingestion-declared,
-tenant-scoped stream identity. Ordinary `service = :service` SQL remains
-available as row filtering, but it is not labeled stream-selector parity; see
-the `LQL-F35` no-SQL disposition. The LogsQL API
+tenant-scoped stream identity. Reserved `_stream_id:<48-hex>` filters are
+likewise rejected before reads rather than treated as ordinary metadata;
+bare text, nested `foo._stream_id`, projections, and inline `rows` data remain
+available. Ordinary `service = :service` SQL remains available as row
+filtering, but it is not labeled stream-selector parity; see the `LQL-F35`
+and `LQL-F36` no-SQL dispositions. The LogsQL API
 includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
 exact-prefix matching, and static multi-exact `in(...)` membership over bounded
 public rows while retaining Timeless's rich JSON types, plus static

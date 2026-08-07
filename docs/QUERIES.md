@@ -643,6 +643,33 @@ not a stream-selector equivalent. Shipping `LQL-F35` requires the complete
 versioned stream contract named in the matrix and `QSF-261`; there is no honest
 SQL recipe or extension primitive today.
 
+### Deferred LogsQL stream-ID filters
+
+VictoriaLogs also reserves `_stream_id:<48-hex>` for its tenant-scoped
+internal stream identity. Timeless recognizes unquoted ASCII-case-insensitive
+spellings, optional whitespace before `:`, and exact quoted `_stream_id` field
+identifiers, then fails before storage with HTTP 422:
+
+```json
+{
+  "error": "unsupported_capability",
+  "reason": "unsupported_logsql",
+  "message": "LogsQL _stream_id filter at line 1, column 1 is deferred: Timeless does not store a VictoriaLogs-compatible stream identity"
+}
+```
+
+This applies to exact IDs, static `in(...)` lists, query-backed `in(...)`,
+base filters, current-row filters, and nested query text. It does not reserve
+an unqualified `_stream_id` word or a quoted message value, a nested metadata
+path such as `payload._stream_id`, `fields _stream_id`, a comment, or an
+`_stream_id` key inside explicit `rows({...})` inline data. Those forms keep
+their existing row/text behavior. The distinction prevents current retained
+metadata from being mislabeled as VictoriaLogs' block identity.
+
+There is no public SQL equivalent because no current table stores the tenant
+prefix, canonical stream hash, or indexed identity. See `LQL-F36`,
+`QSF-263`, and the versioned prerequisite shared with `LQL-F35`.
+
 ## Request-local log query statistics
 
 Direct SQLite/libSQL callers can inspect the actual work of one public log

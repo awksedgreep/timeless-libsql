@@ -17981,6 +17981,134 @@ async fn session_nineteen_stream_selectors_fail_explicitly_without_storage() {
     reopened.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_nineteen_stream_id_filters_fail_explicitly_without_storage() {
+    const STREAM_ID: &str = "0000007b000001c8302bc96e02e54e5524b3a68ec271e55e";
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("deferred-stream-id-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(
+                r#"{"_time":1800000000000001,"_msg":"literal _stream_id value","level":"notice","service":"api","nested":{"_stream_id":"ordinary","value":7},"array":[1,true,null,"x"]}"#
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn assert_rejected(app: &axum::Router, query: String, line: usize, column: usize) {
+        let response = app.clone().oneshot(logsql_request(&query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "error": "unsupported_capability",
+                "reason": "unsupported_logsql",
+                "message": format!(
+                    "LogsQL _stream_id filter at line {line}, column {column} is deferred: Timeless does not store a VictoriaLogs-compatible stream identity"
+                )
+            })
+        );
+    }
+
+    let ordinary = app
+        .clone()
+        .oneshot(logsql_request(r#"nested._stream_id:"ordinary""#))
+        .await
+        .unwrap();
+    assert_eq!(ordinary.status(), StatusCode::OK);
+    let rows = ndjson_values(&to_bytes(ordinary.into_body(), usize::MAX).await.unwrap());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["nested"],
+        serde_json::json!({"_stream_id": "ordinary", "value": 7})
+    );
+    assert_eq!(rows[0]["array"], serde_json::json!([1, true, null, "x"]));
+
+    let before = storage.stats().await.unwrap();
+    assert_rejected(&app, format!("_stream_id:{STREAM_ID}"), 1, 1).await;
+    assert_rejected(&app, format!("_STREAM_ID : {STREAM_ID}"), 1, 1).await;
+    assert_rejected(&app, format!(r#""_stream_id":"{STREAM_ID}""#), 1, 1).await;
+    assert_rejected(&app, format!("*\n| filter _stream_id:{STREAM_ID}"), 2, 10).await;
+    assert_rejected(
+        &app,
+        format!("_stream_id:in({STREAM_ID}, {STREAM_ID})"),
+        1,
+        1,
+    )
+    .await;
+    let after = storage.stats().await.unwrap();
+    assert_eq!(after.api_query_count, before.api_query_count);
+    assert_eq!(after.query_count, before.query_count);
+    assert_eq!(after.native_count_count, before.native_count_count);
+    assert_eq!(
+        after.query_payload_bytes_read,
+        before.query_payload_bytes_read
+    );
+    assert_eq!(after.query_decoded_entries, before.query_decoded_entries);
+
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    let before = reopened.stats().await.unwrap();
+    assert_rejected(
+        &reopened_app,
+        "_stream_id:in(* | fields _stream_id)".to_owned(),
+        1,
+        1,
+    )
+    .await;
+    let after = reopened.stats().await.unwrap();
+    assert_eq!(after.api_query_count, before.api_query_count);
+    assert_eq!(after.query_count, before.query_count);
+    assert_eq!(after.native_count_count, before.native_count_count);
+    assert_eq!(
+        after.query_payload_bytes_read,
+        before.query_payload_bytes_read
+    );
+    assert_eq!(after.query_decoded_entries, before.query_decoded_entries);
+
+    let ordinary = reopened_app
+        .oneshot(logsql_request(r#"nested._stream_id:"ordinary""#))
+        .await
+        .unwrap();
+    assert_eq!(ordinary.status(), StatusCode::OK);
+    assert_eq!(
+        ndjson_values(&to_bytes(ordinary.into_body(), usize::MAX).await.unwrap()).len(),
+        1
+    );
+    reopened.shutdown().await.unwrap();
+}
+
 fn make_evidence_rich_lines(count: usize) -> String {
     const BASE_TS: i64 = 1_800_000_000_000_000;
     const SEVERITIES: [&str; 8] = [

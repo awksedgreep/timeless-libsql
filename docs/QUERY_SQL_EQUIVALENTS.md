@@ -4846,6 +4846,32 @@ matrix must define its SQL representation and add an executable recipe against
 that representation. Until then the Rust API returns an explicit pre-storage
 unsupported error rather than silently running the row predicate above.
 
+### LQL-F36: no SQL equivalent without a stored stream ID
+
+VictoriaLogs `_stream_id` is not an arbitrary `_stream_id` JSON member. It is
+a reserved lowercase 48-hex value containing the tenant account/project
+identity and the canonical 128-bit stream hash; physical blocks and search
+sets use that identity directly. Timeless stores neither component and
+publishes no compatible ID column or index.
+
+A JSON extraction such as the following can query an application-owned nested
+field, but it is deliberately **not** an `LQL-F36` recipe:
+
+```text
+SELECT ts, level, message, metadata
+  FROM logs
+ WHERE json_extract(metadata, '$.payload._stream_id') = :application_value
+ ORDER BY ts, rowid;
+```
+
+No executable statement is published for this matrix row. Hashing current
+metadata in SQL would invent missing stream-field declarations, canonical
+empty handling, tenancy, collision rules, migration state, and the physical
+stream index. After the versioned contract named by `LQL-F35`/`LQL-F36`
+exists, direct SQL must expose and test that actual stored identity. Until
+then the Rust API rejects reserved top-level `_stream_id:` filters before any
+public read while nested application metadata remains queryable.
+
 ### SQL-LOG-001: bounded filter, sort, and pagination
 
 Use the virtual table's declared index-key columns for posting-list pruning:
