@@ -1853,7 +1853,14 @@ const PROMQL_DISABLED_FUNCTION: &str = "disabled stable PromQL function: ";
 fn prometheus_disabled_stable_function(name: &str) -> bool {
     matches!(
         name,
-        "start" | "end" | "step" | "range" | "min_of" | "max_of" | "histogram_quantiles"
+        "start"
+            | "end"
+            | "step"
+            | "range"
+            | "min_of"
+            | "max_of"
+            | "histogram_quantiles"
+            | "mad_over_time"
     )
 }
 
@@ -10159,6 +10166,10 @@ mod tests {
             (
                 "histogram_quantiles(buckets, \"quantile\", 0.5)",
                 "1:1: parse error: function \"histogram_quantiles\" is not enabled",
+            ),
+            (
+                "mad_over_time(oracle_temporal[1m])",
+                "1:1: parse error: function \"mad_over_time\" is not enabled",
             ),
             (
                 "limitk(1, oracle_temporal)",

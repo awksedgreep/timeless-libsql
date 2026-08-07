@@ -400,6 +400,17 @@ model. Until that model exists, the stable Timeless endpoint intentionally
 returns an explicit typed-storage prerequisite instead of pretending that
 classic `_bucket` floats are equivalent.
 
+`PQL-R22` adds the default-tier `mad_over_time` feature-gate case, bringing
+the complete Prometheus API fixture to 535 cases. The pinned parser marks the
+function experimental and requires `promql-experimental-functions`. Source
+audit at the same immutable commit confirms that enabled evaluation computes
+the linear median of all float samples, then the linear median of their
+absolute deviations. An all-native-histogram range emits no result or info; a
+mixed float/histogram range computes from floats and emits the standard
+histogram-ignored info. Stable Timeless preserves the default feature-gate
+diagnostic. Future execution parity requires a separately feature-enabled
+oracle, and full mixed-range parity requires typed native-histogram storage.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects

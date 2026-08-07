@@ -6258,3 +6258,24 @@ current product deliberately performs no query for this deferred row. No
 extension surface, private access, storage format, batching, compression,
 index, rollup, retention, transaction, migration, optimize, or maintenance
 behavior changed.
+
+## Session 19 experimental disposition: `mad_over_time`
+
+`PQL-R22` is classified, not enabled. One new exact case passes against
+immutable Prometheus 3.13.2, bringing the complete API fixture to 535 cases
+and pinning its default `promql-experimental-functions` gate. Rust and
+real-extension regressions failed first on the internal `unsupported PromQL
+expression (parsed as function call)` message, then passed with the pinned
+GET envelope, POST diagnostic, shutdown, reopen, and zero raw/window extension
+queries.
+
+Direct users receive executable `SQL-PROM-058`: 132 recipes and 170 statements
+now pass against the public extension. The recipe performs bounded finite-float
+linear median ranking twice over public raw rows and semantically pins even and
+odd series partitions. No extension primitive can prune either pass or avoid
+the required raw decode. No API narrow/wide p50/p95/p99, result-cardinality,
+storage-byte, or RSS comparison is reported because stable Timeless never
+executes this experimental function. The SQL reference is not relabeled as
+PromQL support. No storage format, private access, batching, compression,
+index, rollup, retention, transaction, migration, optimize, or maintenance
+behavior changed.

@@ -1487,6 +1487,21 @@ Shipping requires `PQL-S22` storage, ingress, public batch/SQL, result, bucket
 interpolation, annotation, limit, cancellation, durability, and oracle work.
 No latency/storage benchmark is claimed for a deliberately rejected row.
 
+`PQL-R22` is closed as an experimental disposition. Pinned Prometheus 3.13.2
+requires `promql-experimental-functions` for `mad_over_time`; the stable API
+previously parsed the call and leaked `unsupported PromQL expression (parsed
+as function call)`. GET, POST, shutdown, and reopen now preserve the pinned
+feature-gate diagnostic with zero raw/window extension queries. Executable
+`SQL-PROM-058` gives direct SQLite/libSQL users a bounded finite-float
+foundation by applying Prometheus's linear median twice over public raw rows.
+A future experimental Rust tier requires a feature-enabled oracle and exact
+window/subquery, raw NaN, signed-zero, infinity, label/name, annotation,
+limit, and cancellation semantics. Complete mixed-range parity additionally
+requires `PQL-S22` typed native-histogram samples so all-histogram ranges can
+be omitted and mixed ranges can emit the upstream info. No extension primitive
+is justified because both median passes require the already-decoded raw
+values. No API benchmark is claimed for stable syntax that is rejected.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

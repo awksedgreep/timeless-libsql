@@ -99,6 +99,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-PROM-055`](#sql-prom-055-atan2) | `PQL-O08` | current foundation | bounded SQLite `atan2(Y,X)` over scalar/vector or label-matched vectors; API owns Go-compatible last-bit rounding, types, names, matching errors, limits, and envelopes |
 | [`SQL-PROM-056`](#sql-prom-056-histogram_fraction-over-classic-buckets) | `PQL-H02` | current foundation | bounded classic-bucket grouping and linear CDF interpolation; API owns strict bounds, scalar ASTs, IEEE values, names, limits, cancellation, and envelopes |
 | [`SQL-PROM-057`](#sql-prom-057-fill-missing-one-to-one-vector-matches) | `PQL-O18` | reference | bounded full-outer one-to-one arithmetic with independently optional left/right defaults; the stable API rejects experimental fill syntax and a future experimental tier owns grammar, matching, labels, types, limits, cancellation, and envelopes |
+| [`SQL-PROM-058`](#sql-prom-058-mad_over_time) | `PQL-R22` | reference | two finite-float linear medians over bounded public raw windows; the stable API rejects the experimental function and a future experimental tier owns IEEE/histogram behavior, annotations, labels, limits, cancellation, and envelopes |
 | [`SQL-MQL-001`](#sql-mql-001-default-if-and-ifnot) | `MQL-01` | current foundation | bounded gap filling and step-local label membership; API owns MetricsQL syntax, implicit scalar vectors, full label/name policy, limits, cancellation, and envelopes |
 | [`SQL-MQL-002`](#sql-mql-002-keep_metric_names) | `MQL-02` | current foundation | carry the public metric-name column through ordinary SQL transforms; API owns modifier grammar, operation eligibility, name-aware matching, collisions, limits, cancellation, and envelopes |
 | [`SQL-MQL-003`](#sql-mql-003-union-and-alias) | `MQL-03` | current foundation | public-grid `UNION ALL`, explicit metric-name projection, and first-branch labelset precedence; API owns grammar, scalar-vector conversion, duplicate-output errors, limits, cancellation, and envelopes |
@@ -2644,6 +2645,134 @@ would not prune either public scan or avoid either decode.
 
 Executable regression: Rust SQL-equivalent harness `SQL-PROM-057`. Stable API
 GET/POST/reopen and zero-storage-query behavior are pinned by
+`session_fourteen_experimental_promql_functions_fail_stably_and_reopen`.
+
+### SQL-PROM-058: `mad_over_time`
+
+For finite float samples, compute Prometheus's linear median for each series
+and evaluation window, then compute the linear median of every absolute
+deviation from that first median:
+
+```sql
+WITH RECURSIVE
+evaluation(ts) AS (
+  SELECT :start
+  UNION ALL
+  SELECT ts + :step FROM evaluation WHERE ts + :step <= :end
+), selected AS (
+  SELECT
+    raw.series_id,
+    raw.labels,
+    evaluation.ts,
+    raw.value
+  FROM evaluation
+  JOIN timeless_raw(
+    'metrics', :metric, :filter_json,
+    :start - :window, :end
+  ) AS raw
+    ON raw.ts > evaluation.ts - :window
+   AND raw.ts <= evaluation.ts
+  WHERE raw.value IS NOT NULL
+), ranked_values AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY series_id, ts ORDER BY value
+    ) - 1 AS value_index,
+    COUNT(*) OVER (PARTITION BY series_id, ts) AS value_count
+  FROM selected
+), median_positions AS (
+  SELECT DISTINCT
+    series_id,
+    labels,
+    ts,
+    value_count,
+    0.5 * (value_count - 1) AS rank
+  FROM ranked_values
+), medians AS (
+  SELECT
+    positions.series_id,
+    positions.labels,
+    positions.ts,
+    lower_value.value * (1.0 - (positions.rank - CAST(positions.rank AS INTEGER)))
+      + upper_value.value * (positions.rank - CAST(positions.rank AS INTEGER)) AS median
+  FROM median_positions AS positions
+  JOIN ranked_values AS lower_value
+    ON lower_value.series_id = positions.series_id
+   AND lower_value.ts = positions.ts
+   AND lower_value.value_index = CAST(positions.rank AS INTEGER)
+  JOIN ranked_values AS upper_value
+    ON upper_value.series_id = positions.series_id
+   AND upper_value.ts = positions.ts
+   AND upper_value.value_index = MIN(
+     CAST(positions.rank AS INTEGER) + 1,
+     positions.value_count - 1
+   )
+), deviations AS (
+  SELECT
+    selected.series_id,
+    selected.labels,
+    selected.ts,
+    abs(selected.value - medians.median) AS deviation
+  FROM selected
+  JOIN medians USING (series_id, ts)
+), ranked_deviations AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY series_id, ts ORDER BY deviation
+    ) - 1 AS deviation_index,
+    COUNT(*) OVER (PARTITION BY series_id, ts) AS deviation_count
+  FROM deviations
+), deviation_positions AS (
+  SELECT DISTINCT
+    series_id,
+    labels,
+    ts,
+    deviation_count,
+    0.5 * (deviation_count - 1) AS rank
+  FROM ranked_deviations
+)
+SELECT
+  positions.labels,
+  positions.ts,
+  lower_deviation.deviation
+      * (1.0 - (positions.rank - CAST(positions.rank AS INTEGER)))
+    + upper_deviation.deviation
+      * (positions.rank - CAST(positions.rank AS INTEGER)) AS value
+FROM deviation_positions AS positions
+JOIN ranked_deviations AS lower_deviation
+  ON lower_deviation.series_id = positions.series_id
+ AND lower_deviation.ts = positions.ts
+ AND lower_deviation.deviation_index = CAST(positions.rank AS INTEGER)
+JOIN ranked_deviations AS upper_deviation
+  ON upper_deviation.series_id = positions.series_id
+ AND upper_deviation.ts = positions.ts
+ AND upper_deviation.deviation_index = MIN(
+   CAST(positions.rank AS INTEGER) + 1,
+   positions.deviation_count - 1
+ )
+ORDER BY positions.labels, positions.ts;
+```
+
+Metric timestamps and `:start`, `:end`, `:step`, and `:window` use the
+table's native unit. Bind a positive `:step`, a positive `:window`, and finite
+ordered bounds; direct callers own those work bounds. Grid bounds are
+inclusive and each sample window is
+exactly `(T-window,T]`; empty windows emit no row. Canonical label JSON and
+timestamp ordering are deterministic. This recipe is exact for finite floats
+and uses only the public `timeless_raw` surface. SQLite exposes a packed stored
+NaN as SQL NULL and does not promise Prometheus's raw-NaN-low or signed-zero
+tie order, so the recipe is not an IEEE-parity claim.
+
+Pinned Prometheus 3.13.2 feature-gates `mad_over_time`; the stable Timeless API
+rejects it before storage. A future experimental Rust tier must also own
+subqueries, infinities, metric-name removal, mixed native-histogram infos,
+all-histogram omission, cumulative work/result limits, cancellation, and HTTP
+envelopes. Both median passes consume the already-required raw values, so a
+new extension primitive would not improve chunk pruning or avoid the public
+decode. Executable regression: Rust SQL-equivalent harness `SQL-PROM-058`.
+Stable API GET/POST/reopen and zero-storage-query behavior are pinned by
 `session_fourteen_experimental_promql_functions_fail_stably_and_reopen`.
 
 ### SQL-PROM-006: range selector

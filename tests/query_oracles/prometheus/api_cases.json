@@ -3981,6 +3981,17 @@
       }
     },
     {
+      "id": "PQL-R22-experimental-disabled",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "mad_over_time(vector(1)[1m:])", "time": "2"},
+      "status": 400,
+      "body": {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "invalid parameter \"query\": 1:1: parse error: function \"mad_over_time\" is not enabled"
+      }
+    },
+    {
       "id": "PQL-R09-quantile-over-time-arity-error",
       "endpoint": "/api/v1/query",
       "params": {"query": "quantile_over_time(up[20s])", "time": "2"},

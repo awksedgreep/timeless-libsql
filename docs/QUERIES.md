@@ -3279,6 +3279,17 @@ classic bucket rows do not encode one native sample's exponential/custom
 schema, positive and negative spans, zero bucket, count, sum, or reset hint.
 `PQL-O19` remains deferred with `PQL-S22` as its prerequisite.
 
+`mad_over_time(range-vector)` is experimental in pinned Prometheus 3.13.2.
+Stable Timeless GET and POST requests return the pinned `function
+"mad_over_time" is not enabled` diagnostic before storage, including after
+reopen; there is no hidden experimental or Elixir fallback. Direct
+SQLite/libSQL users can compute the finite-float statistic with executable
+[`SQL-PROM-058`](QUERY_SQL_EQUIVALENTS.md#sql-prom-058-mad_over_time), which
+applies linear median ranking to a bounded public raw window and again to its
+absolute deviations. That SQL foundation is not a stable PromQL support claim
+and documents the remaining NaN, signed-zero, native-histogram, annotations,
+labels, limits, cancellation, and envelope work.
+
 The API evaluates the bounded child once, checks cancellation while grouping,
 and charges every child point to the cumulative intermediate-work limit.
 Storage remains unchanged. Direct SQLite/libSQL users use ordinary `SUM` over

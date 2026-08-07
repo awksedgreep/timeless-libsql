@@ -161,8 +161,20 @@ correctness fallback.
 | `PQL-R19` | `changes` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-036-changes)); transition counting across finite, NaN, infinity, and signed-zero values, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R20` | `resets` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-037-resets)); strict float-counter decrease counting across finite, NaN, infinity, and signed-zero values, exact boundaries, modifiers, subqueries, limits, cancellation, and reopen are pinned | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-R21` | experimental `double_exponential_smoothing`; pinned Prometheus 3.13.2 rejects it in the default stable tier, and Timeless does the same explicitly through GET, POST, and reopen; implementation requires a separately enabled experimental compatibility tier and oracle gate | experimental | no | `RAW` | `API` | EXP |
-| `PQL-R22` | experimental `mad_over_time` | missing | no | `RAW` | `API` | EXP |
+| `PQL-R22` | experimental `mad_over_time` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-058-mad_over_time)); pinned Prometheus 3.13.2 rejects it unless `promql-experimental-functions` is enabled, and stable Timeless GET/POST/reopen paths now preserve that diagnostic without reading storage; executable finite-float SQL composes two linear medians over public raw rows | experimental | no | `RAW`, `SQL` | `API` | EXP |
 | `PQL-R23` | experimental `ts_of_min/max/first/last_over_time` | missing | no | `RAW` | `API` | EXP |
+
+`PQL-R22` is not enabled merely because its finite-float statistic is
+expressible in ordinary SQL. Pinned upstream takes the median of float samples
+and then the median absolute deviation, ignores all-histogram ranges, and
+emits an info for mixed float/native-histogram ranges. Stable Timeless rejects
+the feature-gated function before storage. Executable
+[`SQL-PROM-058`](QUERY_SQL_EQUIVALENTS.md#sql-prom-058-mad_over_time) gives
+direct users the bounded finite-float composition; a future experimental Rust
+tier must be separately configured and pinned for boundaries, raw NaN and
+signed-zero order, infinities, subqueries, labels, annotations, limits, and
+cancellation. Full upstream mixed-range parity also requires `PQL-S22` typed
+native-histogram samples.
 
 ## Value, label, sorting, and time functions
 

@@ -242,6 +242,15 @@ fn setup(connection: &mut Connection) -> Result<()> {
             ("fill_lhs", r#"{"host":"left"}"#, 100, 3.0),
             ("fill_rhs", r#"{"host":"both"}"#, 100, 2.0),
             ("fill_rhs", r#"{"host":"right"}"#, 100, 4.0),
+            ("mad_metric", r#"{"host":"a"}"#, 91, 1.0),
+            ("mad_metric", r#"{"host":"a"}"#, 100, 2.0),
+            ("mad_metric", r#"{"host":"a"}"#, 105, 4.0),
+            ("mad_metric", r#"{"host":"a"}"#, 110, 10.0),
+            ("mad_metric", r#"{"host":"b"}"#, 100, 5.0),
+            ("mad_metric", r#"{"host":"b"}"#, 110, 9.0),
+            ("mad_metric", r#"{"host":"c"}"#, 91, 1.0),
+            ("mad_metric", r#"{"host":"c"}"#, 100, 4.0),
+            ("mad_metric", r#"{"host":"c"}"#, 110, 10.0),
         ];
         for (name, labels, ts, value) in rows {
             insert.execute(params![name, labels, ts, value])?;
@@ -301,6 +310,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "SQL-PROM-053" => "calendar_leap_metric",
         "SQL-PROM-054" | "SQL-PROM-056" | "SQL-MQL-012" => "sql_histogram_bucket",
         "SQL-PROM-055" => "cpu",
+        "SQL-PROM-058" => "mad_metric",
         _ => "cpu",
     };
     match name {
@@ -316,6 +326,7 @@ fn parameter(identifier: &str, name: &str) -> Value {
         "request_filter" => Value::Text(r#"{"host":"web-1"}"#.to_owned()),
         "at" => Value::Integer(110),
         "anchor" => Value::Integer(100),
+        "start" | "end" if identifier == "SQL-PROM-058" => Value::Integer(110),
         "start" => Value::Integer(if counter_window { 60 } else { 100 }),
         "end" => Value::Integer(if counter_window { 60 } else { 110 }),
         "step" | "resolution" => Value::Integer(10),
@@ -929,6 +940,40 @@ fn semantic_regressions(connection: &Connection, recipes: &[Recipe]) -> Result<(
                 "SQL-PROM-057 fill result changed for lhs={lhs_fill:?}, rhs={rhs_fill:?}: {filled:?}"
             );
         }
+    }
+
+    let mad_sql = recipes
+        .iter()
+        .find(|recipe| recipe.identifier == "SQL-PROM-058")
+        .context("SQL-PROM-058 recipe")?
+        .statements
+        .first()
+        .context("SQL-PROM-058 statement")?;
+    let mut statement = connection.prepare(mad_sql)?;
+    for index in 1..=statement.parameter_count() {
+        let name = statement
+            .parameter_name(index)
+            .unwrap()
+            .trim_start_matches(':');
+        statement.raw_bind_parameter(index, parameter("SQL-PROM-058", name))?;
+    }
+    let mad = statement
+        .raw_query()
+        .mapped(|row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let expected_mad = vec![
+        (r#"{"host":"a"}"#.to_owned(), 110, 1.5),
+        (r#"{"host":"b"}"#.to_owned(), 110, 2.0),
+        (r#"{"host":"c"}"#.to_owned(), 110, 3.0),
+    ];
+    if mad != expected_mad {
+        bail!("SQL-PROM-058 median absolute deviation changed: {mad:?}");
     }
 
     let metricsql_recipe = recipes
@@ -4564,13 +4609,13 @@ mod tests {
     #[test]
     fn every_recipe_has_unique_executable_sql() {
         let recipes = parse_recipes(&root().join("docs/QUERY_SQL_EQUIVALENTS.md")).unwrap();
-        assert_eq!(recipes.len(), 131);
+        assert_eq!(recipes.len(), 132);
         assert_eq!(
             recipes
                 .iter()
                 .map(|recipe| recipe.statements.len())
                 .sum::<usize>(),
-            163
+            164
         );
         assert_eq!(
             recipes
@@ -4578,7 +4623,7 @@ mod tests {
                 .flat_map(|recipe| &recipe.statements)
                 .map(|block| split_sql(block).unwrap().len())
                 .sum::<usize>(),
-            169
+            170
         );
         assert!(recipes.iter().all(|recipe| !recipe.statements.is_empty()));
     }

@@ -61,6 +61,10 @@ separate typed-data-model deferral. The server reports `requires typed
 native-histogram storage` at the operator position before reading storage;
 classic `_bucket` float series are not treated as native histogram samples,
 and no SQL, Elixir, or process fallback is used.
+Pinned Prometheus also marks `mad_over_time` experimental. Stable requests
+preserve its disabled-function diagnostic before storage. Direct users have a
+documented finite-float two-median SQL recipe, while PromQL execution remains
+deferred to a separately configured experimental Rust tier and oracle.
 The bounded instant-vector transforms `abs`, `ceil`, `floor`, `round`,
 `clamp`, `clamp_min`, `clamp_max`, `sqrt`, `exp`, `ln`, `log2`, `log10`, and
 `sgn`, plus `acos`, `acosh`, `asin`, `asinh`, `atan`, and `atanh`
