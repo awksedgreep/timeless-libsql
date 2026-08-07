@@ -1560,6 +1560,17 @@ migration, corruption, capability negotiation, limits, cancellation, and
 downgrade. This session deliberately adds no histogram format, SQL recipe, or
 performance benchmark.
 
+`PQL-H04` is closed with its retained-model slice shipped and its typed slice
+still deferred. Pinned Prometheus 3.13.2 defines all five functions as stable
+one-vector calls and silently ignores float samples. Timeless now evaluates
+the complete child under ordinary public-read, work, result, response,
+deadline, and cancellation ownership, then drops every current float sample;
+GET, POST, range, shutdown, and reopen regressions include classic
+`_bucket`/`_sum`/`_count` names. Count, sum, average, and bucket-estimated
+variance values still require the versioned typed sample design in `PQL-S22`.
+No empty-result SQL shortcut or extension primitive is claimed because it
+would skip child semantics rather than reproduce the language function.
+
 ### Session 20: release-grade public documentation
 
 Audit every public virtual table, TVF, scalar function, hidden input, batch

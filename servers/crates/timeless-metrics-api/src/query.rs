@@ -433,6 +433,11 @@ enum PromFunctionOp {
     Deg,
     Exp,
     Floor,
+    HistogramAvg,
+    HistogramCount,
+    HistogramStddev,
+    HistogramStdvar,
+    HistogramSum,
     Ln,
     Log2,
     Log10,
@@ -470,6 +475,15 @@ impl PromFunctionOp {
             Self::Deg => Some(value * 180.0 / std::f64::consts::PI),
             Self::Exp => Some(value.exp()),
             Self::Floor => Some(value.floor()),
+            // Timeless' declared metrics sample type is float64. Prometheus'
+            // native-histogram scalar functions ignore float samples rather
+            // than coercing classic bucket/sum/count series into histograms.
+            // Typed native-histogram results require a future sample model.
+            Self::HistogramAvg
+            | Self::HistogramCount
+            | Self::HistogramStddev
+            | Self::HistogramStdvar
+            | Self::HistogramSum => None,
             Self::Ln => Some(value.ln()),
             Self::Log2 => Some(value.log2()),
             Self::Log10 => Some(value.log10()),
@@ -2512,6 +2526,40 @@ fn lower_promql_expr(
                 op,
                 inner: Box::new(inner),
                 parameters,
+            }))
+        }
+        promql::Expr::Call(call)
+            if matches!(
+                call.func.name,
+                "histogram_avg"
+                    | "histogram_count"
+                    | "histogram_sum"
+                    | "histogram_stddev"
+                    | "histogram_stdvar"
+            ) =>
+        {
+            let [argument] = call.args.args.as_slice() else {
+                return Err(format!(
+                    "{} requires exactly one instant vector",
+                    call.func.name
+                ));
+            };
+            let inner = lower_promql_expr((**argument).clone(), lookback, depth + 1)?;
+            if inner.value_type() != PromValueType::Vector {
+                return Err(format!("{} requires an instant vector", call.func.name));
+            }
+            let op = match call.func.name {
+                "histogram_avg" => PromFunctionOp::HistogramAvg,
+                "histogram_count" => PromFunctionOp::HistogramCount,
+                "histogram_sum" => PromFunctionOp::HistogramSum,
+                "histogram_stddev" => PromFunctionOp::HistogramStddev,
+                "histogram_stdvar" => PromFunctionOp::HistogramStdvar,
+                _ => unreachable!("guarded native-histogram function"),
+            };
+            Ok(PromPlan::Function(PromFunctionPlan {
+                op,
+                inner: Box::new(inner),
+                parameters: Vec::new(),
             }))
         }
         promql::Expr::Call(call) if prometheus_disabled_stable_function(call.func.name) => Err(
@@ -10247,6 +10295,23 @@ mod tests {
             ),
         ] {
             assert_eq!(lower_promql(query, 300_000).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn prometheus_native_histogram_scalar_functions_accept_float_vectors() {
+        for name in [
+            "histogram_avg",
+            "histogram_count",
+            "histogram_sum",
+            "histogram_stddev",
+            "histogram_stdvar",
+        ] {
+            let query = format!("{name}(vector(1))");
+            assert!(
+                lower_promql(&query, 300_000).is_ok(),
+                "stable PromQL function did not lower: {query}"
+            );
         }
     }
 

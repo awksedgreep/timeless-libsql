@@ -4080,6 +4080,71 @@
       }
     },
     {
+      "id": "PQL-H04-histogram-avg-ignores-float-samples",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "histogram_avg(vector(1))", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "vector", "result": []}
+      }
+    },
+    {
+      "id": "PQL-H04-histogram-count-ignores-float-samples",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "histogram_count(vector(1))", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "vector", "result": []}
+      }
+    },
+    {
+      "id": "PQL-H04-histogram-sum-ignores-float-samples",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "histogram_sum(vector(1))", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "vector", "result": []}
+      }
+    },
+    {
+      "id": "PQL-H04-histogram-stddev-ignores-float-samples",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "histogram_stddev(vector(1))", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "vector", "result": []}
+      }
+    },
+    {
+      "id": "PQL-H04-histogram-stdvar-ignores-float-samples",
+      "endpoint": "/api/v1/query",
+      "params": {"query": "histogram_stdvar(vector(1))", "time": "2"},
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "vector", "result": []}
+      }
+    },
+    {
+      "id": "PQL-H04-range-ignores-float-samples",
+      "endpoint": "/api/v1/query_range",
+      "params": {
+        "query": "histogram_count(vector(1))",
+        "start": "2",
+        "end": "4",
+        "step": "1"
+      },
+      "status": 200,
+      "body": {
+        "status": "success",
+        "data": {"resultType": "matrix", "result": []}
+      }
+    },
+    {
       "id": "PQL-R09-quantile-over-time-arity-error",
       "endpoint": "/api/v1/query",
       "params": {"query": "quantile_over_time(up[20s])", "time": "2"},

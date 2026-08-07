@@ -1039,6 +1039,10 @@ fn metric_specs(series: usize, selector_names: usize, at: i64) -> Vec<MetricSpec
         range("comments_wide", "metrics-comments-wide", "query_contract_cpu # all retained series", at, series * 4),
         instant("histogram_fraction_narrow", "metrics-histogram-fraction-narrow", r#"histogram_fraction(0.1, 0.5, query_contract_histogram_bucket{host="h0000"})"#, 1),
         instant("histogram_fraction_wide", "metrics-histogram-fraction-wide", "histogram_fraction(0.1, 0.5, query_contract_histogram_bucket)", series),
+        instant("native_histogram_float_narrow", "metrics-native-histogram-float-narrow", r#"histogram_count(query_contract_cpu{host="h0000"})"#, 0),
+        range("native_histogram_float_wide", "metrics-native-histogram-float-wide", "histogram_count(query_contract_cpu)", at, 0),
+        instant("native_histogram_float_control_narrow", "metrics-native-histogram-float-control-narrow", r#"query_contract_cpu{host="h0000"} > 1000000"#, 0),
+        range("native_histogram_float_control_wide", "metrics-native-histogram-float-control-wide", "query_contract_cpu > 1000000", at, 0),
         instant("atan2_narrow", "metrics-atan2-narrow", r#"query_contract_cpu{host="h0000"} atan2 2"#, 1),
         range("atan2_wide", "metrics-atan2-wide", "query_contract_cpu atan2 2", at, series * 4),
         instant("annotations_narrow", "metrics-annotations-warning-narrow", r#"quantile(-1, query_contract_cpu{host="h0000"})"#, 1),
@@ -4063,7 +4067,7 @@ mod tests {
         // The work-limit query is appended only after its 100,025-point
         // fixture crosses the second durability barrier.
         assert!(keys.insert("work_limit_rejected"));
-        assert_eq!(keys.len(), 180);
+        assert_eq!(keys.len(), 184);
         assert!(keys.contains("histogram_quantile_narrow"));
         assert!(keys.contains("histogram_quantile_wide"));
         assert!(keys.contains("quoted_name_narrow"));
@@ -4072,6 +4076,10 @@ mod tests {
         assert!(keys.contains("comments_wide"));
         assert!(keys.contains("histogram_fraction_narrow"));
         assert!(keys.contains("histogram_fraction_wide"));
+        assert!(keys.contains("native_histogram_float_narrow"));
+        assert!(keys.contains("native_histogram_float_wide"));
+        assert!(keys.contains("native_histogram_float_control_narrow"));
+        assert!(keys.contains("native_histogram_float_control_wide"));
         assert!(keys.contains("atan2_narrow"));
         assert!(keys.contains("atan2_wide"));
         assert!(keys.contains("annotations_narrow"));
@@ -4146,6 +4154,10 @@ mod tests {
             "comments_wide",
             "histogram_fraction_narrow",
             "histogram_fraction_wide",
+            "native_histogram_float_narrow",
+            "native_histogram_float_wide",
+            "native_histogram_float_control_narrow",
+            "native_histogram_float_control_wide",
             "metricsql_default_narrow",
             "metricsql_default_wide",
             "metricsql_keep_names_narrow",

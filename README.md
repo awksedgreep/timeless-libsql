@@ -318,6 +318,13 @@ and packed query frames remain float-only. Prometheus classic `_bucket` series
 work as ordinary floats; typed native histograms require a future versioned
 storage and public-interface design.
 
+The stable PromQL functions `histogram_avg`, `histogram_count`,
+`histogram_sum`, `histogram_stddev`, and `histogram_stdvar` follow Prometheus's
+float-input rule: they evaluate the child and ignore all current float samples,
+returning an empty vector or matrix. Classic bucket/sum/count metric names are
+not coerced into native histograms; value-producing behavior remains deferred
+until the capability advertises a typed native-histogram sample model.
+
 `timeless_window_batches` uses `TWB1 | count:u32 LE | timestamps:i64 LE[] |
 validity bitmap | value_bits:u64 LE[]`. The bitmap also preserves the optional
 `fill='null'` shape. See [the query cookbook](docs/QUERIES.md#packed-window-batches)

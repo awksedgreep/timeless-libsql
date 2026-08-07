@@ -457,6 +457,20 @@ count is unchanged. A future feature branch must add pinned remote-write,
 storage, mixed-sample, reset, staleness, query, and response oracles before
 changing this row or capability.
 
+`PQL-H04` adds six stable-tier cases, bringing the complete Prometheus API
+fixture to 549 cases. Five instant cases prove that `histogram_avg`,
+`histogram_count`, `histogram_sum`, `histogram_stddev`, and `histogram_stdvar`
+return an empty vector for float input; one range case proves the corresponding
+empty matrix. Pinned parser definitions accept exactly one instant vector and
+do not feature-gate these functions. At source commit
+`bb5dff00cf8fdfbf5c65e0531aa835fa238a43a2`, `simpleHistogramFunc` processes
+only samples whose native-histogram pointer is present. Count and sum read the
+stored histogram fields; average divides sum by count; standard deviation and
+variance estimate bucket populations using arithmetic or geometric bucket
+representatives with compensated accumulation. Timeless ships the complete
+retained float-only behavior while leaving all value-producing semantics
+deferred behind `PQL-S22`.
+
 An exact Session 15 audit corrected two roadmap assumptions against the pinned
 VictoriaMetrics binary and source commit. VictoriaMetrics 1.148.0 supports the
 query-context functions `start()`, `end()`, and `step()`, but rejects

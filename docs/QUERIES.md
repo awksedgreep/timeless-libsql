@@ -4002,6 +4002,27 @@ histograms still require a typed storage model. Direct SQLite/libSQL users can
 use the bounded ordinary-SQL CDF foundation in
 [`SQL-PROM-056`](QUERY_SQL_EQUIVALENTS.md#sql-prom-056-histogram_fraction-over-classic-buckets).
 
+Prometheus's five native-histogram scalar functions are stable, but they
+ignore float samples rather than coercing them:
+
+```promql
+histogram_avg(request_duration)
+histogram_count(request_duration)
+histogram_sum(request_duration)
+histogram_stddev(request_duration)
+histogram_stdvar(request_duration)
+```
+
+Current Timeless metric samples are all `float64`, so each expression evaluates
+its child with the normal public reads, limits, and cancellation contract and
+then returns an empty vector (or empty range matrix). This exact behavior also
+applies to classic `*_bucket`, `*_sum`, and `*_count` series: their names do
+not turn independent float series into one native-histogram sample. Producing
+count/sum/average or estimated bucket variance remains deferred until
+`PQL-S22` supplies a versioned typed sample and public result model. There is
+no honest direct-SQL equivalent for the function contract today; querying or
+combining classic series with SQL is a different operation.
+
 Prometheus 3.13.2 feature-gates `start()`, `end()`, `step()`, `range()`,
 `min_of`, `max_of`, and `histogram_quantiles`; `start_timestamp()` is not a
 PromQL function. The stable endpoint returns the pinned disabled/unknown

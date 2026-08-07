@@ -238,6 +238,16 @@ native histogram would discard or invent schema, spans, reset hints, and
 bucket identity. A future row may claim SQL only after a versioned public
 typed representation exists.
 
+`PQL-H04` intentionally has no SQL recipe. On the retained float-only model,
+Prometheus defines all five functions to ignore every input sample, which the
+Rust API implements after evaluating the child expression. A SQL statement
+that merely returns no rows would skip the required child query, its errors,
+limits, and cancellation and is therefore not equivalent. Value-producing
+`histogram_avg`, `histogram_count`, `histogram_sum`, `histogram_stddev`, and
+`histogram_stdvar` require the typed sample representation deferred by
+`PQL-S22`. Classic `_bucket`, `_sum`, and `_count` float series are independent
+metrics and must not be relabeled as native samples.
+
 `LQL-F40` intentionally has no SQL recipe. Comments, multiline layout, and an
 optional terminal semicolon are LogsQL source grammar owned by the Rust API;
 direct SQLite/libSQL users already write ordinary parameterized SQL and do not

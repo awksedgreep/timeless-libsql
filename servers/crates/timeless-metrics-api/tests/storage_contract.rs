@@ -11818,6 +11818,100 @@ async fn session_nineteen_native_histogram_trim_operators_fail_explicitly_withou
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn session_nineteen_native_histogram_functions_ignore_float_samples_and_reopen() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory
+        .path()
+        .join("session_nineteen_native_histogram_functions.db");
+    let base = 1_785_901_638_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let fixture = format!(
+        concat!(
+            "pql_h04_float{{kind=\"plain\"}} 7 {}\n",
+            "pql_h04_classic_bucket{{le=\"1\"}} 4 {}\n",
+            "pql_h04_classic_bucket{{le=\"+Inf\"}} 5 {}\n",
+            "pql_h04_classic_sum 9 {}\n",
+            "pql_h04_classic_count 5 {}\n"
+        ),
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+        base * 1_000,
+    );
+    assert_no_content(post_body(&app, "/api/v1/import/prometheus", fixture.as_bytes()).await);
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+
+    let cases = [
+        "histogram_avg(pql_h04_float)",
+        "histogram_count(pql_h04_classic_bucket)",
+        "histogram_sum(pql_h04_classic_sum)",
+        "histogram_stddev(pql_h04_float)",
+        "histogram_stdvar(pql_h04_classic_count)",
+    ];
+    let stats_before = storage.stats().await.unwrap();
+    for query in cases {
+        let response = prom_query(&app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(response.1["data"]["resultType"], "vector", "{query}");
+        assert_eq!(
+            response.1["data"]["result"],
+            serde_json::json!([]),
+            "{query}"
+        );
+    }
+    let range = prom_query_range(&app, "histogram_count(pql_h04_float)", base, base + 2, 1).await;
+    assert_eq!(range.0, StatusCode::OK, "{}", range.1);
+    assert_eq!(range.1["data"]["resultType"], "matrix");
+    assert_eq!(range.1["data"]["result"], serde_json::json!([]));
+
+    let posted = form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", "histogram_avg(vector(1))")
+        .append_pair("time", &base.to_string())
+        .finish();
+    let posted = post_form(&app, "/prometheus/api/v1/query", &posted).await;
+    assert_eq!(posted.0, StatusCode::OK, "{}", posted.1);
+    assert_eq!(posted.1["data"]["result"], serde_json::json!([]));
+
+    let stats_after = storage.stats().await.unwrap();
+    assert!(
+        stats_after.extension_raw_batch_query_count
+            + stats_after.extension_window_batch_query_count
+            > stats_before.extension_raw_batch_query_count
+                + stats_before.extension_window_batch_query_count,
+        "float selectors must be evaluated through public extension reads before their samples are ignored"
+    );
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let reopened_app = router(reopened.clone());
+    for query in cases {
+        let response = prom_query(&reopened_app, query, base).await;
+        assert_eq!(response.0, StatusCode::OK, "{query}: {}", response.1);
+        assert_eq!(
+            response.1["data"]["result"],
+            serde_json::json!([]),
+            "{query}"
+        );
+    }
+    drop(reopened_app);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn session_fifteen_metricsql_default_if_ifnot_match_victoriametrics_and_reopen() {
     let extension = extension_path();
     assert!(extension.is_file(), "missing {}", extension.display());

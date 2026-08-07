@@ -64,6 +64,11 @@ and no SQL, Elixir, or process fallback is used.
 The extension handshake makes the boundary machine-readable as
 `sample_types=["float64"]` and `native_histograms=false`; changing either
 requires a separately versioned public storage, batch, and result design.
+The stable `histogram_avg`, `histogram_count`, `histogram_sum`,
+`histogram_stddev`, and `histogram_stdvar` calls still parse and evaluate their
+children. They then ignore every current float sample and return an empty
+vector/matrix exactly as Prometheus does. Classic `_bucket`, `_sum`, and
+`_count` series remain independent floats rather than implicit native samples.
 Pinned Prometheus also marks `mad_over_time` experimental. Stable requests
 preserve its disabled-function diagnostic before storage. Direct users have a
 documented finite-float two-median SQL recipe, while PromQL execution remains
