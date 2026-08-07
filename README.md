@@ -91,6 +91,11 @@ sqlite3 demo.db \
 > `$(brew --prefix sqlite)/bin/sqlite3` — or use the bundled-SQLite bench
 > binaries in `tools/bench`, which work everywhere. Rust 1.95+ required.
 
+The [SQLite extension API reference](docs/SQL_API_REFERENCE.md) is the
+canonical inventory of modules, schemas, hidden inputs, commands, batch and
+frame formats, capability negotiation, transaction behavior, and embedding
+entry points.
+
 ## The three virtual tables
 
 | module | row shape | ts unit | indexed dimensions (pushdown) |
@@ -360,8 +365,8 @@ chunks use the decode fallback until compaction rewrites them.
 
 For high-cardinality host-language reads, `timeless_aggregate_frame` and
 `timeless_latest_frame` return the same logical row results in one versioned
-columnar blob. Their `TAF1`/`TLF1` layouts, strict Rust decoders, and a
-dependency-free Python decoder are documented in
+columnar blob. Their `TAF1`/`TLF1` layouts and strict public Rust decoders are
+documented in
 [the query cookbook](docs/QUERIES.md#packed-aggregate-frame). The row TVFs
 remain the normal relational interface; frames are an additive transport and
 never change the on-disk format.

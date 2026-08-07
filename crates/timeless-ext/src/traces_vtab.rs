@@ -15,7 +15,7 @@
 //!                  start_ts INTEGER, duration_ns INTEGER,
 //!                  attributes TEXT, status_description TEXT,
 //!                  events TEXT, resource TEXT,
-//!                  instrumentation_scope TEXT, "<table>" HIDDEN)
+//!                  instrumentation_scope TEXT, `"<table>"` HIDDEN)
 //!
 //! Ids: trace_id/span_id/parent_span_id accept either a BLOB of the
 //! exact packed length (16/8/8 bytes) or a hex TEXT string (32/16/16
@@ -33,14 +33,14 @@
 //! Write path:  INSERT INTO traces(trace_id, span_id, ...) — one span
 //!              into the engine buffer (auto-flush at threshold).
 //! Commands:    INSERT INTO traces(traces) VALUES ('flush' | 'optimize'
-//!              | 'optimize:<max_spans>' | 'prune:<ts>') — the FTS5
+//!              | `optimize:<max_spans>` | `prune:<ts>`) — the FTS5
 //!              idiom, ts in ns. The budgeted form bounds one
 //!              maintenance call while preserving the same planner.
 //! Read path:   flushed blocks + in-memory buffer merged; the HERO
 //!              query `WHERE trace_id = x'...'` goes through the
 //!              `_trace_blocks` index and decompresses only blocks
 //!              containing that trace.
-//! Append-only: DELETE/UPDATE rejected; retention is 'prune:<ts>'.
+//! Append-only: DELETE/UPDATE rejected; retention is `prune:<ts>`.
 
 use std::borrow::Cow;
 use std::ffi::{c_int, CStr, CString};

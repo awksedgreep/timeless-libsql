@@ -5354,11 +5354,13 @@ drop cleanup, legacy blob-meta migration, and sqld scheduler suppression.
 `QSF-159` records the boundary and retained regression. A speculative strong
 scheduler ownership change was reverted; weak lifecycle ownership remains.
 
-The release gate now has no executable Python dependency. The public
-`examples/query_frames.py` client example and historical
-`tools/bench/session6_log_compaction.py` benchmark remain separate artifacts;
-neither is imported or executed by these suites. No CI workflow, tag,
-release, publication, or downstream repository was used or modified.
+The release gate now has no executable Python dependency. At this session the
+public `examples/query_frames.py` client example and historical
+`tools/bench/session6_log_compaction.py` benchmark remained separate artifacts;
+neither was imported or executed by these suites. Session 20 later removed
+the redundant client decoder in favor of the maintained Rust API. No CI
+workflow, tag, release, publication, or downstream repository was used or
+modified.
 
 ## Session 17 LogsQL P2: bounded `uniq`
 
@@ -6799,4 +6801,42 @@ identifying complete and omitted owners. `QSF-277`–`QSF-279` retain the
 architecture and discovered-error verdicts. No extension primitive, private
 access, storage format, authoritative 8,192-entry batching, compression,
 index, rollup, retention, transaction, migration, optimize, or maintenance
+behavior changed.
+
+## Session 20 public extension and SQL inventory
+
+The first release-documentation audit derives the public SQL surface from the
+actual registrations and a loaded extension rather than from development
+plans. `docs/SQL_API_REFERENCE.md` now gives one canonical entry for the
+telemetry and dbhealth artifacts, scalar, three production storage modules,
+twenty-two production query modules, the compatibility-only spike, every
+stored-table column and creation argument, hidden query input, command,
+ingestion batch, packed result, timestamp unit, transaction boundary, and
+embedding entry point.
+
+The audit exposed two concrete gaps. `timeless_capabilities()` did not carry
+the complete production SQL inventory or all packed-format names, and the
+legacy per-series raw payload had never been labelled honestly as unversioned.
+The additive handshake now has `sql_surface_version=1`, exact
+scalar/storage/query arrays, all five self-identifying query magics, and
+`raw-series-v0` with `versioned=false` plus `TRF1` as the preferred wide
+format. `data_abi` remains 1 and every prior member is unchanged.
+
+The pure capability unit pins every added field. `tests/cli.sh` section 1
+loads the real release extension and proves that the advertised storage/query
+set exactly equals `pragma_module_list`. The Rust documentation contract
+independently extracts every `create_module` and `create_scalar_function`
+registration from the extension source and compares it with the marked
+reference inventory. Existing raw, frame, transaction, rollback, reopen,
+corruption, and compatibility suites retain the byte contracts.
+The redundant 101-line Python frame-decoder copy and its guide link were
+removed; direct Rust users now have one maintained decoder implementation in
+`timeless_ext::query_frame`.
+
+No query-language row changes status, so this documentation/capability work
+does not manufacture a narrow/wide latency or RSS benchmark. The scalar is a
+startup/embedding negotiation call, not a data query. `QSF-280` and
+`QSF-281` preserve the findings and compatibility verdicts. No storage
+schema, existing capability member, ingestion byte, result byte, batching,
+compression, index, rollup, retention, migration, transaction, or maintenance
 behavior changed.

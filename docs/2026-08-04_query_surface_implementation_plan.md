@@ -1813,6 +1813,27 @@ capability negotiation and formats are versioned; examples execute in CI;
 README, guides, matrices, and binaries agree; no stale four-severity, flattened
 metadata, POC, or unavailable-artifact claim remains.
 
+Session 20a closes the extension/SQL inventory. The canonical
+`docs/SQL_API_REFERENCE.md` is derived from the real registrations and loaded
+schemas. It covers both loadable artifacts, the Rust embedding entry points,
+all registered SQL symbols, stored-table schemas and creation arguments,
+hidden inputs, commands, six ingestion formats, six packed query formats,
+timestamp units, limits, transactions, concurrency, backup boundaries, and
+compatibility rules. A Rust contract compares its marked inventory to every
+source `create_module`/`create_scalar_function` registration.
+
+The additive capability handshake now advertises `sql_surface_version=1`,
+the exact three storage and twenty-two production query modules, and all
+packed format names. Release CLI section 1 loads the real extension and proves
+the advertised module set equals `pragma_module_list`; the pure Rust unit pins
+the JSON. The pre-existing unversioned raw-series payload is preserved and
+labelled `raw-series-v0`/`versioned=false`, with `TRF1` preferred for new wide
+consumers. `QSF-280`–`QSF-281` retain both audit findings. Session 20 remains
+open for the server/API reference, compatibility and upgrade guides,
+embedded/sqld guides, artifact inventory, changelog, stale-wording audit, and
+copyable-example gate. The redundant Python `TAF1`/`TLF1` decoder example was
+removed in favor of the public maintained Rust decoders.
+
 ### Session 21: final release gate and report
 
 Run all extension, crash, transaction, migration, storage, API, parser,

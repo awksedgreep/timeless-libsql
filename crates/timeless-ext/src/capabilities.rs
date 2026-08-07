@@ -29,6 +29,7 @@ fn document() -> &'static str {
         json!({
             "extension_version": env!("CARGO_PKG_VERSION"),
             "data_abi": DATA_ABI,
+            "sql_surface_version": 1,
             "minimum_server_version": "0.3.0",
             "build": {
                 "commit": env!("TIMELESS_BUILD_COMMIT_RESOLVED"),
@@ -62,6 +63,11 @@ fn document() -> &'static str {
                 }
             },
             "query_surfaces": {
+                "timeless_raw_batches": {
+                    "format": "raw-series-v0",
+                    "versioned": false,
+                    "preferred_wide_format": "TRF1"
+                },
                 "timeless_raw_frame": {
                     "format": "TRF1",
                     "max_work_points": true
@@ -69,6 +75,15 @@ fn document() -> &'static str {
                 "timeless_window_batches": {
                     "format": "TWB1",
                     "max_work_points": true
+                },
+                "timeless_rollup_batches": {
+                    "format": "TRB1"
+                },
+                "timeless_aggregate_frame": {
+                    "format": "TAF1"
+                },
+                "timeless_latest_frame": {
+                    "format": "TLF1"
                 },
                 "timeless_logs": {
                     "max_work_entries": true
@@ -84,6 +99,38 @@ fn document() -> &'static str {
                     "same_connection": true,
                     "single_use": true
                 }
+            },
+            "sql_surfaces": {
+                "scalar_functions": ["timeless_capabilities"],
+                "storage_modules": [
+                    "timeless_metrics",
+                    "timeless_logs",
+                    "timeless_traces"
+                ],
+                "query_modules": [
+                    "timeless_aggregate",
+                    "timeless_aggregate_frame",
+                    "timeless_grid",
+                    "timeless_label_values",
+                    "timeless_latest",
+                    "timeless_latest_frame",
+                    "timeless_log_buckets",
+                    "timeless_log_count",
+                    "timeless_log_query_stats",
+                    "timeless_log_values",
+                    "timeless_raw",
+                    "timeless_raw_batches",
+                    "timeless_raw_frame",
+                    "timeless_rollup",
+                    "timeless_rollup_batches",
+                    "timeless_series",
+                    "timeless_stats",
+                    "timeless_trace_buckets",
+                    "timeless_trace_operations",
+                    "timeless_trace_services",
+                    "timeless_window",
+                    "timeless_window_batches"
+                ]
             }
         })
         .to_string()
@@ -98,6 +145,7 @@ mod tests {
     fn document_is_stable_and_names_every_release_signal() {
         let value: serde_json::Value = serde_json::from_str(document()).unwrap();
         assert_eq!(value["data_abi"], 1);
+        assert_eq!(value["sql_surface_version"], 1);
         assert_eq!(value["signals"]["metrics"]["rollups"], true);
         assert_eq!(
             value["signals"]["metrics"]["sample_types"],
@@ -137,6 +185,33 @@ mod tests {
         assert_eq!(
             value["query_surfaces"]["timeless_log_query_stats"]["single_use"],
             true
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_raw_batches"]["versioned"],
+            false
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_rollup_batches"]["format"],
+            "TRB1"
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_aggregate_frame"]["format"],
+            "TAF1"
+        );
+        assert_eq!(
+            value["query_surfaces"]["timeless_latest_frame"]["format"],
+            "TLF1"
+        );
+        assert_eq!(
+            value["sql_surfaces"]["storage_modules"],
+            json!(["timeless_metrics", "timeless_logs", "timeless_traces"])
+        );
+        assert_eq!(
+            value["sql_surfaces"]["query_modules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            22
         );
     }
 }

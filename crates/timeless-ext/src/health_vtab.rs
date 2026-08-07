@@ -30,11 +30,11 @@
 //!      independent connection to open) — sample by command there.
 //!
 //! Companion views (created with the table, dropped with it):
-//!   <t>_report   one row per health check: status ok|warn|attention|
+//!   `<t>_report`   one row per health check: status ok|warn|attention|
 //!                'no data', a human value, one piece of advice —
 //!                worst first. Thresholds visible in the view SQL.
-//!   <t>_now      latest value per series + age.
-//!   <t>_trends   per-series daily min/avg/max over 7 days.
+//!   `<t>_now`      latest value per series + age.
+//!   `<t>_trends`   per-series daily min/avg/max over 7 days.
 
 use std::borrow::Cow;
 use std::collections::HashMap;

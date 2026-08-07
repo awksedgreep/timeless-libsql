@@ -8,6 +8,10 @@ implement, no changes to the extension: sqld loads it into every pooled
 connection, and the process-global engine registry makes all of them share
 one engine per table.
 
+The [SQLite extension API reference](SQL_API_REFERENCE.md) defines the SQL
+modules and capability handshake used below. This guide covers only their
+deployment through self-hosted `sqld`.
+
 What you get:
 
 - **Any language becomes a client.** If it can POST JSON, it can ingest and

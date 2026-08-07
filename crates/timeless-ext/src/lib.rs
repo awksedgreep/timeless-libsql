@@ -1,20 +1,26 @@
 //! timeless-ext: loadable SQLite extension exposing the timeless-core
 //! time-series engine as virtual tables.
 //!
-//! Four modules are registered on every connection that loads the .so:
-//!   - "timeless_spike"   (spike.rs)        - the Session 1 proof-of-concept,
-//!     kept as a compiling reference for the vtab + re-entrancy patterns.
-//!   - "timeless_metrics" (metrics_vtab.rs) - the real thing: a writable
+//! The loadable artifact registers three production storage modules, their
+//! public query modules and capability scalar, plus one compatibility-only
+//! reference module:
+//!   - "timeless_spike"   (spike.rs)        - a compatibility/reference vtab;
+//!     it is not registered by the Rust embedding API.
+//!   - "timeless_metrics" (metrics_vtab.rs) - a writable
 //!     vtab whose chunks persist into shadow tables on the HOST database
 //!     through shadow_store::ShadowTableStore (timeless_core::ChunkStore).
-//!   - "timeless_logs"    (logs_vtab.rs)    - Phase 2: compressed log
+//!   - "timeless_logs"    (logs_vtab.rs)    - compressed log
 //!     blocks + inverted term index in `<name>_blocks`/`<name>_terms`
 //!     via shadow_block_store::ShadowBlockStore (BlockStore).
-//!   - "timeless_traces"  (traces_vtab.rs)  - Phase 2, Session 6: span
+//!   - "timeless_traces"  (traces_vtab.rs)  - span
 //!     blocks + term index + packed-trace-id index in `<name>_blocks`/
 //!     `<name>_terms`/`<name>_trace_blocks` via
-//!     shadow_span_store::ShadowSpanStore (SpanBlockStore). Three
-//!     signals, one .so (PLAN.md R8).
+//!     shadow_span_store::ShadowSpanStore (SpanBlockStore).
+//!
+//! `register_telemetry` is the canonical embedded-Rust registration surface.
+//! It installs the three storage modules, all query TVFs, and
+//! `timeless_capabilities()`, but deliberately excludes `timeless_spike` and
+//! the separately packaged dbhealth modules.
 //!
 //! MULTI-CONNECTION (PLAN.md R4, shared.rs): all connections in one
 //! process that open the same (db file, table) share ONE engine via a
@@ -158,7 +164,7 @@ pub unsafe extern "C" fn sqlite3_timeless_ext_init(
     init_common(db, pz_err_msg, p_api)
 }
 
-/// Runs once per connection when the extension loads: register both modules.
+/// Runs once per connection when the loadable telemetry extension is loaded.
 #[cfg(feature = "entrypoints")]
 fn extension_init(db: Connection) -> Result<bool> {
     spike::register(&db)?;

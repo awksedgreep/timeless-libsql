@@ -6,6 +6,11 @@ want to learn a new system to get it.**
 Everything here is plain SQL. If you can write `INSERT` and `SELECT`, you can
 use this extension. No query DSL, no server, no config files.
 
+Use this guide for the walkthrough and the
+[SQLite extension API reference](SQL_API_REFERENCE.md) for the canonical
+module, schema, hidden-input, command, batch, frame, and compatibility
+contracts.
+
 - [1. Install and load](#1-install-and-load)
 - [2. Five-minute tour](#2-five-minute-tour)
 - [3. The one concept you must know: flush](#3-the-one-concept-you-must-know-flush)
@@ -478,9 +483,8 @@ SELECT frame FROM timeless_latest_frame(
   'metrics', 'cpu_usage', NULL, :start, :stop);
 ```
 
-These return versioned `TAF1` and `TLF1` blobs. Use the strict Rust decoders in
-`timeless_ext::query_frame`, or copy the dependency-free
-[Python example](../examples/query_frames.py). See the
+These return versioned `TAF1` and `TLF1` blobs. Use the maintained strict Rust
+decoders in `timeless_ext::query_frame`. See the
 [query cookbook](QUERIES.md#packed-aggregate-frame) for the exact byte layouts
 and NULL rules. The frames are result transport only; database storage,
 transactions, backups, and replication are unchanged.

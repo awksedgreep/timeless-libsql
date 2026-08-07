@@ -130,6 +130,28 @@ SELECT 'series', COUNT(*) FROM metrics_series;
 SELECT 'legacy_registry', COUNT(*) FROM metrics_meta WHERE k = 'series_registry';
 SELECT 'metric_sample_types', json_extract(timeless_capabilities(), '$.signals.metrics.sample_types');
 SELECT 'native_histograms', json_extract(timeless_capabilities(), '$.signals.metrics.native_histograms');
+SELECT 'sql_surface_version', json_extract(timeless_capabilities(), '$.sql_surface_version');
+SELECT 'storage_modules', json_extract(timeless_capabilities(), '$.sql_surfaces.storage_modules');
+SELECT 'query_module_count', json_array_length(timeless_capabilities(), '$.sql_surfaces.query_modules');
+WITH advertised(name) AS (
+       SELECT value FROM json_each(timeless_capabilities(), '$.sql_surfaces.storage_modules')
+       UNION ALL
+       SELECT value FROM json_each(timeless_capabilities(), '$.sql_surfaces.query_modules')
+     ),
+     registered(name) AS (
+       SELECT name FROM pragma_module_list
+        WHERE name LIKE 'timeless_%' AND name <> 'timeless_spike'
+     )
+SELECT 'sql_module_inventory',
+       (SELECT count(*) FROM advertised WHERE name NOT IN registered),
+       (SELECT count(*) FROM registered WHERE name NOT IN advertised);
+SELECT 'raw_batches_versioned', json_extract(timeless_capabilities(), '$.query_surfaces.timeless_raw_batches.versioned');
+SELECT 'packed_formats',
+       json_extract(timeless_capabilities(), '$.query_surfaces.timeless_raw_frame.format'),
+       json_extract(timeless_capabilities(), '$.query_surfaces.timeless_window_batches.format'),
+       json_extract(timeless_capabilities(), '$.query_surfaces.timeless_rollup_batches.format'),
+       json_extract(timeless_capabilities(), '$.query_surfaces.timeless_aggregate_frame.format'),
+       json_extract(timeless_capabilities(), '$.query_surfaces.timeless_latest_frame.format');
 SQL
 )
 expected='pre|cpu|100|1.5|{"host":"a"}
@@ -142,8 +164,14 @@ chunks|2|3
 series|2
 legacy_registry|0
 metric_sample_types|["float64"]
-native_histograms|0'
-check_eq "insert/select/flush round-trip + shadow tables + metric sample capability" "$got" "$expected"
+native_histograms|0
+sql_surface_version|1
+storage_modules|["timeless_metrics","timeless_logs","timeless_traces"]
+query_module_count|22
+sql_module_inventory|0|0
+raw_batches_versioned|0
+packed_formats|TRF1|TWB1|TRB1|TAF1|TLF1'
+check_eq "insert/select/flush round-trip + shadow tables + SQL/format capabilities" "$got" "$expected"
 
 # ---------------------------------------------------------------------------
 echo "== section 1b: append-only enforcement =="

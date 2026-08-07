@@ -200,6 +200,68 @@ fn validate_logs_storage_boundary(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+fn validate_public_sql_inventory(root: &Path) -> Result<Vec<String>> {
+    let source_root = root.join("crates/timeless-ext/src");
+    if !source_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let module = Regex::new(r#"create_module\s*\(\s*c\"([a-z0-9_]+)\""#)?;
+    let scalar = Regex::new(r#"create_scalar_function\s*\(\s*\"([a-z0-9_]+)\""#)?;
+    let mut registered = BTreeSet::new();
+    for entry in fs::read_dir(&source_root)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = fs::read_to_string(path)?;
+        registered.extend(
+            module
+                .captures_iter(&source)
+                .map(|captures| captures[1].to_owned()),
+        );
+        registered.extend(
+            scalar
+                .captures_iter(&source)
+                .map(|captures| captures[1].to_owned()),
+        );
+    }
+
+    let relative = "docs/SQL_API_REFERENCE.md";
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(vec![format!(
+            "missing {relative} for {} registered public SQL symbols",
+            registered.len()
+        )]);
+    }
+    let content = fs::read_to_string(&path)?;
+    let start = "<!-- public-sql-symbols:start -->";
+    let stop = "<!-- public-sql-symbols:end -->";
+    let Some((_, tail)) = content.split_once(start) else {
+        return Ok(vec![format!("{relative}: missing {start} marker")]);
+    };
+    let Some((inventory, _)) = tail.split_once(stop) else {
+        return Ok(vec![format!("{relative}: missing {stop} marker")]);
+    };
+    let row = Regex::new(r#"(?m)^\|\s*`([a-z0-9_]+)`\s*\|"#)?;
+    let documented: BTreeSet<String> = row
+        .captures_iter(inventory)
+        .map(|captures| captures[1].to_owned())
+        .collect();
+    let mut errors = Vec::new();
+    for name in registered.difference(&documented) {
+        errors.push(format!(
+            "{relative}: registered public SQL symbol {name} has no inventory row"
+        ));
+    }
+    for name in documented.difference(&registered) {
+        errors.push(format!(
+            "{relative}: inventory row {name} is not registered by the extension source"
+        ));
+    }
+    Ok(errors)
+}
+
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -508,6 +570,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     }
     errors.extend(validate_local_links(root)?);
     errors.extend(validate_logs_storage_boundary(root)?);
+    errors.extend(validate_public_sql_inventory(root)?);
     Ok(errors)
 }
 
@@ -688,5 +751,27 @@ mod tests {
             fixture.path(),
             "server references private extension shadow table logs_blocks",
         );
+    }
+
+    #[test]
+    fn public_sql_inventory_must_match_registered_symbols() {
+        let fixture = fixture();
+        let source = fixture.path().join("crates/timeless-ext/src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("registration.rs"),
+            "db.create_module(c\"timeless_one\", &ONE, None::<()>)?;\n\
+             db.create_scalar_function(\"timeless_two\", 0, flags, body)?;\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/SQL_API_REFERENCE.md"),
+            "# SQL\n\n<!-- public-sql-symbols:start -->\n\n\
+             | SQL symbol | kind |\n|---|---|\n\
+             | `timeless_one` | module |\n\n\
+             <!-- public-sql-symbols:end -->\n",
+        )
+        .unwrap();
+        assert_invalid(fixture.path(), "public SQL symbol timeless_two");
     }
 }

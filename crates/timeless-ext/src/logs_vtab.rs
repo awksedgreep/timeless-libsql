@@ -12,7 +12,7 @@
 //!                  "service" TEXT HIDDEN, "path" TEXT HIDDEN,
 //!                  "status" TEXT HIDDEN, message_contains TEXT HIDDEN,
 //!                  max_work_entries INTEGER HIDDEN,
-//!                  "<table>" HIDDEN)
+//!                  `"<table>"` HIDDEN)
 //!
 //! THE DESIGN IMPROVEMENT over the Elixir donor's query API: each
 //! index key gets its own HIDDEN column. `WHERE service = 'api'`
@@ -28,14 +28,14 @@
 //!              INSERT shorthand: a non-NULL value is merged into the
 //!              metadata pairs.
 //! Commands:    INSERT INTO logs(logs) VALUES ('flush' | 'optimize' |
-//!              'optimize:<max_entries>' | 'prune:<ts>') — the same
+//!              `optimize:<max_entries>` | `prune:<ts>`) — the same
 //!              FTS5 idiom as metrics. The bounded optimize form lets
 //!              embedded hosts cap one maintenance turn.
 //! Read path:   flushed blocks and the in-memory buffer are merged, so
 //!              entries are queryable immediately after INSERT and
 //!              durable (as durable as the enclosing transaction) after
 //!              'flush'.
-//! Append-only: DELETE/UPDATE rejected; retention is 'prune:<ts>'.
+//! Append-only: DELETE/UPDATE rejected; retention is `prune:<ts>`.
 
 use std::borrow::Cow;
 use std::ffi::{c_int, CStr, CString};

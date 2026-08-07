@@ -3834,10 +3834,9 @@ count is never NULL. Empty series are omitted; if every series is empty the TVF
 emits no row. Series order is unspecified and labels attach through
 `timeless_series`.
 
-Rust callers can use
-`timeless_ext::query_frame::decode_aggregate_frame`; the dependency-free
-[Python decoder](../examples/query_frames.py) consumes the same test fixtures.
-Both reject unknown versions, flags, reserved bits, nonzero bitmap padding,
+Rust callers use
+`timeless_ext::query_frame::decode_aggregate_frame`, which rejects unknown
+versions, flags, reserved bits, nonzero bitmap padding,
 non-canonical NULLs, invalid kinds, and inconsistent lengths.
 `series_count` is limited to `u32`; the encoder uses checked host-size
 arithmetic and also remains subject to SQLite's configured maximum BLOB size.
@@ -3865,8 +3864,7 @@ value_bits:u64[series_count]
 Only series with a point in the inclusive range appear. Timestamp and
 duplicate-winner semantics are identical to the row TVF. A clear validity bit
 represents the row interface's SQL NULL for a NaN value and requires a zero
-word. Use `timeless_ext::query_frame::decode_latest_frame` or the
-[Python decoder](../examples/query_frames.py). `TLF1`, like every packed query
+word. Use `timeless_ext::query_frame::decode_latest_frame`. `TLF1`, like every packed query
 format, is an additive result envelope and never appears in shadow tables or
 replication-visible storage.
 `series_count` is limited to `u32`; frame-size arithmetic is checked before

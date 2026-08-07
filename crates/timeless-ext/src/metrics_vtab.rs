@@ -6,7 +6,7 @@
 //! is named after the table — the FTS5 command idiom):
 //!
 //!   CREATE TABLE x(name TEXT, ts INTEGER, value REAL, labels TEXT,
-//!                  series_id INTEGER HIDDEN, "<table>" HIDDEN)
+//!                  series_id INTEGER HIDDEN, `"<table>"` HIDDEN)
 //!
 //! Write path:  INSERT INTO metrics(name, ts, value, labels) VALUES (...)
 //!              → resolve series → in-memory partition buffer (Tier 1).
