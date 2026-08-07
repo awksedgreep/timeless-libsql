@@ -1281,6 +1281,18 @@ request-attributed API mean after byte-identical public storage work. All
 in-flight work are zero. No extension primitive, private table, storage
 contract, or authoritative batching behavior changed. `LQL-P45` is closed.
 
+The follow-up matrix reconciliation closes `LQL-S14` against that same P45
+implementation and evidence. Upstream documents running `count`, `last`,
+`max`, `min`, and `sum` as functions of the `running_stats` pipe; it exposes
+no separate `running_*` grammar. `SQL-LOG-059`, the 1,300-case pinned oracle,
+the real-extension regression, `QSF-239`–`QSF-240`, and exact-build artifact
+`2026-08-06_session18_lql_p45_running_stats.json` already satisfy every S14
+exit dimension. The current complete 1,388-case live oracle, targeted
+real-extension regression, query contracts, and all 130 executable SQL
+recipes/168 statements were re-run at reconciliation. No duplicate parser,
+evaluator, SQL recipe, benchmark workload, or extension surface is warranted.
+`LQL-S14` is closed as a catalog-alias row, not as a new implementation.
+
 Session 18's `LQL-P46` semantic implementation is complete as API-owned
 bounded total state over one public `logs` scan, with `SQL-LOG-060` as the
 direct-user fixed-key full-partition SQLite window foundation. Pinned

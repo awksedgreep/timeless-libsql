@@ -4669,6 +4669,13 @@ The checked-in
 was captured from exact release extension and server build
 `3f4ef107973f73361cfd90eff6e31ea53bd58f0c` and has SHA-256
 `b58634502d9d9c771fc1079620f3d4de029e0a5207bc8ed9601917ad3f9b84de`.
+This artifact is also the exact evidence for function-catalog row `LQL-S14`:
+upstream exposes its running `count`/`last`/`min`/`max`/`sum` functions only
+through the `LQL-P45` `running_stats` pipe. It is not evidence for a separate
+set of standalone function names. Reconciliation on 2026-08-07 re-ran the
+targeted real-extension durability test, the current complete 1,388-case live
+VictoriaLogs corpus, and all 130 public SQL recipes/168 statements without
+changing code, storage, or the measured artifact.
 Each candidate and control performs one public scan, sorts the same candidate
 set chronologically, limits the response to 64 rows, and performs identical
 physical storage work. The candidate partitions by service and severity and

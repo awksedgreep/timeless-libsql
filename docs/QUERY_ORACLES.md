@@ -1136,6 +1136,17 @@ termination errors. Source audit covers `pipe_running_stats.go`, all six
 reference at immutable VictoriaLogs commit
 `46a54c976fa3d404396050e8a5ee6c5b0320efc5`.
 
+`LQL-S14` catalogs the five documented functions from that same
+`running_stats` surface: `count`, `last`, `max`, `min`, and `sum`. The
+immutable reference contains no separate `running_count`, `running_last`,
+`running_min`, `running_max`, or `running_sum` grammar. Consequently the P45
+source audit and live cases are also the S14 oracle; a second parser or
+duplicate oracle corpus would describe behavior that VictoriaLogs does not
+have. The source parser's additional `first` support remains covered under
+P45. The catalog reconciliation re-ran the current complete 1,388-case live
+corpus successfully; the 1,300-case count below records the earlier point at
+which P45 itself entered the fixture.
+
 The source materializes every input row, partitions by textual group keys,
 sorts groups by their encoded key and rows by the formatted `_time` string,
 and updates `count`, `sum`, `min`, `max`, `first`, and `last` state before

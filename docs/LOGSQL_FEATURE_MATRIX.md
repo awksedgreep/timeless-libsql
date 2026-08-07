@@ -1061,8 +1061,20 @@ only measured repeated scans should create new extension vectors.
 | `LQL-S11` | `row_any` / `row_min` / `row_max` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-047-deterministic-rich-row-selection-and-numeric-row-extrema)) | shipped | `ROWS`, `SQL` | `API` | P2 |
 | `LQL-S12` | `json_values` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-063-bounded-typed-json-values-from-fixed-public-paths)) | shipped | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S13` | `histogram` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-064-bounded-histogram-over-one-native-number-path)) | shipped | `ROWS`, `SQL` | `API` | P3 |
-| `LQL-S14` | running `count/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
+| `LQL-S14` | running `count/last/min/max/sum` via `running_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)) | shipped | `ROWS`, `SQL` | `API` | P3 |
 | `LQL-S15` | total `count/first/last/min/max/sum` | missing | `ROWS`, `SQL` | `API` | P3 |
+
+`LQL-S14` is the function-catalog view of the already-shipped `LQL-P45`
+`running_stats` pipe, not a second LogsQL syntax surface. The pinned upstream
+reference exposes `count`, `last`, `max`, `min`, and `sum` only inside
+`running_stats`; the same source parser also accepts `first`, which the P45
+implementation and tests retain. P45's parser, evaluator, oracle corpus,
+real-extension regression, `SQL-LOG-059`, exact-build benchmark, storage
+finding, and bounded-memory verdict therefore constitute S14's evidence. No
+duplicate `running_count`-style functions or extension primitive exist. The
+current complete 1,388-case live VictoriaLogs corpus, targeted real-extension
+regression, and all 130 executable SQL recipes/168 statements were re-run
+when the catalog row was reconciled.
 
 `count(field)` requires at least one present non-empty selected value;
 `count_empty` counts rows whose selected values are all missing, null, or an
