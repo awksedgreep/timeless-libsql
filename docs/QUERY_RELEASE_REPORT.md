@@ -4,7 +4,7 @@ Date: 2026-08-07
 
 Release line: unreleased `0.4.0`
 
-Measured implementation source: `178f75f7f3b1284c6b3940ae7af0986b9e2fe940`
+Measured implementation source: `cb47e4e9b6d17d848c9249117d1cd1e8f0c324cc`
 
 <!-- query-release-matrix-summary: LQL deferred=7,shipped=107; MQL deferred=2,shipped=10; PQL deferred=5,experimental=11,shipped=74 -->
 <!-- query-release-evidence: docs/evidence/2026-08-07_query_release_gate.json -->
@@ -101,7 +101,7 @@ SQL discovery remain covered independently.
 
 The exact-build [final evidence](evidence/2026-08-07_query_release_gate.json)
 has SHA-256
-`d576b5bcb3729f79d6e81f4793181551c3c99fd9c9a6bbdb877164c2b7e39660`.
+`ab028ebe23079cefe1d2b5b2063a865d588c65af81a6dc3255f8b5312241390e`.
 It exercises 184 metric and 307 log query shapes for five warmups and 50
 recorded iterations each: 24,550 measured loopback HTTP requests. Both release
 servers and the loaded extension report the measured source commit above.
@@ -111,10 +111,10 @@ milliseconds.
 
 | signal/query | Session 0 | final | Session 0 cardinality / bytes | final cardinality / bytes |
 |---|---:|---:|---:|---:|
-| metrics exact/narrow | 0.354 / 0.821 / 0.984 | 0.952 / 1.177 / 1.309 | 1 / 166 | 1 / 164 |
-| metrics wide selector | 2.825 / 3.259 / 3.261 | 3.531 / 4.072 / 5.167 | 512 / 54,521 | 512 / 53,497 |
-| logs indexed/narrow | 6.253 / 6.990 / 7.443 | 12.110 / 13.631 / 13.701 | 1,024 / 174,625 | 100 / 27,228 |
-| logs full/wide | 17.870 / 19.155 / 19.544 | 39.162 / 41.780 / 43.041 | 8,192 / 1,424,639 | 8,192 / 2,249,775 |
+| metrics exact/narrow | 0.354 / 0.821 / 0.984 | 0.884 / 1.042 / 1.215 | 1 / 166 | 1 / 164 |
+| metrics wide selector | 2.825 / 3.259 / 3.261 | 3.248 / 3.822 / 4.996 | 512 / 54,521 | 512 / 53,497 |
+| logs indexed/narrow | 6.253 / 6.990 / 7.443 | 11.652 / 13.355 / 14.297 | 1,024 / 174,625 | 100 / 27,228 |
+| logs full/wide | 17.870 / 19.155 / 19.544 | 37.322 / 40.984 / 41.504 | 8,192 / 1,424,639 | 8,192 / 2,249,775 |
 
 These figures preserve real regressions, but they are not a controlled
 microbenchmark of parser overhead. The final metric database contains 3,163
@@ -127,8 +127,8 @@ shapes, not only the four rows above.
 
 | signal | primary durable work | admission | durability barrier | logical storage | live SQLite/WAL/SHM | RSS HWM |
 |---|---:|---:|---:|---:|---:|---:|
-| metrics | 36,928 points | 8.506 ms | 92.992 ms | 224,688 B | 1,542,312 B | 53,096 KiB |
-| logs | 8,192 entries | 16.250 ms | 39.798 ms | 1,914,055 B | 2,022,736 B | 104,576 KiB |
+| metrics | 36,928 points | 12.339 ms | 88.908 ms | 224,688 B | 1,542,312 B | 50,824 KiB |
+| logs | 8,192 entries | 14.214 ms | 40.146 ms | 1,914,055 B | 2,022,736 B | 101,252 KiB |
 
 Metrics then adds the 100,025-point limit fixture and reaches 136,953
 completed points with zero failed or queued work. Logs finishes with zero
@@ -140,13 +140,13 @@ cancellation.
 
 The separate two-minute [fault evidence](evidence/2026-08-07_query_fault_gate.json)
 has SHA-256
-`d4c927dc2b01327207dda49444fbbfa502c7b810d3e714de0a4f43fe2a1ede37`.
+`0108df70b1258aa21b585ca5d582268af18677a4c302a28f9340248fc32cbb2e`.
 It executes 12 scheduled events: descriptor/startup and disk-full recovery for
 each signal, two slow-client disconnect/cancellation storms, overlapping
 backups for all three signals, two graceful restarts, and two `SIGKILL`
 restarts. Each signal accepts and durably completes 30,784 records across five
 process generations with no reported failure and an `ok` final barrier. HWM
-is 15,100 KiB for metrics, 47,392 KiB for logs, and 55,324 KiB for traces;
+is 15,292 KiB for metrics, 47,192 KiB for logs, and 61,976 KiB for traces;
 post-warmup long-running slope is zero for the final generations. This short
 fault drill complements rather than replaces the already checked-in
 authoritative two-hour release soak.

@@ -1935,15 +1935,15 @@ physical-block-diagnostics prerequisite and explicit no-SQL disposition
 without exposing private storage.
 
 The exact-build query artifact for implementation source
-`178f75f7f3b1284c6b3940ae7af0986b9e2fe940` executes 184 metric and 307 log
+`cb47e4e9b6d17d848c9249117d1cd1e8f0c324cc` executes 184 metric and 307 log
 shapes for 24,550 measured requests and reports the required Session 0 versus
 final p50/p95/p99, completed work, storage, result bytes, and HWM. The current
 two-minute fault artifact passes all 12 scheduled events and durably completes
 30,784 records per signal across five process generations with no final
 failure. Its SHA-256 is
-`d4c927dc2b01327207dda49444fbbfa502c7b810d3e714de0a4f43fe2a1ede37`;
+`0108df70b1258aa21b585ca5d582268af18677a4c302a28f9340248fc32cbb2e`;
 the exact query artifact SHA-256 is
-`d576b5bcb3729f79d6e81f4793181551c3c99fd9c9a6bbdb877164c2b7e39660`.
+`ab028ebe23079cefe1d2b5b2063a865d588c65af81a6dc3255f8b5312241390e`.
 
 The successful gate set includes 49 Rust query-contract tests, including the
 all-signal public-storage-boundary regression; 135 public-SQL recipes/173
