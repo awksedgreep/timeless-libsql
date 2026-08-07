@@ -169,6 +169,7 @@ language/value-envelope semantics belong to the Rust API.
 | [`SQL-LOG-059`](#sql-log-059-bounded-running-numeric-state-by-one-exact-key) | `LQL-P45` | current foundation | bounded chronological SQL windows for row count, nonempty numeric count, numeric sum/min/max, first-at-offset, and previous-at-offset over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
 | [`SQL-LOG-060`](#sql-log-060-bounded-total-numeric-state-by-one-exact-key) | `LQL-P46` | current foundation | bounded full-partition SQL windows that repeat final row count, nonempty numeric count, numeric sum/min/max, and fixed first/last offsets over one exact public metadata key; API owns LogsQL grammar, dynamic selectors, textual numbers, natural order, complete rich values, limits, cancellation, and envelopes |
 | [`SQL-LOG-061`](#sql-log-061-add-a-duration-to-public-native-log-time) | `LQL-P47` | current foundation | bounded saturating shift of public native log timestamps plus an explicit sub-native nanosecond remainder; API owns duration/RFC3339Nano grammar, arbitrary fields, UTC canonicalization, response mutation, limits, cancellation, and envelopes |
+| [`SQL-LOG-062`](#sql-log-062-generate-a-bounded-decimal-string-sequence) | `LQL-P48` | current foundation | input-independent bounded recursive sequence of decimal strings using core SQLite/libSQL; API owns LogsQL numeric grammar, replacement semantics, limits, cancellation, composition, and envelopes |
 
 `current` means the public SQL surface exists now. `reference` means the SQL
 is executable now but the corresponding PromQL/LogsQL parser/evaluator row is
@@ -9459,6 +9460,56 @@ storage, so an extension primitive would not prune a block, avoid decoding, or
 reduce the public payload crossing. Direct regression: `tests/cli.sh` section
 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen regression:
 `session_eighteen_time_add_is_rich_bounded_composable_and_durable`.
+
+### SQL-LOG-062: generate a bounded decimal-string sequence
+
+Bind `:generate_sequence_count` to a positive integer already admitted by the
+caller's work, state, result, and response limits. This core SQLite/libSQL
+statement emits exactly that many rows with `_msg` strings from `"0"` through
+`N-1`, in numeric order. It deliberately reads no `logs` row because the
+operation is independent of and replaces its complete input.
+
+```sql
+WITH RECURSIVE generated(value) AS (
+  SELECT 0
+  WHERE CAST(:generate_sequence_count AS INTEGER) > 0
+
+  UNION ALL
+
+  SELECT value + 1
+  FROM generated
+  WHERE value + 1 < CAST(:generate_sequence_count AS INTEGER)
+)
+SELECT CAST(value AS TEXT) AS _msg
+FROM generated
+ORDER BY value;
+```
+
+For the executable fixture, bind `:generate_sequence_count` to `3`; the exact
+result is `"0"`, `"1"`, and `"2"`. The statement uses only core public SQL,
+so it behaves the same in direct SQLite and libSQL connections whether or not
+the Timeless extension has a persisted log table. Callers must apply a finite
+positive admission limit before executing a user-supplied count; the recipe
+does not claim that an unbounded recursive CTE is safe.
+
+This is the complete direct-SQL value-generation foundation for `LQL-P48`,
+not a LogsQL parser embedded in SQLite. The Rust logs API owns the
+case-insensitive `generate_sequence <number>` grammar, VictoriaLogs number
+spellings, positive fractional truncation, rejection below one, replacement
+of every preceding filter and pipeline, last-generator-wins behavior,
+later-pipeline composition, cumulative work/state/result/response/deadline
+limits, cancellation, and HTTP envelopes. It also skips the public `logs`
+cursor entirely: scanning durable blocks only to discard their rows would be
+incorrect storage work.
+
+No extension primitive is warranted. Direct SQLite/libSQL users already have
+the scan-free recursive statement, and an extension opcode could not improve
+storage pruning because no storage is read. Durable rows, block formats,
+authoritative batching, compression, indexes, transactions, retention,
+optimize, and migration behavior remain untouched. Direct regression:
+`tests/cli.sh` section 45 and the Rust SQL harness; HTTP/oracle/optimize/reopen
+regression:
+`session_eighteen_generate_sequence_is_scan_free_bounded_composable_and_durable`.
 
 ## Adding the next recipe
 

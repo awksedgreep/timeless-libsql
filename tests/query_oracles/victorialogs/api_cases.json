@@ -2350,6 +2350,46 @@
   ],
   "stats_cases": [
     {
+      "id": "LQL-P48-generate-sequence-is-independent-of-input",
+      "query": "case:=does-not-exist | generate_sequence 3",
+      "expected_rows": [{"_msg": "0"}, {"_msg": "1"}, {"_msg": "2"}]
+    },
+    {
+      "id": "LQL-P48-last-generate-sequence-replaces-prior-pipes",
+      "query": "case:=format-row | limit 1 | generate_sequence 2 | generate_sequence 3",
+      "expected_rows": [{"_msg": "0"}, {"_msg": "1"}, {"_msg": "2"}]
+    },
+    {
+      "id": "LQL-P48-generate-sequence-accepts-quoted-fractional-count",
+      "query": "* | generate_sequence \"3.9\"",
+      "expected_rows": [{"_msg": "0"}, {"_msg": "1"}, {"_msg": "2"}]
+    },
+    {
+      "id": "LQL-P48-generate-sequence-accepts-underscores-and-offset",
+      "query": "* | generate_sequence 1_0 | offset 8",
+      "expected_rows": [{"_msg": "8"}, {"_msg": "9"}]
+    },
+    {
+      "id": "LQL-P48-generate-sequence-accepts-duration-number-spellings",
+      "query": "* | generate_sequence 3ns",
+      "expected_rows": [{"_msg": "0"}, {"_msg": "1"}, {"_msg": "2"}]
+    },
+    {
+      "id": "LQL-P48-generated-strings-feed-later-math-and-projection",
+      "query": "* | generate_sequence 3e0 | math (_msg + 10) as value | fields _msg, value",
+      "expected_rows": [{"_msg": "0", "value": "10"}, {"_msg": "1", "value": "11"}, {"_msg": "2", "value": "12"}]
+    },
+    {
+      "id": "LQL-P48-generated-strings-feed-later-filters",
+      "query": "* | generate_sequence 3 | filter _msg:=\"1\"",
+      "expected_rows": [{"_msg": "1"}]
+    },
+    {
+      "id": "LQL-P48-generated-rows-feed-later-limit",
+      "query": "* | generate_sequence 3 | limit 2",
+      "expected_rows": [{"_msg": "0"}, {"_msg": "1"}]
+    },
+    {
       "id": "LQL-P47-time-add-compound-duration-and-canonical-utc",
       "query": "case:=format-row | time_add 1d2h3m4.5s at math_timestamp | fields case, math_timestamp",
       "expected_rows": [{"case": "format-row", "math_timestamp": "2024-05-31T03:05:07.5Z"}]
@@ -5397,6 +5437,62 @@
     }
   ],
   "error_cases": [
+    {
+      "id": "LQL-P48-generate-sequence-requires-a-count",
+      "query": "* | generate_sequence",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P48-generate-sequence-rejects-zero",
+      "query": "* | generate_sequence 0",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P48-generate-sequence-rejects-a-fraction-below-one",
+      "query": "* | generate_sequence 0.9",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P48-generate-sequence-rejects-negative-counts",
+      "query": "* | generate_sequence -1",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P48-generate-sequence-rejects-a-leading-plus",
+      "query": "* | generate_sequence +3",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P48-generate-sequence-rejects-nonnumeric-counts",
+      "query": "* | generate_sequence nope",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P48-generate-sequence-rejects-a-trailing-token",
+      "query": "* | generate_sequence 3 trailing",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
+    {
+      "id": "LQL-P48-generate-sequence-rejects-an-attached-suffix",
+      "query": "* | generate_sequence.3",
+      "status": 400,
+      "content_type": "text/plain; charset=utf-8",
+      "body_contains": "cannot parse `query` arg"
+    },
     {
       "id": "LQL-P47-time-add-requires-a-duration",
       "query": "* | time_add",

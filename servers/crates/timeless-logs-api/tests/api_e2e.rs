@@ -9330,6 +9330,175 @@ async fn session_eighteen_time_add_is_rich_bounded_composable_and_durable() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn session_eighteen_generate_sequence_is_scan_free_bounded_composable_and_durable() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("generate-sequence-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage
+        .ingest(vec![LogEntry {
+            ts: 1_800_300_000_000_001,
+            level: 3,
+            severity: "error".into(),
+            message: "durable source".into(),
+            metadata_json: serde_json::json!({
+                "sequence_group":"source", "case":"source",
+                "nested":{"keep":[1,false,null]}
+            })
+            .to_string(),
+        }])
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let app = router(storage.clone());
+
+    let before = storage.stats().await.unwrap().query_count;
+    let query = r#"sequence_group:=does-not-exist | generate_sequence 3"#;
+    let rows = pipeline_rows(&app, query).await;
+    assert_eq!(
+        rows,
+        [
+            serde_json::json!({"_msg":"0"}),
+            serde_json::json!({"_msg":"1"}),
+            serde_json::json!({"_msg":"2"})
+        ],
+        "generate_sequence must not depend on matching durable input"
+    );
+    assert_eq!(
+        storage.stats().await.unwrap().query_count,
+        before,
+        "an input-independent sequence must not scan the public logs table"
+    );
+
+    assert_eq!(
+        pipeline_rows(
+            &app,
+            r#"sequence_group:=source | limit 1 | generate_sequence 2 | generate_sequence 3 | math (_msg + 10) as value | fields _msg, value"#,
+        )
+        .await,
+        [
+            serde_json::json!({"_msg":"0","value":"10"}),
+            serde_json::json!({"_msg":"1","value":"11"}),
+            serde_json::json!({"_msg":"2","value":"12"})
+        ],
+        "the last sequence replaces all prior rows and feeds later pipes"
+    );
+    assert_eq!(
+        pipeline_rows(&app, r#"* | generate_sequence "3.9" | filter _msg:="1""#).await,
+        [serde_json::json!({"_msg":"1"})],
+        "the upstream parser accepts quoted fractional N and truncates it"
+    );
+    assert_eq!(
+        pipeline_rows(&app, "* | generate_sequence 1_0 | offset 8").await,
+        [
+            serde_json::json!({"_msg":"8"}),
+            serde_json::json!({"_msg":"9"})
+        ]
+    );
+    assert_eq!(
+        pipeline_rows(&app, "* | generate_sequence 3ns").await,
+        [
+            serde_json::json!({"_msg":"0"}),
+            serde_json::json!({"_msg":"1"}),
+            serde_json::json!({"_msg":"2"})
+        ],
+        "generate_sequence shares VictoriaLogs numeric duration parsing"
+    );
+
+    for malformed in [
+        "* | generate_sequence",
+        "* | generate_sequence 0",
+        "* | generate_sequence 0.9",
+        "* | generate_sequence -1",
+        "* | generate_sequence +3",
+        "* | generate_sequence nope",
+        "* | generate_sequence 3 trailing",
+        "* | generate_sequence.3",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_request(malformed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{malformed}");
+    }
+
+    for (limits, reason) in [
+        (
+            LogsQueryLimits {
+                max_work_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            "max_work_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_result_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+            "max_result_rows",
+        ),
+        (
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+            "max_response_bytes",
+        ),
+    ] {
+        let response = router_with_limits(storage.clone(), limits)
+            .oneshot(logsql_request(query))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["reason"], reason, "{body}");
+    }
+
+    let source_query = r#"sequence_group:=source | fields case, nested, _msg, level | limit 10000"#;
+    let source_rows = pipeline_rows(&app, source_query).await;
+    assert_eq!(
+        source_rows,
+        [serde_json::json!({
+            "case":"source", "nested":{"keep":[1,false,null]},
+            "_msg":"durable source", "level":"error"
+        })],
+        "sequence generation must not mutate durable source rows"
+    );
+
+    storage.schedule_optimize().await.unwrap();
+    storage.barrier().await.unwrap();
+    storage.shutdown().await.unwrap();
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let reopened_app = router(reopened.clone());
+    assert_eq!(pipeline_rows(&reopened_app, query).await, rows);
+    assert_eq!(
+        pipeline_rows(&reopened_app, source_query).await,
+        source_rows
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_ten_relative_logsql_pins_inclusive_lower_exclusive_upper_and_reopens() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");

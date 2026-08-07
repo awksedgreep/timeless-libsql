@@ -1195,3 +1195,22 @@ behavior deterministic. The fixture remains 167 source rows and now contains
 346 row-query cases, one stochastic case, 486 error cases, and 508
 statistics/pipeline cases: 1,341 cases total, all passing against the
 immutable image. The fixture now contains 1341 cases.
+
+`LQL-P48` adds eight exact pipeline cases and eight error cases for
+`generate_sequence`. They pin input independence, last-generator-wins
+replacement of every preceding filter and pipe, quoted positive fractional
+truncation, underscore/scientific/duration number spellings, decimal-string
+output, later math/filter/offset/limit/projection composition, and strict
+missing/zero/sub-one/negative/leading-plus/nonnumeric/trailing/attached forms.
+
+Source audit covers `pipe_generate_sequence.go`, its parser and unit tests,
+the shared `parseNumber` implementation, and the checked language reference at
+immutable VictoriaLogs commit
+`46a54c976fa3d404396050e8a5ee6c5b0320efc5`. Upstream parses the count as
+`float64`, requires it to be at least one, converts it to `uint64`, cancels its
+input on the first block, and creates `_msg` strings from zero through `N-1`
+during flush. Consequently a positive fraction truncates, earlier filters and
+limits cannot suppress generation, and only the last generator matters. The
+fixture remains 167 source rows and now contains 346 row-query cases, one
+stochastic case, 494 error cases, and 516 statistics/pipeline cases: 1,357
+cases total, all passing against the immutable image. The fixture now contains 1357 cases.

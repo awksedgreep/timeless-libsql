@@ -1815,6 +1815,31 @@ fn reader_main(
             } => {
                 let started = Instant::now();
                 let result = cancellable_read(&conn, &cancelled, || {
+                    if let Some(sequence_index) = operations
+                        .iter()
+                        .rposition(|operation| matches!(operation, PipelineOp::GenerateSequence(_)))
+                    {
+                        // generate_sequence replaces its complete input even
+                        // when the source is empty. Execute from the last such
+                        // operator without opening a public logs cursor. This
+                        // preserves the language contract and proves zero
+                        // block reads, decodes, or payload crossing.
+                        let report = LogQueryExecutionReport::default();
+                        let rows = pipeline::execute(
+                            Vec::new(),
+                            pipeline::PipelineExecution {
+                                report,
+                                operations: &operations[sequence_index..],
+                                implicit_result_limit,
+                                rate_window_seconds,
+                                timestamp_unit,
+                                limits,
+                                cancelled: cancelled.as_ref(),
+                                query_started: started,
+                            },
+                        )?;
+                        return Ok((rows, report));
+                    }
                     let (rows, report) = query_pipeline_rows(
                         &conn,
                         &spec,

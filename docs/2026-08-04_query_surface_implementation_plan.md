@@ -1333,6 +1333,23 @@ primitive, private table, storage contract, timestamp format, batching,
 compression, index, retention, transaction, migration, optimize, or
 maintenance behavior changed. `LQL-P47` is closed.
 
+Session 18's `LQL-P48` semantic implementation is complete as API-owned,
+input-independent bounded generation with `SQL-LOG-062` as the complete
+direct-user core-SQL foundation. Pinned VictoriaLogs source plus the complete
+1,357-case live oracle establish shared number spellings, positive fractional
+truncation, decimal-string output, complete-input replacement,
+last-generator-wins behavior, later-pipe composition, and strict failures.
+
+The planner removes the final generator's semantically dead prefix, including
+query-backed operations, and the reader executes without opening a public
+`logs` cursor. Count admission, allocated rows and strings, later work, result
+cardinality, response bytes, deadline, and cancellation are bounded. A
+failing-then-passing real-extension regression proves zero storage query,
+block, decode, payload, and row work; immutable rich source data; optimize;
+shutdown; and reopen. `QSF-245` records the semantic and unchanged-storage
+boundary. Exact release-build latency, storage totals, RSS HWM, and final
+documentation evidence remain required before `LQL-P48` closes.
+
 ### Session 19: experimental and data-model dispositions
 
 Rows: `PQL-O17`, `PQL-O18`, `PQL-O19`, `PQL-R22`, `PQL-R23`,

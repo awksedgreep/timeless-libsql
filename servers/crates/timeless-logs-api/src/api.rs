@@ -997,6 +997,11 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
         LogsqlOutput::Pipeline => {
             for operation in &plan.pipeline {
                 match operation {
+                    crate::logsql::PipelineOp::GenerateSequence(count)
+                        if *count > u64::try_from(limits.max_work_rows).unwrap_or(u64::MAX) =>
+                    {
+                        return Err(("max_work_rows", limits.max_work_rows));
+                    }
                     crate::logsql::PipelineOp::Limit(limit)
                     | crate::logsql::PipelineOp::FieldValues {
                         limit: Some(limit), ..

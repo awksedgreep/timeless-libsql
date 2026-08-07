@@ -325,6 +325,68 @@ fn format_victorialogs_timestamp_ns(timestamp_ns: i64) -> Option<String> {
     Some(output)
 }
 
+fn generate_sequence_rows(
+    count: u64,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    ensure_active(cancelled)?;
+    let count = usize::try_from(count).map_err(|_| {
+        format!(
+            "LogsQL generate_sequence exceeds max_work_rows={}",
+            limits.max_state_items
+        )
+    })?;
+    if count > limits.max_state_items {
+        return Err(format!(
+            "LogsQL generate_sequence exceeds max_work_rows={}",
+            limits.max_state_items
+        ));
+    }
+
+    // Account the complete retained vector before allocation, then charge
+    // each generated object, key, and decimal string incrementally. The
+    // estimate is deliberately conservative and keeps generation bounded by
+    // the existing response/state ceiling even if an eventual later pipe
+    // reduces the result cardinality.
+    let mut state_bytes = size_of::<Vec<Value>>()
+        .checked_add(
+            count
+                .checked_mul(size_of::<Value>())
+                .ok_or_else(|| "LogsQL generate_sequence state size overflow".to_string())?,
+        )
+        .ok_or_else(|| "LogsQL generate_sequence state size overflow".to_string())?;
+    ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "generate_sequence")?;
+    let mut work_items = 0usize;
+    let mut rows = Vec::with_capacity(count);
+    for index in 0..count {
+        check_periodically(cancelled, index)?;
+        charge_transfer_work(&mut work_items, limits.max_state_items, "generate_sequence")?;
+        state_bytes = state_bytes
+            .checked_add(size_of::<Map<String, Value>>())
+            .ok_or_else(|| "LogsQL generate_sequence state size overflow".to_string())?;
+        ensure_first_state_bytes(state_bytes, limits.max_state_bytes, "generate_sequence")?;
+        charge_transfer_string(
+            "_msg",
+            &mut state_bytes,
+            limits.max_state_bytes,
+            "generate_sequence",
+        )?;
+        let message = index.to_string();
+        charge_transfer_string(
+            &message,
+            &mut state_bytes,
+            limits.max_state_bytes,
+            "generate_sequence",
+        )?;
+        let mut row = Map::new();
+        row.insert("_msg".into(), Value::String(message));
+        rows.push(Value::Object(row));
+    }
+    ensure_active(cancelled)?;
+    Ok(rows)
+}
+
 pub(crate) fn execute(
     mut rows: Vec<Value>,
     execution: PipelineExecution<'_>,
@@ -400,6 +462,9 @@ pub(crate) fn execute(
             }
             PipelineOp::TimeAdd(spec) => {
                 time_add_fields(rows, spec, execution.limits, execution.cancelled)?
+            }
+            PipelineOp::GenerateSequence(count) => {
+                generate_sequence_rows(*count, execution.limits, execution.cancelled)?
             }
             PipelineOp::QueryStats => vec![Value::Object(query_stats(
                 execution.report,
@@ -15252,6 +15317,87 @@ mod tests {
             time_add_fields(rows, &spec, limits, &AtomicBool::new(true)).unwrap_err(),
             "LogsQL pipeline cancelled"
         );
+    }
+
+    #[test]
+    fn generate_sequence_replaces_input_and_observes_every_bound() {
+        let limits = PipelineLimits {
+            max_result_rows: 10,
+            max_state_items: 10,
+            max_state_bytes: 10_000,
+        };
+        assert_eq!(
+            generate_sequence_rows(3, limits, &AtomicBool::new(false)).unwrap(),
+            [
+                json!({"_msg":"0"}),
+                json!({"_msg":"1"}),
+                json!({"_msg":"2"})
+            ]
+        );
+
+        let operations = [PipelineOp::GenerateSequence(2)];
+        let rows = execute(
+            vec![json!({"rich":[1,false,null]})],
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &operations,
+                implicit_result_limit: None,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits,
+                cancelled: &AtomicBool::new(false),
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap();
+        assert_eq!(rows, [json!({"_msg":"0"}), json!({"_msg":"1"})]);
+
+        let work_error = generate_sequence_rows(
+            3,
+            PipelineLimits {
+                max_state_items: 2,
+                ..limits
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(work_error.contains("max_work_rows=2"), "{work_error}");
+        let state_error = generate_sequence_rows(
+            3,
+            PipelineLimits {
+                max_state_bytes: 1,
+                ..limits
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(
+            state_error.contains("max_response_bytes=1"),
+            "{state_error}"
+        );
+        assert_eq!(
+            generate_sequence_rows(3, limits, &AtomicBool::new(true)).unwrap_err(),
+            "LogsQL pipeline cancelled"
+        );
+
+        let result_error = execute(
+            Vec::new(),
+            PipelineExecution {
+                report: LogQueryExecutionReport::default(),
+                operations: &[PipelineOp::GenerateSequence(3)],
+                implicit_result_limit: None,
+                rate_window_seconds: None,
+                timestamp_unit: TimestampUnit::Microseconds,
+                limits: PipelineLimits {
+                    max_result_rows: 2,
+                    ..limits
+                },
+                cancelled: &AtomicBool::new(false),
+                query_started: Instant::now(),
+            },
+        )
+        .unwrap_err();
+        assert!(result_error.contains("max_result_rows=2"), "{result_error}");
     }
 
     #[test]

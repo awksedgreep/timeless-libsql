@@ -273,6 +273,46 @@ fn parse_sample_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
     Ok(PipelineOp::Sample(sample))
 }
 
+fn parse_generate_sequence_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let tokens = lex_first_pipe(segment, "generate_sequence")?;
+    let [command, value] = tokens.as_slice() else {
+        return Err(LogsqlError::malformed(
+            "LogsQL generate_sequence requires exactly one positive number",
+        ));
+    };
+    if !command.eq_ignore_ascii_case("generate_sequence") {
+        return Err(LogsqlError::malformed(format!(
+            "expected LogsQL generate_sequence pipe, not {command:?}"
+        )));
+    }
+    let value = quoted_value(value)?.unwrap_or_else(|| value.clone());
+    if value.starts_with('+') {
+        return Err(LogsqlError::malformed(
+            "LogsQL generate_sequence does not accept a leading plus",
+        ));
+    }
+    let parsed = parse_logsql_math_number(&value).ok_or_else(|| {
+        LogsqlError::malformed(format!(
+            "LogsQL generate_sequence requires a positive number, not {value:?}"
+        ))
+    })?;
+    if parsed < 1.0 {
+        return Err(LogsqlError::malformed(
+            "LogsQL generate_sequence value must be at least one",
+        ));
+    }
+    // VictoriaLogs parses N as float64 and then converts it to uint64. That
+    // intentionally truncates positive fractions and accepts its existing
+    // decimal, duration, byte, scientific, and base-zero numeric spellings.
+    let count = parsed as u64;
+    if count == 0 {
+        return Err(LogsqlError::malformed(
+            "LogsQL generate_sequence value must produce at least one row",
+        ));
+    }
+    Ok(PipelineOp::GenerateSequence(count))
+}
+
 fn parse_delete_field(value: &str) -> Result<PipelineField, LogsqlError> {
     if value == "*" {
         return Ok(PipelineField::All);
@@ -3910,6 +3950,13 @@ fn is_time_add_pipe(segment: &str) -> bool {
         .is_some_and(|command| command.eq_ignore_ascii_case(operation))
 }
 
+fn is_generate_sequence_pipe(segment: &str) -> bool {
+    let operation = "generate_sequence";
+    segment
+        .get(..operation.len())
+        .is_some_and(|command| command.eq_ignore_ascii_case(operation))
+}
+
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
     let operation = "drop_empty_fields";
     segment
@@ -5513,6 +5560,7 @@ pub(crate) enum PipelineOp {
     UnpackSyslog(UnpackSyslogSpec),
     UnpackWords(UnpackWordsSpec),
     TimeAdd(TimeAddSpec),
+    GenerateSequence(u64),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5973,6 +6021,10 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
                 pipeline.push(parse_time_add_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
             }
+            _ if is_generate_sequence_pipe(segment) => {
+                pipeline.push(parse_generate_sequence_pipe(segment)?);
+                has_session_thirteen_pipeline = true;
+            }
             _ if is_drop_empty_fields_pipe(segment) => {
                 pipeline.push(parse_drop_empty_fields_pipe(segment)?);
                 has_session_thirteen_pipeline = true;
@@ -6036,6 +6088,18 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
     } else {
         pipeline.clear();
     }
+    if let Some(last_sequence) = pipeline
+        .iter()
+        .rposition(|operation| matches!(operation, PipelineOp::GenerateSequence(_)))
+    {
+        // The upstream pipe cancels and discards its input, then generates the
+        // complete sequence even when the source matched nothing. The last
+        // such pipe therefore makes the base filter and every earlier pipe
+        // observationally irrelevant. Drop them before query-backed
+        // resolution so an ignored prefix cannot perform hidden reads.
+        pipeline.drain(..last_sequence);
+        spec = QuerySpec::default();
+    }
     let cardinality_owned_by_pipeline = pipeline.iter().any(|operation| {
         matches!(
             operation,
@@ -6048,6 +6112,7 @@ fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlP
                 | PipelineOp::Top(_)
                 | PipelineOp::Uniq(_)
                 | PipelineOp::Facets(_)
+                | PipelineOp::GenerateSequence(_)
         )
     });
     let implicit_result_limit =
@@ -12773,6 +12838,63 @@ mod tests {
             "* | time_add 1h at stamp trailing",
             "* | time_add 1h at stamp*",
             "* | time_add.extra 1h",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn session_eighteen_generate_sequence_grammar_is_numeric_replacing_and_strict() {
+        for (query, expected) in [
+            ("* | generate_sequence 3", 3),
+            (r#"* | GeNeRaTe_SeQuEnCe "3.9""#, 3),
+            ("* | generate_sequence 0x3", 3),
+            ("* | generate_sequence 1_0", 10),
+            ("* | generate_sequence 3ns", 3),
+            ("* | generate_sequence 3e0", 3),
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::GenerateSequence(count)] = plan.pipeline.as_slice() else {
+                panic!("unexpected generate_sequence plan: {plan:?}");
+            };
+            assert_eq!(*count, expected, "{query}");
+            assert_eq!(plan.output, LogsqlOutput::Pipeline);
+            assert_eq!(plan.implicit_result_limit, None);
+            assert!(plan.spec.predicate.is_none());
+            assert_eq!(plan.spec.limit, 0);
+        }
+
+        let replaced = parse_at(
+            r#"case:=ignored | limit 1 | union rows({old:value}) | generate_sequence 2 | generate_sequence 3 | fields _msg"#,
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(replaced.pipeline.len(), 2);
+        assert!(matches!(
+            replaced.pipeline.first(),
+            Some(PipelineOp::GenerateSequence(3))
+        ));
+        assert!(matches!(
+            replaced.pipeline.last(),
+            Some(PipelineOp::Project(_))
+        ));
+        assert!(replaced.spec.predicate.is_none());
+        assert!(replaced.spec.metadata_eq.is_empty());
+
+        for malformed in [
+            "* | generate_sequence",
+            "* | generate_sequence 0",
+            "* | generate_sequence 0.9",
+            "* | generate_sequence -1",
+            "* | generate_sequence +3",
+            "* | generate_sequence nope",
+            "* | generate_sequence 3 trailing",
+            "* | generate_sequence.3",
+            "* | generate_sequence(3)",
         ] {
             assert!(
                 parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),

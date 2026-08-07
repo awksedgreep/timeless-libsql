@@ -1948,6 +1948,44 @@ block, decode, payload, match, return, and requested-work counters. The cost
 is bounded API-owned timestamp work after the unavoidable public scan and
 does not justify an extension primitive.
 
+## LogsQL bounded sequence generation
+
+`generate_sequence N` emits exactly `N` rows containing only decimal string
+messages from `{"_msg":"0"}` through `{"_msg":"N-1"}`:
+
+```text
+* | generate_sequence 3
+case:=does-not-exist | generate_sequence 3 | math (_msg + 10) as value
+* | generate_sequence 1_0 | offset 8
+```
+
+The case-insensitive command follows pinned VictoriaLogs v1.52.0 number
+parsing. Quoted positive fractions, scientific notation, base-zero integers,
+underscores, durations, and byte sizes are accepted; the binary64 value must
+be at least one and is truncated to an unsigned count. Missing, zero, sub-one,
+negative, leading-plus, malformed, attached, and trailing forms fail before
+execution.
+
+The generated sequence replaces every source row and preceding pipe. It runs
+even when the source matches nothing, a preceding limit cannot suppress it,
+and the last generator wins. Later filters, math, fields, offset, limit, sort,
+and statistics operate on the generated strings. Durable rich rows remain
+unchanged through optimize, shutdown, and reopen.
+
+Count admission, generated state and strings, later work, result cardinality,
+response bytes, deadline, and cancellation are bounded by the normal request
+limits. Plan normalization removes every dead prefix, and execution opens no
+public `logs` cursor: query, candidate-block, decode, payload, and public-row
+counters remain zero. No shadow table or private storage contract is used.
+
+Executable
+[SQL-LOG-062](../../../docs/QUERY_SQL_EQUIVALENTS.md#sql-log-062-generate-a-bounded-decimal-string-sequence)
+provides the complete direct SQLite/libSQL value-generation foundation as a
+bounded recursive CTE. Rust owns LogsQL grammar, prefix replacement,
+cumulative limits, cancellation, composition, and envelopes. Core SQL already
+generates the values with zero storage work, so no extension primitive or
+storage-format change is warranted.
+
 
 Exact-build partitioned/ranked `first` evidence measures 3.681/44.182 ms
 narrow/wide p95 while returning 16/64 rows, versus 3.153/37.107 ms for

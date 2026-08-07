@@ -2437,6 +2437,47 @@ matches and returns 128/8,192 public rows, and emits 64 results. The storage
 work proves that moving this language transform into an extension opcode
 would not improve pruning or avoid decode/payload crossing.
 
+## LogsQL bounded sequence generation
+
+`generate_sequence N` creates exactly `N` independent rows whose only field
+is the decimal string `_msg`, from `"0"` through `"N-1"`:
+
+```text
+* | generate_sequence 3
+case:=does-not-exist | generate_sequence 3 | math (_msg + 10) as value
+* | generate_sequence 1_0 | offset 8
+```
+
+The command is case-insensitive. To match pinned VictoriaLogs v1.52.0, `N`
+uses the shared number grammar: quoting, scientific notation, base-zero
+integers, underscores, duration units, and byte units are accepted. The
+parsed binary64 value must be at least one and is then truncated to an unsigned
+integer, so `"3.9"` emits three rows. Missing, zero, sub-one, negative,
+leading-plus, nonnumeric, attached, and trailing forms fail explicitly.
+
+Generation replaces its complete input. It still runs when the source filter
+matches no durable row; earlier `limit`, transformation, union, or query-backed
+operations cannot affect its output; and the last `generate_sequence` wins.
+Later filters, math, projection, sort, offset, limit, and statistics consume
+the generated string rows normally. The operation never mutates its durable
+source.
+
+The admitted count, retained vector, decimal strings, later-pipeline work,
+result rows, encoded response, deadline, and cancellation all use the existing
+request limits. The planner discards every semantically dead prefix and the
+reader opens no public `logs` cursor, so correct execution performs zero block
+selection, decode, payload transfer, or public-row materialization. This is
+both faster and more faithful than scanning rows merely to discard them.
+
+Executable
+[SQL-LOG-062](QUERY_SQL_EQUIVALENTS.md#sql-log-062-generate-a-bounded-decimal-string-sequence)
+gives direct SQLite/libSQL users the complete value-generation foundation as
+a bounded recursive CTE. LogsQL parsing, prefix replacement, cumulative API
+limits, cancellation, composition, and envelopes remain Rust API concerns.
+There is no extension opcode: ordinary core SQL already performs the operation
+without reading storage, so an extension primitive could not reduce storage
+work.
+
 
 ## LogsQL upper-step quantiles and population deviation
 

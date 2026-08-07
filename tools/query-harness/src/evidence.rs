@@ -316,6 +316,39 @@ fn require_same_public_query_work(
     require_same_public_query_work_with_scans(queries, control_key, sampled_key, 1, 0)
 }
 
+fn require_no_public_query_work(queries: &Map<String, Value>, keys: &[&str]) -> Result<()> {
+    const PUBLIC_WORK_FIELDS: &[&str] = &[
+        "query_count",
+        "native_count_count",
+        "query_bounded_count",
+        "query_bounded_requested_entries",
+        "query_candidate_blocks",
+        "query_decoded_entries",
+        "query_payload_bytes_read",
+        "query_matched_entries",
+        "query_returned_entries",
+        "query_materialize_ns",
+        "query_snapshot_ns",
+        "query_stable_location_snapshots",
+        "query_total_ns",
+    ];
+    for key in keys {
+        let evidence = queries
+            .get(*key)
+            .with_context(|| format!("missing scan-free evidence shape {key}"))?;
+        for field in PUBLIC_WORK_FIELDS {
+            let value = evidence
+                .pointer(&format!("/stats_delta/{field}"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if value != 0 {
+                bail!("scan-free evidence {key} unexpectedly recorded {field}={value}");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn require_same_public_query_work_with_scans(
     queries: &Map<String, Value>,
     control_key: &str,
@@ -3007,6 +3040,20 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
                 None,
             ),
             (
+                "generate_sequence_narrow",
+                "logs-generate-sequence-narrow",
+                r#"host:="h00" AND query | generate_sequence 64"#,
+                64,
+                None,
+            ),
+            (
+                "generate_sequence_wide",
+                "logs-generate-sequence-wide",
+                r#"query | generate_sequence 64"#,
+                64,
+                None,
+            ),
+            (
                 "unpack_json_narrow",
                 "logs-unpack-json-narrow",
                 r#"host:="h00" AND query | fields range_key | pack_json fields (range_key) as packed | unpack_json from packed fields (range_key) result_prefix decoded_ | limit 64 | fields decoded_range_key"#,
@@ -3621,6 +3668,10 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         require_same_public_query_work(&queries, "total_stats_control_wide", "total_stats_wide")?;
         require_same_public_query_work(&queries, "time_add_control_narrow", "time_add_narrow")?;
         require_same_public_query_work(&queries, "time_add_control_wide", "time_add_wide")?;
+        require_no_public_query_work(
+            &queries,
+            &["generate_sequence_narrow", "generate_sequence_wide"],
+        )?;
         let final_stats = stats(context.client, &server.base, "/select/logsql/stats")?;
         let hwm = hwm_kib(server.pid())?;
         Ok(json!({
@@ -3846,6 +3897,26 @@ mod tests {
             require_same_public_query_work_with_scans(&union_queries, "control", "sampled", 2, 192)
                 .unwrap_err();
         assert!(format!("{error:#}").contains("state reservation"));
+    }
+
+    #[test]
+    fn input_independent_shapes_must_record_zero_public_storage_work() {
+        let mut queries = Map::from_iter([(
+            "sequence".to_owned(),
+            json!({
+                "iterations": 50,
+                "stats_delta": {
+                    "api_query_count": 50,
+                    "api_query_result_rows": 3_200,
+                    "read_permit_count": 51
+                }
+            }),
+        )]);
+        require_no_public_query_work(&queries, &["sequence"]).unwrap();
+
+        queries["sequence"]["stats_delta"]["query_decoded_entries"] = json!(1);
+        let error = require_no_public_query_work(&queries, &["sequence"]).unwrap_err();
+        assert!(format!("{error:#}").contains("query_decoded_entries=1"));
     }
 
     #[test]
