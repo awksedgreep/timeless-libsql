@@ -1347,8 +1347,17 @@ cardinality, response bytes, deadline, and cancellation are bounded. A
 failing-then-passing real-extension regression proves zero storage query,
 block, decode, payload, and row work; immutable rich source data; optimize;
 shutdown; and reopen. `QSF-245` records the semantic and unchanged-storage
-boundary. Exact release-build latency, storage totals, RSS HWM, and final
-documentation evidence remain required before `LQL-P48` closes.
+boundary. Exact release build
+`8b6a5e7cb722ceeb7a5f25221994d2d8b619ed7f` measures 0.836/0.780 ms p95
+for indexed-host/full-fixture source spellings while returning the same 64
+rows and 886 bytes. Each records zero public query, block, decode, payload,
+match, and row work. The 6.6% lower full-source p95 is accepted loopback
+variation between identical scan-free plans. All 8,192 entries complete
+durably; storage remains four raw blocks; queued and in-flight work are zero;
+and logs HWM is 107,436 KiB. `QSF-246` records the exact-build verdict. No
+extension primitive, private table, storage contract, batching, compression,
+index, retention, transaction, migration, optimize, or maintenance behavior
+changed. `LQL-P48` is closed.
 
 ### Session 19: experimental and data-model dispositions
 

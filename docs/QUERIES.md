@@ -2478,6 +2478,22 @@ There is no extension opcode: ordinary core SQL already performs the operation
 without reading storage, so an extension primitive could not reduce storage
 work.
 
+Exact release build `8b6a5e7cb722ceeb7a5f25221994d2d8b619ed7f`
+measures 64 generated rows at 0.691/0.836/0.900 ms for an indexed-host source
+form and 0.640/0.780/0.839 ms for a full-fixture source form p50/p95/p99.
+Both responses are exactly 886 bytes. Across 50 measured requests apiece,
+neither shape records a public query, native-count path, candidate block,
+decoded entry, payload byte, matched entry, or returned public row. The 6.6%
+lower wide-form p95 and 2.9% lower API-owned mean are loopback variation
+between semantically identical scan-free execution paths. Source selectivity
+cannot affect the operation.
+
+The full evidence workload completed all 8,192 entries with zero queued work,
+retained four raw blocks, 1,914,055 logical bytes, and 2,022,736 physical
+database/WAL/SHM bytes. Logs RSS HWM was 107,436 KiB and metrics HWM was
+50,720 KiB. `QSF-245`–`QSF-246` retain the semantic, storage, latency, and
+memory verdicts.
+
 
 ## LogsQL upper-step quantiles and population deviation
 

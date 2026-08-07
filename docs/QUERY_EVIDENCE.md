@@ -4859,6 +4859,63 @@ public batch/SQL contracts are unchanged. No private shadow table,
 Elixir/BEAM/NIF/process fallback, CI workflow or invocation, tag, release, or
 downstream repository was used or modified.
 
+## Session 18 LogsQL P3: bounded `generate_sequence`
+
+The checked-in
+[`2026-08-07_session18_lql_p48_generate_sequence.json`](evidence/2026-08-07_session18_lql_p48_generate_sequence.json)
+was captured from exact release extension and server build
+`8b6a5e7cb722ceeb7a5f25221994d2d8b619ed7f` and has SHA-256
+`4626cb29b8340bcb33dd0c8f4abceef4542e3824b6a2f16ff300d1897d119999`.
+Both shapes generate the same 64 decimal `_msg` strings. One starts with an
+indexed-host source expression and the other with a full-fixture expression;
+the final generator must make both sources observationally dead.
+
+| shape | result rows | response bytes | p50 ms | p95 ms | p99 ms | public queries/request | candidate blocks/request | decoded entries/request | extension payload bytes/request | public rows/request |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `generate_sequence 64`, indexed-host source | 64 | 886 | 0.691 | 0.836 | 0.900 | 0 | 0 | 0 | 0 | 0 |
+| `generate_sequence 64`, full-fixture source | 64 | 886 | 0.640 | 0.780 | 0.839 | 0 | 0 | 0 | 0 | 0 |
+
+The full-source spelling is 6.6% lower at p95. Request-attributed API means
+are 0.007752/0.007524 ms, or 2.9% lower. These tiny differences are
+loopback/parser variation between semantically identical scan-free plans, not
+a storage effect. Across 50 measured requests per shape, neither path records
+a public query, native count, bounded query, candidate block, decoded entry,
+payload byte, match, returned entry, materialization, snapshot, or storage
+query timer. Both emit exactly 3,200 measured rows and 44,300 response bytes.
+
+All 8,192 rich fixture entries completed durably with zero queued work.
+Admission took 13.963 ms and the explicit durability barrier took 40.840 ms.
+Storage remains exactly four raw blocks, 1,914,055 logical payload bytes, and
+2,022,736 physical database/WAL/SHM bytes. Logs HWM was 107,436 KiB, 1,328 KiB
+above LQL-P47 after two additional scan-free shapes; metrics HWM was 50,720
+KiB, 324 KiB below it. Both complete-workload maxima are retained as
+whole-process variation. Cancellation ended with zero requests in flight and
+zero cancelled requests at capture.
+
+The complete 1,357-case pinned VictoriaLogs v1.52.0 corpus passes live.
+Direct parser/evaluator and real-extension regressions pin shared numeric
+spellings, positive fractional truncation, string output, no-match generation,
+complete prefix replacement, last-generator-wins behavior, later-pipe
+composition, strict errors, cumulative limits, cancellation, immutable rich
+source rows, zero public storage work, optimize, shutdown, and reopen.
+Executable `SQL-LOG-062` proves the scan-free recursive-CTE foundation through
+the public SQLite/libSQL interface.
+
+Final local gates pass: 150 logs library tests, two logs binary tests, all 74
+logs and 90 metrics real-extension tests, the complete default root workspace
+and server workspace targets, the 36-test Rust query harness, all six focused
+correctness profiles, the standalone DB-health lifecycle gate, all 45
+CLI/crash/transaction sections including 150,000 oracle operations and five
+kill-9 rounds, the complete 1,357-case live oracle, documentation/oracle
+contracts, formatting, and Clippy with warnings denied. All 128 executable SQL
+recipes and 166 statements pass through the public release extension.
+
+The extension's authoritative 8,192-entry batching, storage formats,
+compression, indexes, retention, optimize, transactions, migrations, and
+public batch/SQL contracts are unchanged. No extension opcode, private shadow
+table, language fallback, tag, release, or downstream repository was used or
+modified.
+
 ## Session 18 LogsQL P3: bounded `hash`
 
 The checked-in

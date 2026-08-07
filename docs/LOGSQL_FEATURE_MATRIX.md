@@ -151,7 +151,7 @@ extension.
 | `LQL-P45` | `running_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-059-bounded-running-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P46` | `total_stats` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-060-bounded-total-numeric-state-by-one-exact-key)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P47` | `time_add` ([SQL foundation](QUERY_SQL_EQUIVALENTS.md#sql-log-061-add-a-duration-to-public-native-log-time); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-time_add)) | shipped | no | `SQL` | `API` | P3 |
-| `LQL-P48` | `generate_sequence` | in progress | no | `SQL` | `API` | P3 |
+| `LQL-P48` | `generate_sequence` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-062-generate-a-bounded-decimal-string-sequence); [evidence](QUERY_EVIDENCE.md#session-18-logsql-p3-bounded-generate_sequence)) | shipped | no | `SQL` | `API` | P3 |
 | `LQL-P49` | `set_stream_fields` | deferred | no | none | `DEFER` | DEFER |
 | `LQL-P50` | `stream_context` | deferred | no | none | `DEFER` | DEFER |
 
@@ -182,6 +182,22 @@ Every pair executes one public query and has identical block, decode, payload,
 match, return, and requested-work counters. `QSF-244` accepts the bounded
 post-scan timestamp parse/format cost and records the 106,108 KiB whole-process
 logs HWM. The storage boundary and direct-user SQL foundation remain unchanged.
+
+`LQL-P48` is an input-independent Rust API generator with a complete core-SQL
+foundation. Pinned VictoriaLogs semantics include shared numeric spellings,
+positive fractional truncation, string-valued `_msg`, complete source/prefix
+replacement, last-generator-wins behavior, and later-pipe composition. Count,
+state, result, response, deadline, and cancellation limits remain explicit.
+
+The normalized plan starts at the final generator and opens no public `logs`
+cursor. Exact release evidence measures 64 rows/886 bytes at
+0.691/0.836/0.900 ms for an indexed-host source form and
+0.640/0.780/0.839 ms for a full-fixture source form p50/p95/p99. Both execute
+50 API requests while recording zero public query, candidate-block, decode,
+payload, match, and returned-row work. The 6.6% lower wide-form p95 is ordinary
+loopback variation between semantically identical scan-free requests, not a
+storage effect. `SQL-LOG-062` gives direct users the bounded recursive CTE;
+there is no extension primitive because correct execution reads no storage.
 
 `LQL-P10` is deliberately deferred, not approximated. VictoriaLogs
 `block_stats` exposes one row per physical field column with its internal
