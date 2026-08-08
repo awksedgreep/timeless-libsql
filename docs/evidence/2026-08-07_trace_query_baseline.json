@@ -1,0 +1,359 @@
+{
+  "branch": "feature/trace-duration-pruning",
+  "build": {
+    "extension": {
+      "commit": "ef7c8577d491acd5b48daf9f6638851596cdcab2",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "profile": "release",
+    "traces_binary": {
+      "commit": "ef7c8577d491acd5b48daf9f6638851596cdcab2",
+      "name": "timeless-traces-api",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "0.4.0"
+    }
+  },
+  "captured_at": "2026-08-08T02:20:36.599435Z",
+  "direct_sql": {
+    "broad_all_time_boxes": {
+      "extension_work_delta": {
+        "query_blocks_skipped_by_bound": 0,
+        "query_bounded_count": 0,
+        "query_bounded_max_spans": 0,
+        "query_bounded_requested_spans": 0,
+        "query_buffered_spans_examined": 0,
+        "query_cancelled": 0,
+        "query_candidate_blocks": 960,
+        "query_count": 20,
+        "query_decoded_spans": 2621440,
+        "query_matched_spans": 2621440,
+        "query_payload_blocks_read": 960,
+        "query_payload_bytes_read": 13336880,
+        "query_returned_spans": 2621440,
+        "query_snapshot_ns": 1235065,
+        "query_snapshot_payload_bytes": 0,
+        "query_snapshot_payload_max_bytes": 0,
+        "query_stable_location_snapshots": 20,
+        "query_total_ns": 1210453343
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 68694188,
+        "min": 57988623,
+        "p50": 58733109,
+        "p95": 68475366,
+        "p99": 68694188
+      },
+      "parameters": {
+        "service": null,
+        "start_ns": 1699999200000000000,
+        "step_ns": 3600000000000,
+        "stop_ns": 1700053200008191000,
+        "table": "traces"
+      },
+      "result_json_bytes": 2961,
+      "result_rows": 16,
+      "result_spans": 131072,
+      "sql": "SELECT bucket_ts,service,spans,errors,dur_sum,dur_min,dur_max,dur_p50,dur_p95,dur_p99 FROM timeless_trace_buckets(?1,?2,?3,?4,?5) ORDER BY bucket_ts,service",
+      "warmup": 3
+    },
+    "narrow_one_time_box_control": {
+      "extension_work_delta": {
+        "query_blocks_skipped_by_bound": 0,
+        "query_bounded_count": 0,
+        "query_bounded_max_spans": 0,
+        "query_bounded_requested_spans": 0,
+        "query_buffered_spans_examined": 0,
+        "query_cancelled": 0,
+        "query_candidate_blocks": 60,
+        "query_count": 20,
+        "query_decoded_spans": 163840,
+        "query_matched_spans": 163840,
+        "query_payload_blocks_read": 60,
+        "query_payload_bytes_read": 829500,
+        "query_returned_spans": 163840,
+        "query_snapshot_ns": 930052,
+        "query_snapshot_payload_bytes": 0,
+        "query_snapshot_payload_max_bytes": 0,
+        "query_stable_location_snapshots": 20,
+        "query_total_ns": 70619184
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 3679931,
+        "min": 3493057,
+        "p50": 3551020,
+        "p95": 3671111,
+        "p99": 3679931
+      },
+      "parameters": {
+        "service": "bench",
+        "start_ns": 1699999200000000000,
+        "step_ns": 3600000000000,
+        "stop_ns": 1699999200008191000,
+        "table": "traces"
+      },
+      "result_json_bytes": 186,
+      "result_rows": 1,
+      "result_spans": 8192,
+      "sql": "SELECT bucket_ts,service,spans,errors,dur_sum,dur_min,dur_max,dur_p50,dur_p95,dur_p99 FROM timeless_trace_buckets(?1,?2,?3,?4,?5) ORDER BY bucket_ts,service",
+      "warmup": 3
+    },
+    "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
+    "rss": {
+      "hwm_kib": 17644,
+      "rss_kib": 17644
+    }
+  },
+  "fixture": {
+    "checkpoint": {
+      "busy": 0,
+      "checkpointed_frames": 0,
+      "elapsed_ns": 3678798,
+      "log_frames": 0
+    },
+    "durable_spans_per_second": 224071.0580419379,
+    "exact_reopen_count": 131072,
+    "insert_ns": 584957295,
+    "journal_mode": "wal",
+    "optimize_ns": 383131016,
+    "public_batch_bytes": 66817644,
+    "rich_span_probe": true,
+    "stats_after_reopen": {
+      "blocks": 48,
+      "buffered_spans": 0,
+      "bytes_on_disk": 666844,
+      "compressed_blocks": 48,
+      "duration_bounded_blocks": 48,
+      "duration_unknown_blocks": 0,
+      "index_bytes": 2523136,
+      "raw_blocks": 0,
+      "terms": 576,
+      "total_spans": 131072,
+      "trace_index_rows": 49152
+    },
+    "stats_before_optimize": {
+      "blocks": 48,
+      "buffered_spans": 0,
+      "bytes_on_disk": 64855180,
+      "compressed_blocks": 0,
+      "raw_blocks": 48,
+      "total_spans": 131072
+    },
+    "storage_after_checkpoint": {
+      "database_bytes": 68165632,
+      "physical_bytes": 68165632,
+      "shm_bytes": 0,
+      "wal_bytes": 0
+    },
+    "timestamp_range_ns": [
+      1699999200000000000,
+      1700053200008191000
+    ]
+  },
+  "git_commit": "ef7c8577d491acd5b48daf9f6638851596cdcab2",
+  "host": {
+    "machine": "x86_64",
+    "processor": "unknown",
+    "release": "7.1.3-arch1-2",
+    "system": "Linux"
+  },
+  "jaeger": {
+    "broad_full_decode_miss": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 1120,
+        "api_read_result_spans": 0,
+        "api_read_result_traces": 0,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 1828621995,
+        "api_read_total_ns": 1831709297
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 0,
+        "extension_query_bounded_count": 20,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 2000,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 960,
+        "extension_query_count": 20,
+        "extension_query_decoded_spans": 2621440,
+        "extension_query_matched_spans": 0,
+        "extension_query_payload_blocks_read": 960,
+        "extension_query_payload_bytes_read": 13336880,
+        "extension_query_returned_spans": 0,
+        "extension_query_snapshot_ns": 2290701,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 1826570053
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 98430640,
+        "min": 82671505,
+        "p50": 90235478,
+        "p95": 97450505,
+        "p99": 98430640
+      },
+      "path": "/select/jaeger/api/traces?service=bench&minDuration=500000&maxDuration=500000&limit=100",
+      "response_bytes": 56,
+      "result_spans": 0,
+      "result_traces": 0,
+      "warmup": 3
+    },
+    "broad_result_4096_spans": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 77499580,
+        "api_read_result_spans": 81920,
+        "api_read_result_traces": 10240,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 3050691926,
+        "api_read_total_ns": 3053293230
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 900,
+        "extension_query_bounded_count": 20,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 81920,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 960,
+        "extension_query_count": 20,
+        "extension_query_decoded_spans": 163840,
+        "extension_query_matched_spans": 163840,
+        "extension_query_payload_blocks_read": 60,
+        "extension_query_payload_bytes_read": 833420,
+        "extension_query_returned_spans": 81920,
+        "extension_query_snapshot_ns": 2536698,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 118958641
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 159530127,
+        "min": 146417225,
+        "p50": 155201076,
+        "p95": 157523219,
+        "p99": 159530127
+      },
+      "path": "/select/jaeger/api/traces?service=bench&minDuration=1&limit=4096",
+      "response_bytes": 3874979,
+      "result_spans": 4096,
+      "result_traces": 512,
+      "warmup": 3
+    },
+    "exact_trace_control": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 150520,
+        "api_read_result_spans": 160,
+        "api_read_result_traces": 20,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 127195681,
+        "api_read_total_ns": 130422925
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 0,
+        "extension_query_bounded_count": 0,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 0,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 60,
+        "extension_query_count": 20,
+        "extension_query_decoded_spans": 163840,
+        "extension_query_matched_spans": 160,
+        "extension_query_payload_blocks_read": 60,
+        "extension_query_payload_bytes_read": 829500,
+        "extension_query_returned_spans": 160,
+        "extension_query_snapshot_ns": 1406835,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 120275066
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 12302263,
+        "min": 5201366,
+        "p50": 6197004,
+        "p95": 11460198,
+        "p99": 12302263
+      },
+      "path": "/select/jaeger/api/traces/00000000000000000000000000000001",
+      "response_bytes": 7526,
+      "result_spans": 8,
+      "result_traces": 1,
+      "warmup": 3
+    },
+    "final_storage_stats": {
+      "blocks": 48,
+      "bytes_on_disk": 666844,
+      "compressed_blocks": 48,
+      "database_file_bytes": 68165632,
+      "database_shm_bytes": 32768,
+      "database_wal_bytes": 16512,
+      "freelist_bytes": 64929792,
+      "freelist_pages": 15852,
+      "physical_database_bytes": 68214912,
+      "raw_blocks": 0,
+      "sqlite_index_bytes": 2523136,
+      "sqlite_page_bytes": 68165632,
+      "total_spans": 131072
+    },
+    "rss": {
+      "after_queries": {
+        "hwm_kib": 157692,
+        "rss_kib": 84664
+      },
+      "before_queries": {
+        "hwm_kib": 28060,
+        "rss_kib": 28060
+      }
+    }
+  },
+  "schema_version": 1,
+  "storage_after_queries": {
+    "database_bytes": 68165632,
+    "physical_bytes": 68165632,
+    "shm_bytes": 0,
+    "wal_bytes": 0
+  },
+  "workload": {
+    "authoritative_batch_spans": 8192,
+    "batches": 16,
+    "duration_values_ns": [
+      100000,
+      900000
+    ],
+    "iterations": 20,
+    "logical_spans": 131072,
+    "loopback_http": true,
+    "rich_fields": [
+      "attributes",
+      "status_description",
+      "events",
+      "resource",
+      "instrumentation_scope"
+    ],
+    "single_client": true,
+    "time_boxes": 16,
+    "warmup": 3
+  }
+}

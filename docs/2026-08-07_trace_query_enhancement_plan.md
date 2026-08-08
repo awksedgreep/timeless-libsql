@@ -66,13 +66,21 @@ Exit criteria:
 
 No query implementation or optimization is allowed in this session.
 
-## Session 2 — Projection-aware trace decoding
+Status: complete. Release-build evidence from source commit
+`ef7c8577d491acd5b48daf9f6638851596cdcab2` is recorded in
+[`2026-08-07_trace_query_baseline.md`](2026-08-07_trace_query_baseline.md)
+and the versioned
+[`JSON artifact`](evidence/2026-08-07_trace_query_baseline.json).
 
-Teach the trace cursor to decode only the physical columns requested by SQLite,
-with a minimal scalar path for `timeless_trace_buckets`. Keep predicate,
-ordering, and rich-span semantics identical. Do not split or revise an on-disk
-codec unless the baseline proves projection cannot be applied safely to the
-existing columnar representation.
+## Session 2 — Projection-aware, late-materializing trace decoding
+
+Teach the trace cursor to decode only the physical columns requested by SQLite.
+Add predicate-first late materialization so rich columns are decoded only for
+rows that survive storage predicates and bounds, with a minimal scalar path for
+`timeless_trace_buckets`. Keep predicate, ordering, and rich-span semantics
+identical. Do not split or revise an on-disk codec unless the baseline proves
+projection/late materialization cannot be applied safely to the existing
+columnar representation.
 
 Exit criteria:
 
