@@ -15,8 +15,8 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.4.1` | Current extension/core/dbhealth source line. |
-| `server_workspace` | `0.4.1` | Current metrics/logs/traces server source line. |
+| `extension_workspace` | `0.4.1` | Current tagged extension/core/dbhealth source line. |
+| `server_workspace` | `0.4.1` | Current tagged metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
 | `extension_minimum_server` | `0.4.0` | Oldest server accepted by the current extension document. |
@@ -131,11 +131,11 @@ storage.
 ## Platform and SQLite/libSQL boundary
 
 The release-tool target inventory covers x86-64/AArch64 Linux GNU and
-x86-64/AArch64 macOS. For `v0.4.0`, both Linux candidate jobs passed and both
-macOS jobs failed before producing archives because the release tool linked
-against Apple's restricted system SQLite. Consequently `v0.4.0` has no
-complete checked native artifact set or published outer checksums. Do not
-infer platform publication from the target inventory alone.
+x86-64/AArch64 macOS. For `v0.4.1`, all four native build, identity,
+install/remove, and upload jobs passed, followed by the complete outer
+checksum job. Those archives are retained as Actions artifacts until
+2026-11-06; the workflow did not create a permanent GitHub Release. Do not
+conflate a checked platform matrix with a permanent publication channel.
 
 The extension uses SQLite's loadable-extension ABI and stores ordinary SQLite
 pages/WAL records. A host may use SQLite backup, libSQL replication, or sqld

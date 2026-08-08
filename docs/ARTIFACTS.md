@@ -9,23 +9,23 @@ reachable from `main`.
 
 ## Current publication status
 
-`v0.4.0` was tagged from `main` on 2026-08-08. Its query and production gates
-passed. Both Linux package jobs produced candidates and passed the isolated
-install/remove drill. Both macOS jobs failed before archive creation because
-the release tool linked against Apple's restricted system SQLite, which omits
-the load-extension symbols it uses for identity verification. With an
-incomplete matrix, the outer checksum job was skipped. No GitHub Release was
-published, and the two workflow-retained Linux candidates are not presented
-as a partial public release.
+`v0.4.1` was tagged from `main` at
+`d14a59503d2f54f608a6d424dca3d62b31d9ce34` on 2026-08-08. GitHub Actions
+run `31273182478` built, identity-checked, install/remove-drilled, and uploaded
+all four intended Linux/macOS archives. Its checksum job downloaded the whole
+matrix, produced the complete outer `SHA256SUMS`, verified it, and uploaded it
+as a fifth artifact. The artifacts are retained by Actions until 2026-11-06.
 
-Build from source until a later tag publishes all intended archives and the
-complete outer `SHA256SUMS`. Do not construct a download URL from the examples
-below or treat the existence of `v0.4.0` as binary availability.
+That successful candidate matrix is not a permanent public download channel.
+The workflow did not create a GitHub Release, and no `v0.4.1` release entry or
+release-asset URL currently exists. Build from source or download the five
+artifacts from that authenticated workflow run while they are retained. Do
+not construct a GitHub Release URL from the examples below.
 
-The `0.4.1` source line removes that known macOS link dependency by building
-the release tool with bundled SQLite. This is a packaging fix, not a
-publication claim: a `v0.4.1` tag must still complete all four native jobs and
-the outer checksum gate before its workflow artifacts form a complete set.
+For history, `v0.4.0` produced only its two Linux candidates. Both macOS jobs
+failed because the release tool used Apple's restricted system SQLite, and
+the aggregate checksum job was skipped. `v0.4.1` fixed that packaging defect
+by building the release tool with bundled SQLite.
 
 The standalone dbhealth extension is intentionally not in this bundle. Build
 `dbhealth-ext` separately from compatible source when it is required.
@@ -125,14 +125,13 @@ identity. Before distribution, compare:
 
 ## Installing
 
-After a later complete release is published, extract the archive matching the
-host, verify its outer checksum, then run its installer. These `0.4.0` names
-illustrate the versioned layout only; those archives are not currently
-published:
+After obtaining the complete `v0.4.1` workflow artifact set, verify the outer
+checksum, extract the archive matching the host, then run its installer. These
+names illustrate the versioned layout; they are not GitHub Release URLs:
 
 ```sh
-tar -xzf timeless-telemetry-data-plane-0.4.0-x86_64-unknown-linux-gnu.tar.gz
-cd timeless-telemetry-data-plane-0.4.0-x86_64-unknown-linux-gnu
+tar -xzf timeless-telemetry-data-plane-0.4.1-x86_64-unknown-linux-gnu.tar.gz
+cd timeless-telemetry-data-plane-0.4.1-x86_64-unknown-linux-gnu
 sudo ./install.sh --prefix /opt/timeless
 ```
 

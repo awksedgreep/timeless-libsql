@@ -429,11 +429,11 @@ contains the telemetry extension and all three signal-specific binaries.
 `dbhealth` is a separate extension artifact and is not registered by these
 servers.
 
-That intended matrix is not a publication claim. `v0.4.0` produced validated
-Linux candidates, but its macOS packaging jobs failed before archive creation;
-there is no complete outer checksum set or published GitHub Release for that
-tag. Other targets may compile from source but are not claimed as release
-artifacts. Exact archive paths, current publication status, checksums,
+`v0.4.1` passed all four intended native package jobs and the complete outer
+checksum gate. The archives are retained as authenticated GitHub Actions
+artifacts until 2026-11-06; the workflow did not attach them to a permanent
+GitHub Release. Other targets may compile from source but are not claimed as
+release artifacts. Exact archive paths, current channel status, checksums,
 manifest/SBOM content, install layout, and removal behavior are in the
 [artifact inventory](ARTIFACTS.md).
 

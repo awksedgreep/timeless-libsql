@@ -28,8 +28,11 @@ macOS release-tool link failure after both Linux candidates passed. No
 complete outer checksum set or GitHub Release was published. The disposable
 native package used by this report's local installation gate and the
 workflow-retained Linux candidates are not presented as a partial release.
-The [artifact inventory](ARTIFACTS.md) records the current publication state
-and the complete bundle contract.
+The later `v0.4.1` tag fixed that link dependency and passed all four native
+package jobs plus the aggregate checksum job. Its candidates remain
+workflow-retained artifacts rather than GitHub Release assets. The
+[artifact inventory](ARTIFACTS.md) records the current channel and complete
+bundle contract.
 
 ## Exact compatibility coverage
 
@@ -218,10 +221,11 @@ The release workflow targets four native archives:
 `x86_64-apple-darwin`, and `aarch64-apple-darwin`. Each contains the metrics,
 logs, and traces binaries; matching extension; installer/remover; internal
 checksums; artifact manifest; SPDX SBOM; project license; and third-party
-notices. `v0.4.0` did not complete that matrix and is therefore not a
-published native bundle. Static Rust embedding and direct libSQL 0.9.30 use
-the same three production signal surfaces and prove cold reopen without the
-compatibility spike.
+notices. `v0.4.0` did not complete that matrix. `v0.4.1` subsequently passed
+all four archive jobs and the outer `SHA256SUMS` gate; those files are retained
+as authenticated workflow artifacts, not attached to a GitHub Release. Static
+Rust embedding and direct libSQL 0.9.30 use the same three production signal
+surfaces and prove cold reopen without the compatibility spike.
 
 ## Higher-order Elixir interface recommendations
 

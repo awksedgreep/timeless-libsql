@@ -6,15 +6,14 @@ not turn the server binaries into readers for an unrelated Rust block-store
 directory; that conversion belongs to the higher-order product that owns the
 legacy format and must write through the public Timeless batch/SQL contracts.
 
-The current source line is `0.4.1`. The preceding `v0.4.0` tag has no complete
-published native artifact set: its Linux
-candidate bundles passed, its macOS packaging jobs failed, and no outer
-checksum set or GitHub Release was published. Build the matching extension and
-servers from source, or use a later complete release recorded in the
-[artifact guide](ARTIFACTS.md); do not mix a
-workflow-retained candidate with another version. The earlier `v0.3.0` tag
-predates the capability handshake and is not a valid extension peer for a
-`0.4.x` server.
+The current tagged source line is `0.4.1`. Its four native package jobs and
+complete outer-checksum gate passed. The resulting archives are authenticated
+GitHub Actions artifacts retained until 2026-11-06, not permanent GitHub
+Release assets. Build the matching extension and servers from source or obtain
+the complete matching workflow set described in the
+[artifact guide](ARTIFACTS.md); never mix one retained candidate with another
+version. The earlier `v0.3.0` tag predates the capability handshake and is not
+a valid extension peer for a `0.4.x` server.
 
 ## Invariants
 

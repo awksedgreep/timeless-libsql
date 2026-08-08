@@ -18,6 +18,11 @@ No changes recorded after `0.4.1`.
 
 ## [0.4.1] — 2026-08-08
 
+The tag points at `d14a59503d2f54f608a6d424dca3d62b31d9ce34`. Its
+tag-triggered artifact run built and uploaded all four intended Linux/macOS
+archives and the complete outer checksum set. These are workflow-retained
+artifacts; the workflow did not create a GitHub Release.
+
 ### Added
 
 - A dedicated deferred-work index covering every non-shipped PromQL,
