@@ -66,8 +66,8 @@ Exit criteria:
 
 No query implementation or optimization is allowed in this session.
 
-Status: complete. Release-build evidence from source commit
-`ef7c8577d491acd5b48daf9f6638851596cdcab2` is recorded in
+Status: complete. Refined per-shape release-build evidence from source commit
+`ba3df20eef88ba63b57d89e90d3713e723dc6adf` is recorded in
 [`2026-08-07_trace_query_baseline.md`](2026-08-07_trace_query_baseline.md)
 and the versioned
 [`JSON artifact`](evidence/2026-08-07_trace_query_baseline.json).
@@ -90,6 +90,9 @@ Exit criteria:
 - bucket output is bit/exact-value identical to Session 1;
 - broad Jaeger and bucket evidence shows the change in decoded fields/bytes,
   p50/p95/p99, and HWM with no storage or write regression;
+- report the 4,096-span Jaeger response HWM independently: projection work
+  must not claim its response-construction/serialization memory as a storage
+  improvement, and any response-memory experiment remains a separate change;
 - any new stats are public, bounded, documented, and transaction/reopen safe.
 
 ## Session 3 — Exact percentile selection

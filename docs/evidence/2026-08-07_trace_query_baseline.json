@@ -2,20 +2,20 @@
   "branch": "feature/trace-duration-pruning",
   "build": {
     "extension": {
-      "commit": "ef7c8577d491acd5b48daf9f6638851596cdcab2",
+      "commit": "ba3df20eef88ba63b57d89e90d3713e723dc6adf",
       "profile": "release",
       "target": "x86_64-unknown-linux-gnu"
     },
     "profile": "release",
     "traces_binary": {
-      "commit": "ef7c8577d491acd5b48daf9f6638851596cdcab2",
+      "commit": "ba3df20eef88ba63b57d89e90d3713e723dc6adf",
       "name": "timeless-traces-api",
       "profile": "release",
       "target": "x86_64-unknown-linux-gnu",
       "version": "0.4.0"
     }
   },
-  "captured_at": "2026-08-08T02:20:36.599435Z",
+  "captured_at": "2026-08-08T02:37:07.787104Z",
   "direct_sql": {
     "broad_all_time_boxes": {
       "extension_work_delta": {
@@ -32,19 +32,19 @@
         "query_payload_blocks_read": 960,
         "query_payload_bytes_read": 13336880,
         "query_returned_spans": 2621440,
-        "query_snapshot_ns": 1235065,
+        "query_snapshot_ns": 1285034,
         "query_snapshot_payload_bytes": 0,
         "query_snapshot_payload_max_bytes": 0,
         "query_stable_location_snapshots": 20,
-        "query_total_ns": 1210453343
+        "query_total_ns": 1234426948
       },
       "iterations": 20,
       "latency_ns": {
-        "max": 68694188,
-        "min": 57988623,
-        "p50": 58733109,
-        "p95": 68475366,
-        "p99": 68694188
+        "max": 69262613,
+        "min": 58754382,
+        "p50": 60299645,
+        "p95": 69241898,
+        "p99": 69262613
       },
       "parameters": {
         "service": null,
@@ -74,19 +74,19 @@
         "query_payload_blocks_read": 60,
         "query_payload_bytes_read": 829500,
         "query_returned_spans": 163840,
-        "query_snapshot_ns": 930052,
+        "query_snapshot_ns": 946720,
         "query_snapshot_payload_bytes": 0,
         "query_snapshot_payload_max_bytes": 0,
         "query_stable_location_snapshots": 20,
-        "query_total_ns": 70619184
+        "query_total_ns": 72534277
       },
       "iterations": 20,
       "latency_ns": {
-        "max": 3679931,
-        "min": 3493057,
-        "p50": 3551020,
-        "p95": 3671111,
-        "p99": 3679931
+        "max": 3984035,
+        "min": 3481768,
+        "p50": 3624056,
+        "p95": 3979218,
+        "p99": 3984035
       },
       "parameters": {
         "service": "bench",
@@ -103,22 +103,22 @@
     },
     "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
     "rss": {
-      "hwm_kib": 17644,
-      "rss_kib": 17644
+      "hwm_kib": 17408,
+      "rss_kib": 17408
     }
   },
   "fixture": {
     "checkpoint": {
       "busy": 0,
       "checkpointed_frames": 0,
-      "elapsed_ns": 3678798,
+      "elapsed_ns": 3819760,
       "log_frames": 0
     },
-    "durable_spans_per_second": 224071.0580419379,
+    "durable_spans_per_second": 239087.24954823058,
     "exact_reopen_count": 131072,
-    "insert_ns": 584957295,
+    "insert_ns": 548218277,
     "journal_mode": "wal",
-    "optimize_ns": 383131016,
+    "optimize_ns": 361319074,
     "public_batch_bytes": 66817644,
     "rich_span_probe": true,
     "stats_after_reopen": {
@@ -153,7 +153,7 @@
       1700053200008191000
     ]
   },
-  "git_commit": "ef7c8577d491acd5b48daf9f6638851596cdcab2",
+  "git_commit": "ba3df20eef88ba63b57d89e90d3713e723dc6adf",
   "host": {
     "machine": "x86_64",
     "processor": "unknown",
@@ -171,8 +171,8 @@
         "api_read_result_spans": 0,
         "api_read_result_traces": 0,
         "api_read_retries": 0,
-        "api_read_sqlite_ns": 1828621995,
-        "api_read_total_ns": 1831709297
+        "api_read_sqlite_ns": 1828930748,
+        "api_read_total_ns": 1832194481
       },
       "extension_work_delta": {
         "extension_query_blocks_skipped_by_bound": 0,
@@ -188,19 +188,33 @@
         "extension_query_payload_blocks_read": 960,
         "extension_query_payload_bytes_read": 13336880,
         "extension_query_returned_spans": 0,
-        "extension_query_snapshot_ns": 2290701,
+        "extension_query_snapshot_ns": 2193799,
         "extension_query_snapshot_payload_bytes": 0,
         "extension_query_snapshot_payload_max_bytes": 0,
         "extension_query_stable_location_snapshots": 20,
-        "extension_query_total_ns": 1826570053
+        "extension_query_total_ns": 1826925236
       },
       "iterations": 20,
       "latency_ns": {
-        "max": 98430640,
-        "min": 82671505,
-        "p50": 90235478,
-        "p95": 97450505,
-        "p99": 98430640
+        "max": 104472960,
+        "min": 83317796,
+        "p50": 92439746,
+        "p95": 97499672,
+        "p99": 104472960
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 34704,
+          "rss_kib": 34660
+        },
+        "after_warmup": {
+          "hwm_kib": 34692,
+          "rss_kib": 34612
+        },
+        "startup": {
+          "hwm_kib": 28184,
+          "rss_kib": 28184
+        }
       },
       "path": "/select/jaeger/api/traces?service=bench&minDuration=500000&maxDuration=500000&limit=100",
       "response_bytes": 56,
@@ -218,8 +232,8 @@
         "api_read_result_spans": 81920,
         "api_read_result_traces": 10240,
         "api_read_retries": 0,
-        "api_read_sqlite_ns": 3050691926,
-        "api_read_total_ns": 3053293230
+        "api_read_sqlite_ns": 2949923121,
+        "api_read_total_ns": 2952648292
       },
       "extension_work_delta": {
         "extension_query_blocks_skipped_by_bound": 900,
@@ -235,19 +249,33 @@
         "extension_query_payload_blocks_read": 60,
         "extension_query_payload_bytes_read": 833420,
         "extension_query_returned_spans": 81920,
-        "extension_query_snapshot_ns": 2536698,
+        "extension_query_snapshot_ns": 2576208,
         "extension_query_snapshot_payload_bytes": 0,
         "extension_query_snapshot_payload_max_bytes": 0,
         "extension_query_stable_location_snapshots": 20,
-        "extension_query_total_ns": 118958641
+        "extension_query_total_ns": 112641141
       },
       "iterations": 20,
       "latency_ns": {
-        "max": 159530127,
-        "min": 146417225,
-        "p50": 155201076,
-        "p95": 157523219,
-        "p99": 159530127
+        "max": 160117124,
+        "min": 142180831,
+        "p50": 147772333,
+        "p95": 158529376,
+        "p99": 160117124
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 158008,
+          "rss_kib": 84720
+        },
+        "after_warmup": {
+          "hwm_kib": 157772,
+          "rss_kib": 84572
+        },
+        "startup": {
+          "hwm_kib": 28144,
+          "rss_kib": 28144
+        }
       },
       "path": "/select/jaeger/api/traces?service=bench&minDuration=1&limit=4096",
       "response_bytes": 3874979,
@@ -265,8 +293,8 @@
         "api_read_result_spans": 160,
         "api_read_result_traces": 20,
         "api_read_retries": 0,
-        "api_read_sqlite_ns": 127195681,
-        "api_read_total_ns": 130422925
+        "api_read_sqlite_ns": 118199943,
+        "api_read_total_ns": 120377153
       },
       "extension_work_delta": {
         "extension_query_blocks_skipped_by_bound": 0,
@@ -282,19 +310,33 @@
         "extension_query_payload_blocks_read": 60,
         "extension_query_payload_bytes_read": 829500,
         "extension_query_returned_spans": 160,
-        "extension_query_snapshot_ns": 1406835,
+        "extension_query_snapshot_ns": 1423970,
         "extension_query_snapshot_payload_bytes": 0,
         "extension_query_snapshot_payload_max_bytes": 0,
         "extension_query_stable_location_snapshots": 20,
-        "extension_query_total_ns": 120275066
+        "extension_query_total_ns": 110960905
       },
       "iterations": 20,
       "latency_ns": {
-        "max": 12302263,
-        "min": 5201366,
-        "p50": 6197004,
-        "p95": 11460198,
-        "p99": 12302263
+        "max": 7229481,
+        "min": 5558500,
+        "p50": 6423387,
+        "p95": 7184551,
+        "p99": 7229481
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 35628,
+          "rss_kib": 34216
+        },
+        "after_warmup": {
+          "hwm_kib": 35124,
+          "rss_kib": 32896
+        },
+        "startup": {
+          "hwm_kib": 28124,
+          "rss_kib": 28124
+        }
       },
       "path": "/select/jaeger/api/traces/00000000000000000000000000000001",
       "response_bytes": 7526,
@@ -308,27 +350,18 @@
       "compressed_blocks": 48,
       "database_file_bytes": 68165632,
       "database_shm_bytes": 32768,
-      "database_wal_bytes": 16512,
+      "database_wal_bytes": 0,
       "freelist_bytes": 64929792,
       "freelist_pages": 15852,
-      "physical_database_bytes": 68214912,
+      "physical_database_bytes": 68198400,
       "raw_blocks": 0,
       "sqlite_index_bytes": 2523136,
       "sqlite_page_bytes": 68165632,
       "total_spans": 131072
     },
-    "rss": {
-      "after_queries": {
-        "hwm_kib": 157692,
-        "rss_kib": 84664
-      },
-      "before_queries": {
-        "hwm_kib": 28060,
-        "rss_kib": 28060
-      }
-    }
+    "process_isolation": "each shape runs in a fresh trace-server process"
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "storage_after_queries": {
     "database_bytes": 68165632,
     "physical_bytes": 68165632,
