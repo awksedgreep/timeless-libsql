@@ -302,7 +302,8 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
                 "final_storage_stats": select_fields(&final_stats, &[
                     "blocks", "raw_blocks", "compressed_blocks", "total_spans", "bytes_on_disk",
                     "database_file_bytes", "database_wal_bytes", "database_shm_bytes",
-                    "physical_database_bytes", "sqlite_page_bytes", "sqlite_index_bytes"
+                    "physical_database_bytes", "sqlite_page_bytes", "sqlite_index_bytes",
+                    "freelist_pages", "freelist_bytes"
                 ]),
             },
             "direct_sql": sql,
@@ -444,6 +445,47 @@ fn build_fixture(extension: &Path, database: &Path, batches: usize) -> Result<Fi
     ensure!(serde_json::from_str::<Value>(&rich.4)?["name"] == "trace-baseline");
     let reopen_stats = sqlite_stats(&connection)?;
     drop(connection);
+    let mut before_storage = select_fields(
+        &before_optimize,
+        &[
+            "blocks",
+            "raw_blocks",
+            "buffered_spans",
+            "total_spans",
+            "bytes_on_disk",
+        ],
+    );
+    before_storage
+        .as_object_mut()
+        .expect("selected stats are an object")
+        .insert(
+            "compressed_blocks".to_owned(),
+            json!(
+                stat_i64(&before_optimize, "blocks")? - stat_i64(&before_optimize, "raw_blocks")?
+            ),
+        );
+    let mut reopen_storage = select_fields(
+        &reopen_stats,
+        &[
+            "blocks",
+            "raw_blocks",
+            "buffered_spans",
+            "total_spans",
+            "bytes_on_disk",
+            "terms",
+            "trace_index_rows",
+            "index_bytes",
+            "duration_bounded_blocks",
+            "duration_unknown_blocks",
+        ],
+    );
+    reopen_storage
+        .as_object_mut()
+        .expect("selected stats are an object")
+        .insert(
+            "compressed_blocks".to_owned(),
+            json!(stat_i64(&reopen_stats, "blocks")? - stat_i64(&reopen_stats, "raw_blocks")?),
+        );
 
     Ok(FixtureReport {
         spans,
@@ -460,18 +502,8 @@ fn build_fixture(extension: &Path, database: &Path, batches: usize) -> Result<Fi
                 "checkpointed_frames": checkpoint.2,
                 "elapsed_ns": checkpoint_ns
             },
-            "stats_before_optimize": select_fields(
-                &before_optimize,
-                &["blocks", "raw_blocks", "compressed_blocks", "buffered_spans", "total_spans", "bytes_on_disk"]
-            ),
-            "stats_after_reopen": select_fields(
-                &reopen_stats,
-                &[
-                    "blocks", "raw_blocks", "compressed_blocks", "buffered_spans", "total_spans",
-                    "bytes_on_disk", "terms", "trace_index_rows", "duration_bounded_blocks",
-                    "duration_unknown_blocks"
-                ]
-            ),
+            "stats_before_optimize": before_storage,
+            "stats_after_reopen": reopen_storage,
             "storage_after_checkpoint": storage_files(database),
             "exact_reopen_count": count,
             "timestamp_range_ns": [minimum, maximum],
