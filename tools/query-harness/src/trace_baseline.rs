@@ -1104,10 +1104,12 @@ fn build_fixture(
     }
     let insert_ns = started.elapsed().as_nanos();
     let before_optimize = sqlite_stats(&connection)?;
+    let storage_after_insert = storage_files(database);
     let optimize_started = Instant::now();
     connection.execute("INSERT INTO traces(traces) VALUES ('optimize')", [])?;
     let optimize_ns = optimize_started.elapsed().as_nanos();
     let after_optimize = sqlite_stats(&connection)?;
+    let storage_after_optimize = storage_files(database);
     let raw_blocks = stat_i64(&after_optimize, "raw_blocks")?;
     ensure!(
         raw_blocks == 0,
@@ -1190,6 +1192,7 @@ fn build_fixture(
         ) == (4, 5)
     );
     let reopen_stats = sqlite_stats(&connection)?;
+    let builder_process_memory = process_memory(std::process::id())?;
     drop(connection);
     let mut before_storage = select_fields(
         &before_optimize,
@@ -1253,7 +1256,10 @@ fn build_fixture(
             },
             "stats_before_optimize": before_storage,
             "stats_after_reopen": reopen_storage,
+            "storage_after_insert_before_optimize": storage_after_insert,
+            "storage_after_optimize_before_checkpoint": storage_after_optimize,
             "storage_after_checkpoint": storage_files(database),
+            "builder_process_memory": builder_process_memory,
             "exact_reopen_count": count,
             "timestamp_range_ns": [minimum, maximum],
             "rich_span_probe": true,
