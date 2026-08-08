@@ -29,7 +29,6 @@ The following older utilities are still Python and are being replaced in
 bounded sessions. Their replacement commands and this inventory must change
 in the same commit:
 
-- `tools/production_gate.py`: production fault and soak gate;
 - `tools/package_release.py`: deterministic native artifact packager;
 - `servers/crates/timeless-metrics-api/bench_shell.py`;
 - `servers/crates/timeless-traces-api/bench/*.py`; and
@@ -222,15 +221,16 @@ the owning matrix rows and findings in the same session.
 
 ## Production fault and soak gates
 
-Until its Rust replacement lands, the production process/fault runner remains
-the explicitly listed Python exception:
+The Rust query harness owns the production process, fault, and soak gate:
 
 ```sh
-python3 tools/production_gate.py \
+cargo run --release --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- production \
   --mode short \
   --output /tmp/timeless-production-short.json
 
-python3 tools/production_gate.py \
+cargo run --release --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- production \
   --mode release \
   --output /tmp/timeless-production-two-hour.json
 ```
@@ -239,8 +239,8 @@ Short mode defaults to 120 seconds. Release mode requires at least two hours
 per concurrently running signal. Both exercise durable writes and queries,
 backups, cancellation/disconnect storms, startup descriptor and disk faults,
 graceful and abnormal restarts, storage/WAL/resource watermarks, and final
-durability barriers. The Rust port must preserve the JSON schema and all
-failure gates before this section changes commands.
+durability barriers. The runner fails the command when the report verdict is
+not `passed` and preserves a caller-supplied `--data-dir` for diagnosis.
 
 ## Native package validation
 
