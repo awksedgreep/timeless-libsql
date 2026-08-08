@@ -646,33 +646,27 @@ fn trace_summary_sql(exact_trace: bool) -> String {
                              AND start_ts<=9223372036854775807-duration_ns \
                        THEN start_ts+duration_ns END AS valid_end_ts \
              FROM traces{predicate}\
-         ), totals AS (\
-           SELECT trace_id,count(*) AS span_rows,\
-                  count(DISTINCT span_id) AS distinct_span_ids,\
-                  count(*) FILTER (WHERE status='error') AS error_rows,\
-                  min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,\
-                  count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,\
-                  count(DISTINCT service) AS service_count \
-             FROM retained GROUP BY trace_id\
-         ), roots AS (\
-           SELECT trace_id,count(*) AS root_rows,\
-                  CASE WHEN count(*)=1 THEN lower(hex(min(span_id))) END AS root_span_id,\
-                  CASE WHEN count(*)=1 THEN min(name) END AS root_name,\
-                  CASE WHEN count(*)=1 THEN min(service) END AS root_service \
-             FROM retained WHERE parent_span_id IS NULL GROUP BY trace_id\
          ) \
-         SELECT lower(hex(totals.trace_id)),totals.span_rows,\
-                totals.distinct_span_ids,totals.error_rows,totals.start_ts,totals.end_ts,\
-                CASE WHEN totals.invalid_end_rows<>0 THEN NULL \
-                     WHEN totals.start_ts>=0 THEN totals.end_ts-totals.start_ts \
-                     WHEN totals.end_ts<=9223372036854775807+totals.start_ts \
-                       THEN totals.end_ts-totals.start_ts END AS duration_ns,\
-                totals.invalid_end_rows,coalesce(roots.root_rows,0),\
-                roots.root_span_id,roots.root_name,roots.root_service,\
-                CASE coalesce(roots.root_rows,0) WHEN 0 THEN 'missing' \
+         SELECT lower(hex(trace_id)),count(*) AS span_rows,\
+                count(DISTINCT span_id) AS distinct_span_ids,\
+                count(*) FILTER (WHERE status='error') AS error_rows,\
+                min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,\
+                CASE WHEN count(*) FILTER (WHERE valid_end_ts IS NULL)<>0 THEN NULL \
+                     WHEN min(start_ts)>=0 THEN max(valid_end_ts)-min(start_ts) \
+                     WHEN max(valid_end_ts)<=9223372036854775807+min(start_ts) \
+                       THEN max(valid_end_ts)-min(start_ts) END AS duration_ns,\
+                count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,\
+                count(*) FILTER (WHERE parent_span_id IS NULL) AS root_rows,\
+                CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 \
+                     THEN lower(hex(min(span_id) FILTER (WHERE parent_span_id IS NULL))) END,\
+                CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 \
+                     THEN min(name) FILTER (WHERE parent_span_id IS NULL) END,\
+                CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 \
+                     THEN min(service) FILTER (WHERE parent_span_id IS NULL) END,\
+                CASE count(*) FILTER (WHERE parent_span_id IS NULL) WHEN 0 THEN 'missing' \
                      WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,\
-                totals.service_count,'unknown' AS completeness \
-           FROM totals LEFT JOIN roots USING(trace_id) ORDER BY totals.trace_id"
+                count(DISTINCT service) AS service_count,'unknown' AS completeness \
+           FROM retained GROUP BY trace_id ORDER BY trace_id"
     )
 }
 
