@@ -717,11 +717,29 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     )?
     .join(",");
     let newest = values(&connection, "SELECT start_ts FROM traces WHERE service='api' ORDER BY start_ts DESC,span_id DESC LIMIT 2 OFFSET 1", &[])?;
+    let before_duration = stats(&connection, "traces")?;
     let duration = values(&connection, "SELECT start_ts FROM traces WHERE service='api' AND duration_ns>=1000 ORDER BY start_ts DESC,span_id DESC LIMIT 2", &[])?;
     let current = stats(&connection, "traces")?;
     ensure!(services == "api,worker" && operations == "GET /items");
     ensure!(newest == [vec![Value::Integer(10)], vec![Value::Integer(9)]]);
     ensure!(duration == [vec![Value::Integer(5)]]);
+    ensure!(
+        stat(&current, "query_candidate_blocks")?
+            - stat(&before_duration, "query_candidate_blocks")?
+            == 1
+    );
+    ensure!(
+        stat(&current, "query_payload_blocks_read")?
+            - stat(&before_duration, "query_payload_blocks_read")?
+            == 1
+    );
+    ensure!(
+        stat(&current, "query_decoded_spans")?
+            - stat(&before_duration, "query_decoded_spans")?
+            == 4
+    );
+    ensure!(stat(&current, "duration_bounded_blocks")? == 3);
+    ensure!(stat(&current, "duration_unknown_blocks")? == 0);
     ensure!(stat(&current, "discovery_count")? == 2);
     ensure!(stat(&current, "query_bounded_count")? == 2);
     ensure!(stat(&current, "query_bounded_requested_spans")? == 5);
@@ -744,10 +762,30 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?
         .join(" ");
     ensure!(plan.contains("bounded-ts-desc-offset"));
+    let before_miss = stats(&connection, "traces")?;
+    ensure!(
+        scalar_i64(
+            &connection,
+            "SELECT COUNT(*) FROM traces WHERE duration_ns >= 10000"
+        )? == 0
+    );
+    let after_miss = stats(&connection, "traces")?;
+    ensure!(
+        stat(&after_miss, "query_candidate_blocks")?
+            == stat(&before_miss, "query_candidate_blocks")?
+    );
+    ensure!(
+        stat(&after_miss, "query_payload_blocks_read")?
+            == stat(&before_miss, "query_payload_blocks_read")?
+    );
+    ensure!(
+        stat(&after_miss, "query_decoded_spans")?
+            == stat(&before_miss, "query_decoded_spans")?
+    );
     ensure!(scalar_i64(&connection, "SELECT COUNT(*) FROM traces")? == 12);
     let after = stats(&connection, "traces")?;
-    ensure!(stat(&after, "query_count")? == 3);
-    ensure!(stat(&after, "query_stable_location_snapshots")? == 3);
+    ensure!(stat(&after, "query_count")? == 4);
+    ensure!(stat(&after, "query_stable_location_snapshots")? == 4);
     ensure!(stat(&after, "query_snapshot_payload_max_bytes")? == 0);
     connection.execute_batch("BEGIN")?;
     connection.execute(
@@ -760,13 +798,97 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     connection.execute_batch("ROLLBACK")?;
     let rolled_back = stats(&connection, "traces")?;
     ensure!(stat(&rolled_back, "optimize_source_entries")? == 12);
+    ensure!(stat(&rolled_back, "duration_bounded_blocks")? == 3);
+    connection.execute("INSERT INTO traces(traces) VALUES('optimize')", [])?;
+    let compacted = stats(&connection, "traces")?;
+    ensure!(stat(&compacted, "raw_blocks")? == 0);
+    ensure!(stat(&compacted, "duration_bounded_blocks")? == 1);
     drop(connection);
+    // Simulate a database produced before duration extrema existed. The
+    // current xConnect must add the private side table, keep every span
+    // readable, and conservatively decode the unknown legacy blocks.
+    let legacy = Connection::open(database)?;
+    legacy.execute_batch("DROP TABLE traces_duration_bounds")?;
+    drop(legacy);
+
     let reopened = open(extension, database)?;
+    ensure!(scalar_i64(&reopened, "SELECT COUNT(*) FROM traces")? == 12);
     let reopened_stats = stats(&reopened, "traces")?;
     ensure!(stat(&reopened_stats, "index_bytes")? > 0);
     ensure!(stat(&reopened_stats, "optimize_source_entries")? == 12);
     ensure!(stat(&reopened_stats, "optimize_source_bytes")? > 0);
-    println!("PASS: trace discovery, bounded streaming reads, and stable snapshots");
+    ensure!(stat(&reopened_stats, "duration_bounded_blocks")? == 0);
+    ensure!(stat(&reopened_stats, "duration_unknown_blocks")? == 1);
+    let before_legacy_miss = stats(&reopened, "traces")?;
+    ensure!(
+        scalar_i64(
+            &reopened,
+            "SELECT COUNT(*) FROM traces WHERE duration_ns >= 10000"
+        )? == 0
+    );
+    let after_legacy_miss = stats(&reopened, "traces")?;
+    ensure!(
+        stat(&after_legacy_miss, "query_candidate_blocks")?
+            - stat(&before_legacy_miss, "query_candidate_blocks")?
+            == 1
+    );
+    ensure!(
+        stat(&after_legacy_miss, "query_decoded_spans")?
+            - stat(&before_legacy_miss, "query_decoded_spans")?
+            == 12
+    );
+    reopened.execute_batch("BEGIN")?;
+    reopened.execute("INSERT INTO traces(traces) VALUES('optimize')", [])?;
+    let transaction_backfill = stats(&reopened, "traces")?;
+    ensure!(stat(&transaction_backfill, "duration_bounded_blocks")? == 1);
+    reopened.execute_batch("ROLLBACK")?;
+    let rolled_back_backfill = stats(&reopened, "traces")?;
+    ensure!(stat(&rolled_back_backfill, "duration_bounded_blocks")? == 0);
+    ensure!(stat(&rolled_back_backfill, "duration_unknown_blocks")? == 1);
+    reopened.execute("INSERT INTO traces(traces) VALUES('optimize')", [])?;
+    let optimized = stats(&reopened, "traces")?;
+    ensure!(stat(&optimized, "duration_bounded_blocks")? > 0);
+    ensure!(stat(&optimized, "duration_unknown_blocks")? == 0);
+    ensure!(stat(&optimized, "optimize_duration_backfill_blocks")? == 2);
+    ensure!(stat(&optimized, "optimize_duration_backfill_entries")? == 24);
+    ensure!(stat(&optimized, "optimize_duration_backfill_input_bytes")? > 0);
+    ensure!(stat(&optimized, "optimize_duration_backfill_total_ns")? > 0);
+    let before_rewritten_miss = stats(&reopened, "traces")?;
+    ensure!(
+        scalar_i64(
+            &reopened,
+            "SELECT COUNT(*) FROM traces WHERE duration_ns >= 10000"
+        )? == 0
+    );
+    let after_rewritten_miss = stats(&reopened, "traces")?;
+    ensure!(
+        stat(&after_rewritten_miss, "query_candidate_blocks")?
+            == stat(&before_rewritten_miss, "query_candidate_blocks")?
+    );
+    ensure!(
+        stat(&after_rewritten_miss, "query_decoded_spans")?
+            == stat(&before_rewritten_miss, "query_decoded_spans")?
+    );
+    drop(reopened);
+    let corrupt = Connection::open(database)?;
+    corrupt.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+    corrupt.execute(
+        "UPDATE traces_duration_bounds SET duration_min=2,duration_max=1
+         WHERE block_id=(SELECT MIN(block_id) FROM traces_duration_bounds)",
+        [],
+    )?;
+    corrupt.execute_batch("PRAGMA ignore_check_constraints=OFF")?;
+    drop(corrupt);
+    let rejected = open(extension, database)?;
+    let error = scalar_i64(&rejected, "SELECT COUNT(*) FROM traces")
+        .expect_err("corrupt trace duration metadata was accepted");
+    ensure!(
+        error.to_string().contains("invalid duration bounds"),
+        "corruption error was not actionable: {error:#}"
+    );
+    println!(
+        "PASS: trace discovery, duration pruning/upgrade/corruption, bounded reads, and stable snapshots"
+    );
     Ok(())
 }
 

@@ -1,0 +1,55 @@
+{
+  "date": "2026-08-07",
+  "scope": "same-fixture trace duration block pruning",
+  "fixture": {
+    "spans": 960570,
+    "blocks": 42,
+    "logical_payload_bytes": 26238576,
+    "service": "api",
+    "minimum_duration_ns": 9000000000000000000,
+    "journal_mode": "wal"
+  },
+  "measurement": {
+    "warmup": 3,
+    "iterations": 20,
+    "projection": "all 14 public rich-span columns",
+    "order": "start_ts DESC, span_id DESC",
+    "limit": 20,
+    "returned_rows_per_query": 0
+  },
+  "legacy_decode_fallback": {
+    "p50_ms": 485.670904,
+    "p95_ms": 536.71985,
+    "p99_ms": 536.71985,
+    "mean_ms": 492.5569119,
+    "query_candidate_blocks": 840,
+    "query_payload_blocks_read": 840,
+    "query_payload_bytes_read": 524771520,
+    "query_decoded_spans": 19211400,
+    "rss_hwm_kib": 55676
+  },
+  "optimized_duration_bounds": {
+    "p50_ms": 0.029846,
+    "p95_ms": 0.040073,
+    "p99_ms": 0.040073,
+    "mean_ms": 0.03487195,
+    "query_candidate_blocks": 0,
+    "query_payload_blocks_read": 0,
+    "query_payload_bytes_read": 0,
+    "query_decoded_spans": 0,
+    "rss_hwm_kib": 55676
+  },
+  "optimize": {
+    "elapsed_ms": 519.0053340000001,
+    "backfill_blocks": 42,
+    "backfill_entries": 960570,
+    "backfill_input_bytes": 26238576,
+    "backfill_total_ns": 514348349
+  },
+  "files": {
+    "before": {"main": 35790848, "wal": 24752, "shm": 32768, "total": 35848368},
+    "after_optimize": {"main": 35790848, "wal": 28872, "shm": 32768, "total": 35852488},
+    "after_truncate_checkpoint": {"main": 35794944, "wal": 0, "shm": 32768, "total": 35827712}
+  },
+  "verdict": "accepted: exact inclusive pruning eliminates persisted block reads for impossible duration ranges; legacy blocks retain exact decode fallback"
+}

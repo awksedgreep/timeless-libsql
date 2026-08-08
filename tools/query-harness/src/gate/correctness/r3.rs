@@ -170,6 +170,7 @@ fn complete_lifecycle(extension: &Path, temporary: &Path) -> Result<()> {
         ("table".into(), "traces_blocks".into()),
         ("table".into(), "traces_terms".into()),
         ("table".into(), "traces_trace_blocks".into()),
+        ("table".into(), "traces_duration_bounds".into()),
         ("table".into(), "traces_meta".into()),
         ("index".into(), "traces_blocks_ts".into()),
     ]);

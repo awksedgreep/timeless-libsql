@@ -5,6 +5,7 @@ mod crash;
 mod dbhealth;
 mod rich_logs;
 mod rich_traces;
+mod trace_duration;
 
 use std::path::{Path, PathBuf};
 
@@ -66,6 +67,27 @@ enum GateCommand {
         extension: PathBuf,
         #[arg(long)]
         database: PathBuf,
+    },
+    /// Measure a copied legacy trace database before and after the public
+    /// optimize command backfills duration metadata. The supplied copy is
+    /// intentionally mutated.
+    TraceDurationEvidence {
+        #[arg(long)]
+        extension: PathBuf,
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long, default_value = "spans")]
+        table: String,
+        #[arg(long, default_value = "api")]
+        service: String,
+        #[arg(long, default_value_t = 50)]
+        iterations: usize,
+        #[arg(long, default_value_t = 5)]
+        warmup: usize,
+        #[arg(long, default_value_t = 1_000_000)]
+        minimum_duration_ns: i64,
+        #[arg(long)]
+        wal: bool,
     },
     /// Internal child process used by the R2 multi-process regression.
     #[command(hide = true)]
@@ -144,6 +166,25 @@ pub(crate) fn run(root: &Path, args: GateArgs) -> Result<()> {
             extension,
             database,
         } => dbhealth::run(&extension, &database),
+        GateCommand::TraceDurationEvidence {
+            extension,
+            database,
+            table,
+            service,
+            iterations,
+            warmup,
+            minimum_duration_ns,
+            wal,
+        } => trace_duration::run(trace_duration::Options {
+            extension: &extension,
+            database: &database,
+            table: &table,
+            service: &service,
+            iterations,
+            warmup,
+            minimum_duration_ns,
+            wal,
+        }),
         GateCommand::MetricsWorker {
             extension,
             database,

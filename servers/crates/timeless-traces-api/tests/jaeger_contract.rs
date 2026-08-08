@@ -143,9 +143,12 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     assert_eq!(stats.api_read_result_spans, 5);
     assert!(stats.api_read_response_bytes > 0);
     assert_eq!(stats.extension_query_count, 4);
-    assert_eq!(stats.extension_query_candidate_blocks, 6);
-    assert_eq!(stats.extension_query_payload_blocks_read, 6);
-    assert_eq!(stats.extension_query_decoded_spans, 6);
+    // Duration extrema reject the non-overlapping status-pure block for each
+    // duration-bounded search before payload decode. The trace, operation,
+    // and two bounded searches therefore read five blocks instead of six.
+    assert_eq!(stats.extension_query_candidate_blocks, 5);
+    assert_eq!(stats.extension_query_payload_blocks_read, 5);
+    assert_eq!(stats.extension_query_decoded_spans, 5);
     // Discovery is metadata-native and duration is now an exact engine
     // predicate, so only the five API-visible span rows cross the vtab.
     assert_eq!(stats.extension_query_matched_spans, 5);
@@ -239,7 +242,7 @@ async fn dropped_query_cancels_and_the_same_reader_is_reusable() {
         slow_app
             .oneshot(
                 Request::get(
-                    "/select/jaeger/api/traces?service=svc&minDuration=999999999s&limit=100",
+                    "/select/jaeger/api/traces?service=svc&minDuration=1&limit=131072",
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -301,7 +304,7 @@ async fn broad_query_releases_publication_gate_before_decode_cpu() {
     let slow = tokio::spawn(async move {
         get_json(
             &slow_app,
-            "/select/jaeger/api/traces?service=svc&minDuration=999999999s&limit=100",
+            "/select/jaeger/api/traces?service=svc&minDuration=1&limit=131072",
         )
         .await
     });

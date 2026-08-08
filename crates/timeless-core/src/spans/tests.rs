@@ -832,6 +832,281 @@ fn duration_pushdown_filters_before_the_bounded_prefix() {
 }
 
 #[test]
+fn duration_bounds_prune_known_blocks_and_legacy_blocks_decode_until_rewritten() {
+    let store = MemSpanStore::new();
+    let mut legacy = span(1, 1, None, "legacy", "api", 1, 1, 1, &[]);
+    legacy.duration_ns = 50;
+    let (data, meta) = encode_span_block(std::slice::from_ref(&legacy), CODEC_RAW, 7).unwrap();
+    store
+        .put_blocks(&[EncodedSpanBlock {
+            meta,
+            data,
+            terms: vec!["status:ok".into()],
+            trace_ids: vec![legacy.trace_id],
+        }])
+        .unwrap();
+
+    let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();
+    for (number, duration) in [(2_u8, 10_i64), (3, 100), (4, 1_000)] {
+        let mut entry = span(
+            number,
+            number,
+            None,
+            "known",
+            "api",
+            1,
+            1,
+            i64::from(number),
+            &[],
+        );
+        entry.duration_ns = duration;
+        engine.push(entry).unwrap();
+        engine.flush().unwrap();
+    }
+
+    let before = engine.query_profile();
+    let miss = engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            3_000,
+            4_000,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap();
+    let after = engine.query_profile();
+    assert!(miss.is_empty());
+    assert_eq!(
+        after.query_candidate_blocks - before.query_candidate_blocks,
+        1
+    );
+    assert_eq!(after.query_decoded_spans - before.query_decoded_spans, 1);
+
+    let inclusive = engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            100,
+            1_000,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap();
+    assert_eq!(
+        inclusive
+            .iter()
+            .map(|entry| entry.duration_ns)
+            .collect::<Vec<_>>(),
+        vec![100, 1_000]
+    );
+
+    let before = engine.query_profile();
+    assert!(engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            2,
+            1,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap()
+        .is_empty());
+    let after = engine.query_profile();
+    assert_eq!(after.query_candidate_blocks, before.query_candidate_blocks);
+    assert_eq!(after.query_decoded_spans, before.query_decoded_spans);
+
+    // Ordinary optimize decodes the legacy block for its normal rewrite and
+    // publishes duration extrema on the replacement. No special migration or
+    // eager legacy rewrite is required.
+    assert_eq!(engine.optimize().unwrap(), (4, 1));
+    let before = engine.query_profile();
+    assert!(engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            3_000,
+            4_000,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap()
+        .is_empty());
+    let after = engine.query_profile();
+    assert_eq!(after.query_candidate_blocks, before.query_candidate_blocks);
+    assert_eq!(after.query_decoded_spans, before.query_decoded_spans);
+}
+
+#[test]
+fn optimize_backfills_full_legacy_blocks_without_rewriting_payloads() {
+    let store = MemSpanStore::new();
+    let mut entries = Vec::new();
+    for number in 1_u8..=4 {
+        let mut entry = span(
+            number,
+            number,
+            None,
+            "legacy",
+            "api",
+            1,
+            1,
+            i64::from(number),
+            &[],
+        );
+        entry.duration_ns = i64::from(number) * 10;
+        entries.push(entry);
+    }
+    let (data, meta) = encode_span_block(&entries, CODEC_COLUMNAR_V2, 7).unwrap();
+    store
+        .put_blocks(&[EncodedSpanBlock {
+            meta,
+            data,
+            terms: vec!["status:ok".into()],
+            trace_ids: entries.iter().map(|entry| entry.trace_id).collect(),
+        }])
+        .unwrap();
+    let engine = SpanBlockEngine::new(
+        Box::new(store),
+        SpanEngineConfig {
+            merge_target_entries: 4,
+            ..SpanEngineConfig::default()
+        },
+    )
+    .unwrap();
+
+    let before = engine.query_profile();
+    assert!(engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            100,
+            200,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap()
+        .is_empty());
+    let after = engine.query_profile();
+    assert_eq!(
+        after.query_candidate_blocks - before.query_candidate_blocks,
+        1
+    );
+    assert_eq!(after.query_decoded_spans - before.query_decoded_spans, 4);
+
+    assert_eq!(engine.optimize().unwrap(), (0, 0));
+    let profile = engine.optimize_profile();
+    assert_eq!(profile.optimize_blocks_removed, 0);
+    assert_eq!(profile.optimize_blocks_written, 0);
+    assert_eq!(profile.optimize_duration_backfill_blocks, 1);
+    assert_eq!(profile.optimize_duration_backfill_entries, 4);
+    assert!(profile.optimize_duration_backfill_input_bytes > 0);
+    assert!(profile.optimize_duration_backfill_total_ns > 0);
+
+    let before = engine.query_profile();
+    assert!(engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            100,
+            200,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap()
+        .is_empty());
+    let after = engine.query_profile();
+    assert_eq!(after.query_candidate_blocks, before.query_candidate_blocks);
+    assert_eq!(after.query_decoded_spans, before.query_decoded_spans);
+}
+
+#[test]
+fn duration_backfill_obeys_the_optimize_entry_budget() {
+    let store = MemSpanStore::new();
+    let mut blocks = Vec::new();
+    for block in 0_u8..2 {
+        let mut entries = Vec::new();
+        for row in 0_u8..4 {
+            let number = block * 4 + row + 1;
+            let mut entry = span(
+                number,
+                number,
+                None,
+                "legacy",
+                "api",
+                1,
+                1,
+                i64::from(number),
+                &[],
+            );
+            entry.duration_ns = i64::from(number) * 10;
+            entries.push(entry);
+        }
+        let (data, meta) = encode_span_block(&entries, CODEC_COLUMNAR_V2, 7).unwrap();
+        blocks.push(EncodedSpanBlock {
+            meta,
+            data,
+            terms: vec!["status:ok".into()],
+            trace_ids: entries.iter().map(|entry| entry.trace_id).collect(),
+        });
+    }
+    store.put_blocks(&blocks).unwrap();
+    let engine = SpanBlockEngine::new(
+        Box::new(store),
+        SpanEngineConfig {
+            merge_target_entries: 4,
+            ..SpanEngineConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(engine.optimize_budgeted(4).unwrap(), (0, 0));
+    let first = engine.optimize_profile();
+    assert_eq!(first.optimize_duration_backfill_blocks, 1);
+    assert_eq!(first.optimize_duration_backfill_entries, 4);
+    assert_eq!(first.optimize_budget_limited_count, 1);
+
+    let before = engine.query_profile();
+    assert!(engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            1_000,
+            2_000,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap()
+        .is_empty());
+    let after = engine.query_profile();
+    assert_eq!(
+        after.query_candidate_blocks - before.query_candidate_blocks,
+        1
+    );
+    assert_eq!(after.query_decoded_spans - before.query_decoded_spans, 4);
+
+    assert_eq!(engine.optimize_budgeted(4).unwrap(), (0, 0));
+    let second = engine.optimize_profile();
+    assert_eq!(second.optimize_duration_backfill_blocks, 2);
+    assert_eq!(second.optimize_duration_backfill_entries, 8);
+    let before = engine.query_profile();
+    assert!(engine
+        .query_ordered_with_duration_after_snapshot(
+            &full_range_query(),
+            1_000,
+            2_000,
+            SpanQueryOrder::Asc,
+            None,
+            || {},
+        )
+        .unwrap()
+        .is_empty());
+    let after = engine.query_profile();
+    assert_eq!(after.query_candidate_blocks, before.query_candidate_blocks);
+    assert_eq!(after.query_decoded_spans, before.query_decoded_spans);
+}
+
+#[test]
 fn native_discovery_includes_buffer_and_falls_back_for_legacy_operation_terms() {
     let store = MemSpanStore::new();
     let legacy = span(1, 1, None, "legacy-op", "legacy-svc", 1, 1, 10, &[]);

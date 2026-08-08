@@ -154,7 +154,7 @@ authoritative two-hour release soak.
 ## Storage and query-boundary findings
 
 The append-only [findings log](QUERY_STORAGE_FINDINGS.md) contains `QSF-001`
-through `QSF-293`. The release-significant boundaries are:
+through `QSF-295`. The release-significant boundaries are:
 
 - metric storage remains timestamp-plus-float64; millisecond evaluation,
   lookback, staleness, extrapolation, labels, timestamps, and result envelopes
@@ -170,6 +170,9 @@ through `QSF-293`. The release-significant boundaries are:
   fields or private shadow tables;
 - every signal server obtains tier/block/index and optimizer-source accounting
   from public `timeless_stats` rows; only the extension names shadow objects;
+- trace duration predicates use exact inclusive block extrema when present;
+  legacy blocks remain exact through conservative decode until bounded public
+  optimize backfills the small metadata rows without rewriting payloads;
 - required hidden virtual-table inputs must be bound directly in each public
   scan because SQLite may reorder joins;
 - `raw-series-v0` remains backward-readable but is not self-identifying;

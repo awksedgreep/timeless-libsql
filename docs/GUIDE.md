@@ -409,7 +409,8 @@ SELECT hex(span_id), hex(parent_span_id), name, service, duration_ns
 
 Trace lookup goes through a dedicated trace-id index — only blocks that
 contain that trace are touched. Equality on `service`, `name`, `kind`,
-`status` and ranges on `start_ts` are also pushed down:
+`status`, ranges on `start_ts`, and inclusive lower/upper bounds on
+`duration_ns` are also pushed down:
 
 ```sql
 -- All failed spans for one service in a window
@@ -417,11 +418,33 @@ SELECT hex(trace_id), name, duration_ns FROM traces
  WHERE service = 'payments' AND status = 'error'
    AND start_ts >= 1753000000000000000;
 
+-- Reject blocks whose longest span is still below 250 ms
+SELECT hex(trace_id), name, duration_ns FROM traces
+ WHERE service = 'payments' AND duration_ns >= 250000000
+ ORDER BY start_ts DESC LIMIT 20;
+
 -- Slowest operations, plain SQL
 SELECT name, count(*), avg(duration_ns) / 1e6 AS avg_ms
   FROM traces WHERE service = 'payments'
  GROUP BY name ORDER BY avg_ms DESC LIMIT 10;
 ```
+
+New blocks carry exact per-block duration extrema in a private side table. A
+database created by an older extension gains that table when it is opened; a
+missing metadata row means the block's duration range is unknown, so unknown
+blocks continue to return exact results by decoding. Run the normal public
+maintenance command to backfill them without recompressing the payload:
+
+```sql
+SELECT key, value FROM timeless_stats('traces')
+ WHERE key IN ('duration_bounded_blocks', 'duration_unknown_blocks');
+INSERT INTO traces(traces) VALUES ('optimize');
+```
+
+Use `optimize:<positive max source spans>` when the one-time decode should be
+spread across maintenance windows. A crash or rollback cannot leave a block
+partially summarized: both extrema publish in the surrounding SQLite
+transaction, and corrupt/incomplete extrema fail closed on reopen.
 
 ## 7. Querying: what's fast, what's slow
 
@@ -432,7 +455,7 @@ storage engine can use to *skip* decompression:
 |---|---|
 | metrics | `series_id = ...`, `name = ...`, `ts` ranges (`>`, `>=`, `<`, `<=`, `BETWEEN`) |
 | logs | `level = ...`, any index-key `= ...`, `ts` ranges, `message_contains = ...`; `max_work_entries = ...` bounds examined entries |
-| traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges |
+| traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges, inclusive `duration_ns` lower/upper bounds |
 
 Everything else still *works* — it's ordinary SQL over the decompressed rows
 — it just reads more blocks. Practical guidance:

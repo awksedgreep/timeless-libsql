@@ -169,6 +169,32 @@ pub struct EncodedSpanBlock {
     pub trace_ids: Vec<[u8; 16]>,
 }
 
+/// Exact duration extrema for one persisted span block. Stores may persist
+/// these alongside the ordinary [`BlockMeta`] to reject a duration-bounded
+/// query without reading or decoding the payload. The bounds are additive:
+/// legacy stores and legacy blocks may omit them and retain the exact decode
+/// fallback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpanDurationBounds {
+    pub min_ns: i64,
+    pub max_ns: i64,
+}
+
+impl SpanDurationBounds {
+    pub fn new(min_ns: i64, max_ns: i64) -> Result<Self, String> {
+        if min_ns > max_ns {
+            return Err(format!(
+                "invalid span duration bounds: minimum {min_ns} exceeds maximum {max_ns}"
+            ));
+        }
+        Ok(Self { min_ns, max_ns })
+    }
+
+    pub fn excludes(self, query_min_ns: i64, query_max_ns: i64) -> bool {
+        self.max_ns < query_min_ns || self.min_ns > query_max_ns
+    }
+}
+
 /// Storage backend seam for span blocks — blocks::BlockStore plus the
 /// trace index. Same transaction contract as every other store trait in
 /// this crate: methods must NOT open transactions; in the extension
@@ -193,6 +219,25 @@ pub trait SpanBlockStore: Send + Sync {
     /// its index rows. Locs come back in input order.
     fn put_blocks(&self, blocks: &[EncodedSpanBlock]) -> Result<Vec<BlockLoc>, String>;
 
+    /// Persist blocks with exact duration extrema. Existing store
+    /// implementations remain source-compatible through this conservative
+    /// default: the blocks are stored normally and duration queries decode
+    /// them. Stores that persist the additive metadata override this method.
+    fn put_blocks_with_duration_bounds(
+        &self,
+        blocks: &[EncodedSpanBlock],
+        duration_bounds: &[SpanDurationBounds],
+    ) -> Result<Vec<BlockLoc>, String> {
+        if blocks.len() != duration_bounds.len() {
+            return Err(format!(
+                "span block/duration metadata length mismatch: {} blocks, {} bounds",
+                blocks.len(),
+                duration_bounds.len()
+            ));
+        }
+        self.put_blocks(blocks)
+    }
+
     /// Atomic swap for compaction: persist `add` (with their term +
     /// trace rows), remove `remove` (and THEIR term + trace rows).
     /// `on_committed` fires after the adds are readable and before the
@@ -205,6 +250,26 @@ pub trait SpanBlockStore: Send + Sync {
         on_committed: &mut dyn FnMut(&[BlockLoc]),
     ) -> Result<Vec<BlockLoc>, String>;
 
+    /// Compaction counterpart to [`SpanBlockStore::put_blocks_with_duration_bounds`].
+    /// The default preserves the established atomic replacement contract and
+    /// merely omits the optional pruning metadata.
+    fn replace_blocks_with_duration_bounds(
+        &self,
+        add: &[EncodedSpanBlock],
+        duration_bounds: &[SpanDurationBounds],
+        remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        if add.len() != duration_bounds.len() {
+            return Err(format!(
+                "span block/duration metadata length mismatch: {} blocks, {} bounds",
+                add.len(),
+                duration_bounds.len()
+            ));
+        }
+        self.replace_blocks(add, remove, on_committed)
+    }
+
     /// Read one block's stored payload bytes.
     fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String>;
 
@@ -214,6 +279,27 @@ pub trait SpanBlockStore: Send + Sync {
 
     /// Recovery: every persisted block's metadata (never the payloads).
     fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String>;
+
+    /// Metadata-only discovery for persisted blocks that predate duration
+    /// extrema. The default is empty because stores that do not persist the
+    /// additive optimization have nothing to backfill.
+    fn blocks_missing_duration_bounds(&self) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Publish duration extrema for existing blocks without replacing their
+    /// payloads or index rows. Implementations must update the complete slice
+    /// in the caller's transaction or return an error.
+    fn update_duration_bounds(
+        &self,
+        updates: &[(BlockLoc, SpanDurationBounds)],
+    ) -> Result<(), String> {
+        if updates.is_empty() {
+            Ok(())
+        } else {
+            Err("span store does not support duration-bound backfill".into())
+        }
+    }
 
     /// Posting-list intersection + ts-range overlap, identical contract
     /// to blocks::BlockStore::query_terms (returns metas so callers
@@ -225,10 +311,38 @@ pub trait SpanBlockStore: Send + Sync {
         ts_max: i64,
     ) -> Result<Vec<(BlockLoc, BlockMeta)>, String>;
 
+    /// Duration-aware posting-list query. The default deliberately ignores
+    /// the optional block metadata and preserves exact decode-time filtering.
+    /// Stores with persisted extrema override it to reject only blocks that
+    /// provably cannot overlap the inclusive duration interval.
+    fn query_terms_with_duration_bounds(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+        _duration_min_ns: i64,
+        _duration_max_ns: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.query_terms(terms, ts_min, ts_max)
+    }
+
     /// THE trace-store operation: every block containing spans of
     /// `trace_id`, via the trace index — never a scan. The hero query
     /// (`WHERE trace_id = x'...'`) reads exactly these blocks.
     fn query_trace(&self, trace_id: &[u8; 16]) -> Result<Vec<(BlockLoc, BlockMeta)>, String>;
+
+    /// Duration/time-aware trace-index query. Legacy/custom stores keep the
+    /// existing trace lookup and the engine applies exact row filtering.
+    fn query_trace_with_duration_bounds(
+        &self,
+        trace_id: &[u8; 16],
+        _ts_min: i64,
+        _ts_max: i64,
+        _duration_min_ns: i64,
+        _duration_max_ns: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.query_trace(trace_id)
+    }
 
     /// Distinct suffixes of terms beginning with `prefix`, when the backend
     /// can answer that from its posting-list catalog without payload reads.

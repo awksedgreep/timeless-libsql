@@ -4357,6 +4357,8 @@ struct TraceStorageSummary {
     bytes_on_disk: i64,
     optimize_source_entries: i64,
     optimize_source_bytes: i64,
+    duration_bounded_blocks: i64,
+    duration_unknown_blocks: i64,
 }
 
 fn log_storage_summary(database: &str, table: &str) -> Result<LogStorageSummary> {
@@ -4386,19 +4388,24 @@ fn log_storage_summary(database: &str, table: &str) -> Result<LogStorageSummary>
 fn trace_storage_summary(database: &str, table: &str) -> Result<TraceStorageSummary> {
     let conn = shared::current_conn().map_err(module_err)?;
     let blocks = crate::sql_ident::qualified_shadow(database, table, "blocks");
+    let durations = crate::sql_ident::qualified_shadow(database, table, "duration_bounds");
     let sql = format!(
-        "SELECT COALESCE(SUM(length(data)), 0),
-                COALESCE(SUM(CASE WHEN codec = 1 OR entry_count < {TRACE_MERGE_TARGET_ENTRIES}
-                                  THEN entry_count ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN codec = 1 OR entry_count < {TRACE_MERGE_TARGET_ENTRIES}
-                                  THEN length(data) ELSE 0 END), 0)
-           FROM {blocks}"
+        "SELECT COALESCE(SUM(length(b.data)), 0),
+                COALESCE(SUM(CASE WHEN b.codec = 1 OR b.entry_count < {TRACE_MERGE_TARGET_ENTRIES}
+                                  THEN b.entry_count ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN b.codec = 1 OR b.entry_count < {TRACE_MERGE_TARGET_ENTRIES}
+                                  THEN length(b.data) ELSE 0 END), 0),
+                COALESCE(SUM(d.block_id IS NOT NULL), 0),
+                COALESCE(SUM(d.block_id IS NULL), 0)
+           FROM {blocks} b LEFT JOIN {durations} d ON d.block_id = b.id"
     );
     conn.query_row(&sql, [], |row| {
         Ok(TraceStorageSummary {
             bytes_on_disk: row.get(0)?,
             optimize_source_entries: row.get(1)?,
             optimize_source_bytes: row.get(2)?,
+            duration_bounded_blocks: row.get(3)?,
+            duration_unknown_blocks: row.get(4)?,
         })
     })
 }
@@ -4458,6 +4465,7 @@ fn trace_index_bytes(database: &str, table: &str) -> Option<i64> {
             crate::sql_ident::shadow_object(table, "blocks_ts"),
             crate::sql_ident::shadow_object(table, "terms"),
             crate::sql_ident::shadow_object(table, "trace_blocks"),
+            crate::sql_ident::shadow_object(table, "duration_bounds"),
             autoindex_name(table, "meta"),
         ],
     )
@@ -4950,6 +4958,14 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ),
                     ("bytes_on_disk", Value::Integer(storage.bytes_on_disk)),
                     (
+                        "duration_bounded_blocks",
+                        Value::Integer(storage.duration_bounded_blocks),
+                    ),
+                    (
+                        "duration_unknown_blocks",
+                        Value::Integer(storage.duration_unknown_blocks),
+                    ),
+                    (
                         "terms",
                         Value::Integer(count_rows(&database, &table, "terms")?),
                     ),
@@ -5131,6 +5147,22 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "optimize_merge_total_ns",
                         Value::Integer(optimize.optimize_merge_total_ns as i64),
+                    ),
+                    (
+                        "optimize_duration_backfill_blocks",
+                        Value::Integer(optimize.optimize_duration_backfill_blocks as i64),
+                    ),
+                    (
+                        "optimize_duration_backfill_entries",
+                        Value::Integer(optimize.optimize_duration_backfill_entries as i64),
+                    ),
+                    (
+                        "optimize_duration_backfill_input_bytes",
+                        Value::Integer(optimize.optimize_duration_backfill_input_bytes as i64),
+                    ),
+                    (
+                        "optimize_duration_backfill_total_ns",
+                        Value::Integer(optimize.optimize_duration_backfill_total_ns as i64),
                     ),
                     (
                         "optimize_pending_raw_blocks",

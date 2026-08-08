@@ -14,9 +14,9 @@ in the [upgrade and rollback guide](UPGRADE.md).
 
 All implementation-owned shadow tables are private. Applications must use
 the virtual tables, table-valued functions, scalar, commands, and batch
-formats in this reference. A name such as `metrics_chunks`, `logs_blocks`, or
-`traces_trace_blocks` is an implementation detail even though SQLite stores
-it in the same database file.
+formats in this reference. A name such as `metrics_chunks`, `logs_blocks`,
+`traces_trace_blocks`, or `traces_duration_bounds` is an implementation detail
+even though SQLite stores it in the same database file.
 
 ## Loading and embedding
 
@@ -71,6 +71,11 @@ Consumers must reject an unsupported `data_abi` or a missing capability they
 require. They must tolerate additive object members and array entries. The
 compatibility-only `timeless_spike` module is intentionally omitted from
 `sql_surfaces`; it is not a production storage contract.
+
+The traces signal advertises `duration_block_pruning.version=1`. Its extrema
+and query bounds are inclusive, blocks written by older extensions retain an
+exact decode fallback, and the ordinary public `optimize` command backfills
+missing extrema without rewriting compressed payloads.
 
 ## Registered SQL symbol inventory
 
@@ -231,6 +236,14 @@ TEXT and are returned as BLOBs. An all-zero parent means no parent. `kind` is
 The only creation argument is `retention`. Writes are append-only. Commands
 are `flush`, `optimize`, `optimize:<positive max source spans>`, and
 `prune:<epoch-nanoseconds>`. The authoritative ingest buffer is 8,192 spans.
+Flush and optimize persist exact duration extrema per block. Inclusive
+`duration_ns` lower/upper predicates use those extrema to reject a block only
+when it cannot contain a match; exact filtering still occurs per span. Older
+blocks with unknown extrema remain readable and decode conservatively. A
+normal `optimize` computes the missing metadata in bounded block-sized work,
+updates only the metadata, and preserves payload/index bytes. The positive
+entry budget also bounds this backfill and always permits one block when it
+is the first maintenance unit.
 
 ## Ingestion batch formats
 
@@ -317,7 +330,7 @@ b-trees, not the database file or result payload.
 |---|---|
 | metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
-| traces | `blocks`, `raw_blocks`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families. |
+| traces | `blocks`, `raw_blocks`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `duration_bounded_blocks`, `duration_unknown_blocks`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
 
 The logs/traces `optimize_source_*` values use the extension's current raw-or-
 undersized source predicate and authoritative 8,192-entry/span merge target.
@@ -326,6 +339,10 @@ that one optimize command rewrites exactly that many rows. Index allocation
 and optimizer-source totals remain correct after flush, optimize, transaction
 rollback, and reopen because they are derived inside the extension from the
 calling connection's visible state.
+`duration_bounded_blocks + duration_unknown_blocks = blocks`. Backfill work
+counters describe completed decode/update attempts; the visible coverage rows
+remain the authoritative transactional state if a surrounding transaction is
+rolled back.
 
 Log `filter` is a flat JSON object: `level` selects severity and other string
 members are indexed metadata equality predicates. `message_contains` is the

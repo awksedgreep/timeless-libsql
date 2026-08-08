@@ -35,6 +35,9 @@ artifact exists until a tag is created from the finished, validated `main`.
 - Public storage-aware SQL surfaces for packed raw/latest/aggregate/window/
   rollup metrics, bounded log count/value/query statistics, and trace
   service/operation/time-bucket discovery.
+- Additive trace-block duration extrema with inclusive pruning, conservative
+  legacy decode fallback, bounded metadata-only optimize backfill, capability
+  negotiation, and public coverage/work statistics.
 - Executable SQL equivalents for every matrix row that honestly has a public
   SQL foundation, plus pinned Prometheus, VictoriaMetrics, and VictoriaLogs
   semantic oracles and measured query evidence.
@@ -97,6 +100,9 @@ artifact exists until a tag is created from the finished, validated `main`.
 
 ### Fixed
 
+- Eliminated full trace-block decode for duration filters whose inclusive
+  bounds prove that no persisted block can match, while retaining exact legacy,
+  rollback, cold-reopen, corruption, and rich-span behavior.
 - Corrected query boundary, lookback, staleness, reset/extrapolation,
   IEEE-754, label/name, timestamp, ordering, warning/info, typed-value,
   cancellation, durability, and cold-reopen defects as recorded—without

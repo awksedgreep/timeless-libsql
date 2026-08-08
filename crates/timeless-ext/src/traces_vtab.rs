@@ -207,6 +207,7 @@ impl TracesTab {
         table: &str,
     ) -> Result<Arc<SharedEngine<SpanBlockEngine>>> {
         let host = unsafe { Connection::from_handle(handle) }?;
+        shadow_span_store::ensure_duration_bounds_table(&host, database, table)?;
         let instance_id =
             shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
         let store = ShadowSpanStore::new(database, table);
@@ -262,6 +263,7 @@ impl TracesTab {
             // this db) know these blocks speak nanoseconds.
             store.save_meta("ts_unit", b"ns").map_err(module_err)?;
         }
+        shadow_span_store::ensure_duration_bounds_table(&host, &database, &table)?;
         let instance_id =
             shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
 

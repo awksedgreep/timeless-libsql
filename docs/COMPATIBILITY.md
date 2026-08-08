@@ -95,6 +95,9 @@ Within data ABI 1:
 - metrics/logs/traces timestamp units are persisted/negotiated as documented;
 - rich logs do not fabricate severities already collapsed by an older source;
 - rich traces do not fabricate fields absent from an older span format; and
+- trace duration extrema are additive private metadata: legacy blocks without
+  a metadata row decode exactly, current writers publish both bounds atomically,
+  and public optimize backfills them without changing the stored span payload;
 - transaction, rollback, flush, optimize/compact, rollup, retention, and
   authoritative batching remain extension-owned.
 

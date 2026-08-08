@@ -13,9 +13,9 @@
 #   - NEVER CORRUPT. Whatever moment the process dies, reopening must
 #     give integrity_check == ok, a working vtab (xConnect recovery from
 #     shadow-table metadata), and internally-consistent indexes: every
-#     _terms / _trace_blocks row joins to an existing _blocks row (the
-#     never-dangle rule holds THROUGH crashes because index rows ride
-#     the same transaction as their blocks).
+#     _terms / _trace_blocks / _duration_bounds row joins to an existing
+#     _blocks row (the never-dangle rule holds THROUGH crashes because
+#     metadata/index rows ride the same transaction as their blocks).
 #
 # Mechanics: each iteration spawns a sqlite3 process running a long
 # ingest script against a FRESH db. The script loops rounds of
@@ -149,7 +149,8 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
   ((ok)) && pass "flushed-before-kill data present (>= watermark counts)"
 
   # 4. Index-consistency invariants, in SQL (the never-dangle rule):
-  #    every _terms / _trace_blocks row joins to a _blocks row, every
+  #    every _terms / _trace_blocks / _duration_bounds row joins to a
+  #    _blocks row, every
   #    block is reachable from at least one term (blocks always carry a
   #    level:/status: term), and every chunk row decodes (covered by 2).
   inv=$(sqlite3 "$DB" <<'SQL'
@@ -160,13 +161,19 @@ SELECT
   || '|' ||
   (SELECT COUNT(*) FROM traces_trace_blocks tb LEFT JOIN traces_blocks b ON tb.block_id = b.id WHERE b.id IS NULL)
   || '|' ||
+  (SELECT COUNT(*) FROM traces_duration_bounds d LEFT JOIN traces_blocks b ON d.block_id = b.id WHERE b.id IS NULL)
+  || '|' ||
+  (SELECT COUNT(*) FROM traces_blocks b LEFT JOIN traces_duration_bounds d ON d.block_id = b.id WHERE d.block_id IS NULL)
+  || '|' ||
+  (SELECT COUNT(*) FROM traces_duration_bounds WHERE duration_min > duration_max)
+  || '|' ||
   (SELECT COUNT(*) FROM logs_blocks b WHERE NOT EXISTS (SELECT 1 FROM logs_terms t WHERE t.block_id = b.id))
   || '|' ||
   (SELECT COUNT(*) FROM traces_blocks b WHERE NOT EXISTS (SELECT 1 FROM traces_terms t WHERE t.block_id = b.id));
 SQL
 )
-  if [[ "$inv" == "0|0|0|0|0" ]]; then
-    pass "no dangling _terms/_trace_blocks rows, no term-less blocks"
+  if [[ "$inv" == "0|0|0|0|0|0|0|0" ]]; then
+    pass "no dangling index/duration rows, missing current duration bounds, or term-less blocks"
   else
     fail "index invariant violated (dangling/orphan counts: $inv)"
   fi

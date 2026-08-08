@@ -12,15 +12,19 @@
 //!     16-byte trace id to the blocks holding its spans. The PLAN.md
 //!     never-dangle rule covers it exactly like `_terms`: any operation
 //!     that writes or removes a block row writes/removes its trace rows
-//!     in the same operation (the host transaction makes the trio
-//!     atomic).
+//!     in the same operation.
+//!   - a tiny `"<name>_duration_bounds"` side table stores optional
+//!     per-block duration extrema. Keeping it separate prevents legacy
+//!     metadata backfill from rewriting compressed payload pages into WAL.
+//!     The host transaction makes the block and all three metadata/index
+//!     tables atomic.
 //!   - query_trace() answers the hero pushdown IN SQL: one primary-key
 //!     probe of the trace index joined against the block metadata —
 //!     `WHERE trace_id = x'...'` never scans anything.
 
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use timeless_core::{BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore};
+use timeless_core::{BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanDurationBounds};
 
 use crate::{shared, sql_ident};
 
@@ -42,6 +46,7 @@ pub(crate) fn ddl(database: &str, table: &str) -> String {
     let blocks_index = sql_ident::qualified_shadow(database, table, "blocks_ts");
     let terms = sql_ident::qualified_shadow(database, table, "terms");
     let traces = sql_ident::qualified_shadow(database, table, "trace_blocks");
+    let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
     let meta = sql_ident::qualified_shadow(database, table, "meta");
     format!(
         r#"
@@ -64,9 +69,36 @@ CREATE TABLE IF NOT EXISTS {traces} (
   block_id INTEGER NOT NULL,
   PRIMARY KEY(trace_id, block_id)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS {durations} (
+  block_id     INTEGER PRIMARY KEY,
+  duration_min INTEGER NOT NULL,
+  duration_max INTEGER NOT NULL,
+  CHECK(duration_min <= duration_max)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
 "#
     )
+}
+
+/// Add the duration-extrema side table to databases created by an older
+/// extension. A missing row means unknown: the legacy block remains exact
+/// through decode-time filtering until ordinary optimize backfills it. Keeping
+/// these tiny rows separate avoids rewriting payload-sized block records and
+/// WAL frames during the one-time backfill.
+pub(crate) fn ensure_duration_bounds_table(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> rusqlite::Result<()> {
+    let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {durations} (\
+           block_id INTEGER PRIMARY KEY,\
+           duration_min INTEGER NOT NULL,\
+           duration_max INTEGER NOT NULL,\
+           CHECK(duration_min <= duration_max)\
+         ) WITHOUT ROWID"
+    ))
 }
 
 /// Statements to remove the shadow tables again (vtab xDestroy).
@@ -74,9 +106,10 @@ pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
     let blocks = sql_ident::qualified_shadow(database, table, "blocks");
     let terms = sql_ident::qualified_shadow(database, table, "terms");
     let traces = sql_ident::qualified_shadow(database, table, "trace_blocks");
+    let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
     let meta = sql_ident::qualified_shadow(database, table, "meta");
     format!(
-        r#"DROP TABLE IF EXISTS {blocks}; DROP TABLE IF EXISTS {terms}; DROP TABLE IF EXISTS {traces}; DROP TABLE IF EXISTS {meta};"#
+        r#"DROP TABLE IF EXISTS {blocks}; DROP TABLE IF EXISTS {terms}; DROP TABLE IF EXISTS {traces}; DROP TABLE IF EXISTS {durations}; DROP TABLE IF EXISTS {meta};"#
     )
 }
 
@@ -85,10 +118,14 @@ pub(crate) struct ShadowSpanStore {
     // prepare_cached keyed by these strings makes every statement a
     // one-time parse — the Session 1 lesson).
     insert_block_sql: String,
+    insert_duration_sql: String,
     insert_term_sql: String,
     insert_trace_sql: String,
     read_sql: String,
     scan_sql: String,
+    validate_duration_sql: String,
+    missing_duration_sql: String,
+    update_duration_sql: String,
     save_meta_sql: String,
     load_meta_sql: String,
     /// "DELETE FROM ... IN (" prefixes, completed per call with the id
@@ -96,6 +133,7 @@ pub(crate) struct ShadowSpanStore {
     delete_blocks_prefix: String,
     delete_terms_prefix: String,
     delete_traces_prefix: String,
+    delete_durations_prefix: String,
     /// query_terms building blocks (term count varies per query; each
     /// distinct term-count SQL string is prepared once via
     /// prepare_cached).
@@ -111,11 +149,16 @@ impl ShadowSpanStore {
         let blocks = sql_ident::qualified_shadow(database, table, "blocks");
         let terms = sql_ident::qualified_shadow(database, table, "terms");
         let traces = sql_ident::qualified_shadow(database, table, "trace_blocks");
+        let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
         let meta = sql_ident::qualified_shadow(database, table, "meta");
         ShadowSpanStore {
             insert_block_sql: format!(
                 "INSERT INTO {blocks} (ts_min, ts_max, entry_count, codec, data) \
                  VALUES (?1, ?2, ?3, ?4, ?5)"
+            ),
+            insert_duration_sql: format!(
+                "INSERT INTO {durations} (block_id, duration_min, duration_max) \
+                 VALUES (?1, ?2, ?3)"
             ),
             // OR IGNORE on both index tables: the engine deduplicates
             // terms and trace ids per block, but a duplicate arriving
@@ -128,15 +171,37 @@ impl ShadowSpanStore {
             ),
             read_sql: format!("SELECT data FROM {blocks} WHERE id = ?1"),
             // scan() runs at every xConnect: metadata only, never blobs.
-            scan_sql: format!("SELECT id, ts_min, ts_max, entry_count, codec FROM {blocks}"),
+            scan_sql: format!(
+                "SELECT b.id, b.ts_min, b.ts_max, b.entry_count, b.codec, \
+                        d.duration_min, d.duration_max \
+                 FROM {blocks} b LEFT JOIN {durations} d ON d.block_id = b.id"
+            ),
+            validate_duration_sql: format!(
+                "SELECT d.block_id, d.duration_min, d.duration_max \
+                 FROM {durations} d LEFT JOIN {blocks} b ON b.id = d.block_id \
+                 WHERE b.id IS NULL OR d.duration_min > d.duration_max LIMIT 1"
+            ),
+            missing_duration_sql: format!(
+                "SELECT b.id, b.ts_min, b.ts_max, b.entry_count, b.codec \
+                 FROM {blocks} b LEFT JOIN {durations} d ON d.block_id = b.id \
+                 WHERE d.block_id IS NULL ORDER BY b.ts_min, b.id"
+            ),
+            update_duration_sql: format!(
+                "INSERT OR REPLACE INTO {durations} \
+                 (block_id, duration_min, duration_max) VALUES (?3, ?1, ?2)"
+            ),
             save_meta_sql: format!("INSERT OR REPLACE INTO {meta} (k, v) VALUES (?1, ?2)"),
             load_meta_sql: format!("SELECT v FROM {meta} WHERE k = ?1"),
             delete_blocks_prefix: format!("DELETE FROM {blocks} WHERE id IN ("),
             delete_terms_prefix: format!("DELETE FROM {terms} WHERE block_id IN ("),
             delete_traces_prefix: format!("DELETE FROM {traces} WHERE block_id IN ("),
+            delete_durations_prefix: format!("DELETE FROM {durations} WHERE block_id IN ("),
             query_base: format!(
                 "SELECT b.id, b.ts_min, b.ts_max, b.entry_count, b.codec \
-                 FROM {blocks} b WHERE b.ts_min <= ?1 AND b.ts_max >= ?2"
+                 FROM {blocks} b LEFT JOIN {durations} d ON d.block_id = b.id \
+                 WHERE b.ts_min <= ?1 AND b.ts_max >= ?2 \
+                 AND (d.duration_max IS NULL OR d.duration_max >= ?3) \
+                 AND (d.duration_min IS NULL OR d.duration_min <= ?4)"
             ),
             term_select: format!("SELECT block_id FROM {terms} WHERE term = ?"),
             terms_table: terms.clone(),
@@ -146,8 +211,12 @@ impl ShadowSpanStore {
             // near-sorted, same as query_terms.
             query_trace_sql: format!(
                 "SELECT b.id, b.ts_min, b.ts_max, b.entry_count, b.codec \
-                 FROM {blocks} b WHERE b.id IN \
+                 FROM {blocks} b LEFT JOIN {durations} d ON d.block_id = b.id \
+                 WHERE b.id IN \
                  (SELECT block_id FROM {traces} WHERE trace_id = ?1) \
+                 AND b.ts_min <= ?2 AND b.ts_max >= ?3 \
+                 AND (d.duration_max IS NULL OR d.duration_max >= ?4) \
+                 AND (d.duration_min IS NULL OR d.duration_min <= ?5) \
                  ORDER BY b.ts_min"
             ),
         }
@@ -159,13 +228,13 @@ impl ShadowSpanStore {
         shared::current_conn()
     }
 
-    /// INSERT one block row + its term rows + its trace-index rows.
-    /// The caller's enclosing host transaction makes the trio atomic —
-    /// a block is never visible without BOTH kinds of index rows.
+    /// INSERT one block row + its duration, term, and trace-index rows.
+    /// The caller's enclosing host transaction makes the operation atomic.
     fn insert_block(
         &self,
         conn: &Connection,
         block: &EncodedSpanBlock,
+        duration_bounds: Option<SpanDurationBounds>,
     ) -> Result<BlockLoc, String> {
         let mut stmt = conn
             .prepare_cached(&self.insert_block_sql)
@@ -181,6 +250,13 @@ impl ShadowSpanStore {
         // `id INTEGER PRIMARY KEY` aliases the rowid, so
         // last_insert_rowid() IS the id we just wrote.
         let id = conn.last_insert_rowid();
+
+        if let Some(bounds) = duration_bounds {
+            conn.prepare_cached(&self.insert_duration_sql)
+                .map_err(|e| format!("prepare duration-bound insert failed: {e}"))?
+                .execute(params![id, bounds.min_ns, bounds.max_ns])
+                .map_err(|e| format!("duration-bound insert for block {id} failed: {e}"))?;
+        }
 
         let mut tstmt = conn
             .prepare_cached(&self.insert_term_sql)
@@ -202,8 +278,8 @@ impl ShadowSpanStore {
         Ok(BlockLoc { id })
     }
 
-    /// DELETE term rows, trace rows, then block rows for `ids` — one
-    /// operation, so neither index ever outlives its blocks (order
+    /// DELETE term, trace, and duration rows, then block rows for `ids` —
+    /// one operation, so no metadata ever outlives its blocks (order
     /// within the transaction is invisible to other connections).
     fn delete_ids(&self, conn: &Connection, ids: &[i64]) -> Result<(), String> {
         if ids.is_empty() {
@@ -218,6 +294,8 @@ impl ShadowSpanStore {
             .map_err(|e| format!("term delete failed: {e}"))?;
         conn.execute(&format!("{}{})", self.delete_traces_prefix, list), [])
             .map_err(|e| format!("trace-index delete failed: {e}"))?;
+        conn.execute(&format!("{}{})", self.delete_durations_prefix, list), [])
+            .map_err(|e| format!("duration-bound delete failed: {e}"))?;
         conn.execute(&format!("{}{})", self.delete_blocks_prefix, list), [])
             .map_err(|e| format!("block delete failed: {e}"))?;
         Ok(())
@@ -265,7 +343,27 @@ impl SpanBlockStore for ShadowSpanStore {
         let conn = Self::conn()?;
         blocks
             .iter()
-            .map(|block| self.insert_block(&conn, block))
+            .map(|block| self.insert_block(&conn, block, None))
+            .collect()
+    }
+
+    fn put_blocks_with_duration_bounds(
+        &self,
+        blocks: &[EncodedSpanBlock],
+        duration_bounds: &[SpanDurationBounds],
+    ) -> Result<Vec<BlockLoc>, String> {
+        if blocks.len() != duration_bounds.len() {
+            return Err(format!(
+                "span block/duration metadata length mismatch: {} blocks, {} bounds",
+                blocks.len(),
+                duration_bounds.len()
+            ));
+        }
+        let conn = Self::conn()?;
+        blocks
+            .iter()
+            .zip(duration_bounds)
+            .map(|(block, bounds)| self.insert_block(&conn, block, Some(*bounds)))
             .collect()
     }
 
@@ -282,13 +380,38 @@ impl SpanBlockStore for ShadowSpanStore {
 
         let mut locs = Vec::with_capacity(add.len());
         for block in add {
-            locs.push(self.insert_block(&conn, block)?);
+            locs.push(self.insert_block(&conn, block, None)?);
         }
         on_committed(&locs);
 
         let ids: Vec<i64> = remove.iter().map(|l| l.id).collect();
         self.delete_ids(&conn, &ids)?;
         Ok(locs)
+    }
+
+    fn replace_blocks_with_duration_bounds(
+        &self,
+        add: &[EncodedSpanBlock],
+        duration_bounds: &[SpanDurationBounds],
+        remove: &[BlockLoc],
+        on_committed: &mut dyn FnMut(&[BlockLoc]),
+    ) -> Result<Vec<BlockLoc>, String> {
+        if add.len() != duration_bounds.len() {
+            return Err(format!(
+                "span block/duration metadata length mismatch: {} blocks, {} bounds",
+                add.len(),
+                duration_bounds.len()
+            ));
+        }
+        let conn = Self::conn()?;
+        let mut locations = Vec::with_capacity(add.len());
+        for (block, bounds) in add.iter().zip(duration_bounds) {
+            locations.push(self.insert_block(&conn, block, Some(*bounds))?);
+        }
+        on_committed(&locations);
+        let ids: Vec<i64> = remove.iter().map(|location| location.id).collect();
+        self.delete_ids(&conn, &ids)?;
+        Ok(locations)
     }
 
     fn read_block(&self, loc: &BlockLoc) -> Result<Vec<u8>, String> {
@@ -317,11 +440,48 @@ impl SpanBlockStore for ShadowSpanStore {
     /// xCreate/xConnect.
     fn scan(&self) -> Result<Vec<(BlockMeta, BlockLoc)>, String> {
         let conn = Self::conn()?;
+        let invalid = conn
+            .prepare_cached(&self.validate_duration_sql)
+            .map_err(|error| format!("prepare duration-bound validation failed: {error}"))?
+            .query_row([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .optional()
+            .map_err(|error| format!("duration-bound validation failed: {error}"))?;
+        if let Some((block_id, minimum, maximum)) = invalid {
+            return Err(format!(
+                "trace duration metadata is corrupt at block {block_id}: invalid duration bounds or orphaned row {minimum}..{maximum}"
+            ));
+        }
         let mut stmt = conn
             .prepare_cached(&self.scan_sql)
             .map_err(|e| format!("prepare block scan failed: {e}"))?;
         let rows = stmt
             .query_map([], |r| {
+                let id: i64 = r.get(0)?;
+                let duration_min: Option<i64> = r.get(5)?;
+                let duration_max: Option<i64> = r.get(6)?;
+                let invalid = match (duration_min, duration_max) {
+                    (None, None) => None,
+                    (Some(minimum), Some(maximum)) if minimum <= maximum => None,
+                    (Some(minimum), Some(maximum)) => Some(format!(
+                        "trace block {id} has invalid duration bounds: minimum {minimum} exceeds maximum {maximum}"
+                    )),
+                    _ => Some(format!(
+                        "trace block {id} has incomplete duration bounds; minimum and maximum must both be NULL or both be present"
+                    )),
+                };
+                if let Some(message) = invalid {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Integer,
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
+                    ));
+                }
                 Ok((
                     BlockMeta {
                         ts_min: r.get(1)?,
@@ -329,13 +489,48 @@ impl SpanBlockStore for ShadowSpanStore {
                         entry_count: r.get::<_, i64>(3)? as u32,
                         codec: r.get::<_, i64>(4)? as u8,
                     },
-                    BlockLoc { id: r.get(0)? },
+                    BlockLoc { id },
                 ))
             })
             .map_err(|e| format!("block scan failed: {e}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("block scan row failed: {e}"))?;
         Ok(rows)
+    }
+
+    fn blocks_missing_duration_bounds(&self) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        let conn = Self::conn()?;
+        let mut statement = conn
+            .prepare_cached(&self.missing_duration_sql)
+            .map_err(|error| format!("prepare duration-bound scan failed: {error}"))?;
+        Self::meta_rows(&mut statement, Vec::new(), "duration-bound scan")
+    }
+
+    fn update_duration_bounds(
+        &self,
+        updates: &[(BlockLoc, SpanDurationBounds)],
+    ) -> Result<(), String> {
+        let conn = Self::conn()?;
+        let mut statement = conn
+            .prepare_cached(&self.update_duration_sql)
+            .map_err(|error| format!("prepare duration-bound update failed: {error}"))?;
+        for (location, bounds) in updates {
+            let changed = statement
+                .execute(params![bounds.min_ns, bounds.max_ns, location.id])
+                .map_err(|error| {
+                    format!(
+                        "duration-bound update for block {} failed: {error}",
+                        location.id
+                    )
+                })?;
+            if changed != 1 {
+                return Err(format!(
+                    "duration-bound update for block {} changed {changed} rows; expected 1",
+                    location.id
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Posting-list intersection + ts overlap, identical SQL shape to
@@ -346,6 +541,17 @@ impl SpanBlockStore for ShadowSpanStore {
         terms: &[String],
         ts_min: i64,
         ts_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.query_terms_with_duration_bounds(terms, ts_min, ts_max, i64::MIN, i64::MAX)
+    }
+
+    fn query_terms_with_duration_bounds(
+        &self,
+        terms: &[String],
+        ts_min: i64,
+        ts_max: i64,
+        duration_min_ns: i64,
+        duration_max_ns: i64,
     ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
         let mut sql = self.query_base.clone();
         if !terms.is_empty() {
@@ -362,9 +568,11 @@ impl SpanBlockStore for ShadowSpanStore {
 
         // ?1 = query ts_max (vs ts_min column), ?2 = query ts_min (vs
         // ts_max column) — interval overlap — then one string per term.
-        let mut binds: Vec<Value> = Vec::with_capacity(2 + terms.len());
+        let mut binds: Vec<Value> = Vec::with_capacity(4 + terms.len());
         binds.push(Value::Integer(ts_max));
         binds.push(Value::Integer(ts_min));
+        binds.push(Value::Integer(duration_min_ns));
+        binds.push(Value::Integer(duration_max_ns));
         for t in terms {
             binds.push(Value::Text(t.clone()));
         }
@@ -381,13 +589,30 @@ impl SpanBlockStore for ShadowSpanStore {
     /// memcmp), block metadata joined in — payload blobs untouched
     /// until the engine reads the survivors.
     fn query_trace(&self, trace_id: &[u8; 16]) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        self.query_trace_with_duration_bounds(trace_id, i64::MIN, i64::MAX, i64::MIN, i64::MAX)
+    }
+
+    fn query_trace_with_duration_bounds(
+        &self,
+        trace_id: &[u8; 16],
+        ts_min: i64,
+        ts_max: i64,
+        duration_min_ns: i64,
+        duration_max_ns: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
         let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.query_trace_sql)
             .map_err(|e| format!("prepare trace query failed: {e}"))?;
         Self::meta_rows(
             &mut stmt,
-            vec![Value::Blob(trace_id.to_vec())],
+            vec![
+                Value::Blob(trace_id.to_vec()),
+                Value::Integer(ts_max),
+                Value::Integer(ts_min),
+                Value::Integer(duration_min_ns),
+                Value::Integer(duration_max_ns),
+            ],
             "trace query",
         )
     }

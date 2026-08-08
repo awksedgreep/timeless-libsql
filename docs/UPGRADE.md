@@ -22,6 +22,16 @@ capability handshake and is not a valid extension peer for a `0.4.x` server.
 - A green `--version` string is not enough; require the complete capability,
   database-ledger, readiness, and semantic checks below.
 
+Opening an older `timeless_traces` table with this extension adds a private
+duration-extrema side table. Existing payloads and indexes are not
+rewritten during startup. Unknown blocks remain exactly queryable through the
+decode fallback; schedule `INSERT INTO traces(traces) VALUES ('optimize')` (or
+the bounded `optimize:<max source spans>` form) to populate them. Observe
+`duration_unknown_blocks` reaching zero through `timeless_stats('traces')`.
+Keep the pre-upgrade backup: an older extension is not expected to understand
+the additive private schema even though stored block payloads retain their
+codec and data-ABI meaning.
+
 ## 1. Inventory the current installation
 
 Record the current artifact identities and complete database paths. For a
@@ -142,6 +152,9 @@ After admitting a bounded test batch:
 - fetch a complete trace and verify parent relationships and rich-span fields;
 - inspect public stats for failures, queue growth, decoded work, WAL/checkpoint
   state, and storage accounting;
+- for upgraded traces, require `duration_unknown_blocks=0` after the planned
+  optimize backfill and verify an impossible duration filter reports zero
+  candidate blocks and decoded spans;
 - restart normally and repeat the reads cold; and
 - retain the rollback backup and old artifacts for the documented support
   window.

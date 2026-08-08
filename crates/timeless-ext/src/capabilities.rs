@@ -59,7 +59,13 @@ fn document() -> &'static str {
                     "batches": ["span-v0", "rich-span-v1"],
                     "timestamp_unit": "nanoseconds",
                     "authoritative_batch_spans": 8192,
-                    "rich_span_fidelity": true
+                    "rich_span_fidelity": true,
+                    "duration_block_pruning": {
+                        "version": 1,
+                        "inclusive_bounds": true,
+                        "legacy_decode_fallback": true,
+                        "optimize_backfill": true
+                    }
                 }
             },
             "query_surfaces": {
@@ -167,6 +173,22 @@ mod tests {
         assert_eq!(value["signals"]["metrics"]["native_histograms"], false);
         assert_eq!(value["signals"]["logs"]["typed_metadata"], true);
         assert_eq!(value["signals"]["traces"]["rich_span_fidelity"], true);
+        assert_eq!(
+            value["signals"]["traces"]["duration_block_pruning"]["version"],
+            1
+        );
+        assert_eq!(
+            value["signals"]["traces"]["duration_block_pruning"]["inclusive_bounds"],
+            true
+        );
+        assert_eq!(
+            value["signals"]["traces"]["duration_block_pruning"]["legacy_decode_fallback"],
+            true
+        );
+        assert_eq!(
+            value["signals"]["traces"]["duration_block_pruning"]["optimize_backfill"],
+            true
+        );
         assert_eq!(
             value["query_surfaces"]["timeless_raw_frame"]["max_work_points"],
             true

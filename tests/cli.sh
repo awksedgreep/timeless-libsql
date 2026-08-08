@@ -16,7 +16,7 @@
 #      auto-queue rebuild, integrity_check, reopen)
 #   6b. logs transaction rollback (real auto-flush inside the txn,
 #       optimize-in-txn, no dangling _terms rows)
-#   6c. traces transaction rollback (auto-flush + _trace_blocks rows
+#   6c. traces transaction rollback (auto-flush + trace/duration rows
 #       vanish with their blocks; never-dangle through rollback)
 #   7. Tier 2 batch blob ingest (format v0; blob in the hidden column)
 #   8. malformed batch blobs rejected atomically (truncation, bad index)
@@ -30,7 +30,7 @@
 #   14. trace_id pushdown proof (_trace_blocks contents + the planner
 #       choosing the trace-index plan, visible as VIRTUAL TABLE INDEX 1)
 #   15. traces status/service pushdown
-#   16. traces prune removes blocks AND _terms AND _trace_blocks rows
+#   16. traces prune removes blocks, terms, trace rows, and duration rows
 #   17. traces append-only + kind/status/id-length validation
 #   18. Prometheus text ingest (BLOB dispatch on first byte: 0x01 = batch
 #       v0, reserved 0x00/0x02–0x08 = loud error, else exposition text;
@@ -393,10 +393,10 @@ check_eq "logs rollback state survives reopen, no dangling terms" "$got" "2|0
 ok"
 
 # ---------------------------------------------------------------------------
-echo "== section 6c: traces transaction rollback (incl. _trace_blocks) =="
-# Same story as logs plus the trace index: rows in _trace_blocks are
-# created in the same operation as their blocks, so ROLLBACK must take
-# them away together — never-dangle holds THROUGH rollback.
+echo "== section 6c: traces transaction rollback (indexes + durations) =="
+# Same story as logs plus the trace/duration indexes: their rows are created
+# in the same operation as their blocks, so ROLLBACK must take them away
+# together — never-dangle holds THROUGH rollback.
 RTDB="$TMP/rollback_traces.db"
 got=$(sqlite3 "$RTDB" <<SQL
 .load $EXT
@@ -404,12 +404,12 @@ CREATE VIRTUAL TABLE traces USING timeless_traces;
 INSERT INTO traces(trace_id, span_id, name, service, status, start_ts) VALUES (x'11111111111111111111111111111111', x'0000000000000001', 'keep-flushed', 'api', 'ok', 1000);
 INSERT INTO traces(traces) VALUES ('flush');
 INSERT INTO traces(trace_id, span_id, name, service, status, start_ts) VALUES (x'22222222222222222222222222222222', x'0000000000000002', 'keep-buffered', 'web', 'error', 2000);
-SELECT 'pre', COUNT(*), (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks) FROM traces;
+SELECT 'pre', COUNT(*), (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks), (SELECT COUNT(*) FROM traces_duration_bounds) FROM traces;
 BEGIN;
 INSERT INTO traces(trace_id, span_id, name, service, start_ts) SELECT randomblob(16), randomblob(8), 'bulk', 'svc', 10000 + value FROM generate_series(1, 9000);
-SELECT 'in_txn', (SELECT COUNT(*) FROM traces_blocks) > 1, (SELECT COUNT(*) FROM traces_trace_blocks) > 1, COUNT(*) FROM traces;
+SELECT 'in_txn', (SELECT COUNT(*) FROM traces_blocks) > 1, (SELECT COUNT(*) FROM traces_trace_blocks) > 1, (SELECT COUNT(*) FROM traces_duration_bounds) > 1, COUNT(*) FROM traces;
 ROLLBACK;
-SELECT 'post', COUNT(*), (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks) FROM traces;
+SELECT 'post', COUNT(*), (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks), (SELECT COUNT(*) FROM traces_duration_bounds) FROM traces;
 SELECT 'rows', name, status, start_ts FROM traces ORDER BY start_ts;
 PRAGMA integrity_check;
 INSERT INTO traces(traces) VALUES ('flush');
@@ -419,9 +419,9 @@ SQL
 # + 1 trace row. in_txn: auto-flush at 8192 wrote blocks + trace rows.
 # post: everything back — 1 block / 4 terms / 1 trace row — and the
 # pre-txn buffered error span RESTORED.
-expected='pre|2|1|6|1
-in_txn|1|1|9002
-post|2|1|6|1
+expected='pre|2|1|6|1|1
+in_txn|1|1|1|9002
+post|2|1|6|1|1
 rows|keep-flushed|ok|1000
 rows|keep-buffered|error|2000
 ok'
@@ -432,6 +432,8 @@ got=$(sqlite3 "$RTDB" <<SQL
 SELECT COUNT(*), (SELECT COUNT(*) FROM traces WHERE name = 'bulk') FROM traces;
 SELECT hex(tb.trace_id) FROM traces_trace_blocks tb LEFT JOIN traces_blocks b ON tb.block_id = b.id WHERE b.id IS NULL;
 SELECT t.term FROM traces_terms t LEFT JOIN traces_blocks b ON t.block_id = b.id WHERE b.id IS NULL;
+SELECT d.block_id FROM traces_duration_bounds d LEFT JOIN traces_blocks b ON d.block_id = b.id WHERE b.id IS NULL;
+SELECT b.id FROM traces_blocks b LEFT JOIN traces_duration_bounds d ON d.block_id = b.id WHERE d.block_id IS NULL;
 PRAGMA integrity_check;
 SQL
 )
@@ -863,9 +865,8 @@ check_eq "traces status/service/kind/name pushdown" "$got" "$expected"
 # ---------------------------------------------------------------------------
 echo "== section 16: traces prune removes blocks + terms + trace rows =="
 # Fresh db, two flushes -> blocks with disjoint ts ranges. Pruning
-# between them must delete the old blocks and BOTH kinds of index rows
-# in the same operation (posting lists AND the trace index never
-# dangle — the PLAN.md rule extended to _trace_blocks).
+# between them must delete the old blocks, both index families, and duration
+# rows in the same operation (no private metadata may dangle).
 TPRUNEDB="$TMP/traces_prune.db"
 got=$(sqlite3 "$TPRUNEDB" <<SQL
 .load $EXT
@@ -878,9 +879,9 @@ INSERT INTO traces(traces) VALUES ('flush');
 INSERT INTO traces(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
   VALUES (x'33333333333333333333333333333333', x'0000000000000003', 'new-op', 'api', 'server', 'ok', 9000000, 10);
 INSERT INTO traces(traces) VALUES ('flush');
-SELECT 'before', (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks);
+SELECT 'before', (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks), (SELECT COUNT(*) FROM traces_duration_bounds);
 INSERT INTO traces(traces) VALUES ('prune:1000000');
-SELECT 'after', (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks);
+SELECT 'after', (SELECT COUNT(*) FROM traces_blocks), (SELECT COUNT(*) FROM traces_terms), (SELECT COUNT(*) FROM traces_trace_blocks), (SELECT COUNT(*) FROM traces_duration_bounds);
 SELECT 'rows', hex(trace_id), name FROM traces ORDER BY start_ts;
 SELECT 'gone', COUNT(*) FROM traces WHERE trace_id = x'11111111111111111111111111111111';
 SQL
@@ -890,8 +891,8 @@ SQL
 # (4 terms) = 3 blocks / 12 term rows / 3 trace rows.
 # after: both old blocks pruned with ALL their index rows; the new
 # block keeps 4 terms + 1 trace row.
-expected='before|3|18|3
-after|1|6|1
+expected='before|3|18|3|3
+after|1|6|1|1
 rows|33333333333333333333333333333333|new-op
 gone|0'
 check_eq "traces prune drops blocks + terms + trace-index rows" "$got" "$expected"

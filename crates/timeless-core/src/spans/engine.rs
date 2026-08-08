@@ -27,7 +27,10 @@ use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
 use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR_V2, CODEC_RAW};
-use super::{status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanEntry};
+use super::{
+    status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanDurationBounds,
+    SpanEntry,
+};
 
 /// Tuning knobs. All ts_* values are in the SAME opaque unit as
 /// SpanEntry.start_ts — the engine never assumes a unit (the traces
@@ -288,6 +291,10 @@ pub struct SpanOptimizeProfileSnapshot {
     pub optimize_merge_input_bytes: u64,
     pub optimize_merge_output_bytes: u64,
     pub optimize_merge_total_ns: u64,
+    pub optimize_duration_backfill_blocks: u64,
+    pub optimize_duration_backfill_entries: u64,
+    pub optimize_duration_backfill_input_bytes: u64,
+    pub optimize_duration_backfill_total_ns: u64,
 }
 
 #[derive(Default)]
@@ -311,6 +318,10 @@ struct SpanOptimizeProfile {
     optimize_merge_input_bytes: AtomicU64,
     optimize_merge_output_bytes: AtomicU64,
     optimize_merge_total_ns: AtomicU64,
+    optimize_duration_backfill_blocks: AtomicU64,
+    optimize_duration_backfill_entries: AtomicU64,
+    optimize_duration_backfill_input_bytes: AtomicU64,
+    optimize_duration_backfill_total_ns: AtomicU64,
 }
 
 impl SpanOptimizeProfile {
@@ -336,6 +347,12 @@ impl SpanOptimizeProfile {
             optimize_merge_input_bytes: load(&self.optimize_merge_input_bytes),
             optimize_merge_output_bytes: load(&self.optimize_merge_output_bytes),
             optimize_merge_total_ns: load(&self.optimize_merge_total_ns),
+            optimize_duration_backfill_blocks: load(&self.optimize_duration_backfill_blocks),
+            optimize_duration_backfill_entries: load(&self.optimize_duration_backfill_entries),
+            optimize_duration_backfill_input_bytes: load(
+                &self.optimize_duration_backfill_input_bytes,
+            ),
+            optimize_duration_backfill_total_ns: load(&self.optimize_duration_backfill_total_ns),
         }
     }
 }
@@ -382,6 +399,15 @@ struct SpanOptimizeOutcome {
     merge_input_bytes: u64,
     merge_output_bytes: u64,
     merge_total_ns: u64,
+}
+
+#[derive(Default)]
+struct SpanDurationBackfillOutcome {
+    blocks: u64,
+    entries: u64,
+    input_bytes: u64,
+    total_ns: u64,
+    budget_limited: bool,
 }
 
 /// One entry in the engine's in-memory block index: persisted metadata
@@ -809,6 +835,7 @@ impl SpanBlockEngine {
         buf.sort_by_key(|e| (e.status, e.start_ts));
 
         let mut blocks: Vec<EncodedSpanBlock> = Vec::new();
+        let mut duration_bounds: Vec<SpanDurationBounds> = Vec::new();
         let mut statuses: Vec<u8> = Vec::new(); // partition tag per block
         let mut start = 0usize;
         while start < buf.len() {
@@ -826,11 +853,14 @@ impl SpanBlockEngine {
                 terms: extract_terms(run),
                 trace_ids: extract_trace_ids(run),
             });
+            duration_bounds.push(span_duration_bounds(run)?);
             statuses.push(status);
             start = end;
         }
 
-        let locs = self.store.put_blocks(&blocks)?;
+        let locs = self
+            .store
+            .put_blocks_with_duration_bounds(&blocks, &duration_bounds)?;
         {
             let mut index = self.index_lock();
             for ((block, loc), status) in blocks.iter().zip(&locs).zip(&statuses) {
@@ -879,7 +909,13 @@ impl SpanBlockEngine {
 
     fn optimize_with_budget(&self, max_entries: Option<usize>) -> Result<(usize, usize), String> {
         let started = Instant::now();
-        let out = self.optimize_inner(max_entries)?;
+        let mut out = self.optimize_inner(max_entries)?;
+        let rewritten_entries = out.raw_entries.saturating_add(out.merge_entries);
+        let backfill_budget = max_entries.map(|budget| {
+            budget.saturating_sub(usize::try_from(rewritten_entries).unwrap_or(usize::MAX))
+        });
+        let backfill = self.backfill_duration_bounds(backfill_budget)?;
+        out.budget_limited |= backfill.budget_limited;
         self.apply_retention()?;
         self.optimize_profile
             .optimize_count
@@ -946,10 +982,81 @@ impl SpanBlockEngine {
                 &self.optimize_profile.optimize_merge_total_ns,
                 out.merge_total_ns,
             ),
+            (
+                &self.optimize_profile.optimize_duration_backfill_blocks,
+                backfill.blocks,
+            ),
+            (
+                &self.optimize_profile.optimize_duration_backfill_entries,
+                backfill.entries,
+            ),
+            (
+                &self.optimize_profile.optimize_duration_backfill_input_bytes,
+                backfill.input_bytes,
+            ),
+            (
+                &self.optimize_profile.optimize_duration_backfill_total_ns,
+                backfill.total_ns,
+            ),
         ] {
             counter.fetch_add(value, Ordering::Relaxed);
         }
         Ok((out.blocks_removed, out.blocks_written))
+    }
+
+    fn backfill_duration_bounds(
+        &self,
+        max_entries: Option<usize>,
+    ) -> Result<SpanDurationBackfillOutcome, String> {
+        let _transition = self.transition_write();
+        let candidates = self.store.blocks_missing_duration_bounds()?;
+        if candidates.is_empty() {
+            return Ok(SpanDurationBackfillOutcome::default());
+        }
+
+        let started = Instant::now();
+        let mut selected = Vec::new();
+        let mut selected_entries = 0usize;
+        let mut budget_limited = false;
+        for (location, meta) in candidates {
+            let entries = meta.entry_count as usize;
+            if max_entries == Some(0)
+                || (!selected.is_empty()
+                    && max_entries
+                        .is_some_and(|budget| selected_entries.saturating_add(entries) > budget))
+            {
+                budget_limited = true;
+                break;
+            }
+            selected_entries = selected_entries.saturating_add(entries);
+            selected.push((location, meta));
+        }
+
+        let mut updates = Vec::with_capacity(selected.len());
+        let mut input_bytes = 0u64;
+        for (location, meta) in &selected {
+            let bytes = self.store.read_block(location)?;
+            input_bytes = input_bytes.saturating_add(bytes.len() as u64);
+            let entries = decode_span_block(&bytes)?;
+            if entries.len() != meta.entry_count as usize {
+                return Err(format!(
+                    "span block {} metadata declares {} entries but payload decoded {}",
+                    location.id,
+                    meta.entry_count,
+                    entries.len()
+                ));
+            }
+            updates.push((*location, span_duration_bounds(&entries)?));
+        }
+        self.store.update_duration_bounds(&updates)?;
+
+        Ok(SpanDurationBackfillOutcome {
+            blocks: updates.len() as u64,
+            entries: selected_entries as u64,
+            input_bytes,
+            total_ns: elapsed_ns(started),
+            budget_limited,
+        })
     }
 
     pub fn optimize_backlog(&self) -> SpanOptimizeBacklog {
@@ -1214,6 +1321,7 @@ impl SpanBlockEngine {
         }
 
         let mut adds: Vec<EncodedSpanBlock> = Vec::new();
+        let mut add_duration_bounds: Vec<SpanDurationBounds> = Vec::new();
         let mut add_partitions: Vec<Option<u8>> = Vec::new();
         let mut removes: Vec<BlockLoc> = Vec::new();
         let mut outcome = SpanOptimizeOutcome {
@@ -1246,6 +1354,7 @@ impl SpanBlockEngine {
                 terms,
                 trace_ids,
             });
+            add_duration_bounds.push(span_duration_bounds(&entries)?);
             add_partitions.push(group.partition);
             removes.extend(group.sources.iter().map(|entry| entry.loc));
             let elapsed = elapsed_ns(phase_started);
@@ -1288,8 +1397,11 @@ impl SpanBlockEngine {
         let add_metas: Vec<BlockMeta> = adds.iter().map(|b| b.meta).collect();
         outcome.blocks_removed = removes.len();
         outcome.blocks_written = add_metas.len();
-        self.store
-            .replace_blocks(&adds, &removes, &mut |new_locs: &[BlockLoc]| {
+        self.store.replace_blocks_with_duration_bounds(
+            &adds,
+            &add_duration_bounds,
+            &removes,
+            &mut |new_locs: &[BlockLoc]| {
                 let mut index = self.index_lock();
                 if let Some(j) = j.as_deref_mut() {
                     for e in index.iter().filter(|e| removes.contains(&e.loc)) {
@@ -1310,7 +1422,8 @@ impl SpanBlockEngine {
                         partition: *partition,
                     });
                 }
-            })?;
+            },
+        )?;
         drop(j);
         Ok(outcome)
     }
@@ -1742,7 +1855,7 @@ impl SpanBlockEngine {
     ) -> Result<SpanQuerySnapshot, String> {
         let _transition = self.transition_read();
         self.validate_query(q)?;
-        let locs = self.query_locations(q)?;
+        let locs = self.query_locations(q, duration_min, duration_max)?;
         let candidate_blocks = locs.len() as u64;
         let stable_locations = self.store.query_snapshot_keeps_locations_readable();
         let mut blocks = Vec::with_capacity(locs.len());
@@ -1794,11 +1907,25 @@ impl SpanBlockEngine {
         Ok(())
     }
 
-    fn query_locations(&self, q: &SpanQuery) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+    fn query_locations(
+        &self,
+        q: &SpanQuery,
+        duration_min: i64,
+        duration_max: i64,
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        if duration_min > duration_max {
+            return Ok(Vec::new());
+        }
         match &q.trace_id {
             Some(trace_id) => Ok(self
                 .store
-                .query_trace(trace_id)
+                .query_trace_with_duration_bounds(
+                    trace_id,
+                    q.ts_min,
+                    q.ts_max,
+                    duration_min,
+                    duration_max,
+                )
                 .map_err(|error| self.query_error(error))?
                 .into_iter()
                 .filter(|(_, meta)| meta.ts_min <= q.ts_max && meta.ts_max >= q.ts_min)
@@ -1818,7 +1945,13 @@ impl SpanBlockEngine {
                     terms.push(format!("name:{name}"));
                 }
                 self.store
-                    .query_terms(&terms, q.ts_min, q.ts_max)
+                    .query_terms_with_duration_bounds(
+                        &terms,
+                        q.ts_min,
+                        q.ts_max,
+                        duration_min,
+                        duration_max,
+                    )
                     .map_err(|error| self.query_error(error))
             }
         }
@@ -2229,6 +2362,17 @@ fn extract_trace_ids(entries: &[SpanEntry]) -> Vec<[u8; 16]> {
         set.insert(e.trace_id);
     }
     set.into_iter().collect()
+}
+
+fn span_duration_bounds(entries: &[SpanEntry]) -> Result<SpanDurationBounds, String> {
+    let mut durations = entries.iter().map(|entry| entry.duration_ns);
+    let Some(first) = durations.next() else {
+        return Err("cannot encode duration bounds for an empty span block".into());
+    };
+    let (minimum, maximum) = durations.fold((first, first), |(minimum, maximum), duration| {
+        (minimum.min(duration), maximum.max(duration))
+    });
+    SpanDurationBounds::new(minimum, maximum)
 }
 
 /// Exact per-span filter — the truth the block-level indexes only

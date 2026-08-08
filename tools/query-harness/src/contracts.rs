@@ -381,7 +381,7 @@ fn validate_signal_storage_boundaries(root: &Path) -> Result<Vec<String>> {
         ("logs", r"\blogs_(?:blocks|blocks_ts|terms|meta)\b"),
         (
             "traces",
-            r"\btraces_(?:blocks|blocks_ts|terms|trace_blocks|meta)\b",
+            r"\btraces_(?:blocks|blocks_ts|terms|trace_blocks|duration_bounds|meta)\b",
         ),
     ];
     let mut errors = Vec::new();
