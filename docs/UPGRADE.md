@@ -37,6 +37,17 @@ Keep the pre-upgrade backup: an older extension is not expected to understand
 the additive private schema even though stored block payloads retain their
 codec and data-ABI meaning.
 
+Starting with `0.5.0`, rich-logs `optimize()` writes template-compressed
+message blocks (codec byte 8). Nothing is rewritten at open — the new codec
+appears only as background or scheduled optimize re-encodes rich blocks — but
+once it has, a pre-`0.5.0` extension refuses those blocks with a loud decode
+error naming the unknown codec; it never returns partial or flattened rows.
+Rolling back the extension after a `0.5.0` optimize therefore requires
+restoring the pre-upgrade backup (or re-importing through the public batch
+contracts with the older binary). Upgrade every binary that opens the same
+database file as one set before allowing optimize to run, exactly as the
+invariants above require.
+
 ## 1. Inventory the current installation
 
 Record the current artifact identities and complete database paths. For a

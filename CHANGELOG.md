@@ -10,9 +10,13 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.4.2 -->
+<!-- release-target: 0.5.0 -->
 
 ## [Unreleased]
+
+No changes recorded after `0.5.0`.
+
+## [0.5.0] — 2026-08-08
 
 ### Added
 
@@ -26,6 +30,24 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   whole-block wins: 1.29–2.44× on message-dominated rich blocks, ~1.03×
   when the metadata envelope dominates. Ingest/flush is unchanged; all
   prior codecs remain decodable.
+
+### Compatibility
+
+- This minor selects a new compatibility line because of stored-data
+  forward compatibility: after this extension runs rich-logs `optimize()`,
+  the database contains codec-8 blocks that pre-`0.5.0` extensions refuse
+  to decode (they fail loudly, matching the codec-6/7 posture). Reading
+  older databases is unaffected — every prior codec stays decodable, and
+  no migration runs at open.
+- Storage data ABI 1, SQL-surface generation 1, and the batch/frame
+  formats are unchanged. The extension/server pairing floors advance with
+  the line, as the pre-1.0 policy requires: the `0.5.0` extension floors
+  servers at `0.5.0` and the `0.5.0` servers floor extensions at `0.5.0`,
+  so a compatibility set upgrades as one unit. Servers load the extension
+  in-process, so any handshake-accepted pairing decodes codec 8 through
+  the loaded extension; the rollback caveat is a pre-`0.5.0` extension
+  pointed at a database already optimized by `0.5.0` (see the upgrade
+  guide).
 
 ## [0.4.2] — 2026-08-08
 
@@ -209,7 +231,8 @@ Hardened statement atomicity, savepoints, multi-process series identity,
 attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
-[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/awksedgreep/timeless-libsql/compare/v0.3.0...v0.4.0
