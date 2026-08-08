@@ -163,6 +163,13 @@ Exit criteria:
   backup/reopen, optimize, and mixed old/new batches preserve every field;
 - memory, storage, and write/read regressions receive an explicit verdict.
 
+Status: complete. Public SQL columns, `rich-span-v2` batch `0x03`, block
+generation 3, additive capability negotiation, old-generation defaults,
+complete JSON/protobuf OTLP fidelity, dashboard and Jaeger projection,
+direct-SQL/mixed-batch/backup/optimize/reopen regressions, and two release
+measurements are recorded in
+[`2026-08-08_trace_rich_span_v2.md`](2026-08-08_trace_rich_span_v2.md).
+
 ## Session 6 — Trace-level summaries
 
 Create a trace query matrix before adding storage. If complete-trace search

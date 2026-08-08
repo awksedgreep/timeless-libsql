@@ -1,0 +1,752 @@
+{
+  "branch": "feature/trace-duration-pruning",
+  "build": {
+    "extension": {
+      "commit": "813a84cc13402f4a37ede2004c3a825c273d1f46",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "profile": "release",
+    "traces_binary": {
+      "commit": "813a84cc13402f4a37ede2004c3a825c273d1f46",
+      "name": "timeless-traces-api",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "0.4.0"
+    }
+  },
+  "captured_at": "2026-08-08T14:54:57.647232Z",
+  "direct_sql": {
+    "broad_all_time_boxes": {
+      "extension_work_delta": {
+        "query_blocks_skipped_by_bound": 0,
+        "query_bounded_count": 0,
+        "query_bounded_max_spans": 0,
+        "query_bounded_requested_spans": 0,
+        "query_buffered_spans_examined": 0,
+        "query_cancelled": 0,
+        "query_candidate_blocks": 960,
+        "query_count": 20,
+        "query_decoded_column_bytes": 126720,
+        "query_decoded_columns": 3840,
+        "query_decoded_spans": 2621440,
+        "query_matched_spans": 2621440,
+        "query_materialized_rich_values": 0,
+        "query_materialized_values": 10485760,
+        "query_payload_blocks_read": 960,
+        "query_payload_bytes_read": 15310740,
+        "query_returned_spans": 2621440,
+        "query_snapshot_ns": 1073823,
+        "query_snapshot_payload_bytes": 0,
+        "query_snapshot_payload_max_bytes": 0,
+        "query_stable_location_snapshots": 20,
+        "query_total_ns": 402426638
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 21128241,
+        "min": 20173774,
+        "p50": 20435054,
+        "p95": 20986777,
+        "p99": 21128241
+      },
+      "parameters": {
+        "service": null,
+        "start_ns": 1699999200000000000,
+        "step_ns": 3600000000000,
+        "stop_ns": 1700053200008191000,
+        "table": "traces"
+      },
+      "result_json_bytes": 2961,
+      "result_rows": 16,
+      "result_spans": 131072,
+      "sql": "SELECT bucket_ts,service,spans,errors,dur_sum,dur_min,dur_max,dur_p50,dur_p95,dur_p99 FROM timeless_trace_buckets(?1,?2,?3,?4,?5) ORDER BY bucket_ts,service",
+      "warmup": 3
+    },
+    "narrow_one_time_box_control": {
+      "extension_work_delta": {
+        "query_blocks_skipped_by_bound": 0,
+        "query_bounded_count": 0,
+        "query_bounded_max_spans": 0,
+        "query_bounded_requested_spans": 0,
+        "query_buffered_spans_examined": 0,
+        "query_cancelled": 0,
+        "query_candidate_blocks": 60,
+        "query_count": 20,
+        "query_decoded_column_bytes": 7920,
+        "query_decoded_columns": 240,
+        "query_decoded_spans": 163840,
+        "query_matched_spans": 163840,
+        "query_materialized_rich_values": 0,
+        "query_materialized_values": 655360,
+        "query_payload_blocks_read": 60,
+        "query_payload_bytes_read": 952600,
+        "query_returned_spans": 163840,
+        "query_snapshot_ns": 845609,
+        "query_snapshot_payload_bytes": 0,
+        "query_snapshot_payload_max_bytes": 0,
+        "query_stable_location_snapshots": 20,
+        "query_total_ns": 27849258
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 1577567,
+        "min": 1465788,
+        "p50": 1491655,
+        "p95": 1553677,
+        "p99": 1577567
+      },
+      "parameters": {
+        "service": "bench",
+        "start_ns": 1699999200000000000,
+        "step_ns": 3600000000000,
+        "stop_ns": 1699999200008191000,
+        "table": "traces"
+      },
+      "result_json_bytes": 186,
+      "result_rows": 1,
+      "result_spans": 8192,
+      "sql": "SELECT bucket_ts,service,spans,errors,dur_sum,dur_min,dur_max,dur_p50,dur_p95,dur_p99 FROM timeless_trace_buckets(?1,?2,?3,?4,?5) ORDER BY bucket_ts,service",
+      "warmup": 3
+    },
+    "posting_windows": {
+      "narrow_one_time_box": {
+        "fixture_blocks": 48,
+        "shapes": {
+          "kind": {
+            "expected_candidate_blocks_per_query": 3,
+            "expected_decoded_spans_per_query": 8192,
+            "expected_rows": 1639,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 3780,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 32780,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 32780,
+              "query_snapshot_ns": 594679,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 5068618
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 299433,
+              "min": 248684,
+              "p50": 253734,
+              "p95": 261356,
+              "p99": 299433
+            },
+            "sql": "SELECT count(*) FROM traces WHERE kind='internal' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "name": {
+            "expected_candidate_blocks_per_query": 3,
+            "expected_decoded_spans_per_query": 8192,
+            "expected_rows": 1024,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 7220,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 20480,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 20480,
+              "query_snapshot_ns": 618408,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 7860129
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 445914,
+              "min": 384453,
+              "p50": 392720,
+              "p95": 400767,
+              "p99": 445914
+            },
+            "sql": "SELECT count(*) FROM traces WHERE name='GET /baseline' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "service": {
+            "expected_candidate_blocks_per_query": 3,
+            "expected_decoded_spans_per_query": 8192,
+            "expected_rows": 8192,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 5040,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 163840,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 163840,
+              "query_snapshot_ns": 897708,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 29219969
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 1571794,
+              "min": 1471003,
+              "p50": 1499204,
+              "p95": 1569198,
+              "p99": 1571794
+            },
+            "sql": "SELECT count(*) FROM traces WHERE service='bench' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "status": {
+            "expected_candidate_blocks_per_query": 1,
+            "expected_decoded_spans_per_query": 2730,
+            "expected_rows": 2730,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 20,
+              "query_count": 20,
+              "query_decoded_column_bytes": 920,
+              "query_decoded_columns": 40,
+              "query_decoded_spans": 54600,
+              "query_matched_spans": 54600,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 109200,
+              "query_payload_blocks_read": 20,
+              "query_payload_bytes_read": 317760,
+              "query_returned_spans": 54600,
+              "query_snapshot_ns": 514185,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 5624256
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 316628,
+              "min": 270927,
+              "p50": 281928,
+              "p95": 290976,
+              "p99": 316628
+            },
+            "sql": "SELECT count(*) FROM traces WHERE status='error' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          }
+        },
+        "start_ns": 1699999200000000000,
+        "stop_ns": 1699999200008191000,
+        "time_boxes": 1
+      },
+      "wide_four_time_boxes": {
+        "fixture_blocks": 48,
+        "shapes": {
+          "kind": {
+            "expected_candidate_blocks_per_query": 12,
+            "expected_decoded_spans_per_query": 32768,
+            "expected_rows": 6554,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 240,
+              "query_count": 20,
+              "query_decoded_column_bytes": 15120,
+              "query_decoded_columns": 480,
+              "query_decoded_spans": 655360,
+              "query_matched_spans": 131080,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 1310720,
+              "query_payload_blocks_read": 240,
+              "query_payload_bytes_read": 3823480,
+              "query_returned_spans": 131080,
+              "query_snapshot_ns": 749780,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 18695960
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 984614,
+              "min": 920910,
+              "p50": 933374,
+              "p95": 974320,
+              "p99": 984614
+            },
+            "sql": "SELECT count(*) FROM traces WHERE kind='internal' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "name": {
+            "expected_candidate_blocks_per_query": 12,
+            "expected_decoded_spans_per_query": 32768,
+            "expected_rows": 4096,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 240,
+              "query_count": 20,
+              "query_decoded_column_bytes": 28880,
+              "query_decoded_columns": 480,
+              "query_decoded_spans": 655360,
+              "query_matched_spans": 81920,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 1310720,
+              "query_payload_blocks_read": 240,
+              "query_payload_bytes_read": 3823480,
+              "query_returned_spans": 81920,
+              "query_snapshot_ns": 842837,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 30052265
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 1622140,
+              "min": 1472953,
+              "p50": 1496305,
+              "p95": 1553653,
+              "p99": 1622140
+            },
+            "sql": "SELECT count(*) FROM traces WHERE name='GET /baseline' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "service": {
+            "expected_candidate_blocks_per_query": 12,
+            "expected_decoded_spans_per_query": 32768,
+            "expected_rows": 32768,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 240,
+              "query_count": 20,
+              "query_decoded_column_bytes": 20160,
+              "query_decoded_columns": 480,
+              "query_decoded_spans": 655360,
+              "query_matched_spans": 655360,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 1310720,
+              "query_payload_blocks_read": 240,
+              "query_payload_bytes_read": 3823480,
+              "query_returned_spans": 655360,
+              "query_snapshot_ns": 1098125,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 98742924
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 5096778,
+              "min": 4926062,
+              "p50": 4974938,
+              "p95": 5061372,
+              "p99": 5096778
+            },
+            "sql": "SELECT count(*) FROM traces WHERE service='bench' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "status": {
+            "expected_candidate_blocks_per_query": 4,
+            "expected_decoded_spans_per_query": 10922,
+            "expected_rows": 10922,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 80,
+              "query_count": 20,
+              "query_decoded_column_bytes": 3680,
+              "query_decoded_columns": 160,
+              "query_decoded_spans": 218440,
+              "query_matched_spans": 218440,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 436880,
+              "query_payload_blocks_read": 80,
+              "query_payload_bytes_read": 1275420,
+              "query_returned_spans": 218440,
+              "query_snapshot_ns": 842730,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 27292175
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 1427708,
+              "min": 1337285,
+              "p50": 1361706,
+              "p95": 1427132,
+              "p99": 1427708
+            },
+            "sql": "SELECT count(*) FROM traces WHERE status='error' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          }
+        },
+        "start_ns": 1699999200000000000,
+        "stop_ns": 1700010000008191000,
+        "time_boxes": 4
+      }
+    },
+    "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
+    "rss": {
+      "hwm_kib": 16008,
+      "rss_kib": 13956
+    }
+  },
+  "fixture": {
+    "checkpoint": {
+      "busy": 0,
+      "checkpointed_frames": 0,
+      "elapsed_ns": 3742384,
+      "log_frames": 0
+    },
+    "durable_spans_per_second": 176192.66939397698,
+    "exact_reopen_count": 131072,
+    "insert_ns": 743912902,
+    "journal_mode": "wal",
+    "optimize_ns": 507900885,
+    "public_batch_bytes": 86953580,
+    "rich_span_probe": true,
+    "stats_after_reopen": {
+      "blocks": 48,
+      "buffered_spans": 0,
+      "bytes_on_disk": 765537,
+      "compressed_blocks": 48,
+      "duration_bounded_blocks": 48,
+      "duration_unknown_blocks": 0,
+      "index_bytes": 2523136,
+      "raw_blocks": 0,
+      "terms": 576,
+      "total_spans": 131072,
+      "trace_index_rows": 49152
+    },
+    "stats_before_optimize": {
+      "blocks": 48,
+      "buffered_spans": 0,
+      "bytes_on_disk": 84993036,
+      "compressed_blocks": 0,
+      "raw_blocks": 48,
+      "total_spans": 131072
+    },
+    "storage_after_checkpoint": {
+      "database_bytes": 88440832,
+      "physical_bytes": 88440832,
+      "shm_bytes": 0,
+      "wal_bytes": 0
+    },
+    "timestamp_range_ns": [
+      1699999200000000000,
+      1700053200008191000
+    ]
+  },
+  "git_commit": "813a84cc13402f4a37ede2004c3a825c273d1f46",
+  "host": {
+    "machine": "x86_64",
+    "processor": "unknown",
+    "release": "7.1.3-arch1-2",
+    "system": "Linux"
+  },
+  "jaeger": {
+    "broad_full_decode_miss": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 1120,
+        "api_read_result_spans": 0,
+        "api_read_result_traces": 0,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 130381689,
+        "api_read_total_ns": 133813699
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 0,
+        "extension_query_bounded_count": 20,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 2000,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 960,
+        "extension_query_count": 20,
+        "extension_query_decoded_column_bytes": 82560,
+        "extension_query_decoded_columns": 1920,
+        "extension_query_decoded_spans": 2621440,
+        "extension_query_matched_spans": 0,
+        "extension_query_materialized_rich_values": 0,
+        "extension_query_materialized_values": 5242880,
+        "extension_query_payload_blocks_read": 960,
+        "extension_query_payload_bytes_read": 15310740,
+        "extension_query_returned_spans": 0,
+        "extension_query_snapshot_ns": 1419360,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 129169517
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 8095680,
+        "min": 6538019,
+        "p50": 7077807,
+        "p95": 7678080,
+        "p99": 8095680
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 28384,
+          "rss_kib": 28384
+        },
+        "after_warmup": {
+          "hwm_kib": 28320,
+          "rss_kib": 28320
+        },
+        "startup": {
+          "hwm_kib": 27348,
+          "rss_kib": 27348
+        }
+      },
+      "path": "/select/jaeger/api/traces?service=bench&minDuration=500000&maxDuration=500000&limit=100",
+      "response_bytes": 56,
+      "result_spans": 0,
+      "result_traces": 0,
+      "warmup": 3
+    },
+    "broad_result_4096_spans": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 78513340,
+        "api_read_result_spans": 81920,
+        "api_read_result_traces": 10240,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 3068585355,
+        "api_read_total_ns": 3071231591
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 900,
+        "extension_query_bounded_count": 20,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 81920,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 960,
+        "extension_query_count": 20,
+        "extension_query_decoded_column_bytes": 949860,
+        "extension_query_decoded_columns": 1440,
+        "extension_query_decoded_spans": 163840,
+        "extension_query_matched_spans": 163840,
+        "extension_query_materialized_rich_values": 2457600,
+        "extension_query_materialized_values": 3932160,
+        "extension_query_payload_blocks_read": 60,
+        "extension_query_payload_bytes_read": 956940,
+        "extension_query_returned_spans": 81920,
+        "extension_query_snapshot_ns": 2477381,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 166641388
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 167744760,
+        "min": 150285467,
+        "p50": 154154267,
+        "p95": 165356425,
+        "p99": 167744760
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 160128,
+          "rss_kib": 89464
+        },
+        "after_warmup": {
+          "hwm_kib": 159956,
+          "rss_kib": 90116
+        },
+        "startup": {
+          "hwm_kib": 27448,
+          "rss_kib": 27448
+        }
+      },
+      "path": "/select/jaeger/api/traces?service=bench&minDuration=1&limit=4096",
+      "response_bytes": 3925667,
+      "result_spans": 4096,
+      "result_traces": 512,
+      "warmup": 3
+    },
+    "exact_trace_control": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 152500,
+        "api_read_result_spans": 160,
+        "api_read_result_traces": 20,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 46885501,
+        "api_read_total_ns": 49832532
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 0,
+        "extension_query_bounded_count": 0,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 0,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 60,
+        "extension_query_count": 20,
+        "extension_query_decoded_column_bytes": 945520,
+        "extension_query_decoded_columns": 1440,
+        "extension_query_decoded_spans": 163840,
+        "extension_query_matched_spans": 160,
+        "extension_query_materialized_rich_values": 2400,
+        "extension_query_materialized_values": 167520,
+        "extension_query_payload_blocks_read": 60,
+        "extension_query_payload_bytes_read": 952600,
+        "extension_query_returned_spans": 160,
+        "extension_query_snapshot_ns": 1054537,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 41108843
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 3788098,
+        "min": 2380599,
+        "p50": 2711154,
+        "p95": 3054730,
+        "p99": 3788098
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 29340,
+          "rss_kib": 29340
+        },
+        "after_warmup": {
+          "hwm_kib": 29016,
+          "rss_kib": 29016
+        },
+        "startup": {
+          "hwm_kib": 27324,
+          "rss_kib": 27324
+        }
+      },
+      "path": "/select/jaeger/api/traces/00000000000000000000000000000001",
+      "response_bytes": 7625,
+      "result_spans": 8,
+      "result_traces": 1,
+      "warmup": 3
+    },
+    "final_storage_stats": {
+      "blocks": 48,
+      "bytes_on_disk": 765537,
+      "compressed_blocks": 48,
+      "database_file_bytes": 88440832,
+      "database_shm_bytes": 32768,
+      "database_wal_bytes": 0,
+      "freelist_bytes": 85110784,
+      "freelist_pages": 20779,
+      "physical_database_bytes": 88473600,
+      "raw_blocks": 0,
+      "sqlite_index_bytes": 2523136,
+      "sqlite_page_bytes": 88440832,
+      "total_spans": 131072
+    },
+    "process_isolation": "each shape runs in a fresh trace-server process"
+  },
+  "schema_version": 2,
+  "storage_after_queries": {
+    "database_bytes": 88440832,
+    "physical_bytes": 88440832,
+    "shm_bytes": 0,
+    "wal_bytes": 0
+  },
+  "workload": {
+    "authoritative_batch_spans": 8192,
+    "batches": 16,
+    "duration_values_ns": [
+      100000,
+      900000
+    ],
+    "iterations": 20,
+    "logical_spans": 131072,
+    "loopback_http": true,
+    "rich_fields": [
+      "attributes",
+      "status_description",
+      "events",
+      "resource",
+      "instrumentation_scope",
+      "links",
+      "trace_state",
+      "trace_flags",
+      "dropped_attributes_count",
+      "dropped_events_count",
+      "dropped_links_count",
+      "resource_schema_url",
+      "scope_schema_url",
+      "resource_dropped_attributes_count",
+      "scope_dropped_attributes_count"
+    ],
+    "single_client": true,
+    "time_boxes": 16,
+    "warmup": 3
+  }
+}

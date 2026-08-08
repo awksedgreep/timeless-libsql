@@ -1,6 +1,7 @@
 # Rich-span v2 public fidelity contract
 
-Status: accepted Session 5 contract; implementation follows this document.
+Status: implemented by Session 5. Validation and measured verdict are in
+[`2026-08-08_trace_rich_span_v2.md`](2026-08-08_trace_rich_span_v2.md).
 
 ## Purpose
 

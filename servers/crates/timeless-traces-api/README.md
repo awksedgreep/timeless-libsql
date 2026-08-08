@@ -42,7 +42,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 
 - `GET /live` reports process liveness without touching SQLite.
 - `GET /ready` and `GET /health` verify a live reader and expose the negotiated
-  `timeless_traces/rich-span-batch-v1` capability.
+  `timeless_traces/rich-span-batch-v2` capability.
 - `GET /select/traces/stats` reports extension, SQLite-file, connection, and
   exact request/span/body queue watermarks.
 - `GET|POST /api/v1/flush` is an ordered completion and durability barrier. Its
@@ -51,7 +51,9 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   checkpoints the WAL, and publishes a verified no-overwrite SQLite backup.
 - `POST /insert/opentelemetry/v1/traces` accepts OTLP JSON, protobuf, and
   gzip-compressed protobuf. It validates the complete request, encodes one
-  public rich-span v1 batch, waits for its one SQLite statement, and returns
+  public rich-span v2 batch without dropping links, trace state/flags,
+  dropped-value counters, schema URLs, or resource/scope metadata, waits for
+  its one SQLite statement, and returns
   the established `{"partialSuccess":{}}` response. Raw and decompressed
   bodies are independently capped at 10 MiB.
 - `GET /select/jaeger/api/services` and
@@ -95,7 +97,7 @@ public `optimize:<spans>` command; it never creates or reshapes blocks itself.
 
 Startup acquires `<database>.timeless-traces-api.lock` before opening SQLite.
 It then validates the full rich-span schema, module identity, configured
-retention, and public batch version `0x02` before binding the listener. A
+retention, and public batch version `0x03` before binding the listener. A
 second owner or incompatible extension fails startup with a descriptive error.
 
 One writer consumes a bounded FIFO. A request is admitted only after queue
