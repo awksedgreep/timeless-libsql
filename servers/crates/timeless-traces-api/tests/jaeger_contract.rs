@@ -149,6 +149,9 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     assert_eq!(stats.api_read_errors, 0);
     assert_eq!(stats.api_read_result_spans, 5);
     assert!(stats.api_read_response_bytes > 0);
+    assert_eq!(stats.attribute_index_fields, 0);
+    assert_eq!(stats.attribute_bloom_rows, 0);
+    assert_eq!(stats.attribute_bloom_bytes, 0);
     assert_eq!(stats.extension_query_count, 4);
     // Duration extrema reject the non-overlapping status-pure block for each
     // duration-bounded search before payload decode. The trace, operation,

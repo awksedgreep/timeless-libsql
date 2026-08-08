@@ -373,7 +373,8 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
                     "blocks", "raw_blocks", "compressed_blocks", "total_spans", "bytes_on_disk",
                     "database_file_bytes", "database_wal_bytes", "database_shm_bytes",
                     "physical_database_bytes", "sqlite_page_bytes", "sqlite_index_bytes",
-                    "freelist_pages", "freelist_bytes"
+                    "freelist_pages", "freelist_bytes", "attribute_index_fields",
+                    "attribute_bloom_rows", "attribute_bloom_bytes"
                 ]),
             },
             "direct_sql": sql,

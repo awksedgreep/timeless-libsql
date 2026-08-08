@@ -46,6 +46,7 @@ const EXPECTED_COLUMNS: &[(&str, &str, i64)] = &[
     ("scope_schema_url", "TEXT", 0),
     ("resource_dropped_attributes_count", "INTEGER", 0),
     ("scope_dropped_attributes_count", "INTEGER", 0),
+    ("attribute_filter", "TEXT", 1),
     ("traces", "", 1),
 ];
 
@@ -63,6 +64,9 @@ pub struct StorageStats {
     pub bytes_on_disk: i64,
     pub terms: i64,
     pub trace_index_rows: i64,
+    pub attribute_index_fields: i64,
+    pub attribute_bloom_rows: i64,
+    pub attribute_bloom_bytes: i64,
     pub oldest_timestamp_nanoseconds: Option<i64>,
     pub newest_timestamp_nanoseconds: Option<i64>,
     pub extension_query_count: i64,
@@ -1433,6 +1437,9 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         bytes_on_disk: integer("bytes_on_disk"),
         terms: integer("terms"),
         trace_index_rows: integer("trace_index_rows"),
+        attribute_index_fields: integer("attribute_index_fields"),
+        attribute_bloom_rows: integer("attribute_bloom_rows"),
+        attribute_bloom_bytes: integer("attribute_bloom_bytes"),
         oldest_timestamp_nanoseconds: optional_integer(values.get("ts_min")),
         newest_timestamp_nanoseconds: optional_integer(values.get("ts_max")),
         extension_query_count: integer("query_count"),
