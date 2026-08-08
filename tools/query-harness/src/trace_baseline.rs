@@ -377,14 +377,192 @@ pub(crate) fn run_sql(args: TraceBaselineSqlArgs) -> Result<()> {
         args.iterations,
         args.warmup,
     )?;
+    let posting_windows = json!({
+        "narrow_one_time_box": measure_posting_window(
+            &connection,
+            args.start_ns,
+            1,
+            args.iterations,
+            args.warmup,
+        )?,
+        "wide_four_time_boxes": measure_posting_window(
+            &connection,
+            args.start_ns,
+            4,
+            args.iterations,
+            args.warmup,
+        )?,
+    });
     let report = json!({
         "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
         "broad_all_time_boxes": broad,
         "narrow_one_time_box_control": narrow,
+        "posting_windows": posting_windows,
         "rss": process_memory(std::process::id())?,
     });
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum PostingShape {
+    Service,
+    Name,
+    Kind,
+    Status,
+}
+
+impl PostingShape {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Name => "name",
+            Self::Kind => "kind",
+            Self::Status => "status",
+        }
+    }
+
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Service => {
+                "SELECT count(*) FROM traces \
+                 WHERE service='bench' AND start_ts>=?1 AND start_ts<=?2"
+            }
+            Self::Name => {
+                "SELECT count(*) FROM traces \
+                 WHERE name='GET /baseline' AND start_ts>=?1 AND start_ts<=?2"
+            }
+            Self::Kind => {
+                "SELECT count(*) FROM traces \
+                 WHERE kind='internal' AND start_ts>=?1 AND start_ts<=?2"
+            }
+            Self::Status => {
+                "SELECT count(*) FROM traces \
+                 WHERE status='error' AND start_ts>=?1 AND start_ts<=?2"
+            }
+        }
+    }
+
+    fn matches(self, global: usize) -> bool {
+        match self {
+            Self::Service => true,
+            Self::Name => global.is_multiple_of(8),
+            Self::Kind => global.is_multiple_of(5),
+            Self::Status => global % 3 == 2,
+        }
+    }
+
+    fn candidate_blocks_per_box(self) -> usize {
+        match self {
+            // Flush and optimize retain one block per status partition. Each
+            // of these terms occurs in all three partitions in every box.
+            Self::Service | Self::Name | Self::Kind => 3,
+            // A status term names exactly its one status-pure partition.
+            Self::Status => 1,
+        }
+    }
+}
+
+fn measure_posting_window(
+    connection: &Connection,
+    start: i64,
+    boxes: usize,
+    iterations: usize,
+    warmup: usize,
+) -> Result<Value> {
+    let stop = start + (boxes as i64 - 1) * HOUR_NS + (BATCH_SPANS as i64 - 1) * 1_000;
+    let spans = boxes * BATCH_SPANS;
+    let fixture_blocks = stat_i64(&sqlite_stats(connection)?, "blocks")?;
+    let mut shapes = Map::new();
+    for shape in [
+        PostingShape::Service,
+        PostingShape::Name,
+        PostingShape::Kind,
+        PostingShape::Status,
+    ] {
+        let expected_rows = (0..spans).filter(|global| shape.matches(*global)).count();
+        let expected_candidates = boxes * shape.candidate_blocks_per_box();
+        let expected_decoded = if matches!(shape, PostingShape::Status) {
+            expected_rows
+        } else {
+            spans
+        };
+        shapes.insert(
+            shape.name().into(),
+            measure_posting_count(
+                connection,
+                shape,
+                start,
+                stop,
+                expected_rows,
+                expected_candidates,
+                expected_decoded,
+                iterations,
+                warmup,
+            )?,
+        );
+    }
+    Ok(json!({
+        "start_ns": start,
+        "stop_ns": stop,
+        "time_boxes": boxes,
+        "fixture_blocks": fixture_blocks,
+        "shapes": shapes,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_posting_count(
+    connection: &Connection,
+    shape: PostingShape,
+    start: i64,
+    stop: i64,
+    expected_rows: usize,
+    expected_candidates: usize,
+    expected_decoded: usize,
+    iterations: usize,
+    warmup: usize,
+) -> Result<Value> {
+    let mut statement = connection.prepare_cached(shape.sql())?;
+    for _ in 0..warmup {
+        let rows: i64 = statement.query_row(params![start, stop], |row| row.get(0))?;
+        ensure!(rows == expected_rows as i64);
+    }
+    let before = sqlite_stats(connection)?;
+    let mut elapsed = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let rows: i64 = statement.query_row(params![start, stop], |row| row.get(0))?;
+        elapsed.push(started.elapsed().as_nanos());
+        ensure!(rows == expected_rows as i64);
+    }
+    let after = sqlite_stats(connection)?;
+    let work = prefix_numeric_delta(&before, &after, "query_");
+    let actual = |key: &str| -> Result<i64> {
+        work.get(key)
+            .and_then(Value::as_i64)
+            .with_context(|| format!("posting profile omitted {key}"))
+    };
+    ensure!(actual("query_count")? == iterations as i64);
+    ensure!(
+        actual("query_candidate_blocks")? == (expected_candidates * iterations) as i64,
+        "{} posting query considered time-disjoint blocks",
+        shape.name()
+    );
+    ensure!(actual("query_payload_blocks_read")? == (expected_candidates * iterations) as i64);
+    ensure!(actual("query_decoded_spans")? == (expected_decoded * iterations) as i64);
+    ensure!(actual("query_matched_spans")? == (expected_rows * iterations) as i64);
+    ensure!(actual("query_returned_spans")? == (expected_rows * iterations) as i64);
+    Ok(json!({
+        "sql": shape.sql(),
+        "iterations": iterations,
+        "warmup": warmup,
+        "expected_rows": expected_rows,
+        "expected_candidate_blocks_per_query": expected_candidates,
+        "expected_decoded_spans_per_query": expected_decoded,
+        "latency_ns": latency_summary(&elapsed),
+        "extension_work_delta": work,
+    }))
 }
 
 fn build_fixture(extension: &Path, database: &Path, batches: usize) -> Result<FixtureReport> {
