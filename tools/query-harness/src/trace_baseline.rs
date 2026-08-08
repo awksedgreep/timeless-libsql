@@ -443,22 +443,46 @@ pub(crate) fn run_sql(args: TraceBaselineSqlArgs) -> Result<()> {
         )?,
     });
     let retained_trace_summaries = json!({
-        "exact_one_trace": measure_trace_summaries(
-            &connection,
-            Some(&fixed_be::<16>(1)),
-            1,
-            8,
-            args.iterations,
-            args.warmup,
-        )?,
-        "broad_all_traces": measure_trace_summaries(
-            &connection,
-            None,
-            args.expected_spans / 8,
-            args.expected_spans,
-            args.iterations,
-            args.warmup,
-        )?,
+        "two_scan_control": {
+            "exact_one_trace": measure_trace_summaries(
+                &connection,
+                Some(&fixed_be::<16>(1)),
+                1,
+                8,
+                false,
+                args.iterations,
+                args.warmup,
+            )?,
+            "broad_all_traces": measure_trace_summaries(
+                &connection,
+                None,
+                args.expected_spans / 8,
+                args.expected_spans,
+                false,
+                args.iterations,
+                args.warmup,
+            )?,
+        },
+        "single_scan": {
+            "exact_one_trace": measure_trace_summaries(
+                &connection,
+                Some(&fixed_be::<16>(1)),
+                1,
+                8,
+                true,
+                args.iterations,
+                args.warmup,
+            )?,
+            "broad_all_traces": measure_trace_summaries(
+                &connection,
+                None,
+                args.expected_spans / 8,
+                args.expected_spans,
+                true,
+                args.iterations,
+                args.warmup,
+            )?,
+        },
     });
     let report = json!({
         "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
@@ -633,7 +657,7 @@ fn measure_posting_count(
     }))
 }
 
-fn trace_summary_sql(exact_trace: bool) -> String {
+fn trace_summary_prefix(exact_trace: bool) -> String {
     let predicate = if exact_trace {
         " WHERE trace_id=?1"
     } else {
@@ -646,7 +670,13 @@ fn trace_summary_sql(exact_trace: bool) -> String {
                              AND start_ts<=9223372036854775807-duration_ns \
                        THEN start_ts+duration_ns END AS valid_end_ts \
              FROM traces{predicate}\
-         ) \
+         )"
+    )
+}
+
+fn trace_summary_single_scan_sql(exact_trace: bool) -> String {
+    format!(
+        "{} \
          SELECT lower(hex(trace_id)),count(*) AS span_rows,\
                 count(DISTINCT span_id) AS distinct_span_ids,\
                 count(*) FILTER (WHERE status='error') AS error_rows,\
@@ -666,15 +696,54 @@ fn trace_summary_sql(exact_trace: bool) -> String {
                 CASE count(*) FILTER (WHERE parent_span_id IS NULL) WHEN 0 THEN 'missing' \
                      WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,\
                 count(DISTINCT service) AS service_count,'unknown' AS completeness \
-           FROM retained GROUP BY trace_id ORDER BY trace_id"
+           FROM retained GROUP BY trace_id ORDER BY trace_id",
+        trace_summary_prefix(exact_trace)
+    )
+}
+
+fn trace_summary_two_scan_sql(exact_trace: bool) -> String {
+    format!(
+        "{}, totals AS (\
+           SELECT trace_id,count(*) AS span_rows,\
+                  count(DISTINCT span_id) AS distinct_span_ids,\
+                  count(*) FILTER (WHERE status='error') AS error_rows,\
+                  min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,\
+                  count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,\
+                  count(DISTINCT service) AS service_count \
+             FROM retained GROUP BY trace_id\
+         ), roots AS (\
+           SELECT trace_id,count(*) AS root_rows,\
+                  CASE WHEN count(*)=1 THEN lower(hex(min(span_id))) END AS root_span_id,\
+                  CASE WHEN count(*)=1 THEN min(name) END AS root_name,\
+                  CASE WHEN count(*)=1 THEN min(service) END AS root_service \
+             FROM retained WHERE parent_span_id IS NULL GROUP BY trace_id\
+         ) \
+         SELECT lower(hex(totals.trace_id)),totals.span_rows,\
+                totals.distinct_span_ids,totals.error_rows,totals.start_ts,totals.end_ts,\
+                CASE WHEN totals.invalid_end_rows<>0 THEN NULL \
+                     WHEN totals.start_ts>=0 THEN totals.end_ts-totals.start_ts \
+                     WHEN totals.end_ts<=9223372036854775807+totals.start_ts \
+                       THEN totals.end_ts-totals.start_ts END AS duration_ns,\
+                totals.invalid_end_rows,coalesce(roots.root_rows,0),\
+                roots.root_span_id,roots.root_name,roots.root_service,\
+                CASE coalesce(roots.root_rows,0) WHEN 0 THEN 'missing' \
+                     WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,\
+                totals.service_count,'unknown' AS completeness \
+           FROM totals LEFT JOIN roots USING(trace_id) ORDER BY totals.trace_id",
+        trace_summary_prefix(exact_trace)
     )
 }
 
 fn execute_trace_summaries(
     connection: &Connection,
     trace_id: Option<&[u8; 16]>,
+    single_scan: bool,
 ) -> Result<Vec<TraceSummaryRow>> {
-    let sql = trace_summary_sql(trace_id.is_some());
+    let sql = if single_scan {
+        trace_summary_single_scan_sql(trace_id.is_some())
+    } else {
+        trace_summary_two_scan_sql(trace_id.is_some())
+    };
     let mut statement = connection.prepare_cached(&sql)?;
     let map = |row: &rusqlite::Row<'_>| {
         Ok(TraceSummaryRow {
@@ -742,11 +811,12 @@ fn measure_trace_summaries(
     trace_id: Option<&[u8; 16]>,
     expected_rows: usize,
     expected_spans: usize,
+    single_scan: bool,
     iterations: usize,
     warmup: usize,
 ) -> Result<Value> {
     for _ in 0..warmup {
-        let rows = execute_trace_summaries(connection, trace_id)?;
+        let rows = execute_trace_summaries(connection, trace_id, single_scan)?;
         require_trace_summaries(&rows, expected_rows, expected_spans)?;
     }
     let before = sqlite_stats(connection)?;
@@ -755,7 +825,7 @@ fn measure_trace_summaries(
     let mut result_bytes = BTreeSet::new();
     for _ in 0..iterations {
         let started = Instant::now();
-        let rows = execute_trace_summaries(connection, trace_id)?;
+        let rows = execute_trace_summaries(connection, trace_id, single_scan)?;
         elapsed.push(started.elapsed().as_nanos());
         require_trace_summaries(&rows, expected_rows, expected_spans)?;
         cardinality.insert(rows.len());
@@ -763,8 +833,14 @@ fn measure_trace_summaries(
     }
     let after = sqlite_stats(connection)?;
     ensure!(cardinality.len() == 1 && result_bytes.len() == 1);
+    let sql = if single_scan {
+        trace_summary_single_scan_sql(trace_id.is_some())
+    } else {
+        trace_summary_two_scan_sql(trace_id.is_some())
+    };
     Ok(json!({
-        "sql": trace_summary_sql(trace_id.is_some()),
+        "implementation": if single_scan { "single conditional aggregate scan" } else { "two CTE consumers control" },
+        "sql": sql,
         "trace_id": trace_id.map(|value| format!("{:032x}", u128::from_be_bytes(*value))),
         "iterations": iterations,
         "warmup": warmup,
