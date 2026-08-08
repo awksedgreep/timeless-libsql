@@ -503,11 +503,7 @@ fn rich_batch(batch_number: usize) -> Vec<u8> {
                 kind: (global % 5) as u8,
                 status: (global % 3) as u8,
                 start_ts,
-                duration_ns: if (global / 3).is_multiple_of(2) {
-                    100_000
-                } else {
-                    900_000
-                },
+                duration_ns: fixture_duration(offset),
                 attributes: format!(
                     "{{\"array\":[1,\"two\",false,null],\"bool\":true,\"count\":{global},\"nested\":{{\"ratio\":1.25,\"unicode\":\"空🔥\"}},\"service.name\":\"bench\"}}"
                 ),
@@ -580,6 +576,14 @@ fn fixed_be<const N: usize>(number: u64) -> [u8; N] {
 fn framed(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(&(value.len() as u32).to_le_bytes());
     output.extend_from_slice(value);
+}
+
+fn fixture_duration(batch_offset: usize) -> i64 {
+    if (batch_offset / 3).is_multiple_of(2) {
+        100_000
+    } else {
+        900_000
+    }
 }
 
 fn measure_http(
@@ -1018,5 +1022,14 @@ mod tests {
     fn fixed_width_big_endian_identity_preserves_low_bits() {
         assert_eq!(fixed_be::<8>(0x0102), [0, 0, 0, 0, 0, 0, 1, 2]);
         assert_eq!(&fixed_be::<16>(1)[8..], &[0, 0, 0, 0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn every_authoritative_batch_has_the_pinned_duration_quantiles() {
+        let mut durations = (0..BATCH_SPANS).map(fixture_duration).collect::<Vec<_>>();
+        durations.sort_unstable();
+        assert_eq!(durations[4_095], 100_000);
+        assert_eq!(durations[7_782], 900_000);
+        assert_eq!(durations[8_109], 900_000);
     }
 }
