@@ -15,6 +15,28 @@ complete result; this file defines how to reproduce it.
 - Linux for the complete signal-process fault and RSS-watermark gate. Core,
   extension, SQL, and most API tests also run on macOS.
 
+## Scratch storage and cleanup
+
+Test and benchmark scratch data is temporary by default. Rust `tempfile`
+owners and shell `trap` handlers remove databases, WAL/SHM files, and server
+logs on both success and ordinary failure. This matters on systems where
+`/tmp` is tmpfs: a leaked benchmark database consumes memory or swap, not just
+disk space.
+
+The query evidence runner also removes failed captures by default. Pass
+`--keep-failed` only when you need its diagnostic database and server logs;
+the error prints their retained path. The production gate removes its
+generated scratch tree, but an explicit `--data-dir NEW_DIRECTORY` is
+operator-owned and retained. General benchmarks remove their databases; pass
+`--keep-dir NEW_DIRECTORY` to `bench`, `bench-logs`, or `bench-traces` only
+when you intend to inspect them afterward. Prefer a disk-backed path outside
+`/tmp` for retained or large runs.
+
+Result files named by `--output` and database paths explicitly supplied by a
+caller are also caller-owned. Remove them when their evidence is no longer
+needed. A successful test must never silently retain an internally selected
+scratch path.
+
 On macOS, `/usr/bin/sqlite3` disables extension loading. Install SQLite with
 Homebrew and put its `bin` directory first in `PATH` before running the shell
 suites.
@@ -29,7 +51,6 @@ The following older utilities are still Python and are being replaced in
 bounded sessions. Their replacement commands and this inventory must change
 in the same commit:
 
-- `tools/package_release.py`: deterministic native artifact packager;
 - `servers/crates/timeless-metrics-api/bench_shell.py`;
 - `servers/crates/timeless-traces-api/bench/*.py`; and
 - `tools/bench/session6_log_compaction.py`.
@@ -218,6 +239,7 @@ The JSON records durable completed work, p50/p95/p99, cardinality, public
 storage work, response and extension bytes, cancellation behavior, physical
 storage, and RSS HWM. Do not commit a new evidence artifact without updating
 the owning matrix rows and findings in the same session.
+Use `--keep-failed` only for a failure you are actively diagnosing.
 
 ## Production fault and soak gates
 
@@ -244,19 +266,20 @@ not `passed` and preserves a caller-supplied `--data-dir` for diagnosis.
 
 ## Native package validation
 
-Until its Rust replacement lands, candidate packaging remains the second
-explicit Python exception:
+The detached Rust release tool builds and validates one native candidate:
 
 ```sh
-python3 tools/package_release.py \
+cargo run --release --manifest-path tools/release-tool/Cargo.toml \
+  --locked -- \
   --target x86_64-unknown-linux-gnu \
   --output /tmp/timeless-dist
 ```
 
-This is a local candidate build, not a tag or publication. The replacement
-must preserve deterministic archives, inner and outer checksums, exact build
-identity, manifest, SPDX SBOM, license notices, install/remove behavior, and
-data/config preservation. See [ARTIFACTS.md](docs/ARTIFACTS.md).
+This is a local candidate build, not a tag or publication. The command checks
+the native target, locked builds, exact binary/extension identity,
+deterministic archive metadata, inner and outer checksums, manifest, SPDX
+SBOM, license notices, and an isolated install/remove drill with data and
+configuration sentinels. See [ARTIFACTS.md](docs/ARTIFACTS.md).
 
 ## Benchmarks
 
@@ -275,6 +298,10 @@ cargo run --release --manifest-path tools/bench/Cargo.toml \
 cargo run --release --manifest-path tools/bench/Cargo.toml \
   --bin query-read -- target/release/libtimeless_ext.so
 ```
+
+The general signal benchmarks clean their scratch databases by default. Add
+`--keep-dir /disk/backed/new-directory` after the extension path when an
+inspection copy is genuinely required.
 
 Several historical API and maintenance benchmark drivers are still Python;
 they are named in the migration inventory above. Their Rust ports must retain

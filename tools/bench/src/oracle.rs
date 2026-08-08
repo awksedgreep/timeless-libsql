@@ -161,7 +161,7 @@ fn canon_rows(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> 
         for i in 0..ncols {
             use rusqlite::types::ValueRef::*;
             match row.get_ref(i).expect("col") {
-                Null => s.push_str("N"),
+                Null => s.push('N'),
                 Integer(v) => s.push_str(&v.to_string()),
                 Real(v) => s.push_str(&format!("f{:016x}", v.to_bits())),
                 Text(t) => {
@@ -218,13 +218,15 @@ fn check(
 const N_OPS: usize = 50_000;
 
 fn run_seed(ext: &str, seed: u64) {
-    let path = format!(
-        "{}/timeless_oracle_{}_{}.db",
-        std::env::temp_dir().display(),
-        std::process::id(),
-        seed
-    );
-    let _ = std::fs::remove_file(&path);
+    let temporary = tempfile::Builder::new()
+        .prefix(&format!("timeless-oracle-{seed}-"))
+        .tempdir()
+        .expect("create oracle scratch directory");
+    let path = temporary
+        .path()
+        .join("oracle.db")
+        .to_string_lossy()
+        .into_owned();
     let conn = open_db(&path, ext);
     let mut rng = Rng::new(seed);
 
@@ -348,8 +350,6 @@ fn run_seed(ext: &str, seed: u64) {
     let conn = open_db_existing(&path, ext);
     run_all_full_checks(&conn, seed, N_OPS + 1);
     drop(conn);
-    let _ = std::fs::remove_file(&path);
-
     println!(
         "seed {seed}: {N_OPS} ops OK ({queries} query checks, {txns} txns, {prunes} prune-alls) in {:.1}s",
         t0.elapsed().as_secs_f64()

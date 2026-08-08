@@ -50,6 +50,7 @@ rusqlite = { version = "0.40", features = ["bundled", "load_extension", "blob"] 
 # it needs timeless-core's encode/decode entry points to compare codec
 # 2 vs codec 4 on identical entry groups.
 timeless-core = { path = "../../crates/timeless-core" }
+tempfile = "3"
 
 # The numbers should reflect the extension's release profile.
 [profile.release]

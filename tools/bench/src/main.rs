@@ -17,12 +17,13 @@
 //! and timing is std::time::Instant. That is fine for a tool binary (we
 //! are measuring milliseconds, not nanoseconds).
 
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
+
+mod scratch;
 
 // ---------------------------------------------------------------------------
 // Workload shape (PLAN.md: TSBS-style; deterministic so runs are comparable)
@@ -165,8 +166,7 @@ fn generate() -> Dataset {
                     level
                 }
                 Kind::Sine => {
-                    50.0 + 40.0 * ((i as f64) * 0.05 + phase).sin()
-                        + (rng.next_f64() - 0.5) * 2.0
+                    50.0 + 40.0 * ((i as f64) * 0.05 + phase).sin() + (rng.next_f64() - 0.5) * 2.0
                 }
             };
             svals.push(v);
@@ -178,7 +178,12 @@ fn generate() -> Dataset {
         labels.push(format!("{{\"host\":\"host-{host:03}\"}}"));
     }
 
-    Dataset { ts, val, name, labels }
+    Dataset {
+        ts,
+        val,
+        name,
+        labels,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +210,8 @@ fn open_with_ext(path: &str, ext: &str) -> Connection {
     // what this tool exists to do, with the .so the user pointed us at.
     unsafe {
         conn.load_extension_enable().expect("enable ext loading");
-        conn.load_extension(ext, None::<&str>).expect("load extension");
+        conn.load_extension(ext, None::<&str>)
+            .expect("load extension");
     }
     conn.load_extension_disable().expect("disable ext loading");
     conn
@@ -285,10 +291,8 @@ struct IngestResult {
 fn bench_plain(data: &Dataset, path: &str) -> IngestResult {
     scrub(path);
     let conn = Connection::open(path).expect("open plain db");
-    conn.execute_batch(
-        "CREATE TABLE metrics(name TEXT, ts INTEGER, value REAL, labels TEXT);",
-    )
-    .expect("create plain table");
+    conn.execute_batch("CREATE TABLE metrics(name TEXT, ts INTEGER, value REAL, labels TEXT);")
+        .expect("create plain table");
 
     let t0 = Instant::now();
     conn.execute_batch("BEGIN").unwrap();
@@ -435,7 +439,11 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
         .expect("count");
     println!(
         "- count(*) after reopen: {n} ({})",
-        if n as usize == N_POINTS { "OK" } else { "MISMATCH — EXPECTED 1000000" }
+        if n as usize == N_POINTS {
+            "OK"
+        } else {
+            "MISMATCH — EXPECTED 1000000"
+        }
     );
 
     // Name + ts-range query (the pushdown path: name EQ + ts GE/LE reach
@@ -488,7 +496,11 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
             .expect("prepare raw fetch");
         let rows = stmt
             .query_map(params![g_start, g_stop], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
             })
             .expect("raw fetch");
         for row in rows {
@@ -615,7 +627,10 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
         )
         .expect("regex-all grid TVF");
     let a8_ms = ta8.elapsed().as_secs_f64() * 1e3;
-    assert_eq!(all_rows, q2_rows, "regex-all grid disagrees with NULL-filter grid");
+    assert_eq!(
+        all_rows, q2_rows,
+        "regex-all grid disagrees with NULL-filter grid"
+    );
     println!(
         "    timeless_grid TVF (re: 50 of 100 hosts): {sel_rows} rows, {sel_ms:.1} ms (verified vs client-side filter)"
     );
@@ -626,10 +641,8 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
     // F3 rollup ladder: the same 1M points into a laddered table
     // (1-minute tier, ms units), then the dashboard aggregate served
     // from the TIER vs computed from raw with GROUP BY.
-    conn.execute_batch(
-        "CREATE VIRTUAL TABLE metrics_r USING timeless_metrics(rollups='60000@0');",
-    )
-    .expect("create laddered vtab");
+    conn.execute_batch("CREATE VIRTUAL TABLE metrics_r USING timeless_metrics(rollups='60000@0');")
+        .expect("create laddered vtab");
     {
         conn.execute_batch("BEGIN").unwrap();
         let mut stmt = conn
@@ -708,7 +721,10 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
             data.labels[s],
             if ok { "OK" } else { "FAIL (bits differ)" }
         );
-        assert!(ok, "bit-exact verification failed for series {s} offset {i}");
+        assert!(
+            ok,
+            "bit-exact verification failed for series {s} offset {i}"
+        );
     }
 }
 
@@ -717,10 +733,7 @@ fn query_checks(data: &Dataset, path: &str, ext: &str) {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let ext = env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: bench <path-to-libtimeless_ext.so>");
-        std::process::exit(2);
-    });
+    let (ext, scratch) = scratch::Scratch::from_args("bench", "timeless-bench-metrics-");
     assert!(
         Path::new(&ext).exists(),
         "extension not found at {ext} (build with: cargo build -p timeless-ext --release)"
@@ -733,13 +746,19 @@ fn main() {
 
     let tg = Instant::now();
     let data = generate();
-    println!("- generated workload in {:.1} ms", tg.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "- generated workload in {:.1} ms",
+        tg.elapsed().as_secs_f64() * 1e3
+    );
 
-    let plain = bench_plain(&data, "/tmp/tl_bench_plain.db");
+    let plain_path = scratch.database("plain.db");
+    let tier1_path = scratch.database("tier1.db");
+    let tier2_path = scratch.database("tier2.db");
+    let plain = bench_plain(&data, &plain_path);
     println!("- plain baseline done ({:.2}s insert)", plain.insert_secs);
-    let tier1 = bench_tier1(&data, "/tmp/tl_bench_tier1.db", &ext);
+    let tier1 = bench_tier1(&data, &tier1_path, &ext);
     println!("- tier1 done ({:.2}s insert)", tier1.insert_secs);
-    let tier2 = bench_tier2(&data, "/tmp/tl_bench_tier2.db", &ext);
+    let tier2 = bench_tier2(&data, &tier2_path, &ext);
     println!("- tier2 done ({:.3}s ingest)", tier2.insert_secs);
     println!();
 
@@ -767,7 +786,7 @@ fn main() {
     }
     println!();
 
-    query_checks(&data, "/tmp/tl_bench_tier2.db", &ext);
+    query_checks(&data, &tier2_path, &ext);
 
-    println!("\ndone. dbs left in /tmp/tl_bench_{{plain,tier1,tier2}}.db for inspection.");
+    println!("\ndone. {}.", scratch.finish_message());
 }

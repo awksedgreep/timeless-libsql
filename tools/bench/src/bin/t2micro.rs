@@ -10,7 +10,6 @@
 //! statement and isolate per-statement overhead.
 
 use std::env;
-use std::fs;
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
@@ -64,11 +63,12 @@ fn main() {
     // per-statement times in ms, [iteration][blob]
     let mut times = vec![vec![0f64; n_blobs]; iters];
 
-    for it in 0..iters {
-        let path = format!("/tmp/tl_t2micro_{it}.db");
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(format!("{path}-wal"));
-        let _ = fs::remove_file(format!("{path}-journal"));
+    let temporary = tempfile::Builder::new()
+        .prefix("timeless-t2micro-")
+        .tempdir()
+        .expect("create t2micro scratch directory");
+    for (it, iteration_times) in times.iter_mut().enumerate() {
+        let path = temporary.path().join(format!("iteration-{it}.db"));
         let conn = Connection::open(&path).expect("open db");
         unsafe {
             conn.load_extension_enable().unwrap();
@@ -86,18 +86,21 @@ fn main() {
             for (b, blob) in blobs.iter().enumerate() {
                 let t = Instant::now();
                 stmt.execute(params![blob]).unwrap();
-                times[it][b] = t.elapsed().as_secs_f64() * 1e3;
+                iteration_times[b] = t.elapsed().as_secs_f64() * 1e3;
             }
         }
         conn.execute_batch("COMMIT").unwrap();
         drop(conn);
-        let _ = fs::remove_file(&path);
     }
 
     // median per blob position across iterations
     print!("blob-ms:");
-    for b in 0..n_blobs {
-        let mut col: Vec<f64> = (0..iters).map(|i| times[i][b]).collect();
+    for mut col in (0..n_blobs).map(|blob| {
+        times
+            .iter()
+            .map(|iteration| iteration[blob])
+            .collect::<Vec<_>>()
+    }) {
         col.sort_by(|a, b| a.partial_cmp(b).unwrap());
         print!(" {:.2}", col[iters / 2]);
     }
@@ -116,7 +119,11 @@ fn main() {
         {
             let mut c: Vec<f64> = (0..iters).flat_map(|i| times[i][1..].to_vec()).collect();
             c.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            if c.is_empty() { f64::NAN } else { c[c.len() / 2] }
+            if c.is_empty() {
+                f64::NAN
+            } else {
+                c[c.len() / 2]
+            }
         }
     );
 }

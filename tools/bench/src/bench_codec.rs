@@ -167,6 +167,7 @@ fn fmt_mb(b: usize) -> String {
     format!("{:.2} MB", b as f64 / 1.0e6)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn report(
     label: &str,
     col_names: &[&str],
@@ -273,6 +274,7 @@ fn main() {
         .map(|r| LogEntry {
             ts: r.ts,
             level: r.level_num,
+            severity: None,
             message: r.message.clone(),
             // Canonical sorted pair order (path < service < status) —
             // exactly what the vtab stores after its JSON parse.
@@ -281,6 +283,7 @@ fn main() {
                 ("service".into(), r.service.into()),
                 ("status".into(), r.status.into()),
             ],
+            metadata_json: None,
         })
         .collect();
     drop(logs);

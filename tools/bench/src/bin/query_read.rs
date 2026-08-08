@@ -60,7 +60,15 @@ fn main() {
         "point count exceeds batch format"
     );
 
-    let db_path = format!("/tmp/timeless_query_read_{}.db", std::process::id());
+    let temporary = tempfile::Builder::new()
+        .prefix("timeless-query-read-")
+        .tempdir()
+        .expect("create query-read scratch directory");
+    let db_path = temporary
+        .path()
+        .join("query-read.db")
+        .to_string_lossy()
+        .into_owned();
     scrub(&db_path);
 
     let writer = open_with_ext(&db_path, &ext);
@@ -575,7 +583,7 @@ fn database_bytes(path: &str) -> u64 {
 }
 
 fn labels_for(series: usize) -> String {
-    let region = if series % 2 == 0 {
+    let region = if series.is_multiple_of(2) {
         "us-east"
     } else {
         "us-west"
