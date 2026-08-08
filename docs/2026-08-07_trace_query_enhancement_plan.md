@@ -213,6 +213,12 @@ Exit criteria:
 - the final report recommends the structure and ownership boundaries of a
   later TraceQL feature matrix.
 
+Status: in progress. The bounded candidate contract and language/storage
+ownership split are recorded in
+[`2026-08-08_trace_attribute_index_contract.md`](2026-08-08_trace_attribute_index_contract.md)
+and
+[`2026-08-08_traceql_prerequisite_matrix.md`](2026-08-08_traceql_prerequisite_matrix.md).
+
 ## Completion
 
 The plan is complete when every session has a shipped, rejected, or deferred

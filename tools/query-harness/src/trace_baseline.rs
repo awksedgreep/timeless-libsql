@@ -39,6 +39,10 @@ pub(crate) struct TraceBaselineArgs {
     /// Preserve the temporary database and server log when the run fails.
     #[arg(long, default_value_t = false)]
     retain_on_failure: bool,
+    /// Create the fixture with Session 7's bounded attribute-index fields.
+    /// The default preserves every earlier trace-baseline invocation.
+    #[arg(long, default_value_t = false)]
+    attribute_indexes: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -57,6 +61,8 @@ pub(crate) struct TraceBaselineSqlArgs {
     warmup: usize,
     #[arg(long)]
     expected_spans: usize,
+    #[arg(long, default_value_t = false)]
+    attribute_indexes: bool,
 }
 
 #[derive(Clone)]
@@ -267,7 +273,7 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
     let database = temporary.path().join("traces.db");
 
     let execution: Result<Value> = (|| {
-        let fixture = build_fixture(&extension, &database, args.batches)?;
+        let fixture = build_fixture(&extension, &database, args.batches, args.attribute_indexes)?;
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()?;
@@ -324,6 +330,7 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
             fixture.spans,
             args.iterations,
             args.warmup,
+            args.attribute_indexes,
         )?;
         let storage_after_queries = storage_files(&database);
         Ok(json!({
@@ -342,6 +349,7 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
                 "batches": args.batches,
                 "logical_spans": fixture.spans,
                 "time_boxes": args.batches,
+                "attribute_indexes": args.attribute_indexes,
                 "rich_fields": [
                     "attributes", "status_description", "events", "resource",
                     "instrumentation_scope", "links", "trace_state", "trace_flags",
@@ -484,16 +492,231 @@ pub(crate) fn run_sql(args: TraceBaselineSqlArgs) -> Result<()> {
             )?,
         },
     });
+    let attribute_equality = measure_attribute_equality(
+        &connection,
+        args.start_ns,
+        args.stop_ns,
+        args.expected_spans,
+        args.attribute_indexes,
+        args.iterations,
+        args.warmup,
+    )?;
     let report = json!({
         "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
         "broad_all_time_boxes": broad,
         "narrow_one_time_box_control": narrow,
         "posting_windows": posting_windows,
         "retained_trace_summaries": retained_trace_summaries,
+        "attribute_equality": attribute_equality,
         "rss": process_memory(std::process::id())?,
     });
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum AttributeShape {
+    ExactCount,
+    BooleanTrue,
+}
+
+impl AttributeShape {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ExactCount => "exact_typed_high_cardinality",
+            Self::BooleanTrue => "exact_typed_low_cardinality",
+        }
+    }
+
+    fn control_sql(self) -> &'static str {
+        match self {
+            Self::ExactCount => {
+                "SELECT lower(hex(trace_id)),lower(hex(span_id)),start_ts FROM traces \
+                 WHERE start_ts>=?1 AND start_ts<=?2 \
+                   AND json_type(attributes,'$.count')='integer' \
+                   AND attributes->'$.count'=?3 \
+                 ORDER BY start_ts,span_id"
+            }
+            Self::BooleanTrue => {
+                "SELECT count(*) FROM traces WHERE start_ts>=?1 AND start_ts<=?2 \
+                   AND json_type(attributes,'$.bool')='true'"
+            }
+        }
+    }
+
+    fn candidate_sql(self) -> &'static str {
+        match self {
+            Self::ExactCount => {
+                "SELECT lower(hex(trace_id)),lower(hex(span_id)),start_ts FROM traces \
+                 WHERE start_ts>=?1 AND start_ts<=?2 AND attribute_filter=?3 \
+                 ORDER BY start_ts,span_id"
+            }
+            Self::BooleanTrue => {
+                "SELECT count(*) FROM traces WHERE start_ts>=?1 AND start_ts<=?2 \
+                   AND attribute_filter=?3"
+            }
+        }
+    }
+
+    fn candidate_filter(self, target: usize) -> String {
+        match self {
+            Self::ExactCount => {
+                format!(r#"{{"scope":"span","path":"/count","value":{target}}}"#)
+            }
+            Self::BooleanTrue => {
+                r#"{"scope":"span","path":"/bool","value":true}"#.to_owned()
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_attribute_equality(
+    connection: &Connection,
+    start: i64,
+    stop: i64,
+    expected_spans: usize,
+    candidate_available: bool,
+    iterations: usize,
+    warmup: usize,
+) -> Result<Value> {
+    let narrow_stop = start + (BATCH_SPANS as i64 - 1) * 1_000;
+    let cases = [
+        ("narrow_one_time_box", start, narrow_stop, 123_usize),
+        ("wide_all_time_boxes", start, stop, expected_spans / 2),
+    ];
+    let mut control = Map::new();
+    let mut candidate = Map::new();
+    for shape in [AttributeShape::ExactCount, AttributeShape::BooleanTrue] {
+        let mut control_windows = Map::new();
+        let mut candidate_windows = Map::new();
+        for (window, lower, upper, target) in cases {
+            let expected_rows = match shape {
+                AttributeShape::ExactCount => 1,
+                AttributeShape::BooleanTrue => {
+                    if window == "narrow_one_time_box" {
+                        BATCH_SPANS
+                    } else {
+                        expected_spans
+                    }
+                }
+            };
+            control_windows.insert(
+                window.to_owned(),
+                measure_attribute_shape(
+                    connection,
+                    shape,
+                    false,
+                    lower,
+                    upper,
+                    target,
+                    expected_rows,
+                    iterations,
+                    warmup,
+                )?,
+            );
+            if candidate_available {
+                candidate_windows.insert(
+                    window.to_owned(),
+                    measure_attribute_shape(
+                        connection,
+                        shape,
+                        true,
+                        lower,
+                        upper,
+                        target,
+                        expected_rows,
+                        iterations,
+                        warmup,
+                    )?,
+                );
+            }
+        }
+        control.insert(shape.name().to_owned(), Value::Object(control_windows));
+        if candidate_available {
+            candidate.insert(shape.name().to_owned(), Value::Object(candidate_windows));
+        }
+    }
+    Ok(json!({
+        "control": control,
+        "candidate": if candidate_available { Value::Object(candidate) } else { Value::Null },
+        "candidate_available": candidate_available,
+        "typed_semantics": "count uses JSON integer equality; bool uses JSON true; missing/null/string values do not match",
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_attribute_shape(
+    connection: &Connection,
+    shape: AttributeShape,
+    candidate: bool,
+    start: i64,
+    stop: i64,
+    target: usize,
+    expected_rows: usize,
+    iterations: usize,
+    warmup: usize,
+) -> Result<Value> {
+    let sql = if candidate {
+        shape.candidate_sql()
+    } else {
+        shape.control_sql()
+    };
+    let operand = if candidate {
+        shape.candidate_filter(target)
+    } else {
+        target.to_string()
+    };
+    let execute = |connection: &Connection| -> Result<(usize, usize)> {
+        match shape {
+            AttributeShape::ExactCount => {
+                let mut statement = connection.prepare_cached(sql)?;
+                let rows = statement
+                    .query_map(params![start, stop, operand], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((rows.len(), serde_json::to_vec(&rows)?.len()))
+            }
+            AttributeShape::BooleanTrue => {
+                let count: i64 = connection.query_row(sql, params![start, stop, operand], |row| {
+                    row.get(0)
+                })?;
+                let count = usize::try_from(count).context("negative attribute row count")?;
+                Ok((count, serde_json::to_vec(&count)?.len()))
+            }
+        }
+    };
+    for _ in 0..warmup {
+        ensure!(execute(connection)?.0 == expected_rows);
+    }
+    let before = sqlite_stats(connection)?;
+    let mut elapsed = Vec::with_capacity(iterations);
+    let mut result_bytes = BTreeSet::new();
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let (rows, bytes) = execute(connection)?;
+        elapsed.push(started.elapsed().as_nanos());
+        ensure!(rows == expected_rows);
+        result_bytes.insert(bytes);
+    }
+    let after = sqlite_stats(connection)?;
+    ensure!(result_bytes.len() == 1);
+    Ok(json!({
+        "implementation": if candidate { "configured block filter plus exact extension recheck" } else { "public virtual table plus SQLite JSON1" },
+        "sql": sql,
+        "filter": candidate.then_some(operand),
+        "iterations": iterations,
+        "warmup": warmup,
+        "latency_ns": latency_summary(&elapsed),
+        "result_rows": expected_rows,
+        "result_json_bytes": result_bytes.first(),
+        "extension_work_delta": prefix_numeric_delta(&before, &after, "query_"),
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -852,11 +1075,23 @@ fn measure_trace_summaries(
     }))
 }
 
-fn build_fixture(extension: &Path, database: &Path, batches: usize) -> Result<FixtureReport> {
+fn build_fixture(
+    extension: &Path,
+    database: &Path,
+    batches: usize,
+    attribute_indexes: bool,
+) -> Result<FixtureReport> {
     let connection = open(database, extension)?;
     let journal_mode: String =
         connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-    connection.execute("CREATE VIRTUAL TABLE traces USING timeless_traces", [])?;
+    let create = if attribute_indexes {
+        "CREATE VIRTUAL TABLE traces USING timeless_traces(\
+           attribute_indexes='[{\"scope\":\"span\",\"path\":\"/count\"},{\"scope\":\"span\",\"path\":\"/bool\"}]'\
+         )"
+    } else {
+        "CREATE VIRTUAL TABLE traces USING timeless_traces"
+    };
+    connection.execute(create, [])?;
     let started = Instant::now();
     let mut public_batch_bytes = 0_u64;
     for batch_number in 0..batches {
@@ -1406,6 +1641,7 @@ fn isolated_sql_baseline(
     expected_spans: usize,
     iterations: usize,
     warmup: usize,
+    attribute_indexes: bool,
 ) -> Result<Value> {
     let executable = std::env::current_exe()?;
     let output = Command::new(executable)
@@ -1421,6 +1657,7 @@ fn isolated_sql_baseline(
         .args(["--expected-spans", &expected_spans.to_string()])
         .args(["--iterations", &iterations.to_string()])
         .args(["--warmup", &warmup.to_string()])
+        .args(attribute_indexes.then_some("--attribute-indexes"))
         .output()?;
     if !output.status.success() {
         bail!(

@@ -1,8 +1,9 @@
 # Trace query matrix
 
 Date: 2026-08-08  
-Session: 6 of the [trace query enhancement plan](2026-08-07_trace_query_enhancement_plan.md)  
-Status: Session 6 complete. Persisted summaries were rejected; the measured
+Session: 7 of the [trace query enhancement plan](2026-08-07_trace_query_enhancement_plan.md)
+Status: Session 6 complete; Session 7 attribute prerequisite work is in
+progress. Persisted summaries were rejected; the measured
 public SQL verdict is in
 [`2026-08-08_trace_summaries.md`](2026-08-08_trace_summaries.md). No persisted
 summary storage may be added until the `TSQ-06` prerequisites are satisfied.
@@ -42,7 +43,7 @@ version first changes the write contract.
 | `TSQ-05` | Broad retained-trace summaries | Group the selected retained span snapshot by packed trace ID. Counts include repeated rows; roots and services are sets, not assumed scalars. | SQL | A persisted accelerator is possible only as per-block contributions, but no current API consumes it and completeness remains unknowable. | sql |
 | `TSQ-06` | Complete-trace search | Select logical traces by root service/operation, trace start/end/duration, total spans, or any-error state; limit traces; then return all retained spans for each selected trace. | future versioned Rust API | This is the only vector that could justify persisted trace contributions, but it is not the current Jaeger contract. | deferred |
 | `TSQ-07` | Trace completeness | Distinguish complete, still arriving, source-truncated, retry-duplicated, and retention-truncated traces. | future ingest/storage contract | OTLP supplies no trace-finalization marker, expected span count, or retry identity. Root presence does not prove completeness. | deferred |
-| `TSQ-08` | Trace attribute search | Select traces when any/root/all spans match typed resource, scope, span, event, or link attributes. | future Rust query planner | Requires the bounded attribute-index decisions in Session 7; a scalar summary would lose type, scope, and quantifier semantics. | deferred |
+| `TSQ-08` | Trace attribute search | Select traces when any/root/all spans match typed resource, scope, span, event, or link attributes. | extension candidate pruning + future Rust query planner | Session 7 is measuring exact typed scalar equality for configured span/resource/scope paths. Event/link predicates and trace quantifiers remain higher-order prerequisites; a scalar summary would lose type, scope, and quantifier semantics. | in progress |
 | `TSQ-09` | Dependency/service graph | Derive parent/link edges across services from a retained snapshot. | Rust trace library | Requires graph composition and explicit missing-parent/link policy, not one scalar trace row. | library |
 | `TSQ-10` | Trace statistics over a time window | Count retained traces or compute distributions from a precisely defined selected-span or selected-trace population. | SQL or future Rust API | Depends on whether the time predicate applies to roots, envelopes, or any span; those are different populations. | deferred |
 
