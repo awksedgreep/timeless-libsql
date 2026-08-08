@@ -10,11 +10,26 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.4.1 -->
+<!-- release-target: 0.4.2 -->
 
 ## [Unreleased]
 
-No changes recorded after `0.4.1`.
+No changes recorded after `0.4.2`.
+
+## [0.4.2] — 2026-08-08
+
+### Fixed
+
+- Completed the tag release path: after all four native package jobs and the
+  aggregate checksum gate pass, the workflow now re-verifies the complete
+  asset set and publishes the archives plus `SHA256SUMS` as a GitHub Release.
+  Write permission is scoped only to the final publication job.
+
+### Compatibility
+
+- Storage data ABI 1, SQL-surface generation 1, batch/frame formats, and the
+  minimum `0.4.0` extension/server pairing remain unchanged. This patch only
+  advances package identity and release publication behavior.
 
 ## [0.4.1] — 2026-08-08
 
@@ -183,7 +198,8 @@ Hardened statement atomicity, savepoints, multi-process series identity,
 attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
-[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/awksedgreep/timeless-libsql/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.3.0

@@ -60,3 +60,48 @@ jobs:
           name: timeless-telemetry-data-plane-checksums
           path: dist/SHA256SUMS
           if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: checksums
+    permissions:
+      actions: read
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: timeless-telemetry-data-plane-*
+          merge-multiple: true
+          path: dist
+      - name: Verify complete release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          mapfile -t archives < <(find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort)
+          test "${#archives[@]}" -eq 4
+          test "$(wc -l < SHA256SUMS)" -eq 4
+          sha256sum -c SHA256SUMS
+      - name: Resolve previous release tag
+        id: previous
+        shell: bash
+        run: |
+          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_SHA}^")"
+          echo "tag=${previous_tag}" >> "${GITHUB_OUTPUT}"
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          dist/*.tar.gz dist/SHA256SUMS
+          --verify-tag
+          --fail-on-no-commits
+          --generate-notes
+          --notes-start-tag "${{ steps.previous.outputs.tag }}"
+          --title "${GITHUB_REF_NAME}"
+          --latest
