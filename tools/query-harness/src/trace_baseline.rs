@@ -94,6 +94,25 @@ struct BucketRow {
     dur_p99: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct TraceSummaryRow {
+    trace_id: String,
+    span_rows: i64,
+    distinct_span_ids: i64,
+    error_rows: i64,
+    start_ts: i64,
+    end_ts: i64,
+    duration_ns: i64,
+    invalid_end_rows: i64,
+    root_rows: i64,
+    root_span_id: Option<String>,
+    root_name: Option<String>,
+    root_service: Option<String>,
+    root_state: String,
+    service_count: i64,
+    completeness: String,
+}
+
 struct FixtureReport {
     spans: usize,
     stop_ns: i64,
@@ -423,11 +442,30 @@ pub(crate) fn run_sql(args: TraceBaselineSqlArgs) -> Result<()> {
             args.warmup,
         )?,
     });
+    let retained_trace_summaries = json!({
+        "exact_one_trace": measure_trace_summaries(
+            &connection,
+            Some(&fixed_be::<16>(1)),
+            1,
+            8,
+            args.iterations,
+            args.warmup,
+        )?,
+        "broad_all_traces": measure_trace_summaries(
+            &connection,
+            None,
+            args.expected_spans / 8,
+            args.expected_spans,
+            args.iterations,
+            args.warmup,
+        )?,
+    });
     let report = json!({
         "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
         "broad_all_time_boxes": broad,
         "narrow_one_time_box_control": narrow,
         "posting_windows": posting_windows,
+        "retained_trace_summaries": retained_trace_summaries,
         "rss": process_memory(std::process::id())?,
     });
     println!("{}", serde_json::to_string(&report)?);
@@ -592,6 +630,155 @@ fn measure_posting_count(
         "expected_decoded_spans_per_query": expected_decoded,
         "latency_ns": latency_summary(&elapsed),
         "extension_work_delta": work,
+    }))
+}
+
+fn trace_summary_sql(exact_trace: bool) -> String {
+    let predicate = if exact_trace {
+        " WHERE trace_id=?1"
+    } else {
+        ""
+    };
+    format!(
+        "WITH retained AS (\
+           SELECT trace_id,span_id,parent_span_id,name,service,status,start_ts,duration_ns,\
+                  CASE WHEN duration_ns>=0 \
+                             AND start_ts<=9223372036854775807-duration_ns \
+                       THEN start_ts+duration_ns END AS valid_end_ts \
+             FROM traces{predicate}\
+         ), totals AS (\
+           SELECT trace_id,count(*) AS span_rows,\
+                  count(DISTINCT span_id) AS distinct_span_ids,\
+                  count(*) FILTER (WHERE status='error') AS error_rows,\
+                  min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,\
+                  count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,\
+                  count(DISTINCT service) AS service_count \
+             FROM retained GROUP BY trace_id\
+         ), roots AS (\
+           SELECT trace_id,count(*) AS root_rows,\
+                  CASE WHEN count(*)=1 THEN lower(hex(min(span_id))) END AS root_span_id,\
+                  CASE WHEN count(*)=1 THEN min(name) END AS root_name,\
+                  CASE WHEN count(*)=1 THEN min(service) END AS root_service \
+             FROM retained WHERE parent_span_id IS NULL GROUP BY trace_id\
+         ) \
+         SELECT lower(hex(totals.trace_id)),totals.span_rows,\
+                totals.distinct_span_ids,totals.error_rows,totals.start_ts,totals.end_ts,\
+                CASE WHEN totals.invalid_end_rows<>0 THEN NULL \
+                     WHEN totals.start_ts>=0 THEN totals.end_ts-totals.start_ts \
+                     WHEN totals.end_ts<=9223372036854775807+totals.start_ts \
+                       THEN totals.end_ts-totals.start_ts END AS duration_ns,\
+                totals.invalid_end_rows,coalesce(roots.root_rows,0),\
+                roots.root_span_id,roots.root_name,roots.root_service,\
+                CASE coalesce(roots.root_rows,0) WHEN 0 THEN 'missing' \
+                     WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,\
+                totals.service_count,'unknown' AS completeness \
+           FROM totals LEFT JOIN roots USING(trace_id) ORDER BY totals.trace_id"
+    )
+}
+
+fn execute_trace_summaries(
+    connection: &Connection,
+    trace_id: Option<&[u8; 16]>,
+) -> Result<Vec<TraceSummaryRow>> {
+    let sql = trace_summary_sql(trace_id.is_some());
+    let mut statement = connection.prepare_cached(&sql)?;
+    let map = |row: &rusqlite::Row<'_>| {
+        Ok(TraceSummaryRow {
+            trace_id: row.get(0)?,
+            span_rows: row.get(1)?,
+            distinct_span_ids: row.get(2)?,
+            error_rows: row.get(3)?,
+            start_ts: row.get(4)?,
+            end_ts: row.get(5)?,
+            duration_ns: row.get(6)?,
+            invalid_end_rows: row.get(7)?,
+            root_rows: row.get(8)?,
+            root_span_id: row.get(9)?,
+            root_name: row.get(10)?,
+            root_service: row.get(11)?,
+            root_state: row.get(12)?,
+            service_count: row.get(13)?,
+            completeness: row.get(14)?,
+        })
+    };
+    let rows = match trace_id {
+        Some(trace_id) => statement.query_map([trace_id.as_slice()], map)?,
+        None => statement.query_map([], map)?,
+    };
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn require_trace_summaries(
+    rows: &[TraceSummaryRow],
+    expected_rows: usize,
+    expected_spans: usize,
+) -> Result<()> {
+    ensure!(
+        rows.len() == expected_rows,
+        "trace summary rows {}, expected {expected_rows}",
+        rows.len()
+    );
+    let spans = rows.iter().try_fold(0_i64, |total, row| {
+        total
+            .checked_add(row.span_rows)
+            .context("trace summary span count overflow")
+    })?;
+    ensure!(spans == expected_spans as i64);
+    ensure!(rows.iter().all(|row| {
+        row.span_rows == 8
+            && row.distinct_span_ids == 8
+            && row.invalid_end_rows == 0
+            && row.root_rows == 1
+            && row.root_state == "unique"
+            && row.service_count == 1
+            && row.completeness == "unknown"
+            && row.root_span_id.is_some()
+            && row.root_name.as_deref() == Some("GET /baseline")
+            && row.root_service.as_deref() == Some("bench")
+            && row.end_ts >= row.start_ts
+            && row.duration_ns == row.end_ts - row.start_ts
+            && (row.error_rows == 2 || row.error_rows == 3)
+    }));
+    Ok(())
+}
+
+fn measure_trace_summaries(
+    connection: &Connection,
+    trace_id: Option<&[u8; 16]>,
+    expected_rows: usize,
+    expected_spans: usize,
+    iterations: usize,
+    warmup: usize,
+) -> Result<Value> {
+    for _ in 0..warmup {
+        let rows = execute_trace_summaries(connection, trace_id)?;
+        require_trace_summaries(&rows, expected_rows, expected_spans)?;
+    }
+    let before = sqlite_stats(connection)?;
+    let mut elapsed = Vec::with_capacity(iterations);
+    let mut cardinality = BTreeSet::new();
+    let mut result_bytes = BTreeSet::new();
+    for _ in 0..iterations {
+        let started = Instant::now();
+        let rows = execute_trace_summaries(connection, trace_id)?;
+        elapsed.push(started.elapsed().as_nanos());
+        require_trace_summaries(&rows, expected_rows, expected_spans)?;
+        cardinality.insert(rows.len());
+        result_bytes.insert(serde_json::to_vec(&rows)?.len());
+    }
+    let after = sqlite_stats(connection)?;
+    ensure!(cardinality.len() == 1 && result_bytes.len() == 1);
+    Ok(json!({
+        "sql": trace_summary_sql(trace_id.is_some()),
+        "trace_id": trace_id.map(|value| format!("{:032x}", u128::from_be_bytes(*value))),
+        "iterations": iterations,
+        "warmup": warmup,
+        "latency_ns": latency_summary(&elapsed),
+        "result_rows": cardinality.first(),
+        "result_spans": expected_spans,
+        "result_json_bytes": result_bytes.first(),
+        "extension_work_delta": prefix_numeric_delta(&before, &after, "query_"),
     }))
 }
 

@@ -261,6 +261,86 @@ updates only the metadata, and preserves payload/index bytes. The positive
 entry budget also bounds this backfill and always permits one block when it
 is the first maintenance unit.
 
+### Retained trace summaries
+
+The extension does not claim to know when an OTLP trace is complete. OTLP
+exports spans without a finalization marker or retry identity, and the
+append-only table intentionally preserves repeated `(trace_id, span_id)`
+rows. Use ordinary SQL when a summary of the currently retained rows is
+useful. This parameterized recipe benefits from the existing trace-ID block
+index and uses no private shadow table:
+
+```sql
+-- ?1 is a packed 16-byte trace_id (use unhex(?) when starting from hex text).
+WITH retained AS (
+  SELECT span_id, parent_span_id, name, service, status, start_ts, duration_ns,
+         CASE
+           WHEN duration_ns >= 0
+            AND start_ts <= 9223372036854775807 - duration_ns
+           THEN start_ts + duration_ns
+         END AS valid_end_ts
+    FROM traces
+   WHERE trace_id = ?1
+), totals AS (
+  SELECT count(*) AS span_rows,
+         count(DISTINCT span_id) AS distinct_span_ids,
+         count(*) FILTER (WHERE status = 'error') AS error_rows,
+         min(start_ts) AS start_ts,
+         max(valid_end_ts) AS end_ts,
+         count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,
+         count(DISTINCT service) AS service_count
+    FROM retained
+), roots AS (
+  SELECT count(*) AS root_rows,
+         CASE WHEN count(*) = 1 THEN lower(hex(min(span_id))) END AS root_span_id,
+         CASE WHEN count(*) = 1 THEN min(name) END AS root_name,
+         CASE WHEN count(*) = 1 THEN min(service) END AS root_service
+    FROM retained
+   WHERE parent_span_id IS NULL
+)
+SELECT totals.span_rows, totals.distinct_span_ids, totals.error_rows,
+       totals.start_ts, totals.end_ts,
+       CASE
+         WHEN totals.span_rows = 0 OR totals.invalid_end_rows <> 0 THEN NULL
+         WHEN totals.start_ts >= 0 THEN totals.end_ts - totals.start_ts
+         WHEN totals.end_ts <= 9223372036854775807 + totals.start_ts
+           THEN totals.end_ts - totals.start_ts
+       END AS duration_ns,
+       totals.invalid_end_rows, roots.root_rows,
+       roots.root_span_id, roots.root_name, roots.root_service,
+       CASE roots.root_rows
+         WHEN 0 THEN 'missing'
+         WHEN 1 THEN 'unique'
+         ELSE 'ambiguous'
+       END AS root_state,
+       totals.service_count,
+       'unknown' AS completeness
+  FROM totals CROSS JOIN roots;
+```
+
+`span_rows` and `error_rows` count retained rows, including retries.
+`distinct_span_ids` is an additional diagnostic and never silently replaces
+the physical count. Envelope duration is `NULL` when a direct-SQL row has a
+negative duration or its end/difference cannot fit in signed 64-bit storage.
+The root fields are populated only for exactly one retained root row. A
+distributed trace's services are a set; list them without choosing a false
+scalar owner:
+
+```sql
+SELECT DISTINCT service
+  FROM traces
+ WHERE trace_id = ?1
+ ORDER BY service;
+```
+
+For broad snapshots, group the same retained fields by `trace_id`. Timeless
+does not persist that aggregate today: it cannot accelerate the established
+span-filtered Jaeger search without changing its results, and exact optimize
+and retention support would require a second per-block contribution index
+without making completeness observable. The decision and prerequisites for a
+future versioned complete-trace search are in the
+[trace query matrix](2026-08-08_trace_query_matrix.md).
+
 ## Ingestion batch formats
 
 Every integer and float word below is little-endian. Flags and reserved words

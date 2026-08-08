@@ -457,6 +457,15 @@ spread across maintenance windows. A crash or rollback cannot leave a block
 partially summarized: both extrema publish in the surrounding SQLite
 transaction, and corrupt/incomplete extrema fail closed on reopen.
 
+For a summary of one trace's currently retained rows, use the copyable
+[retained trace summary SQL](SQL_API_REFERENCE.md#retained-trace-summaries).
+It reports physical and distinct span counts, errors, checked envelope bounds,
+root ambiguity, and service cardinality. Completeness is deliberately
+`unknown`: OTLP has no trace-finalization or retry identity, so root presence
+or an inactivity timeout would not make that claim truthful. The
+[trace query matrix](2026-08-08_trace_query_matrix.md) defines the boundary
+between this retained-row summary and a future versioned complete-trace API.
+
 ## 7. Querying: what's fast, what's slow
 
 You don't need to learn a query planner — just know which predicates the

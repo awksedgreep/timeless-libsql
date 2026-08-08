@@ -63,6 +63,24 @@ struct SemanticSpan {
     scope_dropped_attributes_count: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RetainedTraceSummary {
+    span_rows: i64,
+    distinct_span_ids: i64,
+    error_rows: i64,
+    start_ts: Option<i64>,
+    end_ts: Option<i64>,
+    duration_ns: Option<i64>,
+    invalid_end_rows: i64,
+    root_rows: i64,
+    root_span_id: Option<String>,
+    root_name: Option<String>,
+    root_service: Option<String>,
+    root_state: String,
+    service_count: i64,
+    completeness: String,
+}
+
 const COLUMNS: &str = "trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,duration_ns,attributes,status_description,events,resource,instrumentation_scope,links,trace_state,trace_flags,dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url,scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count";
 
 fn fixed_be<const N: usize>(number: u64) -> [u8; N] {
@@ -531,6 +549,210 @@ fn semantic_rows(connection: &Connection, table: &str) -> Result<Vec<SemanticSpa
     Ok(rows)
 }
 
+fn retained_trace_summary(
+    connection: &Connection,
+    table: &str,
+    trace_id: &[u8; 16],
+) -> Result<RetainedTraceSummary> {
+    let sql = format!(
+        "WITH retained AS (\
+           SELECT span_id,parent_span_id,name,service,status,start_ts,duration_ns,\
+                  CASE WHEN duration_ns>=0 \
+                             AND start_ts<=9223372036854775807-duration_ns \
+                       THEN start_ts+duration_ns END AS valid_end_ts \
+             FROM \"{table}\" WHERE trace_id=?1\
+         ), totals AS (\
+           SELECT count(*) AS span_rows,\
+                  count(DISTINCT span_id) AS distinct_span_ids,\
+                  count(*) FILTER (WHERE status='error') AS error_rows,\
+                  min(start_ts) AS start_ts,\
+                  max(valid_end_ts) AS end_ts,\
+                  count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,\
+                  count(DISTINCT service) AS service_count \
+             FROM retained\
+         ), roots AS (\
+           SELECT count(*) AS root_rows,\
+                  CASE WHEN count(*)=1 THEN lower(hex(min(span_id))) END AS root_span_id,\
+                  CASE WHEN count(*)=1 THEN min(name) END AS root_name,\
+                  CASE WHEN count(*)=1 THEN min(service) END AS root_service \
+             FROM retained WHERE parent_span_id IS NULL\
+         ) \
+         SELECT totals.span_rows,totals.distinct_span_ids,totals.error_rows,\
+                totals.start_ts,totals.end_ts,\
+                CASE WHEN totals.span_rows=0 OR totals.invalid_end_rows<>0 THEN NULL \
+                     WHEN totals.start_ts>=0 THEN totals.end_ts-totals.start_ts \
+                     WHEN totals.end_ts<=9223372036854775807+totals.start_ts \
+                       THEN totals.end_ts-totals.start_ts \
+                     ELSE NULL END AS duration_ns,\
+                totals.invalid_end_rows,roots.root_rows,roots.root_span_id,\
+                roots.root_name,roots.root_service,\
+                CASE roots.root_rows WHEN 0 THEN 'missing' WHEN 1 THEN 'unique' \
+                     ELSE 'ambiguous' END AS root_state,\
+                totals.service_count,'unknown' AS completeness \
+           FROM totals CROSS JOIN roots"
+    );
+    connection
+        .query_row(&sql, [trace_id.as_slice()], |row| {
+            Ok(RetainedTraceSummary {
+                span_rows: row.get(0)?,
+                distinct_span_ids: row.get(1)?,
+                error_rows: row.get(2)?,
+                start_ts: row.get(3)?,
+                end_ts: row.get(4)?,
+                duration_ns: row.get(5)?,
+                invalid_end_rows: row.get(6)?,
+                root_rows: row.get(7)?,
+                root_span_id: row.get(8)?,
+                root_name: row.get(9)?,
+                root_service: row.get(10)?,
+                root_state: row.get(11)?,
+                service_count: row.get(12)?,
+                completeness: row.get(13)?,
+            })
+        })
+        .map_err(Into::into)
+}
+
+fn trace_summary_contract(connection: &Connection, table: &str) -> Result<RetainedTraceSummary> {
+    let trace_id = hex("abababababababababababababababab");
+    let mut root = rich_span(70_001, Some(100));
+    root.trace_id = trace_id;
+    root.span_id = hex("0101010101010101");
+    root.parent_span_id = None;
+    root.name = "root-original".into();
+    root.status = 0;
+    root.duration_ns = 50;
+    root.attributes = json!({"service.name":"root-service"});
+
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES (?1)"),
+        params![batch(std::slice::from_ref(&root), 3)?],
+    )?;
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES ('flush')"),
+        [],
+    )?;
+    ensure!(
+        retained_trace_summary(connection, table, &trace_id)?
+            == RetainedTraceSummary {
+                span_rows: 1,
+                distinct_span_ids: 1,
+                error_rows: 0,
+                start_ts: Some(100),
+                end_ts: Some(150),
+                duration_ns: Some(50),
+                invalid_end_rows: 0,
+                root_rows: 1,
+                root_span_id: Some("0101010101010101".into()),
+                root_name: Some("root-original".into()),
+                root_service: Some("root-service".into()),
+                root_state: "unique".into(),
+                service_count: 1,
+                completeness: "unknown".into(),
+            }
+    );
+
+    // There is no idempotency identity in the current append-only contract.
+    // A retry with the same trace/span ids is another retained row and makes
+    // the root ambiguous instead of being silently deduplicated.
+    let mut retry = root.clone();
+    retry.name = "root-retry".into();
+    retry.start_ts = 110;
+    retry.duration_ns = 60;
+    retry.attributes = json!({"service.name":"retry-service"});
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES (?1)"),
+        params![batch(&[retry], 3)?],
+    )?;
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES ('flush')"),
+        [],
+    )?;
+    let retried = retained_trace_summary(connection, table, &trace_id)?;
+    ensure!(retried.span_rows == 2);
+    ensure!(retried.distinct_span_ids == 1);
+    ensure!(retried.root_rows == 2 && retried.root_state == "ambiguous");
+    ensure!(retried.root_span_id.is_none());
+    ensure!(retried.root_name.is_none() && retried.root_service.is_none());
+    ensure!(retried.completeness == "unknown");
+
+    // A child may arrive in any later public batch. It changes the retained
+    // envelope and counts but cannot prove that the source trace is complete.
+    let mut child = rich_span(70_002, Some(200));
+    child.trace_id = trace_id;
+    child.span_id = hex("0202020202020202");
+    child.parent_span_id = Some(root.span_id);
+    child.name = "late-child".into();
+    child.status = 2;
+    child.duration_ns = 25;
+    child.attributes = json!({"service.name":"child-service"});
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES (?1)"),
+        params![batch(std::slice::from_ref(&child), 3)?],
+    )?;
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES ('flush')"),
+        [],
+    )?;
+    let complete_snapshot = RetainedTraceSummary {
+        span_rows: 3,
+        distinct_span_ids: 2,
+        error_rows: 1,
+        start_ts: Some(100),
+        end_ts: Some(225),
+        duration_ns: Some(125),
+        invalid_end_rows: 0,
+        root_rows: 2,
+        root_span_id: None,
+        root_name: None,
+        root_service: None,
+        root_state: "ambiguous".into(),
+        service_count: 3,
+        completeness: "unknown".into(),
+    };
+    ensure!(retained_trace_summary(connection, table, &trace_id)? == complete_snapshot);
+
+    connection.execute_batch("BEGIN")?;
+    let mut rolled_back = child.clone();
+    rolled_back.span_id = hex("0303030303030303");
+    rolled_back.start_ts = 250;
+    insert_row(connection, table, &rolled_back)?;
+    connection.execute_batch("ROLLBACK")?;
+    ensure!(retained_trace_summary(connection, table, &trace_id)? == complete_snapshot);
+
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES ('optimize')"),
+        [],
+    )?;
+    ensure!(retained_trace_summary(connection, table, &trace_id)? == complete_snapshot);
+
+    // Retention removes both old root rows while leaving the later child.
+    // The retained snapshot is exact, but no query can tell whether the root
+    // was source-missing or retention-truncated without unbounded history.
+    connection.execute(
+        &format!("INSERT INTO \"{table}\"(\"{table}\") VALUES ('prune:150')"),
+        [],
+    )?;
+    let partial = RetainedTraceSummary {
+        span_rows: 1,
+        distinct_span_ids: 1,
+        error_rows: 1,
+        start_ts: Some(200),
+        end_ts: Some(225),
+        duration_ns: Some(25),
+        invalid_end_rows: 0,
+        root_rows: 0,
+        root_span_id: None,
+        root_name: None,
+        root_service: None,
+        root_state: "missing".into(),
+        service_count: 1,
+        completeness: "unknown".into(),
+    };
+    ensure!(retained_trace_summary(connection, table, &trace_id)? == partial);
+    Ok(partial)
+}
+
 fn integer_stats(connection: &Connection, table: &str) -> Result<BTreeMap<String, i64>> {
     let mut statement = connection
         .prepare("SELECT key,value FROM timeless_stats(?1) WHERE typeof(value)='integer'")?;
@@ -701,6 +923,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
          CREATE VIRTUAL TABLE lifecycle_spans USING timeless_traces;
          CREATE VIRTUAL TABLE corrupt_spans USING timeless_traces;
          CREATE VIRTUAL TABLE percentile_spans USING timeless_traces;
+         CREATE VIRTUAL TABLE summary_spans USING timeless_traces;
          CREATE VIRTUAL TABLE v0_spans USING timeless_traces;
          CREATE VIRTUAL TABLE v1_spans USING timeless_traces;",
     )?;
@@ -756,6 +979,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
         )?;
     }
     percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
+    let expected_summary = trace_summary_contract(&connection, "summary_spans")?;
     connection.execute(
         "INSERT INTO percentile_spans(percentile_spans) VALUES ('flush')",
         [],
@@ -915,11 +1139,18 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     projection_contract(&connection, "batch_spans", &fixture, true)?;
     percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
     ensure!(semantic_rows(&connection, "lifecycle_spans")? == expected_lifecycle);
+    ensure!(
+        retained_trace_summary(
+            &connection,
+            "summary_spans",
+            &hex("abababababababababababababababab")
+        )? == expected_summary
+    );
     ensure!(semantic_rows(&connection, "corrupt_spans")?[0].attributes == victim.attributes);
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     ensure!(integrity == "ok");
     println!(
-        "PASS: rich row/batch fidelity, threshold, transactions, maintenance, exact percentiles, corruption, reopen"
+        "PASS: rich row/batch fidelity, trace summaries, threshold, transactions, maintenance, exact percentiles, corruption, reopen"
     );
     Ok(())
 }
