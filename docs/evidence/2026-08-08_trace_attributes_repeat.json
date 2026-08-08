@@ -1,0 +1,1281 @@
+{
+  "branch": "feature/trace-duration-pruning",
+  "build": {
+    "extension": {
+      "commit": "5b96413fca408dd77b8fc46c12c2cead963abad1",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "profile": "release",
+    "traces_binary": {
+      "commit": "5b96413fca408dd77b8fc46c12c2cead963abad1",
+      "name": "timeless-traces-api",
+      "profile": "release",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "0.4.0"
+    }
+  },
+  "captured_at": "2026-08-08T17:12:27.285207Z",
+  "direct_sql": {
+    "attribute_equality": {
+      "candidate": {
+        "exact_typed_high_cardinality": {
+          "narrow_one_time_box": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 20,
+              "query_count": 20,
+              "query_decoded_column_bytes": 162200,
+              "query_decoded_columns": 80,
+              "query_decoded_spans": 54620,
+              "query_matched_spans": 20,
+              "query_materialized_rich_values": 54620,
+              "query_materialized_values": 109280,
+              "query_payload_blocks_read": 20,
+              "query_payload_bytes_read": 317600,
+              "query_returned_spans": 20,
+              "query_snapshot_ns": 1228897,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 32848436
+            },
+            "filter": "{\"scope\":\"span\",\"path\":\"/count\",\"value\":123}",
+            "implementation": "configured block filter plus exact extension recheck",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 1704493,
+              "min": 1500286,
+              "p50": 1663077,
+              "p95": 1692413,
+              "p99": 1704493
+            },
+            "result_json_bytes": 77,
+            "result_rows": 1,
+            "sql": "SELECT lower(hex(trace_id)),lower(hex(span_id)),start_ts FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND attribute_filter=?3 ORDER BY start_ts,span_id",
+            "warmup": 3
+          },
+          "wide_all_time_boxes": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 20,
+              "query_count": 20,
+              "query_decoded_column_bytes": 164320,
+              "query_decoded_columns": 80,
+              "query_decoded_spans": 54620,
+              "query_matched_spans": 20,
+              "query_materialized_rich_values": 54620,
+              "query_materialized_values": 109280,
+              "query_payload_blocks_read": 20,
+              "query_payload_bytes_read": 319920,
+              "query_returned_spans": 20,
+              "query_snapshot_ns": 8402551,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 40280962
+            },
+            "filter": "{\"scope\":\"span\",\"path\":\"/count\",\"value\":65536}",
+            "implementation": "configured block filter plus exact extension recheck",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 2073839,
+              "min": 1968310,
+              "p50": 2018094,
+              "p95": 2066478,
+              "p99": 2073839
+            },
+            "result_json_bytes": 77,
+            "result_rows": 1,
+            "sql": "SELECT lower(hex(trace_id)),lower(hex(span_id)),start_ts FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND attribute_filter=?3 ORDER BY start_ts,span_id",
+            "warmup": 3
+          }
+        },
+        "exact_typed_low_cardinality": {
+          "narrow_one_time_box": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 231080,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 163840,
+              "query_materialized_rich_values": 163840,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 163840,
+              "query_snapshot_ns": 1379074,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 101957646
+            },
+            "filter": "{\"scope\":\"span\",\"path\":\"/bool\",\"value\":true}",
+            "implementation": "configured block filter plus exact extension recheck",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 6007440,
+              "min": 4446676,
+              "p50": 4982033,
+              "p95": 5646753,
+              "p99": 6007440
+            },
+            "result_json_bytes": 4,
+            "result_rows": 8192,
+            "sql": "SELECT count(*) FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND attribute_filter=?3",
+            "warmup": 3
+          },
+          "wide_all_time_boxes": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 960,
+              "query_count": 20,
+              "query_decoded_column_bytes": 3751340,
+              "query_decoded_columns": 1920,
+              "query_decoded_spans": 2621440,
+              "query_matched_spans": 2621440,
+              "query_materialized_rich_values": 2621440,
+              "query_materialized_values": 5242880,
+              "query_payload_blocks_read": 960,
+              "query_payload_bytes_read": 15310740,
+              "query_returned_spans": 2621440,
+              "query_snapshot_ns": 9694176,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 1676196222
+            },
+            "filter": "{\"scope\":\"span\",\"path\":\"/bool\",\"value\":true}",
+            "implementation": "configured block filter plus exact extension recheck",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 98419451,
+              "min": 77267440,
+              "p50": 79276704,
+              "p95": 94316264,
+              "p99": 98419451
+            },
+            "result_json_bytes": 6,
+            "result_rows": 131072,
+            "sql": "SELECT count(*) FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND attribute_filter=?3",
+            "warmup": 3
+          }
+        }
+      },
+      "candidate_available": true,
+      "control": {
+        "exact_typed_high_cardinality": {
+          "narrow_one_time_box": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 486400,
+              "query_decoded_columns": 240,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 163840,
+              "query_materialized_rich_values": 163840,
+              "query_materialized_values": 655360,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 163840,
+              "query_snapshot_ns": 701527,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 100837663
+            },
+            "filter": null,
+            "implementation": "public virtual table plus SQLite JSON1",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 5483067,
+              "min": 4274126,
+              "p50": 5124697,
+              "p95": 5241098,
+              "p99": 5483067
+            },
+            "result_json_bytes": 77,
+            "result_rows": 1,
+            "sql": "SELECT lower(hex(trace_id)),lower(hex(span_id)),start_ts FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND json_type(attributes,'$.count')='integer' AND attributes->'$.count'=?3 ORDER BY start_ts,span_id",
+            "warmup": 3
+          },
+          "wide_all_time_boxes": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 960,
+              "query_count": 20,
+              "query_decoded_column_bytes": 7843300,
+              "query_decoded_columns": 3840,
+              "query_decoded_spans": 2621440,
+              "query_matched_spans": 2621440,
+              "query_materialized_rich_values": 2621440,
+              "query_materialized_values": 10485760,
+              "query_payload_blocks_read": 960,
+              "query_payload_bytes_read": 15310740,
+              "query_returned_spans": 2621440,
+              "query_snapshot_ns": 1796474,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 1543230138
+            },
+            "filter": null,
+            "implementation": "public virtual table plus SQLite JSON1",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 86018608,
+              "min": 69869194,
+              "p50": 80409637,
+              "p95": 83820940,
+              "p99": 86018608
+            },
+            "result_json_bytes": 77,
+            "result_rows": 1,
+            "sql": "SELECT lower(hex(trace_id)),lower(hex(span_id)),start_ts FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND json_type(attributes,'$.count')='integer' AND attributes->'$.count'=?3 ORDER BY start_ts,span_id",
+            "warmup": 3
+          }
+        },
+        "exact_typed_low_cardinality": {
+          "narrow_one_time_box": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 231080,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 163840,
+              "query_materialized_rich_values": 163840,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 163840,
+              "query_snapshot_ns": 593924,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 79536258
+            },
+            "filter": null,
+            "implementation": "public virtual table plus SQLite JSON1",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 4526460,
+              "min": 3810586,
+              "p50": 3954850,
+              "p95": 4151470,
+              "p99": 4526460
+            },
+            "result_json_bytes": 4,
+            "result_rows": 8192,
+            "sql": "SELECT count(*) FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND json_type(attributes,'$.bool')='true'",
+            "warmup": 3
+          },
+          "wide_all_time_boxes": {
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 960,
+              "query_count": 20,
+              "query_decoded_column_bytes": 3751340,
+              "query_decoded_columns": 1920,
+              "query_decoded_spans": 2621440,
+              "query_matched_spans": 2621440,
+              "query_materialized_rich_values": 2621440,
+              "query_materialized_values": 5242880,
+              "query_payload_blocks_read": 960,
+              "query_payload_bytes_read": 15310740,
+              "query_returned_spans": 2621440,
+              "query_snapshot_ns": 1664199,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 1284042022
+            },
+            "filter": null,
+            "implementation": "public virtual table plus SQLite JSON1",
+            "iterations": 20,
+            "latency_ns": {
+              "max": 70867873,
+              "min": 58772216,
+              "p50": 64385925,
+              "p95": 66688075,
+              "p99": 70867873
+            },
+            "result_json_bytes": 6,
+            "result_rows": 131072,
+            "sql": "SELECT count(*) FROM traces WHERE start_ts>=?1 AND start_ts<=?2 AND json_type(attributes,'$.bool')='true'",
+            "warmup": 3
+          }
+        }
+      },
+      "typed_semantics": "count uses JSON integer equality; bool uses JSON true; missing/null/string values do not match"
+    },
+    "broad_all_time_boxes": {
+      "extension_work_delta": {
+        "query_blocks_skipped_by_bound": 0,
+        "query_bounded_count": 0,
+        "query_bounded_max_spans": 0,
+        "query_bounded_requested_spans": 0,
+        "query_buffered_spans_examined": 0,
+        "query_cancelled": 0,
+        "query_candidate_blocks": 960,
+        "query_count": 20,
+        "query_decoded_column_bytes": 126720,
+        "query_decoded_columns": 3840,
+        "query_decoded_spans": 2621440,
+        "query_matched_spans": 2621440,
+        "query_materialized_rich_values": 0,
+        "query_materialized_values": 10485760,
+        "query_payload_blocks_read": 960,
+        "query_payload_bytes_read": 15310740,
+        "query_returned_spans": 2621440,
+        "query_snapshot_ns": 1196025,
+        "query_snapshot_payload_bytes": 0,
+        "query_snapshot_payload_max_bytes": 0,
+        "query_stable_location_snapshots": 20,
+        "query_total_ns": 433679181
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 24223948,
+        "min": 18220573,
+        "p50": 22281743,
+        "p95": 23823517,
+        "p99": 24223948
+      },
+      "parameters": {
+        "service": null,
+        "start_ns": 1699999200000000000,
+        "step_ns": 3600000000000,
+        "stop_ns": 1700053200008191000,
+        "table": "traces"
+      },
+      "result_json_bytes": 2961,
+      "result_rows": 16,
+      "result_spans": 131072,
+      "sql": "SELECT bucket_ts,service,spans,errors,dur_sum,dur_min,dur_max,dur_p50,dur_p95,dur_p99 FROM timeless_trace_buckets(?1,?2,?3,?4,?5) ORDER BY bucket_ts,service",
+      "warmup": 3
+    },
+    "narrow_one_time_box_control": {
+      "extension_work_delta": {
+        "query_blocks_skipped_by_bound": 0,
+        "query_bounded_count": 0,
+        "query_bounded_max_spans": 0,
+        "query_bounded_requested_spans": 0,
+        "query_buffered_spans_examined": 0,
+        "query_cancelled": 0,
+        "query_candidate_blocks": 60,
+        "query_count": 20,
+        "query_decoded_column_bytes": 7920,
+        "query_decoded_columns": 240,
+        "query_decoded_spans": 163840,
+        "query_matched_spans": 163840,
+        "query_materialized_rich_values": 0,
+        "query_materialized_values": 655360,
+        "query_payload_blocks_read": 60,
+        "query_payload_bytes_read": 952600,
+        "query_returned_spans": 163840,
+        "query_snapshot_ns": 915754,
+        "query_snapshot_payload_bytes": 0,
+        "query_snapshot_payload_max_bytes": 0,
+        "query_stable_location_snapshots": 20,
+        "query_total_ns": 32456484
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 2067259,
+        "min": 1691082,
+        "p50": 1722708,
+        "p95": 1792900,
+        "p99": 2067259
+      },
+      "parameters": {
+        "service": "bench",
+        "start_ns": 1699999200000000000,
+        "step_ns": 3600000000000,
+        "stop_ns": 1699999200008191000,
+        "table": "traces"
+      },
+      "result_json_bytes": 186,
+      "result_rows": 1,
+      "result_spans": 8192,
+      "sql": "SELECT bucket_ts,service,spans,errors,dur_sum,dur_min,dur_max,dur_p50,dur_p95,dur_p99 FROM timeless_trace_buckets(?1,?2,?3,?4,?5) ORDER BY bucket_ts,service",
+      "warmup": 3
+    },
+    "posting_windows": {
+      "narrow_one_time_box": {
+        "fixture_blocks": 48,
+        "shapes": {
+          "kind": {
+            "expected_candidate_blocks_per_query": 3,
+            "expected_decoded_spans_per_query": 8192,
+            "expected_rows": 1639,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 3780,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 32780,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 32780,
+              "query_snapshot_ns": 679613,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 6323776
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 382228,
+              "min": 305290,
+              "p50": 312958,
+              "p95": 353461,
+              "p99": 382228
+            },
+            "sql": "SELECT count(*) FROM traces WHERE kind='internal' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "name": {
+            "expected_candidate_blocks_per_query": 3,
+            "expected_decoded_spans_per_query": 8192,
+            "expected_rows": 1024,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 7220,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 20480,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 20480,
+              "query_snapshot_ns": 678678,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 9529643
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 539882,
+              "min": 457965,
+              "p50": 471125,
+              "p95": 525977,
+              "p99": 539882
+            },
+            "sql": "SELECT count(*) FROM traces WHERE name='GET /baseline' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "service": {
+            "expected_candidate_blocks_per_query": 3,
+            "expected_decoded_spans_per_query": 8192,
+            "expected_rows": 8192,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 60,
+              "query_count": 20,
+              "query_decoded_column_bytes": 5040,
+              "query_decoded_columns": 120,
+              "query_decoded_spans": 163840,
+              "query_matched_spans": 163840,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 327680,
+              "query_payload_blocks_read": 60,
+              "query_payload_bytes_read": 952600,
+              "query_returned_spans": 163840,
+              "query_snapshot_ns": 911866,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 34607398
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 1936123,
+              "min": 1713738,
+              "p50": 1757812,
+              "p95": 1893993,
+              "p99": 1936123
+            },
+            "sql": "SELECT count(*) FROM traces WHERE service='bench' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "status": {
+            "expected_candidate_blocks_per_query": 1,
+            "expected_decoded_spans_per_query": 2730,
+            "expected_rows": 2730,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 20,
+              "query_count": 20,
+              "query_decoded_column_bytes": 920,
+              "query_decoded_columns": 40,
+              "query_decoded_spans": 54600,
+              "query_matched_spans": 54600,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 109200,
+              "query_payload_blocks_read": 20,
+              "query_payload_bytes_read": 317760,
+              "query_returned_spans": 54600,
+              "query_snapshot_ns": 564850,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 6610056
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 388757,
+              "min": 315542,
+              "p50": 325097,
+              "p95": 366326,
+              "p99": 388757
+            },
+            "sql": "SELECT count(*) FROM traces WHERE status='error' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          }
+        },
+        "start_ns": 1699999200000000000,
+        "stop_ns": 1699999200008191000,
+        "time_boxes": 1
+      },
+      "wide_four_time_boxes": {
+        "fixture_blocks": 48,
+        "shapes": {
+          "kind": {
+            "expected_candidate_blocks_per_query": 12,
+            "expected_decoded_spans_per_query": 32768,
+            "expected_rows": 6554,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 240,
+              "query_count": 20,
+              "query_decoded_column_bytes": 15120,
+              "query_decoded_columns": 480,
+              "query_decoded_spans": 655360,
+              "query_matched_spans": 131080,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 1310720,
+              "query_payload_blocks_read": 240,
+              "query_payload_bytes_read": 3823480,
+              "query_returned_spans": 131080,
+              "query_snapshot_ns": 807575,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 23500034
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 1305930,
+              "min": 1128573,
+              "p50": 1168897,
+              "p95": 1261040,
+              "p99": 1305930
+            },
+            "sql": "SELECT count(*) FROM traces WHERE kind='internal' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "name": {
+            "expected_candidate_blocks_per_query": 12,
+            "expected_decoded_spans_per_query": 32768,
+            "expected_rows": 4096,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 240,
+              "query_count": 20,
+              "query_decoded_column_bytes": 28880,
+              "query_decoded_columns": 480,
+              "query_decoded_spans": 655360,
+              "query_matched_spans": 81920,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 1310720,
+              "query_payload_blocks_read": 240,
+              "query_payload_bytes_read": 3823480,
+              "query_returned_spans": 81920,
+              "query_snapshot_ns": 879305,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 37190801
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 2009482,
+              "min": 1803651,
+              "p50": 1846818,
+              "p95": 1932742,
+              "p99": 2009482
+            },
+            "sql": "SELECT count(*) FROM traces WHERE name='GET /baseline' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "service": {
+            "expected_candidate_blocks_per_query": 12,
+            "expected_decoded_spans_per_query": 32768,
+            "expected_rows": 32768,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 240,
+              "query_count": 20,
+              "query_decoded_column_bytes": 20160,
+              "query_decoded_columns": 480,
+              "query_decoded_spans": 655360,
+              "query_matched_spans": 655360,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 1310720,
+              "query_payload_blocks_read": 240,
+              "query_payload_bytes_read": 3823480,
+              "query_returned_spans": 655360,
+              "query_snapshot_ns": 1103828,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 117045097
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 6502951,
+              "min": 5763368,
+              "p50": 5830752,
+              "p95": 6273211,
+              "p99": 6502951
+            },
+            "sql": "SELECT count(*) FROM traces WHERE service='bench' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          },
+          "status": {
+            "expected_candidate_blocks_per_query": 4,
+            "expected_decoded_spans_per_query": 10922,
+            "expected_rows": 10922,
+            "extension_work_delta": {
+              "query_blocks_skipped_by_bound": 0,
+              "query_bounded_count": 0,
+              "query_bounded_max_spans": 0,
+              "query_bounded_requested_spans": 0,
+              "query_buffered_spans_examined": 0,
+              "query_cancelled": 0,
+              "query_candidate_blocks": 80,
+              "query_count": 20,
+              "query_decoded_column_bytes": 3680,
+              "query_decoded_columns": 160,
+              "query_decoded_spans": 218440,
+              "query_matched_spans": 218440,
+              "query_materialized_rich_values": 0,
+              "query_materialized_values": 436880,
+              "query_payload_blocks_read": 80,
+              "query_payload_bytes_read": 1275420,
+              "query_returned_spans": 218440,
+              "query_snapshot_ns": 847813,
+              "query_snapshot_payload_bytes": 0,
+              "query_snapshot_payload_max_bytes": 0,
+              "query_stable_location_snapshots": 20,
+              "query_total_ns": 32138723
+            },
+            "iterations": 20,
+            "latency_ns": {
+              "max": 1758500,
+              "min": 1536504,
+              "p50": 1590364,
+              "p95": 1738644,
+              "p99": 1758500
+            },
+            "sql": "SELECT count(*) FROM traces WHERE status='error' AND start_ts>=?1 AND start_ts<=?2",
+            "warmup": 3
+          }
+        },
+        "start_ns": 1699999200000000000,
+        "stop_ns": 1700010000008191000,
+        "time_boxes": 4
+      }
+    },
+    "process_isolation": "fresh child; fixture generation and HTTP response allocation excluded",
+    "retained_trace_summaries": {
+      "single_scan": {
+        "broad_all_traces": {
+          "extension_work_delta": {
+            "query_blocks_skipped_by_bound": 0,
+            "query_bounded_count": 0,
+            "query_bounded_max_spans": 0,
+            "query_bounded_requested_spans": 0,
+            "query_buffered_spans_examined": 0,
+            "query_cancelled": 0,
+            "query_candidate_blocks": 960,
+            "query_count": 20,
+            "query_decoded_column_bytes": 5797600,
+            "query_decoded_columns": 7680,
+            "query_decoded_spans": 2621440,
+            "query_matched_spans": 2621440,
+            "query_materialized_rich_values": 0,
+            "query_materialized_values": 20971520,
+            "query_payload_blocks_read": 960,
+            "query_payload_bytes_read": 15310740,
+            "query_returned_spans": 2621440,
+            "query_snapshot_ns": 2580640,
+            "query_snapshot_payload_bytes": 0,
+            "query_snapshot_payload_max_bytes": 0,
+            "query_stable_location_snapshots": 20,
+            "query_total_ns": 1226178567
+          },
+          "implementation": "single conditional aggregate scan",
+          "iterations": 20,
+          "latency_ns": {
+            "max": 142724888,
+            "min": 120521387,
+            "p50": 138611372,
+            "p95": 140464744,
+            "p99": 142724888
+          },
+          "result_json_bytes": 5980161,
+          "result_rows": 16384,
+          "result_spans": 131072,
+          "sql": "WITH retained AS (SELECT trace_id,span_id,parent_span_id,name,service,status,start_ts,duration_ns,CASE WHEN duration_ns>=0 AND start_ts<=9223372036854775807-duration_ns THEN start_ts+duration_ns END AS valid_end_ts FROM traces) SELECT lower(hex(trace_id)),count(*) AS span_rows,count(DISTINCT span_id) AS distinct_span_ids,count(*) FILTER (WHERE status='error') AS error_rows,min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,CASE WHEN count(*) FILTER (WHERE valid_end_ts IS NULL)<>0 THEN NULL WHEN min(start_ts)>=0 THEN max(valid_end_ts)-min(start_ts) WHEN max(valid_end_ts)<=9223372036854775807+min(start_ts) THEN max(valid_end_ts)-min(start_ts) END AS duration_ns,count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,count(*) FILTER (WHERE parent_span_id IS NULL) AS root_rows,CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 THEN lower(hex(min(span_id) FILTER (WHERE parent_span_id IS NULL))) END,CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 THEN min(name) FILTER (WHERE parent_span_id IS NULL) END,CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 THEN min(service) FILTER (WHERE parent_span_id IS NULL) END,CASE count(*) FILTER (WHERE parent_span_id IS NULL) WHEN 0 THEN 'missing' WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,count(DISTINCT service) AS service_count,'unknown' AS completeness FROM retained GROUP BY trace_id ORDER BY trace_id",
+          "trace_id": null,
+          "warmup": 3
+        },
+        "exact_one_trace": {
+          "extension_work_delta": {
+            "query_blocks_skipped_by_bound": 0,
+            "query_bounded_count": 0,
+            "query_bounded_max_spans": 0,
+            "query_bounded_requested_spans": 0,
+            "query_buffered_spans_examined": 0,
+            "query_cancelled": 0,
+            "query_candidate_blocks": 60,
+            "query_count": 20,
+            "query_decoded_column_bytes": 361620,
+            "query_decoded_columns": 480,
+            "query_decoded_spans": 163840,
+            "query_matched_spans": 160,
+            "query_materialized_rich_values": 0,
+            "query_materialized_values": 164960,
+            "query_payload_blocks_read": 60,
+            "query_payload_bytes_read": 952600,
+            "query_returned_spans": 160,
+            "query_snapshot_ns": 582718,
+            "query_snapshot_payload_bytes": 0,
+            "query_snapshot_payload_max_bytes": 0,
+            "query_stable_location_snapshots": 20,
+            "query_total_ns": 7688919
+          },
+          "implementation": "single conditional aggregate scan",
+          "iterations": 20,
+          "latency_ns": {
+            "max": 464563,
+            "min": 386396,
+            "p50": 389646,
+            "p95": 419739,
+            "p99": 464563
+          },
+          "result_json_bytes": 366,
+          "result_rows": 1,
+          "result_spans": 8,
+          "sql": "WITH retained AS (SELECT trace_id,span_id,parent_span_id,name,service,status,start_ts,duration_ns,CASE WHEN duration_ns>=0 AND start_ts<=9223372036854775807-duration_ns THEN start_ts+duration_ns END AS valid_end_ts FROM traces WHERE trace_id=?1) SELECT lower(hex(trace_id)),count(*) AS span_rows,count(DISTINCT span_id) AS distinct_span_ids,count(*) FILTER (WHERE status='error') AS error_rows,min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,CASE WHEN count(*) FILTER (WHERE valid_end_ts IS NULL)<>0 THEN NULL WHEN min(start_ts)>=0 THEN max(valid_end_ts)-min(start_ts) WHEN max(valid_end_ts)<=9223372036854775807+min(start_ts) THEN max(valid_end_ts)-min(start_ts) END AS duration_ns,count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,count(*) FILTER (WHERE parent_span_id IS NULL) AS root_rows,CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 THEN lower(hex(min(span_id) FILTER (WHERE parent_span_id IS NULL))) END,CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 THEN min(name) FILTER (WHERE parent_span_id IS NULL) END,CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL)=1 THEN min(service) FILTER (WHERE parent_span_id IS NULL) END,CASE count(*) FILTER (WHERE parent_span_id IS NULL) WHEN 0 THEN 'missing' WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,count(DISTINCT service) AS service_count,'unknown' AS completeness FROM retained GROUP BY trace_id ORDER BY trace_id",
+          "trace_id": "00000000000000000000000000000001",
+          "warmup": 3
+        }
+      },
+      "two_scan_control": {
+        "broad_all_traces": {
+          "extension_work_delta": {
+            "query_blocks_skipped_by_bound": 0,
+            "query_bounded_count": 0,
+            "query_bounded_max_spans": 0,
+            "query_bounded_requested_spans": 0,
+            "query_buffered_spans_examined": 0,
+            "query_cancelled": 0,
+            "query_candidate_blocks": 1920,
+            "query_count": 40,
+            "query_decoded_column_bytes": 9935640,
+            "query_decoded_columns": 10560,
+            "query_decoded_spans": 5242880,
+            "query_matched_spans": 5242880,
+            "query_materialized_rich_values": 0,
+            "query_materialized_values": 28835840,
+            "query_payload_blocks_read": 1920,
+            "query_payload_bytes_read": 30621480,
+            "query_returned_spans": 5242880,
+            "query_snapshot_ns": 4294534,
+            "query_snapshot_payload_bytes": 0,
+            "query_snapshot_payload_max_bytes": 0,
+            "query_stable_location_snapshots": 40,
+            "query_total_ns": 1551323122
+          },
+          "implementation": "two CTE consumers control",
+          "iterations": 20,
+          "latency_ns": {
+            "max": 177167247,
+            "min": 145644448,
+            "p50": 169652060,
+            "p95": 174683882,
+            "p99": 177167247
+          },
+          "result_json_bytes": 5980161,
+          "result_rows": 16384,
+          "result_spans": 131072,
+          "sql": "WITH retained AS (SELECT trace_id,span_id,parent_span_id,name,service,status,start_ts,duration_ns,CASE WHEN duration_ns>=0 AND start_ts<=9223372036854775807-duration_ns THEN start_ts+duration_ns END AS valid_end_ts FROM traces), totals AS (SELECT trace_id,count(*) AS span_rows,count(DISTINCT span_id) AS distinct_span_ids,count(*) FILTER (WHERE status='error') AS error_rows,min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,count(DISTINCT service) AS service_count FROM retained GROUP BY trace_id), roots AS (SELECT trace_id,count(*) AS root_rows,CASE WHEN count(*)=1 THEN lower(hex(min(span_id))) END AS root_span_id,CASE WHEN count(*)=1 THEN min(name) END AS root_name,CASE WHEN count(*)=1 THEN min(service) END AS root_service FROM retained WHERE parent_span_id IS NULL GROUP BY trace_id) SELECT lower(hex(totals.trace_id)),totals.span_rows,totals.distinct_span_ids,totals.error_rows,totals.start_ts,totals.end_ts,CASE WHEN totals.invalid_end_rows<>0 THEN NULL WHEN totals.start_ts>=0 THEN totals.end_ts-totals.start_ts WHEN totals.end_ts<=9223372036854775807+totals.start_ts THEN totals.end_ts-totals.start_ts END AS duration_ns,totals.invalid_end_rows,coalesce(roots.root_rows,0),roots.root_span_id,roots.root_name,roots.root_service,CASE coalesce(roots.root_rows,0) WHEN 0 THEN 'missing' WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,totals.service_count,'unknown' AS completeness FROM totals LEFT JOIN roots USING(trace_id) ORDER BY totals.trace_id",
+          "trace_id": null,
+          "warmup": 3
+        },
+        "exact_one_trace": {
+          "extension_work_delta": {
+            "query_blocks_skipped_by_bound": 0,
+            "query_bounded_count": 0,
+            "query_bounded_max_spans": 0,
+            "query_bounded_requested_spans": 0,
+            "query_buffered_spans_examined": 0,
+            "query_cancelled": 0,
+            "query_candidate_blocks": 120,
+            "query_count": 40,
+            "query_decoded_column_bytes": 619820,
+            "query_decoded_columns": 660,
+            "query_decoded_spans": 327680,
+            "query_matched_spans": 320,
+            "query_materialized_rich_values": 0,
+            "query_materialized_values": 329120,
+            "query_payload_blocks_read": 120,
+            "query_payload_bytes_read": 1905200,
+            "query_returned_spans": 320,
+            "query_snapshot_ns": 1081627,
+            "query_snapshot_payload_bytes": 0,
+            "query_snapshot_payload_max_bytes": 0,
+            "query_stable_location_snapshots": 40,
+            "query_total_ns": 13314405
+          },
+          "implementation": "two CTE consumers control",
+          "iterations": 20,
+          "latency_ns": {
+            "max": 788514,
+            "min": 645248,
+            "p50": 671583,
+            "p95": 733472,
+            "p99": 788514
+          },
+          "result_json_bytes": 366,
+          "result_rows": 1,
+          "result_spans": 8,
+          "sql": "WITH retained AS (SELECT trace_id,span_id,parent_span_id,name,service,status,start_ts,duration_ns,CASE WHEN duration_ns>=0 AND start_ts<=9223372036854775807-duration_ns THEN start_ts+duration_ns END AS valid_end_ts FROM traces WHERE trace_id=?1), totals AS (SELECT trace_id,count(*) AS span_rows,count(DISTINCT span_id) AS distinct_span_ids,count(*) FILTER (WHERE status='error') AS error_rows,min(start_ts) AS start_ts,max(valid_end_ts) AS end_ts,count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows,count(DISTINCT service) AS service_count FROM retained GROUP BY trace_id), roots AS (SELECT trace_id,count(*) AS root_rows,CASE WHEN count(*)=1 THEN lower(hex(min(span_id))) END AS root_span_id,CASE WHEN count(*)=1 THEN min(name) END AS root_name,CASE WHEN count(*)=1 THEN min(service) END AS root_service FROM retained WHERE parent_span_id IS NULL GROUP BY trace_id) SELECT lower(hex(totals.trace_id)),totals.span_rows,totals.distinct_span_ids,totals.error_rows,totals.start_ts,totals.end_ts,CASE WHEN totals.invalid_end_rows<>0 THEN NULL WHEN totals.start_ts>=0 THEN totals.end_ts-totals.start_ts WHEN totals.end_ts<=9223372036854775807+totals.start_ts THEN totals.end_ts-totals.start_ts END AS duration_ns,totals.invalid_end_rows,coalesce(roots.root_rows,0),roots.root_span_id,roots.root_name,roots.root_service,CASE coalesce(roots.root_rows,0) WHEN 0 THEN 'missing' WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state,totals.service_count,'unknown' AS completeness FROM totals LEFT JOIN roots USING(trace_id) ORDER BY totals.trace_id",
+          "trace_id": "00000000000000000000000000000001",
+          "warmup": 3
+        }
+      }
+    },
+    "rss": {
+      "hwm_kib": 37448,
+      "rss_kib": 32392
+    }
+  },
+  "fixture": {
+    "builder_process_memory": {
+      "hwm_kib": 46772,
+      "rss_kib": 36788
+    },
+    "checkpoint": {
+      "busy": 0,
+      "checkpointed_frames": 0,
+      "elapsed_ns": 4072748,
+      "log_frames": 0
+    },
+    "durable_spans_per_second": 162211.0984533574,
+    "exact_reopen_count": 131072,
+    "insert_ns": 808033490,
+    "journal_mode": "wal",
+    "optimize_ns": 563278841,
+    "public_batch_bytes": 86953580,
+    "rich_span_probe": true,
+    "stats_after_reopen": {
+      "attribute_bloom_bytes": 393216,
+      "attribute_bloom_rows": 96,
+      "attribute_index_fields": 2,
+      "blocks": 48,
+      "buffered_spans": 0,
+      "bytes_on_disk": 765537,
+      "compressed_blocks": 48,
+      "duration_bounded_blocks": 48,
+      "duration_unknown_blocks": 0,
+      "index_bytes": 2981888,
+      "raw_blocks": 0,
+      "terms": 576,
+      "total_spans": 131072,
+      "trace_index_rows": 49152
+    },
+    "stats_before_optimize": {
+      "blocks": 48,
+      "buffered_spans": 0,
+      "bytes_on_disk": 84993036,
+      "compressed_blocks": 0,
+      "raw_blocks": 48,
+      "total_spans": 131072
+    },
+    "storage_after_checkpoint": {
+      "database_bytes": 89341952,
+      "physical_bytes": 89341952,
+      "shm_bytes": 0,
+      "wal_bytes": 0
+    },
+    "storage_after_insert_before_optimize": {
+      "database_bytes": 86867968,
+      "physical_bytes": 92466888,
+      "shm_bytes": 32768,
+      "wal_bytes": 5566152
+    },
+    "storage_after_optimize_before_checkpoint": {
+      "database_bytes": 89341952,
+      "physical_bytes": 179399912,
+      "shm_bytes": 196608,
+      "wal_bytes": 89861352
+    },
+    "timestamp_range_ns": [
+      1699999200000000000,
+      1700053200008191000
+    ]
+  },
+  "git_commit": "5b96413fca408dd77b8fc46c12c2cead963abad1",
+  "host": {
+    "machine": "x86_64",
+    "processor": "unknown",
+    "release": "7.1.3-arch1-2",
+    "system": "Linux"
+  },
+  "jaeger": {
+    "broad_full_decode_miss": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 1120,
+        "api_read_result_spans": 0,
+        "api_read_result_traces": 0,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 146267085,
+        "api_read_total_ns": 148740858
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 0,
+        "extension_query_bounded_count": 20,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 2000,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 960,
+        "extension_query_count": 20,
+        "extension_query_decoded_column_bytes": 82560,
+        "extension_query_decoded_columns": 1920,
+        "extension_query_decoded_spans": 2621440,
+        "extension_query_matched_spans": 0,
+        "extension_query_materialized_rich_values": 0,
+        "extension_query_materialized_values": 5242880,
+        "extension_query_payload_blocks_read": 960,
+        "extension_query_payload_bytes_read": 15310740,
+        "extension_query_returned_spans": 0,
+        "extension_query_snapshot_ns": 1629606,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 144874130
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 9038520,
+        "min": 6876288,
+        "p50": 7743056,
+        "p95": 8868508,
+        "p99": 9038520
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 31132,
+          "rss_kib": 31132
+        },
+        "after_warmup": {
+          "hwm_kib": 31064,
+          "rss_kib": 31064
+        },
+        "startup": {
+          "hwm_kib": 30176,
+          "rss_kib": 30176
+        }
+      },
+      "path": "/select/jaeger/api/traces?service=bench&minDuration=500000&maxDuration=500000&limit=100",
+      "response_bytes": 56,
+      "result_spans": 0,
+      "result_traces": 0,
+      "warmup": 3
+    },
+    "broad_result_4096_spans": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 78513340,
+        "api_read_result_spans": 81920,
+        "api_read_result_traces": 10240,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 3184259278,
+        "api_read_total_ns": 3186580645
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 900,
+        "extension_query_bounded_count": 20,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 81920,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 960,
+        "extension_query_count": 20,
+        "extension_query_decoded_column_bytes": 949860,
+        "extension_query_decoded_columns": 1440,
+        "extension_query_decoded_spans": 163840,
+        "extension_query_matched_spans": 163840,
+        "extension_query_materialized_rich_values": 2457600,
+        "extension_query_materialized_values": 3932160,
+        "extension_query_payload_blocks_read": 60,
+        "extension_query_payload_bytes_read": 956940,
+        "extension_query_returned_spans": 81920,
+        "extension_query_snapshot_ns": 2625217,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 167633887
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 173880546,
+        "min": 153416110,
+        "p50": 160922508,
+        "p95": 169819440,
+        "p99": 173880546
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 162472,
+          "rss_kib": 92888
+        },
+        "after_warmup": {
+          "hwm_kib": 162260,
+          "rss_kib": 92704
+        },
+        "startup": {
+          "hwm_kib": 30080,
+          "rss_kib": 30080
+        }
+      },
+      "path": "/select/jaeger/api/traces?service=bench&minDuration=1&limit=4096",
+      "response_bytes": 3925667,
+      "result_spans": 4096,
+      "result_traces": 512,
+      "warmup": 3
+    },
+    "exact_trace_control": {
+      "api_work_delta": {
+        "api_read_cancelled": 0,
+        "api_read_errors": 0,
+        "api_read_in_flight": 0,
+        "api_read_requests": 20,
+        "api_read_response_bytes": 152500,
+        "api_read_result_spans": 160,
+        "api_read_result_traces": 20,
+        "api_read_retries": 0,
+        "api_read_sqlite_ns": 44046587,
+        "api_read_total_ns": 45581674
+      },
+      "extension_work_delta": {
+        "extension_query_blocks_skipped_by_bound": 0,
+        "extension_query_bounded_count": 0,
+        "extension_query_bounded_max_spans": 0,
+        "extension_query_bounded_requested_spans": 0,
+        "extension_query_buffered_spans_examined": 0,
+        "extension_query_cancelled": 0,
+        "extension_query_candidate_blocks": 60,
+        "extension_query_count": 20,
+        "extension_query_decoded_column_bytes": 945520,
+        "extension_query_decoded_columns": 1440,
+        "extension_query_decoded_spans": 163840,
+        "extension_query_matched_spans": 160,
+        "extension_query_materialized_rich_values": 2400,
+        "extension_query_materialized_values": 167520,
+        "extension_query_payload_blocks_read": 60,
+        "extension_query_payload_bytes_read": 952600,
+        "extension_query_returned_spans": 160,
+        "extension_query_snapshot_ns": 944652,
+        "extension_query_snapshot_payload_bytes": 0,
+        "extension_query_snapshot_payload_max_bytes": 0,
+        "extension_query_stable_location_snapshots": 20,
+        "extension_query_total_ns": 38859711
+      },
+      "iterations": 20,
+      "latency_ns": {
+        "max": 2964383,
+        "min": 2505851,
+        "p50": 2600880,
+        "p95": 2921494,
+        "p99": 2964383
+      },
+      "memory": {
+        "after_measured": {
+          "hwm_kib": 32108,
+          "rss_kib": 32108
+        },
+        "after_warmup": {
+          "hwm_kib": 31804,
+          "rss_kib": 31804
+        },
+        "startup": {
+          "hwm_kib": 30144,
+          "rss_kib": 30144
+        }
+      },
+      "path": "/select/jaeger/api/traces/00000000000000000000000000000001",
+      "response_bytes": 7625,
+      "result_spans": 8,
+      "result_traces": 1,
+      "warmup": 3
+    },
+    "final_storage_stats": {
+      "attribute_bloom_bytes": 393216,
+      "attribute_bloom_rows": 96,
+      "attribute_index_fields": 2,
+      "blocks": 48,
+      "bytes_on_disk": 765537,
+      "compressed_blocks": 48,
+      "database_file_bytes": 89341952,
+      "database_shm_bytes": 32768,
+      "database_wal_bytes": 0,
+      "freelist_bytes": 85553152,
+      "freelist_pages": 20887,
+      "physical_database_bytes": 89374720,
+      "raw_blocks": 0,
+      "sqlite_index_bytes": 2981888,
+      "sqlite_page_bytes": 89341952,
+      "total_spans": 131072
+    },
+    "process_isolation": "each shape runs in a fresh trace-server process"
+  },
+  "schema_version": 2,
+  "storage_after_queries": {
+    "database_bytes": 89341952,
+    "physical_bytes": 89341952,
+    "shm_bytes": 0,
+    "wal_bytes": 0
+  },
+  "workload": {
+    "attribute_indexes": true,
+    "authoritative_batch_spans": 8192,
+    "batches": 16,
+    "duration_values_ns": [
+      100000,
+      900000
+    ],
+    "iterations": 20,
+    "logical_spans": 131072,
+    "loopback_http": true,
+    "rich_fields": [
+      "attributes",
+      "status_description",
+      "events",
+      "resource",
+      "instrumentation_scope",
+      "links",
+      "trace_state",
+      "trace_flags",
+      "dropped_attributes_count",
+      "dropped_events_count",
+      "dropped_links_count",
+      "resource_schema_url",
+      "scope_schema_url",
+      "resource_dropped_attributes_count",
+      "scope_dropped_attributes_count"
+    ],
+    "single_client": true,
+    "time_boxes": 16,
+    "warmup": 3
+  }
+}

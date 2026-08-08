@@ -2,8 +2,8 @@
 
 Date: 2026-08-08  
 Session: 7 of the [trace query enhancement plan](2026-08-07_trace_query_enhancement_plan.md)
-Status: Session 6 complete; Session 7 attribute prerequisite implementation
-is complete and awaiting the final measured verdict. Persisted summaries were rejected; the measured
+Status: complete. Session 7 ships bounded opt-in attribute pruning as a
+storage prerequisite, not TraceQL. Persisted summaries were rejected; the measured
 public SQL verdict is in
 [`2026-08-08_trace_summaries.md`](2026-08-08_trace_summaries.md). No persisted
 summary storage may be added until the `TSQ-06` prerequisites are satisfied.
@@ -43,7 +43,7 @@ version first changes the write contract.
 | `TSQ-05` | Broad retained-trace summaries | Group the selected retained span snapshot by packed trace ID. Counts include repeated rows; roots and services are sets, not assumed scalars. | SQL | A persisted accelerator is possible only as per-block contributions, but no current API consumes it and completeness remains unknowable. | sql |
 | `TSQ-06` | Complete-trace search | Select logical traces by root service/operation, trace start/end/duration, total spans, or any-error state; limit traces; then return all retained spans for each selected trace. | future versioned Rust API | This is the only vector that could justify persisted trace contributions, but it is not the current Jaeger contract. | deferred |
 | `TSQ-07` | Trace completeness | Distinguish complete, still arriving, source-truncated, retry-duplicated, and retention-truncated traces. | future ingest/storage contract | OTLP supplies no trace-finalization marker, expected span count, or retry identity. Root presence does not prove completeness. | deferred |
-| `TSQ-08` | Trace attribute search | Select retained spans by exact typed scalar equality on configured resource, scope, or span paths; a later API may compose those span sets into explicitly defined trace quantifiers. | extension prerequisite + future Rust query planner | The extension implements opt-in fixed-size block-negative filters plus exact row recheck for at most eight configured paths. Event/link predicates, non-equality operators, structural composition, and any/root/all trace quantifiers remain higher-order prerequisites; a scalar summary would lose type, scope, and quantifier semantics. | implemented; measured verdict pending |
+| `TSQ-08` | Trace attribute search | Select retained spans by exact typed scalar equality on configured resource, scope, or span paths; a later API may compose those span sets into explicitly defined trace quantifiers. | extension prerequisite + future Rust query planner | The extension ships opt-in fixed-size block-negative filters plus exact row recheck for at most eight configured paths. Event/link predicates, non-equality operators, structural composition, and any/root/all trace quantifiers remain higher-order prerequisites; a scalar summary would lose type, scope, and quantifier semantics. | shipped |
 | `TSQ-09` | Dependency/service graph | Derive parent/link edges across services from a retained snapshot. | Rust trace library | Requires graph composition and explicit missing-parent/link policy, not one scalar trace row. | library |
 | `TSQ-10` | Trace statistics over a time window | Count retained traces or compute distributions from a precisely defined selected-span or selected-trace population. | SQL or future Rust API | Depends on whether the time predicate applies to roots, envelopes, or any span; those are different populations. | deferred |
 
@@ -114,3 +114,13 @@ Reconsider `TSQ-06` only after all of these prerequisites exist:
 
 Until then, persisted summaries would be write amplification in search of a
 query and would falsely suggest that Timeless knows when a trace is complete.
+
+## Session 7 attribute decision
+
+Ship `TSQ-08` only at the retained-span storage-prerequisite layer. The
+configured filter improves high-cardinality all-box p95 by 38.6–40.6× while
+low-cardinality p95 is 38–41% slower because every block survives. Two fields
+reduce ingest throughput 10–17%, add 26–31% optimize time, and add 1.01% to
+the checkpointed fixture, so no field is enabled automatically. Exact
+contracts, A/B evidence, compatibility, and later TraceQL ownership are in
+the [Session 7 report](2026-08-08_trace_attribute_indexes.md).

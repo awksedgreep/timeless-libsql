@@ -94,8 +94,9 @@ Five rounds: the Rust query harness owns an unreaped `sqlite3` child running a
 long ingest with periodic flushes and watermark logging, sends SIGKILL to that
 exact child at a random moment, reaps it, reopens, then asserts
 `PRAGMA integrity_check` is clean, all flushed watermarks are present, and
-no `_terms`/`_trace_blocks`/`_duration_bounds` row dangles; every current trace
-block also has valid duration bounds. The durability contract being proven:
+no `_terms`/`_trace_blocks`/`_duration_bounds`/`_attribute_blooms` row
+dangles; every current trace block also has valid duration bounds and exact
+configured-attribute results. The durability contract being proven:
 **flushed = durable, buffered = lost, never corrupt.**
 
 ## Benchmarks
@@ -158,6 +159,23 @@ cargo build --release --manifest-path tools/query-harness/Cargo.toml
 tools/query-harness/target/release/timeless-query-harness trace-baseline \
   --output docs/evidence/local_trace_query_baseline.json
 ```
+
+Session 7's opt-in trace-attribute A/B uses separate fresh processes at the
+same clean commit. Omit the flag for the public JSON1/write-path control and
+include it for the two configured `/count` and `/bool` fields:
+
+```sh
+tools/query-harness/target/release/timeless-query-harness trace-baseline \
+  --output docs/evidence/local_trace_attributes_unindexed.json
+tools/query-harness/target/release/timeless-query-harness trace-baseline \
+  --attribute-indexes \
+  --output docs/evidence/local_trace_attributes_indexed.json
+```
+
+Both reports include insert/optimize time, file/WAL state before optimize and
+checkpoint, builder/query HWM, and JSON1 attribute controls. The indexed run
+also measures the hidden-filter candidate. Compare equal commits and fixtures;
+the command rejects dirty tracked source or stale extension/server identities.
 
 Run from a clean tracked commit: the command rejects stale extension or server
 build identities. The default workload is 16 public 8,192-span batches, 20

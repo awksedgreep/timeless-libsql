@@ -154,7 +154,7 @@ authoritative two-hour release soak.
 ## Storage and query-boundary findings
 
 The append-only [findings log](QUERY_STORAGE_FINDINGS.md) contains `QSF-001`
-through `QSF-305`. The release-significant boundaries are:
+through `QSF-309`. The release-significant boundaries are:
 
 - metric storage remains timestamp-plus-float64; millisecond evaluation,
   lookback, staleness, extrapolation, labels, timestamps, and result envelopes
@@ -173,6 +173,10 @@ through `QSF-305`. The release-significant boundaries are:
 - trace duration predicates use exact inclusive block extrema when present;
   legacy blocks remain exact through conservative decode until bounded public
   optimize backfills the small metadata rows without rewriting payloads;
+- trace attribute equality is an opt-in fixed-size block-negative filter for
+  at most eight configured scalar paths. It is a 38.6–40.6× wide-p95 win for
+  the measured high-cardinality value but a measured loss when every block
+  contains the value, so no path is enabled automatically;
 - generation-2 trace reads honor SQLite projection and materialize rich values
   after pushed predicates; older formats retain the conservative full decoder,
   while large Jaeger response construction remains a separate API target;

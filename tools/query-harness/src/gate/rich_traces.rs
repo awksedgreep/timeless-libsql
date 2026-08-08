@@ -933,6 +933,8 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
         Some(json!("1")),
         Some(json!(1)),
         Some(json!(1.0)),
+        Some(json!([1])),
+        Some(json!({"x":1})),
     ]
     .into_iter()
     .enumerate()
@@ -961,8 +963,8 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
         (r#"{"scope":"span","path":"/typed","value":"1"}"#, 1),
         (r#"{"scope":"span","path":"/typed","value":1}"#, 1),
         (r#"{"scope":"span","path":"/typed","value":1.0}"#, 1),
-        (r#"{"scope":"resource","path":"/debug","value":false}"#, 6),
-        (r#"{"scope":"scope","path":"/name","value":"attribute-scope"}"#, 6),
+        (r#"{"scope":"resource","path":"/debug","value":false}"#, 8),
+        (r#"{"scope":"scope","path":"/name","value":"attribute-scope"}"#, 8),
     ] {
         let result = attribute_count(connection, table, filter);
         if filter.contains("/missing") {
@@ -1052,6 +1054,38 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
          WHERE scope='resource' AND path='/debug'",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    connection.execute(
+        "UPDATE attribute_spans_attribute_blooms SET hash_version=2 \
+         WHERE scope='resource' AND path='/debug' AND block_id=?1",
+        [block_id],
+    )?;
+    ensure!(attribute_count(
+        connection,
+        table,
+        r#"{"scope":"resource","path":"/debug","value":false}"#
+    )
+    .is_err());
+    connection.execute(
+        "UPDATE attribute_spans_attribute_blooms SET hash_version=1 \
+         WHERE scope='resource' AND path='/debug' AND block_id=?1",
+        [block_id],
+    )?;
+    connection.execute(
+        "UPDATE attribute_spans_attribute_blooms SET bits=zeroblob(1) \
+         WHERE scope='resource' AND path='/debug' AND block_id=?1",
+        [block_id],
+    )?;
+    ensure!(attribute_count(
+        connection,
+        table,
+        r#"{"scope":"resource","path":"/debug","value":false}"#
+    )
+    .is_err());
+    connection.execute(
+        "UPDATE attribute_spans_attribute_blooms SET bits=?1 \
+         WHERE scope='resource' AND path='/debug' AND block_id=?2",
+        params![&bits, block_id],
     )?;
     connection.execute(
         "UPDATE attribute_spans_attribute_blooms SET bits=zeroblob(length(bits)) \
@@ -1171,6 +1205,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     )?;
     for invalid in [
         r#"CREATE VIRTUAL TABLE bad_attribute_scope USING timeless_traces(attribute_indexes='[{"scope":"event","path":"/x"}]')"#,
+        r#"CREATE VIRTUAL TABLE bad_link_attribute_scope USING timeless_traces(attribute_indexes='[{"scope":"link","path":"/x"}]')"#,
         r#"CREATE VIRTUAL TABLE bad_attribute_path USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/~2"}]')"#,
         r#"CREATE VIRTUAL TABLE duplicate_attribute_path USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/x"},{"scope":"span","path":"/x"}]')"#,
         r#"CREATE VIRTUAL TABLE too_many_attribute_paths USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/a"},{"scope":"span","path":"/b"},{"scope":"span","path":"/c"},{"scope":"span","path":"/d"},{"scope":"span","path":"/e"},{"scope":"span","path":"/f"},{"scope":"span","path":"/g"},{"scope":"span","path":"/h"},{"scope":"span","path":"/i"}]')"#,

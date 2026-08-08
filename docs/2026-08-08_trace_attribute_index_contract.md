@@ -1,12 +1,12 @@
-# Trace attribute equality candidate contract
+# Trace attribute equality contract
 
 Date: 2026-08-08  
 Session: 7 of the [trace query enhancement plan](2026-08-07_trace_query_enhancement_plan.md)  
-Status: implemented candidate; final measured verdict pending
+Status: shipped as opt-in infrastructure
 
 ## Scope
 
-The candidate is a direct SQLite/libSQL primitive for exact typed scalar
+The feature is a direct SQLite/libSQL primitive for exact typed scalar
 equality. It does not parse TraceQL, return logical traces, infer completeness,
 or index arbitrary attributes automatically.
 
@@ -35,7 +35,7 @@ object would create a misleading prerequisite for TraceQL.
 
 ## Query shape
 
-The candidate adds one hidden input, `attribute_filter`, to the existing
+The feature adds one hidden input, `attribute_filter`, to the existing
 `timeless_traces` table. Its value is a JSON object containing exactly one
 configured scope/path and one scalar value:
 
@@ -119,5 +119,5 @@ same missing/null/empty/number-type distinctions but cannot prune a block
 before its public JSON column is decoded. Resource and scope controls replace
 `attributes` with `resource` or `instrumentation_scope`.
 
-The final Session 7 report will either mark this implementation shipped with
-release-build evidence or record its rejection and reversion.
+The measured cost/benefit and exact recommendation are in the
+[Session 7 report](2026-08-08_trace_attribute_indexes.md).

@@ -213,12 +213,13 @@ Exit criteria:
 - the final report recommends the structure and ownership boundaries of a
   later TraceQL feature matrix.
 
-Status: implementation and focused real-extension gates complete; final
-release-build measurement and full validation pending. The bounded contract
-and language/storage ownership split are recorded in
+Status: complete. The bounded contract and language/storage ownership split
+are recorded in
 [`2026-08-08_trace_attribute_index_contract.md`](2026-08-08_trace_attribute_index_contract.md)
 and
 [`2026-08-08_traceql_prerequisite_matrix.md`](2026-08-08_traceql_prerequisite_matrix.md).
+The exact release-build A/B verdict is in
+[`2026-08-08_trace_attribute_indexes.md`](2026-08-08_trace_attribute_indexes.md).
 
 ## Completion
 
