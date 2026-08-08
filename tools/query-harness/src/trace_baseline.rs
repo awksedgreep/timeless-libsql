@@ -102,13 +102,19 @@ struct TraceServer {
 }
 
 impl TraceServer {
-    fn start(binary: &Path, extension: &Path, database: &Path, directory: &Path) -> Result<Self> {
+    fn start(
+        binary: &Path,
+        extension: &Path,
+        database: &Path,
+        directory: &Path,
+        log_name: &str,
+    ) -> Result<Self> {
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
             .local_addr()?
             .port();
         let base = format!("http://127.0.0.1:{port}");
         let bind = format!("127.0.0.1:{port}");
-        let log = directory.join("traces-server.log");
+        let log = directory.join(log_name);
         let stdout = File::create(&log)?;
         let stderr = stdout.try_clone()?;
         let child = Command::new(binary)
@@ -222,31 +228,41 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()?;
-        let mut server = TraceServer::start(&binary, &extension, &database, temporary.path())?;
-        let before_memory = process_memory(server.pid())?;
 
         let exact_trace = format!("{:032x}", 1);
-        let exact = measure_http(
+        let (exact, _) = measure_isolated_http(
+            &binary,
+            &extension,
+            &database,
+            temporary.path(),
+            "exact-server.log",
             &client,
-            &server.base,
             &format!("/select/jaeger/api/traces/{exact_trace}"),
             1,
             8,
             args.iterations,
             args.warmup,
         )?;
-        let broad_decode_miss = measure_http(
+        let (broad_decode_miss, _) = measure_isolated_http(
+            &binary,
+            &extension,
+            &database,
+            temporary.path(),
+            "broad-miss-server.log",
             &client,
-            &server.base,
             "/select/jaeger/api/traces?service=bench&minDuration=500000&maxDuration=500000&limit=100",
             0,
             0,
             args.iterations,
             args.warmup,
         )?;
-        let broad_result = measure_http(
+        let (broad_result, final_stats) = measure_isolated_http(
+            &binary,
+            &extension,
+            &database,
+            temporary.path(),
+            "broad-result-server.log",
             &client,
-            &server.base,
             &format!(
                 "/select/jaeger/api/traces?service=bench&minDuration=1&limit={BROAD_RESULT_LIMIT}"
             ),
@@ -255,9 +271,6 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
             args.iterations,
             args.warmup,
         )?;
-        let final_stats = http_json(&client, &server.base, "/select/traces/stats")?;
-        let after_memory = process_memory(server.pid())?;
-        server.stop()?;
 
         let sql = isolated_sql_baseline(
             root,
@@ -271,7 +284,7 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
         )?;
         let storage_after_queries = storage_files(&database);
         Ok(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "captured_at": Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
             "git_commit": commit,
             "branch": current_branch(root)?,
@@ -298,7 +311,7 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
                 "exact_trace_control": exact,
                 "broad_full_decode_miss": broad_decode_miss,
                 "broad_result_4096_spans": broad_result,
-                "rss": {"before_queries": before_memory, "after_queries": after_memory},
+                "process_isolation": "each shape runs in a fresh trace-server process",
                 "final_storage_stats": select_fields(&final_stats, &[
                     "blocks", "raw_blocks", "compressed_blocks", "total_spans", "bytes_on_disk",
                     "database_file_bytes", "database_wal_bytes", "database_shm_bytes",
@@ -618,19 +631,23 @@ fn fixture_duration(batch_offset: usize) -> i64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_http(
     client: &Client,
     base: &str,
+    pid: u32,
     path: &str,
     expected_traces: usize,
     expected_spans: usize,
     iterations: usize,
     warmup: usize,
 ) -> Result<Value> {
+    let startup_memory = process_memory(pid)?;
     for _ in 0..warmup {
         let body = http_get(client, base, path)?;
         require_jaeger_cardinality(&body, expected_traces, expected_spans)?;
     }
+    let after_warmup_memory = process_memory(pid)?;
     let before = http_json(client, base, "/select/traces/stats")?;
     let mut elapsed = Vec::with_capacity(iterations);
     let mut response_bytes = BTreeSet::new();
@@ -642,6 +659,7 @@ fn measure_http(
         require_jaeger_cardinality(&body, expected_traces, expected_spans)?;
     }
     let after = http_json(client, base, "/select/traces/stats")?;
+    let after_measured_memory = process_memory(pid)?;
     ensure!(
         response_bytes.len() == 1,
         "{path} response size was not deterministic"
@@ -654,9 +672,51 @@ fn measure_http(
         "result_traces": expected_traces,
         "result_spans": expected_spans,
         "response_bytes": response_bytes.first(),
+        "memory": {
+            "startup": startup_memory,
+            "after_warmup": after_warmup_memory,
+            "after_measured": after_measured_memory,
+        },
         "api_work_delta": prefix_numeric_delta(&before, &after, "api_read_"),
         "extension_work_delta": prefix_numeric_delta(&before, &after, "extension_query_"),
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_isolated_http(
+    binary: &Path,
+    extension: &Path,
+    database: &Path,
+    directory: &Path,
+    log_name: &str,
+    client: &Client,
+    path: &str,
+    expected_traces: usize,
+    expected_spans: usize,
+    iterations: usize,
+    warmup: usize,
+) -> Result<(Value, Value)> {
+    let mut server = TraceServer::start(binary, extension, database, directory, log_name)?;
+    let result = (|| {
+        let measurement = measure_http(
+            client,
+            &server.base,
+            server.pid(),
+            path,
+            expected_traces,
+            expected_spans,
+            iterations,
+            warmup,
+        )?;
+        let stats = http_json(client, &server.base, "/select/traces/stats")?;
+        Ok((measurement, stats))
+    })();
+    let shutdown = server.stop();
+    match (result, shutdown) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 fn require_jaeger_cardinality(
