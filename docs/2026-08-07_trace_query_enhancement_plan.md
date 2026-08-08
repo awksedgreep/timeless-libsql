@@ -118,6 +118,12 @@ Exit criteria:
 - release evidence demonstrates a material bucket improvement or the
   implementation is reverted and the negative result is documented.
 
+Status: complete; experiment reverted. Exact selection preserved nearest-rank
+semantics but did not produce a repeatable material end-to-end improvement over
+the existing full sort. The retained adversarial direct-SQL and cancellation
+regressions, contemporaneous A/B evidence, and negative verdict are recorded in
+[`2026-08-07_trace_query_percentile_selection.md`](2026-08-07_trace_query_percentile_selection.md).
+
 ## Session 4 — Time-aware posting-list experiment
 
 Measure whether service/name/kind/status postings should carry time bounds or a

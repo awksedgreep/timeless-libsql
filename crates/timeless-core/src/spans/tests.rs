@@ -805,7 +805,7 @@ fn trace_query_reads_only_blocks_containing_the_trace() {
 }
 
 #[test]
-fn trace_bucket_selection_observes_cancellation_after_buffer_scan() {
+fn trace_bucket_percentile_finalization_observes_cancellation_after_buffer_scan() {
     let store = SpyStore::new();
     let cancelled = Arc::clone(&store.cancelled);
     let engine = SpanBlockEngine::new(
