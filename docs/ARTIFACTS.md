@@ -1,16 +1,31 @@
 # Release artifacts, installation, and removal
 
 This document is the canonical inventory for the native telemetry data-plane
-bundle produced by this repository. It describes the unreleased 0.4.x source
-contract; it is not evidence that a tag, archive, container, or package has
-been published. A release exists only when its immutable artifact and checksum
-are present in the intended release channel and its commit is reachable from
-`main`.
+bundle produced by this repository. A source tag, target row, workflow run,
+or locally generated candidate is not evidence that a complete release was
+published. A native release exists only when its immutable archives and outer
+checksum set are present in the intended release channel and its commit is
+reachable from `main`.
+
+## Current publication status
+
+`v0.4.0` was tagged from `main` on 2026-08-08. Its query and production gates
+passed. Both Linux package jobs produced candidates and passed the isolated
+install/remove drill. Both macOS jobs failed before archive creation because
+the release tool linked against Apple's restricted system SQLite, which omits
+the load-extension symbols it uses for identity verification. With an
+incomplete matrix, the outer checksum job was skipped. No GitHub Release was
+published, and the two workflow-retained Linux candidates are not presented
+as a partial public release.
+
+Build from source until a later tag publishes all intended archives and the
+complete outer `SHA256SUMS`. Do not construct a download URL from the examples
+below or treat the existence of `v0.4.0` as binary availability.
 
 The standalone dbhealth extension is intentionally not in this bundle. Build
 `dbhealth-ext` separately from compatible source when it is required.
 
-## Checked native target matrix
+## Intended native target matrix
 
 <!-- public-artifact-targets:start -->
 
@@ -23,10 +38,12 @@ The standalone dbhealth extension is intentionally not in this bundle. Build
 
 <!-- public-artifact-targets:end -->
 
-Each target must be built and identity-checked natively. Windows, Linux musl,
-and other targets may compile from source but are not claimed as checked
-release artifacts. A GNU/Linux artifact also depends on a compatible runtime
-libc; a target triple alone does not prove it will load in an older container.
+Each target must be built and identity-checked natively before the matrix is
+published. The table is the packager contract, not the current publication
+result. Windows, Linux musl, and other targets may compile from source but are
+not claimed as release artifacts. A GNU/Linux artifact also depends on a
+compatible runtime libc; a target triple alone does not prove it will load in
+an older container.
 
 ## Archive and file inventory
 
@@ -103,7 +120,10 @@ identity. Before distribution, compare:
 
 ## Installing
 
-Extract one native archive, verify its outer checksum, then run its installer:
+After a later complete release is published, extract the archive matching the
+host, verify its outer checksum, then run its installer. These `0.4.0` names
+illustrate the versioned layout only; those archives are not currently
+published:
 
 ```sh
 tar -xzf timeless-telemetry-data-plane-0.4.0-x86_64-unknown-linux-gnu.tar.gz

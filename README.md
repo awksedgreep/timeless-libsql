@@ -1,1343 +1,454 @@
 # timeless-libsql
 
-**Compressed metrics, logs, and traces inside any SQLite or libSQL database —
-one loadable extension, three virtual tables.** Think *"FTS5 for telemetry."*
+**Compressed metrics, logs, and traces inside SQLite or libSQL.**
+
+`timeless-libsql` is a Rust loadable extension that adds three telemetry
+virtual tables to an ordinary SQLite-compatible database. It keeps compressed
+blocks, indexes, rollups, and maintenance metadata in that database, so the
+host retains SQLite transactions, WAL, backup, and libSQL deployment choices.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)
+![Release line: 0.4.x](https://img.shields.io/badge/release%20line-0.4.x-orange.svg)
+
+Think of it as **FTS5 for telemetry**: load one extension, create the table
+types you need, and query them with SQL.
 
 ```sql
 .load ./libtimeless_ext
 
 CREATE VIRTUAL TABLE metrics USING timeless_metrics;
-CREATE VIRTUAL TABLE logs    USING timeless_logs(index_keys='service,path,status');
-CREATE VIRTUAL TABLE traces  USING timeless_traces(
+CREATE VIRTUAL TABLE logs USING timeless_logs(
+  index_keys='service,path,status',
+  timestamp_unit='us'
+);
+CREATE VIRTUAL TABLE traces USING timeless_traces(
   attribute_indexes='[{"scope":"span","path":"/http.method"}]'
 );
-
-INSERT INTO metrics(name, ts, value, labels)
-  VALUES ('cpu_usage', 1753000000, 42.5, '{"host":"pvm1"}');
-INSERT INTO metrics(metrics) VALUES ('flush');   -- FTS5-style command idiom
-
-SELECT * FROM logs   WHERE service='payments' AND level='error' AND ts > :t0;
-SELECT * FROM traces WHERE trace_id = x'4bf92f3577b34da6a3ce929d0e0e4736';
-SELECT * FROM traces WHERE attribute_filter =
-  '{"scope":"span","path":"/http.method","value":"GET"}';
-
--- A raw Prometheus scrape body is just another blob:
-INSERT INTO metrics(metrics) VALUES (readfile('scrape.prom'));
 ```
 
-Chunks and blocks are compressed ([pco](https://github.com/pcodec/pcodec) +
-adaptive columnar encoding) and stored in shadow tables **inside the same
-database file** — so transactions, backup, and libSQL replication come from
-the host, while compression, pruning, and predicate pushdown come from the
-engines. Works in the `sqlite3` CLI, the rusqlite/libsql crates, and
-self-hosted `sqld` (SQL over HTTP through Hrana).
-
-## Why
-
-Telemetry in SQLite usually means a plain table that grows ~50–160 bytes per
-row forever, or shipping data out to a second system (Prometheus, Loki,
-ClickHouse) with its own storage, backup, and replication story. This
-extension keeps telemetry *in the database you already have*:
-
-- **One file.** Metrics, logs, traces, and your application data — same
-  `.db`, same `BEGIN/COMMIT`, same coordinated backup, and the same
-  host-supported replication mechanism for committed pages.
-- **6–200x smaller.** Lossless compression, verified bit-exact per point
-  after flush and cold recovery (see [Numbers](#numbers)).
-- **It's just SQL.** No query DSL: indexed dimensions are real (hidden)
-  columns, so `WHERE service='api' AND level='error'` pushes down into an
-  inverted term index and reads like a normal query plan.
-- **Append-only with honest retention.** DELETE/UPDATE are rejected;
-  retention is an explicit `'prune:<ts>'` command.
-
-**Born for the edge.** Compression happens before a successful flush writes
-durable database pages. Host-supported libSQL replication or backup therefore
-operates on committed compressed block state rather than one Timeless row per
-sample. Actual network bytes also include page, WAL, protocol, retry, and
-checkpoint behavior and must be measured for the chosen host. For one device
-recording 100 metrics at 1 Hz for a month, the logical stored payload before
-that host overhead is:
-
-| storage | durable representation | logical monthly payload |
-|---|---|---:|
-| plain SQLite table | raw rows (~52.6 B/pt) | **~13.6 GB** |
-| timeless, hostile data | pco blocks (8.3 B/pt) | **~2.2 GB** |
-| timeless, friendly data | pco blocks (0.23 B/pt) | **~60 MB** |
-
-An embedded application controls flush cadence and can pair the same database
-with [dbhealth](docs/DBHEALTH.md). The host—not this extension—owns network
-transport, replication topology, retry policy, and the measured bandwidth
-result. The [embedded](docs/EMBEDDED_RUST.md) and [sqld](docs/SQLD.md) guides
-define that boundary.
-
-## Quick start
-
-```sh
-cargo build --release -p timeless-ext
-# artifact: target/release/libtimeless_ext.so   (.dylib on macOS)
-```
-
-```sh
-sqlite3 demo.db \
-  ".load target/release/libtimeless_ext" \
-  "CREATE VIRTUAL TABLE m USING timeless_metrics;
-   INSERT INTO m(name, ts, value) VALUES ('cpu', 1, 42.5);
-   INSERT INTO m(m) VALUES ('flush');
-   SELECT * FROM m;"
-# → cpu|1|42.5|{}
-```
-
-> **macOS:** Apple's system `/usr/bin/sqlite3` disables extension loading
-> (`.load` fails with "not authorized"). `brew install sqlite` and use
-> `$(brew --prefix sqlite)/bin/sqlite3` — or use the bundled-SQLite bench
-> binaries in `tools/bench`, which work everywhere. Rust 1.95+ required.
-
-The [SQLite extension API reference](docs/SQL_API_REFERENCE.md) is the
-canonical inventory of modules, schemas, hidden inputs, commands, batch and
-frame formats, capability negotiation, transaction behavior, and embedding
-entry points. The [Rust signal server API reference](docs/SERVER_API_REFERENCE.md)
-is the canonical inventory of binaries, routes, configuration, authentication,
-limits, lifecycle, backup, errors, and checked platforms.
-Versioning and operational changes are defined by the
-[changelog](CHANGELOG.md), [compatibility statement](docs/COMPATIBILITY.md),
-and [upgrade/rollback guide](docs/UPGRADE.md). Standalone users should start
-with the [embedded Rust guide](docs/EMBEDDED_RUST.md),
-[self-hosted sqld guide](docs/SQLD.md), and
-[release artifact/install inventory](docs/ARTIFACTS.md). The checked query,
-benchmark, deferred-work, and higher-order interface verdict is in the
-[query release report](docs/QUERY_RELEASE_REPORT.md).
-
-## The three virtual tables
-
-| module | row shape | ts unit | indexed dimensions (pushdown) |
-|---|---|---|---|
-| `timeless_metrics` | `(name, ts, value, labels)` | **seconds** | `name` =, `ts` ranges |
-| `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column =, exact `message_contains` =; optional hidden `max_work_entries` bounds examined entries |
-| `timeless_traces` | complete rich-span v2 IDs/timing, typed attributes/events/links, scope/resource schema and dropped-value fidelity | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges, optional exact typed `attribute_filter` = for up to eight configured span/resource/scope paths |
-
-All three share the same lifecycle: inserts land in an in-memory buffer
-(queryable immediately, auto-flushed at a size threshold), `'flush'` encodes
-the buffer into compressed blocks riding the host transaction, and reads
-transparently merge flushed blocks with the live buffer. Commands use the
-FTS5 hidden-column idiom — an INSERT into the column named after the table:
-
-```sql
-INSERT INTO metrics(metrics) VALUES ('flush');       -- make buffered points durable
-INSERT INTO metrics(metrics) VALUES ('compact');     -- merge small chunks
-INSERT INTO logs(logs)       VALUES ('optimize');    -- re-encode into larger, purer blocks
-INSERT INTO logs(logs)       VALUES ('optimize:65536'); -- cap source entries this turn
-INSERT INTO traces(traces)   VALUES ('optimize:65536'); -- same bounded maintenance for spans
-INSERT INTO traces(traces)   VALUES ('prune:<ns>');  -- drop everything older than <ts>
-```
-
-`optimize:<entries>` is the incremental logs/traces maintenance form. Raw
-compression runs before eligible size-tiered merges, and one complete merge
-cohort may slightly exceed the requested budget so maintenance always makes
-progress. `timeless_stats('logs'|'traces')` exposes actionable/deferred backlog,
-current optimizer-source entries/bytes, and separate raw and merge entry, byte,
-and time counters. (`prune:` takes the table's own ts unit: seconds / ms / ns.)
-
-Retention can also be automatic — declared at CREATE, applied during the
-maintenance the engine already performs (no background threads; the vtab
-stays passive):
-
-```sql
-CREATE VIRTUAL TABLE metrics USING timeless_metrics(retention='30d');
-CREATE VIRTUAL TABLE logs    USING timeless_logs(index_keys='service', retention='7d');
-CREATE VIRTUAL TABLE traces  USING timeless_traces(retention='72h');
-```
-
-The cutoff is *data time* (newest ingested timestamp minus the window),
-so it's deterministic, replay-safe, and inert for backfills; pruning is
-chunk/block-granular at flush/compact/optimize boundaries.
-
-**Rollup ladder (metrics)** — declare downsampling tiers and raw ages
-out while coarse aggregates survive, which is what makes "a year of
-metrics in one SQLite file" plausible:
-
-```sql
-CREATE VIRTUAL TABLE metrics USING timeless_metrics(
-  retention='14d',                  -- raw tier
-  rollups='5m@90d,1h@0');          -- resolution@retention, 0 = forever
-
-INSERT INTO metrics(metrics) VALUES ('rollup');  -- also runs at 'compact'
-
-SELECT labels, ts, value                         -- explicit tier reads
-  FROM timeless_rollup('metrics', 'cpu_usage', NULL, 300, :t0, :t1, 'avg');
---                                           agg: avg|sum|min|max|count|last
-
-SELECT series_id, labels, buckets                -- all fields, one row/series
-  FROM timeless_rollup_batches(
-    'metrics', 'cpu_usage', NULL, 300, :t0, :t1);
-```
-
-Buckets are `[B, B+R)` with exactly-documented aggregate math
-(bit-verified against naive bucket computation); tiers fill as buckets
-settle (one bucket-width margin) and are append-only. Tier reads are
-explicit — no silent substitution for raw. On the 1M-point bench, the
-1-minute tier answers the per-bucket average in **4.1ms** vs 34.5ms for
-the GROUP BY over raw, and building the whole tier costs 80ms. The packed
-`timeless_rollup_batches` form keeps the row TVF intact while avoiding six
-separate scans for hosts that need the complete rollup record.
-
-### Metrics
-
-```sql
-CREATE VIRTUAL TABLE metrics USING timeless_metrics;
-INSERT INTO metrics(name, ts, value, labels) VALUES
-  ('cpu_usage', 1753000000, 42.5, '{"host":"pvm1"}'),
-  ('cpu_usage', 1753000015, 43.1, '{"host":"pvm1"}');
-INSERT INTO metrics(metrics) VALUES ('flush');
-
-SELECT name, ts, value, labels FROM metrics
- WHERE name='cpu_usage' AND ts >= 1753000015;
--- cpu_usage|1753000015|43.1|{"host":"pvm1"}
-```
-
-Aggregation is plain SQL — `avg(value)`, `min`, `max`, `GROUP BY` all work;
-the vtab prunes chunks by name and ts range before SQLite ever sees a row.
-For a scalar result per series, `timeless_aggregate` is the chunk-aware fast
-path and avoids shipping raw samples through SQLite.
-
-Three ingest paths, one durability contract (same buffers, same flush):
-
-1. **Tier 1 — SQL rows** (above): ~2.3M pts/s. The compatibility floor;
-   works from any SQLite client.
-2. **Tier 2 — batch blob**: a packed columnar blob (version byte `0x01`,
-   then series table + ts/value arrays, spec in the
-   [SQL API reference](docs/SQL_API_REFERENCE.md#ingestion-batch-formats)) inserted
-   into the hidden column: **23.8M pts/s**. For agents that batch off the
-   hot path.
-3. **Prometheus exposition text**: any non-batch blob is parsed as a raw
-   scrape body — malformed/NaN lines are counted, not fatal, exactly like a
-   real Prometheus server scrape. Standard label-value `\n`, `\"`, and
-   `\\` escapes are decoded before series identity is resolved:
-
-```sh
-curl -s target:9100/metrics -o /tmp/scrape.prom && sqlite3 metrics.db \
-  ".load ./libtimeless_ext" \
-  "INSERT INTO metrics(metrics) VALUES (readfile('/tmp/scrape.prom'));
-   INSERT INTO metrics(metrics) VALUES ('flush');"
-```
-
-The scraping loop stays external by design (cron, curl, your app); the
-vtab is passive.
-
-Embedded hosts can resolve a durable series id once and omit metric/label
-strings from steady-state writes:
-
-```sql
-INSERT INTO metrics(metrics, name, labels)
-  VALUES ('resolve', 'cpu_usage', '{"host":"pvm1"}');
-SELECT last_insert_rowid();                     -- durable series_id
-
-INSERT INTO metrics(series_id, ts, value)
-  VALUES (:series_id, 1753000015, 43.1);
-```
-
-The corresponding resolved batch begins with version byte `0x02`, followed
-by `flags:u8=0`, `reserved:u16=0`, `n_points:u32 LE`, then columnar
-`series_id:i64[n]`, `timestamp:i64[n]`, and `value_bits:u64[n]` arrays, all
-little-endian. The entire id set is validated before any point is buffered.
-Named batch `0x01` remains the portable path when the caller has no durable
-id cache. Both binary formats preserve all 64 value bits through buffering,
-flush, and reopen, including distinct NaN payloads. Text exposition `NaN` is
-an ordinary float NaN, not an implicit Prometheus stale marker; JSON ingest
-cannot represent a NaN payload. Consequently the Rust PromQL server does not
-yet claim stale-marker semantics. That feature requires a bit-preserving
-server ingress and marker-aware selector/window execution that excludes only
-`0x7ff0000000000002`, never every NaN.
-
-The same durable ID is a read handle. SQLite pushes an equality constraint
-through the base metrics table and every per-series metrics query TVF:
-
-```sql
-SELECT ts, value FROM metrics
- WHERE series_id = :series_id AND ts BETWEEN :t0 AND :t1;
-
-SELECT value
-  FROM timeless_aggregate('metrics', 'cpu_usage', NULL, :t0, :t1, 'avg')
- WHERE series_id = :series_id;
-```
-
-The ID is intersected with the TVF's metric and matcher arguments and composes
-with joins against `timeless_series`. It is durable and table-scoped, but is not
-portable between independently created database files.
-
-**Query kernels** — table-valued functions evaluate the dominant
-dashboard shapes inside the engine, so remote deployments (sqld, HTTP)
-ship grid points instead of every raw sample:
-
-```sql
--- Matcher-aware raw narrow waist (one row per sample):
-SELECT series_id, labels, ts, value
-  FROM timeless_raw('metrics', 'cpu_usage', '{"host":"pvm1"}', :t0, :t1);
-
--- Same waist, one packed point blob per series for embedded hosts:
-SELECT series_id, labels, points
-  FROM timeless_raw_batches('metrics', 'cpu_usage', '{"host":"pvm1"}', :t0, :t1);
-
--- Wide fanout form: every non-empty series in one versioned columnar frame:
-SELECT frame
-  FROM timeless_raw_frame(
-    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1,
-    :max_work_points);
-
--- one scalar reduction per matched series; inclusive [:t0, :t1]
--- aggregate: avg | sum | min | max | count
-SELECT series_id, labels, value
-  FROM timeless_aggregate('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1, 'avg');
-
--- every scalar result in one TAF1 frame:
-SELECT frame
-  FROM timeless_aggregate_frame(
-    'metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1, 'avg');
-
--- newest point per matched series; inclusive bounds
-SELECT series_id, labels, ts, value
-  FROM timeless_latest('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
-
--- every newest point in one TLF1 frame:
-SELECT frame
-  FROM timeless_latest_frame('metrics', 'cpu_usage', '{"env":"prod"}', :t0, :t1);
-
--- last sample per grid point, per series (instant-selector shape):
---                 table      metric       label filter    start  stop   step lookback
-SELECT labels, ts, value
-  FROM timeless_grid('metrics', 'cpu_usage', '{"host":"pvm1"}', :t0, :t1, 60, 90);
-
--- sliding-window operations per grid point:
---   folds:       sum | min | max | count | avg
---   counters:    delta | increase | rate
---   percentiles: pNN (exact nearest-rank: p50, p95, p99.9, …)
---   robust:      tavg:N (trimmed mean, drop N% from each tail)
-SELECT labels, ts, value
-  FROM timeless_window('metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate');
-
--- Same result, one versioned bucket blob per series for embedded/remote hosts:
-SELECT series_id, labels, buckets
-  FROM timeless_window_batches(
-    'metrics', 'requests_total', NULL, :t0, :t1, 60, 300, 'rate',
-    NULL, :max_work_points);
-```
-
-Both packed calls retain their original unbounded arity. A supplied positive
-`max_work_points` is an inclusive, pre-decode guard: raw frames cap candidate
-stored/buffered points; window batches independently cap candidate input and
-possible grid output. Errors return no partial blob. The capability document
-advertises each guarded surface under `query_surfaces`.
-
-The same `timeless_capabilities()` document declares the current metrics
-sample domain as `signals.metrics.sample_types=["float64"]` and
-`signals.metrics.native_histograms=false`. This is an additive declaration,
-not a format change: named/resolved batches, stored chunks, rollups, SQL rows,
-and packed query frames remain float-only. Prometheus classic `_bucket` series
-work as ordinary floats; typed native histograms require a future versioned
-storage and public-interface design.
-
-The stable PromQL functions `histogram_avg`, `histogram_count`,
-`histogram_sum`, `histogram_stddev`, and `histogram_stdvar` follow Prometheus's
-float-input rule: they evaluate the child and ignore all current float samples,
-returning an empty vector or matrix. Classic bucket/sum/count metric names are
-not coerced into native histograms; value-producing behavior remains deferred
-until the capability advertises a typed native-histogram sample model.
-
-`timeless_window_batches` uses `TWB1 | count:u32 LE | timestamps:i64 LE[] |
-validity bitmap | value_bits:u64 LE[]`. The bitmap also preserves the optional
-`fill='null'` shape. See [the query cookbook](docs/QUERIES.md#packed-window-batches)
-for the exact byte contract. The row-oriented `timeless_window` API remains
-unchanged.
-
-`timeless_raw_frame` uses `TRF1 | series_count:u32 LE | total_points:u64 LE |
-series_ids:i64 LE[] | point_counts:u32 LE[] | timestamps:i64 LE[] |
-value_bits:u64 LE[]`. Counts partition the point columns by series; empty
-series are omitted and series slice order is unspecified. It complements,
-rather than replaces, the row-oriented and per-series batch raw APIs. See
-[the packed-raw contract](docs/QUERIES.md#packed-raw-frame).
-
-Rollup hosts can likewise use `timeless_rollup_batches`, whose `TRB1` blob
-contains bucket timestamps, exact integer counts, all six aggregate values,
-and stored last-sample timestamps in one row per series. See
-[the packed-rollup contract](docs/QUERIES.md#packed-rollup-batches).
-
-`timeless_aggregate` emits no row for an empty series/range and returns
-`count` as a SQLite INTEGER. Fully covered chunks use persisted statistics;
-only boundary chunks are decoded. `sum`/`avg` therefore accumulate points
-left-to-right within each chunk, then chunk sums in index order, so a flat SQL
-scan can differ by floating-point rounding. Count is exact. NaNs count as
-stored points, make `sum`/`avg` SQL `NULL`, and are ignored by `min`/`max`
-unless every value is NaN, in which case those are `NULL` too.
-
-`timeless_latest` emits at most one row per matched series and no row for an
-empty range. The greatest timestamp wins; duplicate maximum timestamps keep
-the first point in the raw engine's stable order. New chunks persist that
-point as metadata, so the usual unbounded-latest query does not decompress
-history. Databases created by older versions are upgraded additively: legacy
-chunks use the decode fallback until compaction rewrites them.
-
-For high-cardinality host-language reads, `timeless_aggregate_frame` and
-`timeless_latest_frame` return the same logical row results in one versioned
-columnar blob. Their `TAF1`/`TLF1` layouts and strict public Rust decoders are
-documented in
-[the query cookbook](docs/QUERIES.md#packed-aggregate-frame). The row TVFs
-remain the normal relational interface; frames are an additive transport and
-never change the on-disk format.
-
-**Counter kernels are raw window folds, NOT PromQL**: `increase` uses
-the standard reset-adjustment rule but does **no** boundary
-extrapolation, lookback, or staleness inference — for conformance-grade
-PromQL semantics, use the evaluator layer above the waist. Percentiles
-are the opposite story: because raw samples are kept, `p95` is the
-**exact** value — no `le`-bucket interpolation, no sketch error — which
-Prometheus-lineage systems cannot offer. `timeless_trace_buckets` gains
-`dur_p50/dur_p95/dur_p99` for the same reason: exact p95 latency per
-service per bucket. Outlier handling is always parameter-explicit
-(`tavg:5`) — the database never decides what an outlier is.
-
-Both windows are half-open `(t - width, t]`; grid points with no sample
-produce no row — unless you ask for a dense grid with the optional
-trailing **fill** argument (`'none'` default, `'null'` = every grid
-point emitted per matched series, value `NULL` where the window is
-empty; a series with no points in range stays absent either way):
-
-```sql
-SELECT labels, ts, value
-  FROM timeless_grid('metrics', 'cpu_usage', NULL, :t0, :t1, 60, 90, 'null');
-```
-
-The kernels are deliberately *semantics-free* — no
-lookback defaults, no staleness or rate math (that belongs to the query
-layer above) — which is what makes them safe: every result is verified
-bit-for-bit against naive evaluation, in the test suite and in the
-benchmarks. Callers that don't know about them lose nothing: the raw
-scan they replace still works everywhere.
-
-Measured on the 1M-point bench dataset (1-minute grid × 100 hosts over
-the whole range): the raw-scan fallback ships 99,900 samples and
-evaluates client-side in **17.9ms**; `timeless_grid` returns the same
-16,600 grid rows in **1.6ms** — 11x, before a network is even involved.
-
-**Label matchers** — every kernel TVF's filter argument accepts matcher
-objects alongside plain equality strings:
-
-```sql
-SELECT labels, ts, value FROM timeless_grid('metrics', 'cpu_usage',
-  '{"host": {"re": "web-.*"}, "env": {"neq": "dev"}}', :t0, :t1, 60, 90);
-```
-
-| Filter value | Meaning |
+## Current status
+
+The project is on the pre-1.0 `0.4.x` compatibility line. Extension and Rust
+signal-server versions move together and negotiate capabilities at startup;
+matching version strings alone are not sufficient.
+
+The `v0.4.0` source tag exists on `main`. As of 2026-08-08, it does **not**
+have a complete published native release set: both Linux candidate bundles
+passed their package/install checks, while the macOS packaging jobs exposed a
+release-tool link issue before producing archives. There is no complete outer
+checksum set or GitHub Release for that tag. Build from source until a later
+tag publishes the complete verified artifact set described in
+[the artifact guide](docs/ARTIFACTS.md).
+
+The storage, SQL, and Rust API contracts are implemented and extensively
+tested. Query-language coverage is explicit rather than implied:
+
+| tier | shipped | experimental | deferred |
+|---|---:|---:|---:|
+| PromQL | 74 | 11 | 5 |
+| MetricsQL | 10 | 0 | 2 |
+| LogsQL | 107 | 0 | 7 |
+
+Every row has a stable identifier, disposition, semantic test reference, and
+SQL foundation where one honestly exists. See the
+[query release report](docs/QUERY_RELEASE_REPORT.md) and the
+[PromQL](docs/PROMQL_FEATURE_MATRIX.md) and
+[LogsQL](docs/LOGSQL_FEATURE_MATRIX.md) matrices for the exact claim.
+
+## What is in this repository
+
+| component | purpose |
 |---|---|
-| `"v"` | equality (pushed into the label index, as before) |
-| `{"neq": "v"}` | not equal |
-| `{"re": "pat"}` | regex match ([Rust `regex`](https://docs.rs/regex) dialect — RE2 family: no backrefs/lookaround) |
-| `{"nre": "pat"}` | regex non-match |
+| `libtimeless_ext` | Loadable SQLite/libSQL extension containing all three storage engines and public SQL query surfaces. |
+| `timeless-metrics-api` | Standalone Rust metrics HTTP server with Prometheus-compatible query routes and a separate MetricsQL tier. |
+| `timeless-logs-api` | Standalone Rust log ingest/query server with strict LogsQL parsing and bounded evaluation. |
+| `timeless-traces-api` | Standalone Rust OTLP ingest, Jaeger query, and native rich-span server. |
+| `libdbhealth_ext` | Separate optional SQLite database-health extension; not bundled into `libtimeless_ext`. |
 
-Regexes are **fully anchored** (PromQL-style): the pattern must match
-the whole value — `web-.*` means *starts with* `web-`, `.*web.*` means
-*contains*. A label absent from a series matches as the empty string
-`""`, so `{"neq": "prod"}` includes series without the label and
-`{"nre": ".+"}` means "label absent or empty". Matchers prune the
-candidate *series list* before any chunks are read — cost is
-per-series, not per-point. Invalid patterns are loud errors naming the
-pattern and the label.
+The three signal servers are independently usable. They do not contain a
+second storage engine and never read private shadow tables: all durable work
+crosses public `libtimeless_ext` SQL or batch interfaces.
 
-**Introspection** — three more table-valued functions answer "what's in
-here?" without decompressing anything:
-
-```sql
-SELECT * FROM timeless_series('metrics');  -- one row per series: name, labels,
-                                           -- min/max ts (incl. buffered), points,
-                                           -- chunks, buffered  (~3ms for 1000 series)
-SELECT * FROM timeless_stats('metrics');   -- key/value health rows; works for
-                                           -- logs and traces tables too
-SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
-                                           -- sorted distinct label values —
-                                           -- the dropdown-population query
-
--- Packed metric reads expose cumulative candidate/decode/byte/return work:
-SELECT key, value FROM timeless_stats('metrics')
- WHERE key LIKE 'raw_batch_query_%' ORDER BY key;
-
--- Logical metric tier counts and physical SQLite index allocation are public;
--- clients do not need to inspect implementation-owned shadow tables:
-SELECT key, value FROM timeless_stats('metrics')
- WHERE key IN ('series','chunks','rollup_chunks','disk_points','index_bytes')
- ORDER BY key;
-
--- Logs expose block, entry, payload, index, timestamp-unit, and current
--- optimizer-source totals without exposing extension shadow tables:
-SELECT key, value FROM timeless_stats('logs')
- WHERE key IN ('timestamp_unit','blocks','raw_blocks','compressed_blocks',
-               'buffered_entries','disk_entries','total_entries',
-               'bytes_on_disk','raw_bytes','compressed_bytes','terms',
-               'index_bytes','ts_min','ts_max','optimize_source_entries',
-               'optimize_source_bytes')
- ORDER BY key;
-
--- Traces expose the same public physical-accounting/maintenance boundary:
-SELECT key, value FROM timeless_stats('traces')
- WHERE key IN ('blocks','raw_blocks','disk_spans','bytes_on_disk','terms',
-               'trace_index_rows','index_bytes','optimize_source_entries',
-               'optimize_source_bytes')
- ORDER BY key;
-
--- Trace scans also expose cumulative physical decode/materialization work:
-SELECT key, value FROM timeless_stats('traces')
- WHERE key IN ('query_decoded_columns','query_decoded_column_bytes',
-               'query_materialized_values','query_materialized_rich_values')
- ORDER BY key;
-
--- Request-local work is separate from cumulative/aggregate stats. Fully
--- consume this scan and immediately consume its single-use report on the
--- same connection:
-SELECT ts, level, message FROM logs
- WHERE service='api' AND max_work_entries=100000 ORDER BY ts;
-SELECT payload_bytes_read, candidate_blocks, processed_blocks,
-       decoded_entries, processed_entries, matched_entries, returned_entries
-  FROM timeless_log_query_stats('logs');
-
--- Optional discovery filters use the same matcher JSON and are applied
--- before unrelated catalog rows cross SQLite:
-SELECT labels FROM timeless_series('metrics', 'cpu_usage',
-  '{"host":{"re":"web-.*"},"env":{"neq":"dev"}}');
-SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host',
-  '{"env":{"neq":"dev"}}');
-```
-
-The aggregate log rows above are intentionally not VictoriaLogs
-`| block_stats` compatibility. That pipe reports VictoriaLogs-specific
-per-field dictionaries, bloom filters, stream identities, and filesystem
-parts, which Timeless blocks do not retain. There is therefore no honest
-public SQL equivalent today; use `timeless_stats('logs')` for aggregate
-operational accounting and consult the
-[LogsQL matrix](docs/LOGSQL_FEATURE_MATRIX.md) for the exact deferred
-prerequisite. Private shadow tables are not a supported workaround.
-Likewise, the `blocks` row is the current persisted total—not LogsQL
-`| blocks_count`, whose upstream value counts request-local processing batches
-after preceding pipeline stages. Timeless does not currently expose that
-lineage, and subtracting cumulative `query_candidate_blocks` values is unsafe
-when queries overlap. The separate `timeless_log_query_stats` surface reports
-actual request-local scan work, but deliberately does not claim that private
-pipeline-batch lineage. Its same-connection, single-use contract and complete
-LogsQL mapping are executable as
-[`SQL-LOG-026`](docs/QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics).
-
-For worked recipes — reset-corrected counter math in pure SQL, top-k
-per bucket, cross-metric joins, IQR/σ outlier exclusion, gap-fill
-patterns — see **[docs/QUERIES.md](docs/QUERIES.md)**; every recipe in
-it is executed by the test suite, so the cookbook can't rot.
-Hosts must use these public rows rather than querying implementation-owned
-shadow tables; additive keys may appear as the extension gains observable
-capabilities.
-
-### Logs
-
-`index_keys` declares which metadata keys get inverted-index treatment —
-each one becomes a real hidden column you can SELECT and filter on:
-
-```sql
-CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,path,status');
-INSERT INTO logs(ts, level, message, metadata) VALUES
-  (1753000000123, 'error', 'payment declined: card_expired',
-   '{"service":"payments","path":"/api/charge","status":"402"}');
-INSERT INTO logs(logs) VALUES ('flush');
-
-SELECT ts, level, message FROM logs
- WHERE service='payments' AND level='error' AND ts > 1753000000000;
--- 1753000000123|error|payment declined: card_expired
-```
-
-- `level` is a strict eight-value vocabulary: `debug | info | notice |
-  warning | error | critical | alert | emergency`. Legacy flat batches retain
-  their four-level representation; rich-v1 batches preserve all eight names.
-- `metadata` is canonical typed JSON. Strings, numbers, booleans, nulls,
-  arrays, and nested objects survive flush, optimize, and reopen. Declared
-  `index_keys` project string values for posting-list pruning without replacing
-  the authoritative typed object.
-- Index-key equality intersects posting lists in the `_terms` shadow table;
-  only matching blocks are decompressed.
-- `message LIKE '%…%'` scans by default — or declare
-  `message_index='trigram'` and substring search becomes a block-pruning
-  problem: every 3-byte window of the pattern's literal runs must appear
-  in a block for it to decode, and SQLite still rechecks rows exactly.
-  1M entries: `LIKE '%timeout%'` in **48.3ms** vs 334.5ms unindexed —
-  and vs 74.5ms for the plain table, flipping the one benchmark row this
-  extension used to lose (index overhead ~1.5 MB, opt-in).
-- For a literal case-insensitive substring rather than full SQL LIKE syntax,
-  use the exact hidden input `message_contains`. It filters before rows cross
-  the virtual-table boundary and can consume `ORDER BY ts ... LIMIT/OFFSET`:
-
-  ```sql
-  SELECT ts, level, message FROM logs
-   WHERE message_contains='timeout' AND max_work_entries=100000
-   ORDER BY ts DESC LIMIT 100;
-  ```
-
-  ASCII matching is allocation-free; non-ASCII matching uses Unicode
-  lowercase equivalence. Trigram pruning remains conservative and is disabled
-  for a non-ASCII needle so it cannot introduce false negatives.
-- Index keys can also be used as INSERT shorthand: a non-NULL value in the
-  hidden column merges into the metadata JSON.
-- **Batch ingest**: the flat string-only v0 batch remains readable; rich-v1
-  preserves microsecond timestamps, all eight severities, and canonical typed
-  metadata. Inserting either public columnar blob into the hidden table column
-  ingests a whole batch in one statement, validated all-or-nothing. The
-  extension's 8,192-entry buffer remains authoritative.
-
-**Bucket kernel** — the dominant logs-dashboard shape (volume histogram
-by level or any index key) evaluated engine-side; level-pure blocks that
-fit inside one bucket are counted from metadata without decoding:
-
-```sql
-SELECT bucket_ts, group_key, n FROM timeless_log_buckets(
-  'logs', 'level', '{"service":"api"}', :t0, :t1, 60000);
--- buckets are [t, t+step) aligned to :t0 — histograms bin forward
-```
-
-1M entries, whole range, 1-minute buckets: **95.9ms** vs 543.5ms for the
-GROUP BY over the raw vtab (5.7x, totals verified equal).
-
-**Scalar count** — exact count without materializing a log rowset. `filter` is
-a flat filter JSON object: `level` selects severity and every other string
-member is a metadata equality. The remaining arguments are optional exact
-substring, inclusive timestamp bounds, and a positive examined-entry cap:
-
-```sql
-SELECT n FROM timeless_log_count(
-  'logs', '{"level":"error","service":"api"}', 'timeout', :t0, :t1,
-  :max_work_entries
-);
-```
-
-Only the table name is required. Fully covered unfiltered or level-pure blocks
-use persisted `entry_count` without reading payloads. Boundary, legacy-mixed,
-metadata-filtered, and message-filtered blocks decode one at a time. The
-optional final cap is charged before candidate blocks are decoded and fails
-without a partial result. The same guard is a hidden equality input on
-`timeless_logs` and the final argument to bounded field discovery:
-
-```sql
-SELECT value FROM timeless_log_values(
-  'logs', 'host', '{"level":"error"}', NULL,
-  :t0, :t1, 1000, :max_work_entries
-);
-```
-
-`timeless_capabilities()` advertises these guards under
-`query_surfaces.timeless_logs`, `.timeless_log_count`, and
-`.timeless_log_values`. Omitting them preserves the older unbounded direct-SQL
-contract; the Rust logs API requires the capability and always binds a hard
-limit. Request-local reports are advertised under
-`query_surfaces.timeless_log_query_stats` with `request_local`,
-`same_connection`, and `single_use` flags.
-
-After fully consuming a successful `timeless_logs` scan, direct callers can
-consume its actual work once on the same connection:
-
-```sql
-SELECT query_total_ns, payload_bytes_read,
-       candidate_blocks, processed_blocks,
-       decoded_entries, processed_entries,
-       matched_entries, returned_entries,
-       values_read, timestamps_read
-  FROM timeless_log_query_stats('logs');
-```
-
-New, failed, and cancelled scans clear stale reports. See
-[`SQL-LOG-026`](docs/QUERY_SQL_EQUIVALENTS.md#sql-log-026-request-local-log-query-statistics)
-for all sixteen INTEGER columns and the exact fourteen-field string mapping
-used by LogsQL `| query_stats`.
-
-### Traces
-
-OTel-shaped spans; the hero query is trace reassembly by id, routed through
-a dedicated packed-trace-id index so only blocks containing that trace are
-decompressed:
-
-```sql
-CREATE VIRTUAL TABLE traces USING timeless_traces;
-INSERT INTO traces(trace_id, span_id, name, service, kind, status, start_ts, duration_ns)
-  VALUES ('4bf92f3577b34da6a3ce929d0e0e4736', '00f067aa0ba902b7',
-          'GET /api/charge', 'payments', 'server', 'error',
-          1753000000123000000, 8500000);
-INSERT INTO traces(traces) VALUES ('flush');
-
-SELECT hex(trace_id), name, service, status, duration_ns FROM traces
- WHERE trace_id = x'4bf92f3577b34da6a3ce929d0e0e4736';
--- 4BF92F3577B34DA6A3CE929D0E0E4736|GET /api/charge|payments|error|8500000
-```
-
-- Ids accept packed BLOBs (16/8/8 bytes) *or* hex TEXT (32/16/16 chars) on
-  insert — OTel tooling hands out hex, storage wants packed. Always returned
-  as BLOBs; use `hex()` for display.
-- `kind` (`internal|server|client|producer|consumer`) and `status`
-  (`unset|ok|error`) are strict TEXT vocabularies mapped to storage bytes.
-- `attributes`, `resource`, and `instrumentation_scope` are typed JSON
-  objects; `events` and `links` are typed JSON arrays. Trace state/flags,
-  schema URLs, dropped-value counts, scope attributes, and per-event/link
-  fidelity survive flush, optimize, backup, and reopen.
-- `service` is derived with the same precedence as timeless_traces:
-  string `attributes["service.name"]`, then resource `service.name`, then the
-  explicit compatibility column. The derived value is what gets indexed.
-- Batch byte `0x01` is stable core-span v0, `0x02` is rich-span v1, and
-  `0x03` is complete rich-span v2. All remain readable. The extension's
-  8,192-span auto-flush threshold is authoritative for every path.
-
-**Bucket kernel** — per-service span stats per time bucket (count,
-errors, duration sum/min/max; percentiles stay above the waist):
-
-```sql
-SELECT bucket_ts, service, spans, errors, dur_sum, dur_min, dur_max
-  FROM timeless_trace_buckets('traces', NULL, :t0, :t1, 60000000000);
-```
-
-960k spans, whole range: **246ms** vs 582ms for the GROUP BY equivalent
-(2.4x — duration math requires decoding every span, so this one is
-decode-bound).
-
-## Query language roadmaps
-
-The SQL primitives above are the storage/query foundation, not an implicit
-claim of complete PromQL or LogsQL compatibility. The living feature maps say
-exactly what is implemented, where each missing construct belongs, and what
-must be tested before it can be marked shipped:
-
-- [Query feature ownership and workflow](docs/QUERY_FEATURES.md)
-- [PromQL feature matrix](docs/PROMQL_FEATURE_MATRIX.md)
-- [LogsQL feature matrix](docs/LOGSQL_FEATURE_MATRIX.md)
-- [SQL equivalents for query-language features](docs/QUERY_SQL_EQUIVALENTS.md)
-- [Query/storage findings](docs/QUERY_STORAGE_FINDINGS.md)
-- [Shipped-row conformance references](docs/QUERY_TEST_REFERENCES.md)
-- [Pinned query semantic oracles](docs/QUERY_ORACLES.md)
-- [Query benchmark and evidence protocol](docs/QUERY_EVIDENCE.md)
-- [Sequential query implementation plan](docs/2026-08-04_query_surface_implementation_plan.md)
-- [Final query and public-surface release report](docs/QUERY_RELEASE_REPORT.md)
-
-PromQL, the explicitly named MetricsQL compatibility tier, and LogsQL
-parsing/evaluation live in the Rust signal APIs. MetricsQL-only syntax never
-changes the default PromQL routes and never enters SQLite as query syntax. The
-MetricsQL routes currently implement conditional `default`/`if`/`ifnot`,
-operation-level `keep_metric_names`, bounded `union`/`alias` composition, and
-bounded `label_set`/`label_del` transformations, plus implicit
-`default_rollup` and the established one-argument window-less rollups with
-VictoriaMetrics scrape/carry-in semantics, plus complete-grid
-`range_avg/min/max/sum` with pinned slot-index, missing-value, name, collision,
-and IEEE behavior, plus cumulative `running_avg/min/max/sum` with pinned carry
-and computed-NaN behavior, plus request-step-relative direct/subquery windows,
-resolutions, signed offsets, and adaptive `0i` rollups, plus request-owned
-`start()`/`end()`/`step()` context values with explicit unsupported-function
-errors, plus VictoriaMetrics plural histogram quantiles over cumulative and
-`vmrange` buckets with one shared bucket read; direct SQL users retain
-the same public mechanics with executable `SQL-MQL-001` through `SQL-MQL-007`,
-`SQL-MQL-009` through `SQL-MQL-010`, and `SQL-MQL-012` recipes. The finite
-`MQL-08` legacy remainder is explicitly deferred, not implied parity:
-`label_keep`, `label_map`, `quantiles`, `distinct`, `increase_pure`,
-`remove_resets`, `interpolate`, `keep_last_value`, `keep_next_value`,
-`drop_common_labels`, `rate_over_sum`, and `WITH` fail before storage until
-each receives its own pinned compatibility row. LogsQL stream selectors are
-also explicitly deferred rather than approximated: unquoted `{...}` and
-`_stream:{...}` return a source-positioned pre-storage error because current
-rich-log batches retain row metadata but no ingestion-declared,
-tenant-scoped stream identity. Reserved `_stream_id:<48-hex>` filters are
-likewise rejected before reads rather than treated as ordinary metadata;
-bare text, nested `foo._stream_id`, projections, and inline `rows` data remain
-available. Ordinary `service = :service` SQL remains available as row
-filtering, but it is not labeled stream-selector parity; see the `LQL-F35`
-and `LQL-F36` no-SQL dispositions. Separately, `set_stream_fields` is a
-bounded response-only transform: it selects exact/prefix/all fields from the
-current rich row, emits a bytewise-sorted Go-quoted `_stream`, clears
-`_stream_id` only on matching rows, and never claims or mutates a stored stream
-identity. Core SQL has no exact dynamic-field plus Go-quoting equivalent, and
-the transform occurs after the public row boundary, so it remains in the Rust
-API without a storage opcode. Exact-build evidence returns the same 64 rows
-and 1,856 bytes as its control with byte-identical public storage work;
-narrow/wide p95 is 4.564/40.091 ms versus 3.633/38.555 ms. The related
-`stream_context` pipe is explicitly deferred rather than approximated: it
-returns a source-positioned HTTP 422 before storage because correct surrounding
-reads require the same missing tenant-scoped stream identity; ordinary SQL has
-no equivalent until that versioned ingestion model exists. LogsQL
-`options(concurrency=...)` and `options(parallel_readers=...)` are also
-explicitly deferred: VictoriaLogs defines intra-query CPU/I/O fan-out, whereas
-Timeless uses one public SQLite cursor per query and a pool only across
-independent requests. The options fail before storage rather than being
-silently ignored; host connection concurrency is useful but is not a SQL
-equivalent. The LogsQL API
-includes the four VictoriaLogs pattern anchors and all seven typed placeholders,
-exact-prefix matching, and static multi-exact `in(...)` membership over bounded
-public rows while retaining Timeless's rich JSON types, plus static
-`contains_all(...)` phrase conjunction and `contains_any(...)` phrase
-disjunction over the same rich projection, plus exact top-level primitive
-membership for retained JSON arrays through `json_array_contains_any(...)`,
-plus ordered non-overlapping `seq(...)` phrase matching with the same Unicode
-boundaries and strict static-list grammar, plus query-backed `in`,
-`contains_any`, and `contains_all` with exact one-field output, request-local
-caching, nested composition, and cumulative work/state/deadline bounds,
-plus bounded `equals_common_case(...)` and `contains_common_case(...)` using
-the pinned Go-simple Unicode expansion rather than general case folding,
-plus lower-inclusive/upper-exclusive bytewise `string_range(...)` filtering
-over the same non-mutating rich projection, plus inclusive Unicode-codepoint
-`len_range(...)` filtering with VictoriaLogs-compatible unsigned bound
-grammar, plus same-row `eq_field`, `le_field`, and `lt_field` comparisons with
-exact equality and VictoriaLogs math-value-or-bytewise ordering.
-It also supports literal `prefix*:filter` field-set searches over canonical
-special fields and recursively dotted retained metadata leaves, including
-empty/quoted prefixes, independent field-group operands, projected pipelines,
-strict wildcard-comparison errors, bounded traversal, and cancellation.
-Exact-build p95 is 3.122/49.085 ms for narrow/wide word-prefix search and
-3.216/47.324 ms for typed-prefix search over the 8,192-entry evidence fixture;
-all matching shapes retain byte-identical public storage reads.
-Day-range filtering adds exact `HH:MM`/`HHMM` bracket semantics and signed
-compound offsets over UTC; an omitted offset is deterministic UTC rather than
-ambient process-local time. Direct users can run the native-unit public-row
-equivalent in `SQL-LOG-023`. Exact-build p95 is 3.697/37.123 ms narrow/wide
-with the same public block, entry, and byte reads as equal-cardinality filters.
-Week-range filtering adds case-insensitive short/full English weekdays,
-open/closed Sunday-through-Saturday ranges, and the same explicit signed UTC
-offset policy. `SQL-LOG-024` gives direct users the Euclidean native-timestamp
-equivalent, including pre-epoch dates and bracket-wrap edges. Exact-build p95
-is 3.547/39.768 ms narrow/wide with byte-identical public reads versus the
-same-run equal-cardinality word baseline.
-Query-backed exact membership measures 5.849/7.341/7.440 ms narrow and
-32.622/33.501/34.096 ms wide p50/p95/p99 versus 3.220/4.251/4.312 and
-31.197/35.548/41.786 ms static-list controls. The required second public scan
-doubles narrow decoded work and adds one indexed block to the wide scan;
-storage remains byte-identical. `SQL-LOG-048` gives direct SQLite/libSQL users
-the same bounded two-scan retained-string foundation.
-The ordered pipeline also implements VictoriaLogs-compatible `sample N` with
-strict positive-unsigned grammar, request-local random exponential gaps,
-unchanged rich selected rows, in-place bounded compaction, limits, and
-cancellation. A first-stage sample discards rows before metadata JSON
-materialization; it cannot avoid the required public block read and decode.
-`SQL-LOG-049` gives direct SQLite/libSQL users a parameterized bounded `1/N`
-random-subset recipe using ordinary SQLite randomness, so no sampling opcode
-or private storage access is added to the extension.
-Exact-build `sample 4` p50/p95/p99 is 3.027/3.657/3.910 ms narrow and
-25.179/26.060/26.533 ms wide, versus 3.140/3.307/3.447 and
-32.412/33.206/33.678 ms for exact `sample 1` controls. The 21.5% lower wide
-p95 comes from skipping rich JSON materialization after byte-identical public
-block reads; the 10.6% higher narrow p95 is retained as endpoint-tail
-variation because internal API time is 4.4% lower. The evidence harness now
-rejects native-count or otherwise storage-work-mismatched controls.
-LogsQL source also accepts VictoriaLogs-compatible `#` line comments, LF/CRLF
-multiline composition, literal hashes inside all three quoted forms, and one
-optional terminal semicolon. Malformed tails fail explicitly with lexical
-line/column locations. This bounded parser-only behavior never enters SQLite;
-direct users continue to compose the corresponding public-row SQL recipes.
-Exact-build p95 is 3.335/39.610 ms narrow/wide versus 3.504/41.410 ms for the
-same-run plain word forms, with byte-identical public storage reads.
-The ordered pipeline also supports case-insensitive `delete`, `del`, `drop`,
-and `rm` aliases over exact, quoted, prefix, nested rich-object, special, or all
-fields. Missing fields are no-ops, arrays/scalars remain atomic, empty parents
-are pruned, later stages see the transformed row, and a fully empty row is
-omitted. Executable `SQL-LOG-025` gives embedded SQLite/libSQL users the exact
-metadata-path `json_remove` foundation; prefix grammar, recursive pruning,
-limits, cancellation, and response semantics remain bounded Rust API work.
-Exact-plus-prefix deletion measures 4.011/45.768 ms narrow/wide p95, 16.9%/
-17.6% above same-run word queries while returning 22.4%/22.1% fewer response
-bytes; block, decode, payload-byte, and public-row work are identical.
-`query_stats` emits VictoriaLogs' fourteen string-valued fields from a
-connection-local, single-use public extension report. It preserves exact
-logical post-filter cardinality and actual Timeless block/entry/payload work;
-it does not fabricate unavailable per-column storage files. Executable
-`SQL-LOG-026` documents every native counter, concurrency and invalidation
-rule, and the complete LogsQL mapping.
-The `stats` pipeline also includes bounded `quantile(phi[, fields...])` and
-`stddev(fields...)`. Quantile uses VictoriaLogs textual natural ordering and
-upper-step selection; standard deviation uses one-pass population state over
-native JSON numbers without coercing strings. Timeless preserves explicit
-empty/null/type distinctions and fails exact quantiles at configured state
-limits instead of randomly sampling them. Embedded SQLite/libSQL users can
-run the executable finite-number public-row equivalent in `SQL-LOG-044`;
-mixed textual ordering, grammar, limits, cancellation, and envelopes remain
-Rust logs API behavior.
-`sum_len(fields...)` adds bounded UTF-8/compact-JSON byte lengths across
-exact, prefix, or all current fields and returns a checked native JSON
-integer. Embedded users can execute the single-exact-path public-row
-equivalent in `SQL-LOG-045`; dynamic selection and API semantics remain in
-the Rust logs server.
-`any(field)` adds deterministic first-nonempty selection, while
-`field_min(source,result)` and `field_max(source,result)` use the complete
-LogsQL natural comparator and return a retained rich companion value. Direct
-SQLite/libSQL users have deterministic exact-path and finite-number
-foundations in `SQL-LOG-046`; rich language semantics remain bounded Rust API
-composition over public rows.
-Exact-build p95 is 3.293/33.764 ms for narrow/wide `any` and
-3.306/36.738 ms for companion extrema, respectively 26.4%/10.0% and
-10.7%/4.0% below equal-output controls with byte-identical public storage
-work.
-`row_any(fields...)`, `row_min(source[, fields...])`, and `row_max` add
-deterministic complete-row selection with native nested JSON fidelity,
-flattened-prefix/all-current selectors, the complete LogsQL natural
-comparator, strict first-tie behavior, empty `{}` results, and bounded
-cancellation. Result aliases accept both `as name` and VictoriaLogs' implicit
-`name` form. Direct SQLite/libSQL users have the executable fixed-path and
-finite-native-number public-row foundation in `SQL-LOG-047`; dynamic language
-semantics stay in the standalone Rust logs API without an Elixir, NIF, HTTP,
-or private-storage fallback.
-Exact-build p95 is 3.097/37.829 ms narrow/wide for `row_any`, 15.4%/0.2%
-below same-scan scalar controls. Rich `row_min` plus `row_max` p95 is
-3.219/39.790 ms, 6.1% below/9.8% above scalar companion controls; all pairs
-read byte-identical public blocks and the wide cost stays documented rather
-than hidden.
-The bounded `first` pipeline selects an optional positive number of rows by
-exact fields with per-field direction, optional partitioning, and an optional
-one-based string rank. Its coercion chain covers exact signed/unsigned
-integers, RFC3339 times, numeric/duration/byte values, and VictoriaLogs natural
-UTF-8 order; the no-`by` form observes the current projected/deleted row
-schema. Timeless retains rich JSON values, caps input/result/state with the
-existing query limits, and performs all language composition over public rows.
-Executable `SQL-LOG-027` gives embedded users the bounded numeric
-`row_number()` foundation without claiming that SQLite `REAL` or its default
-collation implements the complete LogsQL order.
-`last` reuses the same bounded rich-row machinery and grammar while reversing
-the complete order, including the interaction with per-field direction.
-Executable `SQL-LOG-028` provides the corresponding descending numeric
-window-rank foundation.
-Partitioned/ranked `first` measures 3.681/44.182 ms narrow/wide p95 versus
-3.153/37.107 ms for same-run equal-cardinality time-sort controls. The
-16.8%/19.1% bounded composition cost follows byte-identical public storage
-reads and does not justify a new extension primitive.
-Partitioned/ranked `last` measures 3.060/46.268 ms narrow/wide p95 versus
-3.290/44.012 ms for same-run `first` controls. Its -7.0%/+5.1% p95 variation
-and -9.8%/+3.9% internal API variation follow byte-identical public storage
-reads and retain the same no-new-primitive verdict.
-The bounded `top` pipeline groups one or more exact current-row fields by
-their LogsQL textual projection, orders frequency descending with a stable
-key tie-break, and emits string `hits` plus optional string `rank`. Missing,
-null, and empty values share the omitted empty-text group. Executable
-`SQL-LOG-029` gives direct SQLite/libSQL users the public `GROUP BY` and window
-rank foundation; multi-field grammar, collision naming, limits, cancellation,
-and HTTP envelopes remain Rust API work.
-Frequency `top` measures 3.385/35.948 ms narrow/wide p95 versus
-3.330/38.060 ms for same-scan, equal-cardinality time-sort controls. Its
-+1.6%/-5.5% p95 variation follows byte-identical public storage work and does
-not justify an extension primitive; executable public SQL remains the direct
-SQLite/libSQL path.
-The ordered LogsQL pipeline also supports bounded rich-row `coalesce`,
-`copy`/`cp`, `rename`/`mv`, `format`, `math`/`eval`, `len`, `hash`,
-`collapse_nums`, `decolorize`, and `split` composition.
-Math provides the pinned VictoriaLogs binary64 operator/function/coercion
-model. `len` counts UTF-8 bytes across the pinned flattened textual view while
-preserving typed sources. `hash` uses seed-zero xxHash64 masked to 53 exact
-bits across the same view. These pipes support sequential destinations,
-strict errors, cancellation, and immutable stored rows. Direct SQLite/libSQL users can use
-the parameterized public JSON1 arithmetic and byte-length foundations in
-`SQL-LOG-036` and `SQL-LOG-037`; complete LogsQL parsing and expression
-semantics stay in the Rust logs API rather than the extension. Core SQLite and
-libSQL have no portable exact xxHash64 scalar, so `hash` has an explicit
-no-SQL-recipe disposition instead of an inexact claim or storage primitive.
-Exact-build `len` p95 is 3.785/40.724 ms narrow/wide versus 3.620/36.622 ms
-for byte-identical same-scan controls; the bounded +4.6%/+11.2% variation does
-not justify another storage primitive.
-Exact-build `hash` p95 is 3.455/36.785 ms versus 3.481/36.223 ms for
-same-public-work controls. The -0.7%/+1.6% variation and larger decimal result
-remain bounded API/wire costs; no extension hash primitive is justified.
-`collapse_nums` follows VictoriaLogs' conditional exact-field decimal/hex
-token boundaries and optional UUID/IP/time/date/datetime prettification while
-preserving native rich values on no-op paths. Core SQLite/libSQL has no
-portable equivalent tokenizer, so the SQL cookbook records an explicit
-no-recipe disposition. Exact-build p95 is 3.135/34.525 ms narrow/wide versus
-3.143/36.735 ms for identical-public-work, identical-output controls. The
--0.3%/-6.0% variation follows unchanged storage reads and does not justify an
-extension tokenizer.
-`decolorize` removes VictoriaLogs' exact ANSI CSI byte form from `_msg` or one
-exact quoted/dotted current-row field. Incomplete CSI is removed; invalid
-final bytes and non-CSI OSC/DCS sequences remain. Native rich values survive
-no-op projections, transformed rows are request-local, and grammar, work,
-state, response, deadline, and cancellation limits are strict. Direct
-SQLite/libSQL users have the byte-exact public-row recursive-CTE foundation in
-`SQL-LOG-050`; complete LogsQL behavior stays in the Rust API, and no private
-table or extension primitive is involved. Exact-build p95 is 3.101/36.385 ms
-narrow/wide versus 3.169/34.872 ms for identical-output, same-public-work
-controls; the bounded -2.2%/+4.3% variation follows unchanged storage reads.
-`split` produces VictoriaLogs-compatible compact JSON-array text from `_msg`
-or one exact quoted/dotted current-row field. Literal multi-byte separators
-retain leading, trailing, and consecutive empty pieces; an empty separator
-splits by Unicode scalar value. Optional `from`/`as` keywords and their
-shorthand are supported, while malformed operands and wildcards fail
-explicitly. Rich sources stay typed when written to another destination, and
-durable rows are immutable. Direct SQLite/libSQL users can run executable
-`SQL-LOG-051` over bounded public `logs` rows; Rust owns strict LogsQL grammar,
-exact VictoriaLogs JSON escaping, current-row composition, resource limits,
-cancellation, and envelopes. The same public rows have already crossed the
-storage boundary, so no split-specific extension primitive or private-table
-path is added.
-Exact-build p50/p95/p99 is 3.219/3.481/4.063 ms narrow and
-37.529/38.655/40.113 ms wide, versus 3.078/4.786/4.878 and
-37.964/40.047/40.151 ms for identical-output, same-public-work controls.
-`QSF-216` records the 27.3%/3.5% lower p95 alongside the more stable +3.1%/
--1.4% request-attributed mean differences as bounded whole-run/API variation,
-not storage pushdown.
-`pack_logfmt` snapshots exact, prefix, empty-list, or all-current-field
-selections and writes deterministic `name=value` text to `_msg` or one exact
-destination. Missing, null, and exact object-parent values remain visible as
-empty values; arrays stay atomic compact JSON; nested objects flatten to
-dotted leaves; spaces/control bytes/quotes/backslashes receive the pinned
-VictoriaLogs JSON-string quoting. Timeless intentionally deduplicates
-overlapping selectors and sorts retained field names bytewise instead of
-repeating merge-order-dependent upstream columns. Work, state, results,
-response bytes, cancellation, conflicts, and durable-row immutability remain
-bounded Rust API contracts over public `logs` rows. Direct SQLite/libSQL users
-can run executable `SQL-LOG-052` for a fixed ordered list of exact public
-metadata paths. Because all values have already crossed the public storage
-boundary, no LogsQL opcode or private-table path is added to the extension.
-Exact-build p50/p95/p99 is 3.459/3.805/4.335 ms narrow and
-37.975/39.144/42.387 ms wide, versus 3.506/3.769/3.924 and
-34.373/38.212/38.572 ms for identical-output `format` controls. `QSF-218`
-accepts the +1.0%/+2.4% p95 and -0.2%/+8.2% request-attributed API mean as
-bounded row-local selection/encoding after byte-identical public storage work;
-storage remains four raw blocks with no new extension primitive.
-`unpack_logfmt` snapshots `_msg` or one exact current-row field, decodes
-unquoted and Go-compatible double/single/backtick-quoted logfmt, applies
-exact/prefix/all selectors, and writes string values with an optional result
-prefix and preservation policy. Missing exact names become empty, duplicate
-names are last-wins, malformed quotes follow the pinned unquoted fallback,
-and dotted names reconstruct retained nested metadata without changing
-durable rows. Work, state, results, response bytes, cancellation, and
-conflicts remain bounded Rust API contracts over public `logs` rows. Direct
-SQLite/libSQL users can run executable `SQL-LOG-053` for fixed keys in
-well-formed unquoted logfmt. Full quoting, escapes, dynamic selection, and
-current-row mutation do not justify a language opcode or private-table path
-after the same required public scan.
-Exact-build p50/p95/p99 is 3.355/3.619/4.494 ms narrow and
-41.166/42.437/43.357 ms wide, versus 3.328/3.573/4.213 and
-38.087/41.659/44.310 ms for identical-output pack-plus-copy controls.
-`QSF-220` accepts the +1.3%/+1.9% p95 and +1.2%/+5.9%
-request-attributed API mean after byte-identical public storage work; storage
-remains four raw blocks with no new extension primitive.
-`unpack_syslog` snapshots `_msg` or one exact current-row field and decodes
-optional PRI, RFC3164, RFC5424 structured data, CEF, and CEE into bounded
-request-local string fields. Signed classic-time offsets, result prefixes,
-keep-original writes, query-backed conditions, Go-compatible current/previous
-year and leap-day rules, partial invalid-input behavior, conflicts, limits,
-cancellation, optimize, shutdown, and reopen are pinned without changing
-durable rows. Timeless reconstructs dotted decoded names as retained nested
-metadata; VictoriaLogs' flattened textual output remains the documented
-compatibility boundary. Direct SQLite/libSQL users can run executable
-`SQL-LOG-054` for a fixed RFC5424 header with `-` structured data through
-public `logs`; complete syslog parsing does not justify an extension opcode or
-private-table path after the same required public scan.
-Exact-build p50/p95/p99 is 3.391/3.581/3.802 ms narrow and
-33.887/38.081/38.210 ms wide, versus 2.978/3.439/3.584 and
-34.075/38.026/38.209 ms for identical-output format-plus-copy controls.
-`QSF-224` accepts the +4.1%/+0.1% p95 after byte-identical public storage
-work. `QSF-223` retains the default-work-limit failure when expansion is
-placed before the 64-row limit; callers must narrow/limit first or explicitly
-budget more work. Storage remains four raw blocks with no new extension
-primitive.
-`unpack_words` snapshots `_msg` or one exact current-row field, extracts
-maximal Unicode Letter/Decimal_Number/underscore tokens in source order, and
-writes compact JSON-array text to the source or one exact destination.
-Bare/`from` sources, bare/`as` destinations, quoted and dotted fields, and
-terminal `drop_duplicates` are supported with strict case-insensitive grammar.
-First-seen deduplication, missing and rich textual projection, scalar/object
-conflicts, work/state/result/response limits, deadline cancellation, optimize,
-shutdown, and reopen are pinned without changing durable rows. Core SQLite
-cannot express the exact Unicode categories portably, and the same public
-row scan is required either way, so this pipe intentionally has no inexact SQL
-recipe or new extension scalar. The Rust API owns the transform over public
-`logs`; storage formats, authoritative 8,192-entry batching, compression,
-indexes, and maintenance remain unchanged.
-
-Exact-build p50/p95/p99 is 3.225/3.740/4.877 ms narrow and
-36.912/38.564/39.308 ms wide, versus 3.250/3.493/3.534 and
-34.241/35.662/36.075 ms for equal-storage-work copies. `QSF-227` accepts the
-+7.0%/+8.1% p95 and +0.8%/+4.5% request-attributed API mean. The candidate's
-compact arrays add 640 response bytes; both pairs retain byte-identical public
-block, decode, payload, sort, limit, and row work, so no extension primitive
-is warranted.
-
-`json_array_concat` joins a retained native array or JSON-array string with an
-optional delimiter and writes the result to the request-local source or one
-exact destination. The bounded Rust scanner preserves VictoriaLogs bare
-`NaN`, numeric token spelling, object order, and nested escape spelling for
-string sources; native arrays remain typed and durable rows remain immutable.
-Empty, missing, malformed, scalar, and nonarray sources produce explicit empty
-text, retaining Timeless's richer missing/null/empty distinction even though
-VictoriaLogs omits empty columns from its streaming JSON response. Executable
-`SQL-LOG-055` gives direct SQLite/libSQL users the canonical JSON1 foundation;
-complete grammar, raw-token fidelity, current-row writes, limits,
-cancellation, and envelopes remain in the Rust logs API. The same public rows
-already cross the storage boundary, so no extension opcode or private-table
-path is added.
-
-Exact-build p50/p95/p99 is 3.202/3.872/4.930 ms narrow and
-34.373/35.216/35.316 ms wide, versus 3.332/3.418/3.614 and
-38.555/40.200/40.598 ms for equal-output controls. `QSF-229` accepts the
-+13.3%/-12.4% p95 and -1.1%/-8.4% request-attributed API mean after identical
-public reads and identical 64-row, 1,536-byte responses.
-
-`unroll` expands one or more request-local JSON arrays into rows without
-changing durable log storage:
-
-```text
-* | unroll tags
-* | unroll by (tags, zones)
-* | unroll if (service:="api") (payload.items, "left field")
-```
-
-Grammar is strict and case-insensitive. Fields are exact, may be quoted or
-dotted, and may be bare or parenthesized; `by` is optional. A parenthesized
-list may end in a comma. Every selected source is snapshotted before writes.
-Multiple arrays zip by index to the longest source and shorter, missing,
-invalid, or scalar sources contribute empty text. If every source is empty or
-invalid, one empty-valued row is still emitted. A false condition passes the
-complete rich row through unchanged.
-
-Native retained arrays are traversed directly. JSON-array strings preserve
-VictoriaLogs number spelling, object order, and bare `NaN`; top-level strings
-are decoded, and strings nested in objects or arrays are decoded and
-re-encoded like VictoriaLogs. Result rows, work, retained/transient state,
-response bytes, deadlines, query-backed conditions, cancellation, and nested
-destination conflicts are bounded. Timeless returns explicit empty strings
-where VictoriaLogs' streaming encoder omits empty columns, preserving the
-richer missing/null/empty boundary.
-
-Executable `SQL-LOG-056` gives direct SQLite/libSQL users a read-only
-single-array expansion through public `logs` and JSON1. Complete multi-field
-zip, raw token behavior, conditions, rich mutation, and HTTP semantics remain
-in the Rust API after the same public scan. No extension opcode, private table,
-storage format, or authoritative 8,192-entry batching behavior is changed.
-
-Exact-build p50/p95/p99 is 3.552/3.896/4.049 ms narrow and
-35.071/39.121/40.075 ms wide while returning 128 rows and 2,112 bytes, versus
-3.220/3.670/4.680 and 34.595/39.180/39.443 ms for 64-row, 1,408-byte array-
-concat controls. `QSF-231` accepts the +6.1%/-0.2% p95 and +8.3%/-0.0%
-request-attributed API mean after identical public storage reads; the
-candidate's doubled cardinality and 704 extra response bytes remain part of
-the honest endpoint measurement.
-
-Standalone unquoted
-wildcards in `in`, `contains_any`, and `contains_all` are field-independent
-no-ops. Query-backed forms require a subquery ending in one exact `fields`,
-`keep`, or `uniq` output and execute through bounded public row/pipeline reads
-with request-local caching, cumulative work/state limits, and one deadline.
-Patterns intentionally
-make no inexact `LIKE`/`GLOB` equivalence claim; direct SQLite/libSQL users have
-executable exact-prefix, parameterized-membership, constant-true, and JSON1
-array-membership recipes in `SQL-LOG-014` through `SQL-LOG-017`, plus the
-retained-text byte-range and codepoint-length foundations in `SQL-LOG-019`
-and `SQL-LOG-020`, plus complete retained-model field equality and the
-bytewise ordering fallback in `SQL-LOG-021`, including the
-literal public-row prefix-selected field-set foundation in `SQL-LOG-022`, and
-the bounded two-scan query-backed membership foundation in `SQL-LOG-048`, and
-the existing public posting index for declared string-only keys. `contains_all`,
-`contains_any`, ordered `seq`, and the complete common-case filters remain
-honest API-only rows: portable SQLite does not supply their Unicode phrase-
-boundary predicate or Go-simple case expansion, and `seq` also needs ordered
-non-overlapping search state. JSON-array membership needs no new
-extension primitive because bounded public rows plus `json_each` expose the
-exact retained-type operation. The
-extension exposes general SQLite/libSQL primitives and
-receives a new query vector only when measurements prove that storage-aware
-pushdown materially avoids reads, decode, copies, or row crossings. Saved
-queries, subscriptions, rules, dashboards, and control-plane state remain
-higher-order library work.
-
-## How it works
+Phoenix, Elixir, dashboards, token issuance, cluster administration, and UI
+state are outside this repository. They can act as a control plane, but no
+storage or query request requires BEAM, a NIF, Rocket, or an Elixir fallback.
 
 ```mermaid
 flowchart LR
-    subgraph app ["your process"]
-        SQL["SQL<br/>(any SQLite client)"]
-    end
-    subgraph ext ["libtimeless_ext (loadable .so/.dylib)"]
-        VT["vtab modules<br/>timeless_metrics / _logs / _traces"]
-        ENG["timeless-core engines<br/>buffer → encode → prune/compact"]
-        COD["timeless-codec<br/>pco + adaptive columnar"]
-    end
-    subgraph db ["one database file"]
-        MAIN["your tables"]
-        SHADOW["shadow tables<br/>_chunks / _blocks / _terms /<br/>_trace_blocks / _meta"]
-    end
-    SQL --> VT --> ENG --> COD
-    ENG -->|"re-entrant SQL,<br/>rides host txn"| SHADOW
-    MAIN ~~~ SHADOW
+    SQL[SQLite / libSQL host] --> EXT[libtimeless_ext]
+    HTTP[Optional Rust signal APIs] --> SQL
+    EXT --> DB[(one SQLite database + WAL)]
 ```
 
-`CREATE VIRTUAL TABLE metrics USING timeless_metrics` creates ordinary
-shadow tables next to it (`metrics_chunks`, `metrics_meta`, …) — the FTS5
-pattern. Engine writes are re-entrant SQL on the host connection, so **vtab
-writes ride the host transaction**: `ROLLBACK` rolls back buffered inserts
-*and* intra-transaction flushes; compaction's atomic swap needed zero
-crash-recovery code because SQLite's journal already provides it.
+## Quick start
 
-Column encoding is adaptive per block ("codec 5"): timestamps get
-delta + pco, low-cardinality strings get RLE or dictionary encoding, log
-metadata is shredded by key, and rich trace JSON remains lossless in adaptive
-string columns. Everything else falls back to zstd — whichever is smallest
-wins, decided by the data, per column, per block.
-
-**Durability contract:** flushed = durable, buffered = lost with the
-process, never corrupt. Proven by `kill -9` crash rounds
-(`tests/crash.sh`): reopen, `PRAGMA integrity_check`, every flushed
-watermark present, no index row dangling.
-
-**Multi-connection:** all connections in one process share one engine per
-(db file, table) via a process-global registry. Committed buffered inserts are
-queryable from another connection without a flush, and writers are serialized
-by a bounded per-table gate. A connection can read its own active write
-transaction; another connection selecting during that transaction receives a
-retryable busy-style error (`active write transaction`; retry as for
-`SQLITE_BUSY`) instead of observing transaction-private shadow rows. This is
-what makes `sqld`'s connection pool work safely:
+Build the extension from a clean checkout:
 
 ```sh
-sqld --extensions-path ./ext-dir   # sha256 trusted.lst; loads into every connection
-# curl one request: CREATE VIRTUAL TABLE → INSERT → 'flush'
-# close the stream; a second request reads the flushed rows through public SQL
+cargo build --release -p timeless-ext --locked
+# Linux: target/release/libtimeless_ext.so
+# macOS: target/release/libtimeless_ext.dylib
 ```
 
-## Numbers
-
-Measured 2026-07-22 on an Apple M5 Pro (macOS, Rust 1.97), second run
-quoted per [TESTING.md](TESTING.md); the Linux run is retained in the
-[historical benchmark archive](RESULTS.md). All datasets are deterministic and deliberately
-hostile (ms-jitter timestamps, per-point noise, random ids) — friendly data
-compresses far better. Every number is lossless: bit-exact f64 round-trips
-verified after flush + cold recovery.
-
-### Ingest (1M points / entries / spans, single transaction)
-
-| path | rate | vs plain table |
-|---|---|---|
-| metrics, Tier 1 SQL rows | 2.3M pts/s | plain: 4.2M |
-| **metrics, Tier 2 batch blob** | **23.8M pts/s** | **5.6x faster than plain** |
-| logs vtab | 1.1M entries/s | plain: 3.6M |
-| traces vtab | 0.8M spans/s | plain + trace_id index: 1.0M |
-
-Flush of 1M buffered points: ~110ms, paid at flush cadence, not per point.
-
-### Storage (bytes per row, on-disk after close)
-
-| dataset | plain | vtab | ratio |
-|---|---|---|---|
-| metrics, hostile (1000 series, ms-jitter, noisy values) | 52.6 | **8.3** | **6.3x** |
-| metrics, friendly (regular interval, patterned values) | 46.7 | 0.23 | ~200x |
-| logs, 1M entries | 120.3 | **8.9** | **13.5x** |
-| traces, 960k spans (plain has a trace_id index) | 161.6 | **37.4** | **4.3x** |
-
-### Queries (cold reopen, vtab vs plain table in the same file)
-
-| query | plain | vtab | |
-|---|---|---|---|
-| logs `level='error'` count (50k rows) | 34.5ms | **15.3ms** | 2.3x |
-| logs `service+level+ts` range | 119.7ms | **4.2ms** | 28x |
-| traces `status='error'` count | 38.6ms | **2.8ms** | 13.8x |
-| metrics name+range (10k rows of 1M) | — | **2.0ms** | pushdown |
-| metrics 1-min dashboard grid (Q2 kernel) | 17.9ms raw + client eval | **1.6ms** | 11x |
-| logs `message LIKE '%timeout%'` (default) | **73.9ms** | 344ms | scan: plain wins |
-| logs `LIKE` with `message_index='trigram'` | 74.5ms | **48.3ms** | 1.5x |
-| traces `trace_id` point lookup | **0.005ms** | 2.0ms | B-tree wins |
-
-The last two rows are the honest ones: a compressed store decompresses to
-scan, and nothing beats a native B-tree at point lookups. The trade is 4–14x
-less disk and telemetry that lives inside your database.
-
-Codec decode throughput on this machine: 1.0–1.2 GB/s (logs/traces,
-`bench-codec`). Every query result in the benchmarks is checked against a
-plain-table oracle in the same database.
-
-## Migrating from timeless FsStore data
-
-`tools/bench`'s `import` binary replays an existing timeless data
-directory into a `timeless_metrics` vtab through the Tier 2 blob path,
-then verifies **every point** before reporting success (bit-exact for
-finite values; NaN samples — e.g. Prometheus staleness markers — are
-preserved in storage and surface as SQL `NULL`, an inherent SQLite
-REAL limitation; engine-level reads return the true NaN bits):
+Load it and exercise all three signals:
 
 ```sh
-cargo run --release --bin import -- /var/lib/timeless/data \
-  ./libtimeless_ext.dylib metrics.db metrics
+sqlite3 telemetry.db <<'SQL'
+.load target/release/libtimeless_ext
+
+CREATE VIRTUAL TABLE metrics USING timeless_metrics;
+INSERT INTO metrics(name, ts, value, labels)
+VALUES ('cpu_usage', 1753000000, 42.5, '{"host":"web1"}');
+INSERT INTO metrics(metrics) VALUES ('flush');
+SELECT name, ts, value, labels FROM metrics WHERE name = 'cpu_usage';
+
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');
+INSERT INTO logs(ts, level, message, metadata)
+VALUES (1753000000123, 'error', 'payment declined',
+        '{"service":"payments","retryable":false}');
+INSERT INTO logs(logs) VALUES ('flush');
+SELECT ts, level, message FROM logs WHERE service = 'payments';
+
+CREATE VIRTUAL TABLE traces USING timeless_traces;
+INSERT INTO traces(
+  trace_id, span_id, name, service, kind, status, start_ts, duration_ns
+) VALUES (
+  '4bf92f3577b34da6a3ce929d0e0e4736', '00f067aa0ba902b7',
+  'GET /checkout', 'checkout', 'server', 'ok',
+  1753000000123000000, 8500000
+);
+INSERT INTO traces(traces) VALUES ('flush');
+SELECT lower(hex(trace_id)), name, duration_ns
+  FROM traces
+ WHERE trace_id = x'4bf92f3577b34da6a3ce929d0e0e4736';
+SQL
 ```
 
-For the query side of the swap, `timeless_core::waist` pins the two-call
-contract (`query_multi` + `list_metrics`) the PromQL evaluator binds
-against, with `=`/`!=` matchers in-waist and regex matchers evaluated
-above it via `list_series` + `query_multi_ids`.
+Apple's `/usr/bin/sqlite3` disables extension loading. On macOS, install
+SQLite with Homebrew and use `$(brew --prefix sqlite)/bin/sqlite3`, or embed
+the extension in a Rust host.
 
-## Trust but verify
+For a guided walkthrough, continue with the [user guide](docs/GUIDE.md).
+The [SQL API reference](docs/SQL_API_REFERENCE.md) is canonical when a schema,
+command, bound, batch format, or error detail matters.
 
-The test harness is the most serious part of this repo:
+## Storage models
 
-- **Randomized property oracle** (`tools/bench`, bin `oracle`): ~50k random
-  ops per seed — inserts, flush/optimize/compact at random points, every
-  pushdown plan family, transactions with rollback, prunes — every result
-  compared against mirrored plain tables, order-insensitive, floats by bit
-  pattern. It found a real engine bug (chunk-index shadowing); trust it.
-- **Crash suite** (`tests/crash.sh`): five rounds of `kill -9` at random
-  moments mid-ingest, then integrity + watermark + no-dangle assertions.
-- **Compression honesty** (`timeless-core` tests): 1M points verified
-  bit-exact after recovery, sizes measured from disk, not bookkeeping.
-- **CLI integration suite** (`tests/cli.sh`): 45 sections through the real
-  sqlite3 CLI and Rust persistent-host harness — lifecycles,
-  `EXPLAIN QUERY PLAN` pushdown proofs, reopen recovery, rollback (including
-  auto-flush inside `BEGIN`), malformed-input rejection, Prometheus ingest,
-  rich log/trace fidelity, and multi-connection/multi-process sharing. The
-  release gate does not require or execute Python.
+| module | public data | timestamp unit | authoritative buffer | primary pruning |
+|---|---|---:|---:|---|
+| `timeless_metrics` | metric name, float64 sample, canonical string labels | seconds | 4,096 points per series | name, series id, time, label matchers |
+| `timeless_logs` | eight severities, message, canonical typed/nested metadata | milliseconds or microseconds | 8,192 entries | time, severity, declared metadata keys, optional trigram message index |
+| `timeless_traces` | complete rich-span v2 IDs, relationships, timing, typed attributes/events/links, resource and scope data | nanoseconds | 8,192 spans | time, trace id, service/name/kind/status, duration bounds, optional typed attribute equality |
+
+Writes are append-only. `UPDATE` and row-oriented `DELETE` are rejected;
+retention is an explicit, block-aware maintenance operation.
+
+All current and legacy public batch generations remain readable within data
+ABI 1. New formats use new version bytes or frame magics. Private shadow-table
+names and codecs are implementation details and are never a migration API.
+
+### Metrics
+
+Metrics retain IEEE-754 float bits through binary ingest, compression, flush,
+and reopen. The extension supports SQL rows, named and resolved binary batches,
+and Prometheus exposition text:
+
+```sql
+INSERT INTO metrics(metrics) VALUES (readfile('scrape.prom'));
+INSERT INTO metrics(metrics) VALUES ('flush');
+```
+
+Optional rollup ladders retain coarse aggregates after raw data ages out:
+
+```sql
+CREATE VIRTUAL TABLE metrics USING timeless_metrics(
+  retention='14d',
+  rollups='5m@90d,1h@0'
+);
+
+INSERT INTO metrics(metrics) VALUES ('rollup');
+
+SELECT labels, ts, value
+  FROM timeless_rollup(
+    'metrics', 'cpu_usage', NULL, 300, :start_s, :stop_s, 'avg'
+  );
+```
+
+The stored sample model is float64. Classic Prometheus histogram series work
+as ordinary floats; native histograms require a future versioned typed storage
+design. A Prometheus stale marker is not yet an end-to-end server-ingress
+contract, so the stable server does not claim stale-marker semantics.
+
+### Logs
+
+Logs preserve all eight severities:
+
+`debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, and
+`emergency`.
+
+Metadata preserves JSON strings, numbers, booleans, nulls, arrays, nested
+objects, and the distinction between missing, null, and empty values. Declared
+`index_keys` project string values for posting-list pruning without replacing
+the authoritative typed object.
+
+Use `message_index='trigram'` when measured substring workloads justify the
+additional write and storage cost. The hidden `message_contains` input offers
+exact case-insensitive substring filtering, and `max_work_entries` places an
+inclusive pre-decode cap on a scan.
+
+### Traces
+
+Rich-span v2 preserves packed trace/span/parent IDs, kind and status, status
+description, trace state and flags, typed span attributes, events, links,
+resource and instrumentation-scope data, schema URLs, and every dropped-value
+counter. OTLP fields are not silently blanked to fit an older representation.
+
+Inclusive duration predicates use per-block minimum/maximum metadata to reject
+impossible blocks before decode. Older blocks remain exact through a
+conservative fallback; bounded public `optimize` backfills the small metadata
+rows without rewriting compressed span payloads.
+
+Up to eight explicitly configured span, resource, or scope JSON Pointer paths
+can use typed scalar equality pruning:
+
+```sql
+CREATE VIRTUAL TABLE traces USING timeless_traces(
+  attribute_indexes='[{"scope":"span","path":"/http.method"}]'
+);
+
+SELECT lower(hex(trace_id)), lower(hex(span_id)), start_ts
+  FROM traces
+ WHERE start_ts BETWEEN :start_ns AND :stop_ns
+   AND attribute_filter =
+       '{"scope":"span","path":"/http.method","value":"GET"}';
+```
+
+The block filter is a negative filter only; surviving rows are rechecked
+exactly. Unconfigured paths remain available through ordinary SQLite JSON1.
+TraceQL, complete-trace finalization, and structural trace quantifiers are not
+claimed by this release line.
+
+## Flush, maintenance, and durability
+
+Buffered rows are immediately queryable but are not durable against process
+loss until the extension flushes them. Automatic flush thresholds limit the
+tail; an explicit flush is the durability barrier:
+
+```sql
+INSERT INTO metrics(metrics) VALUES ('flush');
+INSERT INTO logs(logs) VALUES ('flush');
+INSERT INTO traces(traces) VALUES ('flush');
+```
+
+Commands use the FTS5-style hidden column named after the created table:
+
+```sql
+INSERT INTO metrics(metrics) VALUES ('compact');
+INSERT INTO metrics(metrics) VALUES ('rollup');
+INSERT INTO logs(logs) VALUES ('optimize:65536');
+INSERT INTO traces(traces) VALUES ('optimize:65536');
+INSERT INTO traces(traces) VALUES ('prune:1753000000000000000');
+```
+
+Flush and maintenance participate in the host SQLite transaction. Rollback
+restores both live engine state and shadow-table writes. A crash may lose the
+unflushed tail, but must not corrupt flushed state. The crash suite proves
+reopen integrity, durable watermarks, and index consistency after `SIGKILL`.
+
+The Rust signal servers stop admission, drain accepted work, issue a final
+ordered flush, checkpoint WAL, join workers, and release their owner lease on
+SIGINT or SIGTERM. `SIGKILL` cannot run cleanup and therefore retains the same
+flushed-versus-buffered contract.
+
+All durable Timeless state is in the containing database and WAL. Back up or
+replicate the complete database through the host's supported SQLite/libSQL
+mechanism. Copying selected virtual rows or private shadow tables is not a
+compatible backup.
+
+## Public SQL query surfaces
+
+The extension exposes reusable storage-aware SQL primitives, not PromQL or
+LogsQL syntax:
+
+| signal | public query surfaces |
+|---|---|
+| metrics | `timeless_raw`, `timeless_raw_batches`, `timeless_raw_frame`, `timeless_latest`, `timeless_latest_frame`, `timeless_aggregate`, `timeless_aggregate_frame`, `timeless_grid`, `timeless_window`, `timeless_window_batches`, `timeless_rollup`, `timeless_rollup_batches`, `timeless_series`, `timeless_label_values` |
+| logs | bounded base-table scans, `timeless_log_count`, `timeless_log_buckets`, `timeless_log_values`, `timeless_log_query_stats` |
+| traces | indexed base-table scans, `timeless_trace_services`, `timeless_trace_operations`, `timeless_trace_buckets` |
+| all | `timeless_stats` and `timeless_capabilities()` |
+
+Ordinary SQL remains preferred whenever it is correct and efficient. The
+[SQL equivalents](docs/QUERY_SQL_EQUIVALENTS.md) provide 135 parameterized
+recipes using only public extension surfaces; the Rust documentation harness
+executes 173 statements so examples fail when they drift.
+
+Packed frames are optional transport optimizations for high-cardinality or
+remote hosts. Row-oriented SQL remains supported. Every packed layout,
+timestamp boundary, matcher rule, and work guard is specified in the
+[SQL API reference](docs/SQL_API_REFERENCE.md) and
+[query cookbook](docs/QUERIES.md).
+
+## Standalone Rust signal APIs
+
+Build all three servers:
 
 ```sh
-cargo test -p timeless-codec -p timeless-core   # unit + property tests
-./tests/cli.sh                                  # full integration suite
-cd tools/bench
-cargo run --release --bin oracle -- ../../target/release/libtimeless_ext.dylib
-cargo run --release --bin bench  -- ../../target/release/libtimeless_ext.dylib
-cargo run --release --bin query-read -- ../../target/release/libtimeless_ext.dylib
+cargo build --release --workspace --manifest-path servers/Cargo.toml --locked
 ```
 
-`query-read` is the direct-SQL read baseline used by
-[QUERY_PERFORMANCE_PLAN.md](QUERY_PERFORMANCE_PLAN.md). It covers exact,
-narrow, and full raw fan-out; host-side aggregate/latest fallbacks; grid,
-window, and rollup kernels; and the first read after publishing a flush.
+Each binary accepts the matching extension, database, and optional listener:
 
-See [TESTING.md](TESTING.md) for the full guide and the rules for fair
-benchmark numbers.
+```text
+timeless-<signal>-api <libtimeless_ext.so> <database> [listen-address]
+```
 
-Rust hosts can build `timeless-ext` with
-`default-features = false, features = ["embedded"]` and call
-`timeless_ext::register_telemetry(&connection)` to register the three
-telemetry tables and query TVFs without a loadable artifact. The
-[embedded guide](docs/EMBEDDED_RUST.md) includes an executable example,
-shutdown/durability rules, and the direct libSQL gate. The embedding surface
-deliberately excludes the compatibility spike and separately packaged
-dbhealth modules.
+| binary | default listener | main protocols |
+|---|---:|---|
+| `timeless-metrics-api` | `127.0.0.1:19439` | Prometheus text import/scraping, PromQL, explicit MetricsQL routes, VictoriaMetrics JSON-line import/export, native discovery |
+| `timeless-logs-api` | `127.0.0.1:19429` | NDJSON rich-log ingest, LogsQL query and field discovery |
+| `timeless-traces-api` | `127.0.0.1:19449` | OTLP JSON/protobuf/gzip ingest, Jaeger discovery/search, native rich-span reads |
 
-## Status & limits
+Release binaries require authentication unless
+`TIMELESS_AUTH_MODE=disabled` is explicitly set. Non-loopback binding is
+rejected unless `TIMELESS_ALLOW_NON_LOOPBACK=1` is explicitly set for a
+separately secured deployment. TCP is the implemented transport; this release
+does not claim a Unix-socket listener.
 
-**Versioned 0.x surface.** The public data ABI is version 1, the SQL-surface
-inventory is version 1, and the capability handshake is the compatibility
-authority. The virtual tables are passive when embedded directly: callers
-choose flush, optimize/compact, rollup, and prune cadence. The Rust signal
-servers provide measured default maintenance schedules over those same public
-commands.
+Startup acquires an exclusive signal owner lease, validates build/capability
+compatibility and the additive database schema ledger, and fails before
+binding when the extension, schema, retention, or required work guards are
+incompatible. See the [server API reference](docs/SERVER_API_REFERENCE.md)
+for every route, environment variable, scope, limit, response, and lifecycle
+rule.
 
-Known language and data-model boundaries are kept in the
-[PromQL](docs/PROMQL_FEATURE_MATRIX.md) and
-[LogsQL](docs/LOGSQL_FEATURE_MATRIX.md) matrices rather than hidden behind a
-generic experimental label. Native histograms require a versioned typed
-metrics design; VictoriaLogs stream identity requires a versioned stored
-stream design; TraceQL is outside the current query surface. Unsupported
-behavior fails explicitly.
+## Query-language boundary
+
+PromQL, MetricsQL, and LogsQL parsing and expression evaluation live in the
+Rust signal APIs. SQLite never receives those languages as extension syntax.
+The extension owns general pruning, packed results, reductions, storage
+statistics, and bounded row access that are also useful to direct SQL users.
+
+The stable PromQL tier covers the shipped float-series rows in the matrix.
+The MetricsQL routes are a separately named compatibility tier and never
+change the default PromQL routes. LogsQL preserves rich Timeless values while
+pinning intentional VictoriaLogs differences per row. Invalid or unsupported
+syntax fails explicitly before storage rather than being ignored or delegated.
+
+Deferred and experimental work is kept outside the landing page in the
+[deferred-work index](docs/DEFERRED_WORK.md). It lists every stable matrix ID,
+the reason it did not ship, the design or oracle prerequisite that would
+unblock it, and the evidence files to resume from.
+
+## Rust embedding and libSQL
+
+Rust applications that do not need HTTP can register the same production
+extension surfaces in-process:
+
+```text
+timeless-ext = { path = "crates/timeless-ext", default-features = false,
+                 features = ["embedded"] }
+```
+
+Call `timeless_ext::register_telemetry(&connection)` for every connection.
+The `embedded` and loadable-entrypoint modes are mutually exclusive. The
+[embedded Rust guide](docs/EMBEDDED_RUST.md) includes a complete example and
+the direct libSQL gate.
+
+Self-hosted `sqld` can load the extension for every connection and expose SQL
+over Hrana. Pin a tested sqld/libSQL build and follow the ownership and
+capability rules in the [sqld guide](docs/SQLD.md). Timeless does not own the
+host's replication topology, retry policy, or network-byte accounting.
+
+## Performance and evidence
+
+Timeless is optimized for embedded footprint, bounded memory, and useful
+telemetry pruning. It does not claim a competitive benchmark against
+VictoriaMetrics, VictoriaLogs, or Jaeger today.
+
+The retained deterministic SQLite controls show the storage tradeoff clearly:
+
+| dataset | plain SQLite bytes/row | Timeless bytes/row | reduction |
+|---|---:|---:|---:|
+| hostile metrics | 52.6 | 8.3 | 6.3x |
+| regular/patterned metrics | 46.7 | 0.23 | about 200x |
+| logs | 120.3 | 8.9 | 13.5x |
+| traces | 161.6 | 37.4 | 4.3x |
+
+Compression can lose to a native B-tree for exact point lookups and to an
+uncompressed scan when no useful predicate can prune blocks. The benchmarks
+retain those losses. Optional indexes and query primitives are accepted only
+when exact controls show that they avoid meaningful reads, decode, allocation,
+copies, or row crossings.
+
+The [query evidence protocol](docs/QUERY_EVIDENCE.md),
+[storage findings](docs/QUERY_STORAGE_FINDINGS.md), and
+[testing runbook](TESTING.md) record latency tails, result cardinality,
+logical and physical storage, WAL/checkpoint behavior, decoded work, response
+bytes, cancellation, and RSS HWM. Historical general-purpose results remain
+in [RESULTS.md](RESULTS.md) and are labeled as historical.
+
+## Documentation
+
+| document | use it for |
+|---|---|
+| [User guide](docs/GUIDE.md) | SQL-first walkthrough and operational concepts. |
+| [SQLite extension API](docs/SQL_API_REFERENCE.md) | Canonical tables, columns, TVFs, commands, batches, frames, capabilities, transactions, and errors. |
+| [Rust signal server API](docs/SERVER_API_REFERENCE.md) | Binaries, routes, authentication, limits, lifecycle, backup, and configuration. |
+| [Query cookbook](docs/QUERIES.md) | Copyable SQL query patterns. |
+| [PromQL matrix](docs/PROMQL_FEATURE_MATRIX.md) | Exact PromQL and MetricsQL coverage and dispositions. |
+| [LogsQL matrix](docs/LOGSQL_FEATURE_MATRIX.md) | Exact LogsQL coverage and dispositions. |
+| [SQL equivalents](docs/QUERY_SQL_EQUIVALENTS.md) | Executable SQL foundations for language features. |
+| [Deferred work](docs/DEFERRED_WORK.md) | Stable IDs, prerequisites, evidence locations, and the workflow for resuming future query work. |
+| [Query release report](docs/QUERY_RELEASE_REPORT.md) | Shipped, experimental, and deferred counts, evidence, findings, and higher-order recommendations. |
+| [Trace query matrix](docs/2026-08-08_trace_query_matrix.md) | Current trace vectors, rejected shortcuts, and future complete-trace prerequisites. |
+| [TraceQL prerequisite matrix](docs/2026-08-08_traceql_prerequisite_matrix.md) | Storage prerequisites already shipped and the exact remaining TraceQL work. |
+| [Compatibility](docs/COMPATIBILITY.md) | Version, capability, data ABI, format, and platform rules. |
+| [Upgrade and rollback](docs/UPGRADE.md) | Safe ownership, backup, preflight, replacement, and rollback procedure. |
+| [Artifacts](docs/ARTIFACTS.md) | Target matrix, archive inventory, checksums, installation, and current publication state. |
+| [Embedded Rust](docs/EMBEDDED_RUST.md) | In-process use without HTTP. |
+| [Self-hosted sqld](docs/SQLD.md) | libSQL/sqld deployment boundary. |
+| [Testing](TESTING.md) | Complete local correctness, oracle, fault, soak, packaging, and benchmark commands. |
+| [Changelog](CHANGELOG.md) | Versioned public changes. |
+
+## Testing
+
+The canonical order is in [TESTING.md](TESTING.md). The short core is:
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo test --manifest-path tools/query-harness/Cargo.toml --locked
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- contracts
+```
+
+The complete gate also builds the real release extension and servers, runs
+all ignored extension-backed contracts, executes 135 SQL recipes, runs the
+45-section CLI/oracle/crash suite, validates dbhealth, exercises embedded Rust
+and direct libSQL, and can run short or two-hour production fault gates.
+
+Scratch files are removed by default. The testing guide identifies the few
+remaining Python benchmark utilities and their Rust migration status; the
+production extension, API, query, SQL-equivalence, fixture, crash, and
+persistent-host test logic is Rust.
+
+GitHub Actions has no scheduled, branch-push, or pull-request test trigger.
+The query and production workflows are manually dispatched; native release
+packaging runs only for `v*` tags.
 
 ## Repository layout
 
-```
-crates/
-  timeless-core/    engines: pco chunk store (metrics), columnar block store
-                    (logs), span block store (traces) — no SQLite dependency
-  timeless-codec/   typed column encoders with adaptive strategy selection
-  timeless-ext/     loadable extension and opt-in embedded Rust registration:
-                    three vtabs + public query surfaces + shadow-table stores
-tests/              cli.sh (integration), crash.sh (kill -9 durability)
-tools/bench/        bench, bench-logs, bench-traces, bench-codec, oracle
-                    (bundled SQLite — no system sqlite3 needed)
-PLAN.md             historical design and decision record (not current API)
-RESULTS.md          historical benchmark archive (not current release evidence)
-TESTING.md          how to run everything yourself
+```text
+crates/timeless-codec/   adaptive column codecs
+crates/timeless-core/    metrics, logs, and trace block engines
+crates/timeless-ext/     SQLite extension and embedded registration
+crates/dbhealth-ext/     separate database-health extension
+servers/                 standalone Rust signal APIs
+tools/query-harness/     query contracts, evidence, and production gates
+tools/release-tool/      native package builder and verifier
+tools/bench/             deterministic storage/query benchmarks
+tests/                   SQLite CLI, correctness, crash, and dbhealth gates
+docs/                    public references, matrices, plans, and evidence
 ```
 
 ## License

@@ -12,16 +12,18 @@ backup, and error contract is the
 The release binary requires policy authentication by default. An external
 control plane may own cluster, user, session, and token administration.
 
-Sessions 2–6 provide the server lifecycle shell, OTLP ingest, the pinned
-Jaeger read surface, the reusable bounded/streaming extension read path, and a
-narrow lossless historical-query surface for TimelessTracesDashboard.
+The current binary provides OTLP ingest, the pinned Jaeger read surface, a
+reusable bounded/streaming extension read path, and a narrow lossless
+historical-query surface for TimelessTracesDashboard.
 
 ## Run
 
 ```sh
 cargo build -p timeless-ext
+timeless_traces_dir="$(mktemp -d)"
+trap 'rm -rf -- "$timeless_traces_dir"' EXIT
 TIMELESS_AUTH_MODE=disabled cargo run --manifest-path servers/Cargo.toml -p timeless-traces-api -- \
-  target/debug/libtimeless_ext.so /tmp/traces.db
+  target/debug/libtimeless_ext.so "$timeless_traces_dir/traces.db"
 ```
 
 `TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
@@ -75,7 +77,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   per-span resources, and instrumentation scope intact. These two routes are
   traces-specific; they do not change or masquerade as the Jaeger contract.
 
-Session 5 keeps the public SQL waist useful outside this daemon. Unbounded
+The public SQL waist remains useful outside this daemon. Unbounded
 `timeless_traces` cursors stream one decoded block at a time; exact
 `ORDER BY start_ts[,span_id] ASC|DESC LIMIT/OFFSET` queries retain only their
 bounded prefix; inclusive duration predicates filter inside the engine; and
@@ -90,7 +92,7 @@ The service/operation catalog is additive block metadata. Mixed databases
 containing legacy blocks fall back to exact streaming decode, so upgrading
 never silently omits an operation. `timeless_stats('traces')` exposes snapshot,
 bounded-query, discovery, payload, decode, match, return, and cancellation work
-counters. Session 7 adds extension-owned size-tiered optimize backlog and
+counters. The extension also exposes size-tiered optimize backlog and
 raw-compression/merge phase counters. The timer derives a bounded span budget
 from that exact backlog and a 32 MiB source-byte target, then invokes the
 public `optimize:<spans>` command; it never creates or reshapes blocks itself.
@@ -129,7 +131,7 @@ writer queue, exact drain watermarks, explicit flush, rich-field cold reopen,
 WAL checkpoint, graceful process termination, kill-9 recovery, JSON/protobuf/
 gzip parity, atomic malformed-request rejection, decompression bounds, and the
 8,191-to-8,192 automatic-flush boundary through HTTP. They also cover the
-Session 0 Jaeger oracle, rich tags/logs/processes/references, span-limit-before-
+baseline Jaeger oracle, rich tags/logs/processes/references, span-limit-before-
 grouping behavior, traces split across multiple extension blocks, scoped
 SQLite interruption, cancellation during extension work, progress-handler
 cleanup, reuse of the same reader after cancellation, bounded-order planner

@@ -423,14 +423,18 @@ with their matrix rows.
 
 ## Platform and artifact boundary
 
-The checked release artifact matrix builds x86-64 and AArch64 Linux GNU, and
-x86-64 and AArch64 macOS. Linux loadable extensions use `.so`; macOS uses
-`.dylib`. The archive contains the telemetry extension and the three
-signal-specific binaries. `dbhealth` is a separate extension artifact and is
-not registered by these servers. Other targets may compile from source but
-are not claimed as checked release artifacts here. Exact archive paths,
-checksums, manifest/SBOM content, install layout, removal behavior, and the
-distinction between unreleased source and a published artifact are in the
+The intended release matrix covers x86-64 and AArch64 Linux GNU and macOS.
+Linux loadable extensions use `.so`; macOS uses `.dylib`. A complete archive
+contains the telemetry extension and all three signal-specific binaries.
+`dbhealth` is a separate extension artifact and is not registered by these
+servers.
+
+That intended matrix is not a publication claim. `v0.4.0` produced validated
+Linux candidates, but its macOS packaging jobs failed before archive creation;
+there is no complete outer checksum set or published GitHub Release for that
+tag. Other targets may compile from source but are not claimed as release
+artifacts. Exact archive paths, current publication status, checksums,
+manifest/SBOM content, install layout, and removal behavior are in the
 [artifact inventory](ARTIFACTS.md).
 
 The binaries use TCP, a local SQLite/libSQL-compatible database file, WAL

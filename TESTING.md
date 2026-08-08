@@ -7,7 +7,9 @@ complete result; this file defines how to reproduce it.
 
 ## Requirements
 
-- Rust 1.95 or newer and Cargo.
+- A current stable Rust toolchain and Cargo. The Cargo manifests do not yet
+  declare an MSRV, so do not infer a supported minimum compiler from an old
+  benchmark or badge; the most recent complete local gates used Rust 1.97.
 - `sqlite3` 3.34.1 or newer with loadable extensions enabled.
 - A C compiler and CMake for bundled SQLite and compression dependencies.
 - Docker only for refreshing the pinned Prometheus, VictoriaMetrics, and
@@ -66,7 +68,9 @@ test -z "$(git ls-files '*.py')"
 
 ```sh
 cargo build --release -p timeless-ext --locked
-sqlite3 /tmp/timeless-smoke.db \
+timeless_smoke_dir="$(mktemp -d)"
+trap 'rm -rf -- "$timeless_smoke_dir"' EXIT
+sqlite3 "$timeless_smoke_dir/timeless-smoke.db" \
   ".load target/release/libtimeless_ext" \
   "CREATE VIRTUAL TABLE m USING timeless_metrics;
    INSERT INTO m(name, ts, value) VALUES ('cpu', 1, 42.5);

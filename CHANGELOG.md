@@ -12,10 +12,23 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 <!-- release-target: 0.4.0 -->
 
-## [Unreleased] — target 0.4.0
+## [Unreleased]
 
-The source version is intentionally ahead of the latest tag. No `v0.4.0`
-artifact exists until a tag is created from the finished, validated `main`.
+Documentation on `main` now follows the `v0.4.0` source tag. The workspaces
+remain version `0.4.0` until the next release version is selected. No package
+or archive is published merely because this section changes.
+
+## [0.4.0] — 2026-08-08
+
+`v0.4.0` was tagged from `main` at commit
+`512f995a038fb4d9ac21ffc4df3df2d3b5b1a217`. Its manually dispatched query
+and production gates passed. The tag-triggered artifact run produced and
+validated both Linux candidate bundles, but both macOS jobs failed while
+linking the release tool against Apple's restricted system SQLite. The
+incomplete matrix did not produce the outer checksum set, and no GitHub
+Release was published. See the [artifact guide](docs/ARTIFACTS.md) for the
+current distribution status; the tag records source, not a complete binary
+release.
 
 ### Added
 
@@ -69,7 +82,7 @@ artifact exists until a tag is created from the finished, validated `main`.
 ### Changed
 
 - Advanced extension and server source versions together from the tagged
-  pre-handshake `0.3.0` line to unreleased `0.4.0`. The storage data ABI
+  pre-handshake `0.3.0` line to `0.4.0`. The storage data ABI
   remains 1; this prevents an old `v0.3.0` artifact from masquerading as a
   compatible release-server peer.
 - Kept PromQL, MetricsQL, and LogsQL parsing in the Rust signal APIs. The
@@ -141,7 +154,8 @@ Hardened statement atomicity, savepoints, multi-process series identity,
 attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
-[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/awksedgreep/timeless-libsql/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.3.0
 [0.2.0]: https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.2.0
 [0.1.1]: https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.1.1

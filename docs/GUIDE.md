@@ -34,6 +34,10 @@ cargo build --release -p timeless-ext
 # produces: target/release/libtimeless_ext.so   (.dylib on macOS)
 ```
 
+`v0.4.0` has a source tag but no complete published native archive set. Build
+from source until the [artifact guide](ARTIFACTS.md) records a later release
+with every intended archive and the complete outer checksum set.
+
 Load it like any SQLite extension:
 
 ```sh
@@ -56,7 +60,8 @@ That's it. The extension registers three new table types you can use in
 > `brew install sqlite` and use `$(brew --prefix sqlite)/bin/sqlite3`.
 
 Everything lives inside your existing `.db` file — same transactions, same
-backups, same replication. There is nothing else to run.
+whole-database backups, and the host's supported SQLite/libSQL replication.
+There is nothing else to run for the SQL-only path.
 
 ## 2. Five-minute tour
 
@@ -259,7 +264,8 @@ SELECT ts, level, message FROM logs
 
 Equality filters on `level` and on index keys intersect an inverted index —
 only blocks that can match are decompressed. That's the difference between
-the 4ms query and the 120ms query in the [benchmarks](../README.md#numbers).
+the measured query tradeoffs in
+[performance and evidence](../README.md#performance-and-evidence).
 
 Choosing index keys:
 

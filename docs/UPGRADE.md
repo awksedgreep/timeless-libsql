@@ -6,9 +6,14 @@ not turn the server binaries into readers for an unrelated Rust block-store
 directory; that conversion belongs to the higher-order product that owns the
 legacy format and must write through the public Timeless batch/SQL contracts.
 
-The current source target is `0.4.0`; it is unreleased until a matching tag is
-created from validated `main`. The latest existing tag, `v0.3.0`, predates the
-capability handshake and is not a valid extension peer for a `0.4.x` server.
+The current source line is `0.4.0`, and `v0.4.0` is tagged from validated
+`main`. That tag has no complete published native artifact set: its Linux
+candidate bundles passed, its macOS packaging jobs failed, and no outer
+checksum set or GitHub Release was published. Build the matching extension and
+servers from source, or wait for a later complete release; do not mix a
+workflow-retained candidate with another version. The earlier `v0.3.0` tag
+predates the capability handshake and is not a valid extension peer for a
+`0.4.x` server.
 
 ## Invariants
 

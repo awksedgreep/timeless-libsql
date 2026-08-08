@@ -2,7 +2,7 @@
 
 Date: 2026-08-07
 
-Release line: unreleased `0.4.0`
+Release line at capture: pre-tag `0.4.0`; subsequently tagged as `v0.4.0`
 
 Measured implementation source: `cb47e4e9b6d17d848c9249117d1cd1e8f0c324cc`
 
@@ -20,12 +20,16 @@ documented `0.4.x` source line. All 216 matrix rows have terminal dispositions:
 rows are deferred behind named data-model, topology, or upstream-oracle
 prerequisites. There are no `missing`, `partial`, or `in progress` rows.
 
-This is a source-readiness verdict, not a publication event. No `v0.4.0` tag,
-published archive, package, downstream dependency change, or Stack build was
-created because those actions are outside this work. The disposable native
-package used by the local installation gate is not a release. The
-[artifact inventory](ARTIFACTS.md) states exactly what a later tag must
-produce.
+This was a source-readiness verdict, not a publication event. The report run
+itself created no tag, archive, package, downstream dependency change, or
+Stack build. `v0.4.0` was later tagged from `main` on 2026-08-08. Its query and
+production workflows passed, but the tag-triggered artifact matrix exposed a
+macOS release-tool link failure after both Linux candidates passed. No
+complete outer checksum set or GitHub Release was published. The disposable
+native package used by this report's local installation gate and the
+workflow-retained Linux candidates are not presented as a partial release.
+The [artifact inventory](ARTIFACTS.md) records the current publication state
+and the complete bundle contract.
 
 ## Exact compatibility coverage
 
@@ -209,14 +213,15 @@ The current product contract is split deliberately:
 - [artifact guide](ARTIFACTS.md): checksums, manifest, SBOM, notices,
   installation, removal, backup, and rollback ownership.
 
-The future tag must produce four native archives:
+The release workflow targets four native archives:
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
 `x86_64-apple-darwin`, and `aarch64-apple-darwin`. Each contains the metrics,
 logs, and traces binaries; matching extension; installer/remover; internal
 checksums; artifact manifest; SPDX SBOM; project license; and third-party
-notices. Static Rust embedding and direct libSQL 0.9.30 use the same three
-production signal surfaces and prove cold reopen without the compatibility
-spike.
+notices. `v0.4.0` did not complete that matrix and is therefore not a
+published native bundle. Static Rust embedding and direct libSQL 0.9.30 use
+the same three production signal surfaces and prove cold reopen without the
+compatibility spike.
 
 ## Higher-order Elixir interface recommendations
 

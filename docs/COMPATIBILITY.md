@@ -15,8 +15,8 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.4.0` | Unreleased extension/core/dbhealth source line. |
-| `server_workspace` | `0.4.0` | Unreleased metrics/logs/traces server source line. |
+| `extension_workspace` | `0.4.0` | Current tagged extension/core/dbhealth source line. |
+| `server_workspace` | `0.4.0` | Current tagged metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
 | `extension_minimum_server` | `0.4.0` | Oldest server accepted by the current extension document. |
@@ -47,8 +47,9 @@ The project is pre-1.0. A minor version selects a public compatibility line;
 a patch version fixes behavior without intentionally removing a documented
 surface. Extension and Rust server workspaces advance together whenever their
 minimum pairing changes. The changelog calls a source version “unreleased”
-until a matching tag is reachable from `main`; source metadata is not proof
-that an artifact was published.
+until a matching tag is reachable from `main`. A tag and Cargo metadata prove
+source identity, not that a complete native artifact set was published. The
+[artifact guide](ARTIFACTS.md) records that separate status.
 
 These independent versions must not be conflated:
 
@@ -129,10 +130,16 @@ storage.
 
 ## Platform and SQLite/libSQL boundary
 
-Checked release targets are x86-64/AArch64 Linux GNU and x86-64/AArch64
-macOS. The extension uses SQLite's loadable-extension ABI and stores ordinary
-SQLite pages/WAL records. A host may use SQLite backup, libSQL replication, or
-sqld around the complete database. Timeless does not claim that copying only
+The release-tool target inventory covers x86-64/AArch64 Linux GNU and
+x86-64/AArch64 macOS. For `v0.4.0`, both Linux candidate jobs passed and both
+macOS jobs failed before producing archives because the release tool linked
+against Apple's restricted system SQLite. Consequently `v0.4.0` has no
+complete checked native artifact set or published outer checksums. Do not
+infer platform publication from the target inventory alone.
+
+The extension uses SQLite's loadable-extension ABI and stores ordinary SQLite
+pages/WAL records. A host may use SQLite backup, libSQL replication, or sqld
+around the complete database. Timeless does not claim that copying only
 virtual rows or shadow-table subsets creates a compatible replica.
 
 See the [upgrade guide](UPGRADE.md) before replacing artifacts, the
