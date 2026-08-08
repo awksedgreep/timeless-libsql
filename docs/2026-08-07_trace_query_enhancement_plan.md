@@ -188,6 +188,15 @@ Exit criteria:
   is rejected and documented;
 - write amplification and summary storage are measured alongside read gains.
 
+Status: complete; persisted summaries rejected at the semantic gate. The
+checked-in query matrix proves that the current Jaeger route is span-filtered
+and that OTLP cannot provide a truthful completeness state. Exact retained
+snapshot behavior, a public one-scan SQL recipe, cross-batch/retry/late-child/
+retention regressions, and two release A/B measurements are recorded in
+[`2026-08-08_trace_summaries.md`](2026-08-08_trace_summaries.md). The retained
+SQL is 37.6–38.4% faster at exact p95 and 17.0–17.8% faster at broad p95 than
+the first two-scan expression, with zero write or storage amplification.
+
 ## Session 7 — Attribute indexes and TraceQL prerequisites
 
 Use the trace query matrix and observed workloads to select a bounded set of

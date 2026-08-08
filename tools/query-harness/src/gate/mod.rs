@@ -61,6 +61,19 @@ enum GateCommand {
         #[arg(long, default_value_t = 10)]
         traces_per_round: usize,
     },
+    /// Run one SQLite workload for a bounded interval, then SIGKILL and reap
+    /// that exact unreaped child. Used internally by the crash gate.
+    #[command(hide = true)]
+    CrashRun {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        script: PathBuf,
+        #[arg(long)]
+        log: PathBuf,
+        #[arg(long)]
+        kill_after_ms: u64,
+    },
     /// Prove the standalone dbhealth scheduler lifecycle.
     Dbhealth {
         #[arg(long)]
@@ -162,6 +175,12 @@ pub(crate) fn run(root: &Path, args: GateArgs) -> Result<()> {
             logs_per_round,
             traces_per_round,
         ),
+        GateCommand::CrashRun {
+            database,
+            script,
+            log,
+            kill_after_ms,
+        } => crash::run_and_kill(&database, &script, &log, kill_after_ms),
         GateCommand::Dbhealth {
             extension,
             database,

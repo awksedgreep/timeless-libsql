@@ -2,8 +2,10 @@
 
 Date: 2026-08-08  
 Session: 6 of the [trace query enhancement plan](2026-08-07_trace_query_enhancement_plan.md)  
-Status: accepted design gate; no persisted summary storage may be added until
-the `TSQ-06` prerequisites are satisfied.
+Status: Session 6 complete. Persisted summaries were rejected; the measured
+public SQL verdict is in
+[`2026-08-08_trace_summaries.md`](2026-08-08_trace_summaries.md). No persisted
+summary storage may be added until the `TSQ-06` prerequisites are satisfied.
 
 ## Purpose
 

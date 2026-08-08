@@ -1,7 +1,48 @@
+use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{bail, ensure, Context, Result};
+use wait_timeout::ChildExt;
+
+pub(super) fn run_and_kill(
+    database: &Path,
+    script: &Path,
+    log: &Path,
+    kill_after_ms: u64,
+) -> Result<()> {
+    ensure!(kill_after_ms > 0, "kill-after interval must be positive");
+    let input =
+        File::open(script).with_context(|| format!("open crash workload {}", script.display()))?;
+    let output =
+        File::create(log).with_context(|| format!("create crash log {}", log.display()))?;
+    let mut child = Command::new("sqlite3")
+        .arg(database)
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("start sqlite3 crash workload for {}", database.display()))?;
+
+    if let Some(status) = child.wait_timeout(Duration::from_millis(kill_after_ms))? {
+        bail!(
+            "sqlite3 crash workload completed with {status} before the planned {kill_after_ms} ms SIGKILL; increase the generated rounds"
+        );
+    }
+
+    // The child remains unreaped while we hold this handle, so its PID cannot
+    // be reused between the bounded wait and Child::kill. This is the safety
+    // property a shell sleep followed by `kill $pid` could not provide.
+    child.kill().context("SIGKILL sqlite3 crash workload")?;
+    let status = child.wait().context("reap sqlite3 crash workload")?;
+    ensure!(
+        !status.success(),
+        "SIGKILLed sqlite3 crash workload unexpectedly exited successfully"
+    );
+    Ok(())
+}
 
 pub(super) fn write_sql(
     extension: &Path,

@@ -28,7 +28,7 @@
 #   13. timeless_traces round-trip (hex + blob ids in, BLOBs out,
 #       status-partitioned flush, optimize, reopen recovery)
 #   14. trace_id pushdown proof (_trace_blocks contents + the planner
-#       choosing the trace-index plan, visible as VIRTUAL TABLE INDEX 1)
+#       choosing an idx_num whose trace-index bit is set)
 #   15. traces status/service pushdown
 #   16. traces prune removes blocks, terms, trace rows, and duration rows
 #   17. traces append-only + kind/status/id-length validation
@@ -800,9 +800,10 @@ echo "== section 14: trace_id pushdown proof =="
 #  a) the _trace_blocks index holds PACKED 16-byte rows (dedup per
 #     block: trace A has spans in 2 blocks -> 2 rows, trace B in 1);
 #  b) the PLANNER picks the trace plan: best_index claims trace_id
-#     equality as idx_num bit 1 with cost ~10, which EXPLAIN QUERY PLAN
-#     prints as "VIRTUAL TABLE INDEX 1:". A hex-TEXT trace_id works in
-#     WHERE too (the filter parses both forms).
+#     equality as the low idx_num bit with cost ~10. Higher bits encode
+#     additive predicates and the requested-column projection, so the exact
+#     integer is deliberately not stable. A hex-TEXT trace_id works in WHERE
+#     too (the filter parses both forms).
 got=$(sqlite3 "$TRACEDB" <<SQL
 .load $EXT
 SELECT 'rows', COUNT(*), SUM(LENGTH(trace_id)) FROM traces_trace_blocks;
@@ -824,8 +825,9 @@ check_eq "_trace_blocks packed rows + trace_id lookups (blob + hex)" "$got" "$ex
 
 plan=$(sqlite3 "$TRACEDB" ".load $EXT" \
   "EXPLAIN QUERY PLAN SELECT * FROM traces WHERE trace_id = x'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';")
-if [[ "$plan" == *"VIRTUAL TABLE INDEX 1:"* ]]; then
-  pass "planner chose the trace-index plan (idx_num 1)"
+if [[ "$plan" =~ VIRTUAL[[:space:]]TABLE[[:space:]]INDEX[[:space:]]([0-9]+): ]] \
+  && (( (BASH_REMATCH[1] & 1) == 1 )); then
+  pass "planner chose the trace-index plan (trace bit set in idx_num ${BASH_REMATCH[1]})"
 else
   fail "unexpected query plan for trace_id equality: $plan"
 fi

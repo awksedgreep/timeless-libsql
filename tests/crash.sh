@@ -17,12 +17,14 @@
 #     _blocks row (the never-dangle rule holds THROUGH crashes because
 #     metadata/index rows ride the same transaction as their blocks).
 #
-# Mechanics: each iteration spawns a sqlite3 process running a long
-# ingest script against a FRESH db. The script loops rounds of
+# Mechanics: each iteration asks the Rust release-gate harness to own a
+# sqlite3 child running a long ingest script against a FRESH db. The script loops rounds of
 # BEGIN; <inserts into all three vtabs>; flush x3; COMMIT; and prints a
 # watermark line "WM <round>" AFTER the commit — so every watermark in
-# the log corresponds to durably-committed data. We kill -9 at a random
-# 0.1–0.8s, reopen, and assert count(vtab) >= watermark * rows-per-round
+# the log corresponds to durably-committed data. The Rust `Child` remains
+# unreaped until it sends SIGKILL at a random 0.1–0.8s, preventing numeric PID
+# reuse and avoiding shell process-group ambiguity. We reopen and assert
+# count(vtab) >= watermark * rows-per-round
 # for each signal. (>= not ==: a partial NEXT round may have committed
 # after the last watermark hit the log; stdout buffering can only make
 # the recorded watermark LOWER than the durable truth, never higher, so
@@ -67,14 +69,12 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
   LOG="$TMP/crash_$iter.log"
   rm -f "$DB" "$DB-journal" "$DB-wal"
 
-  sqlite3 "$DB" < "$INGEST" > "$LOG" 2>/dev/null &
-  PID=$!
   # Random 100–800 ms of life. $RANDOM is fine here: the KILL TIMING is
   # supposed to be arbitrary; determinism lives in the ingest script.
   SLEEP_MS=$((100 + RANDOM % 701))
-  sleep "0.$(printf '%03d' "$SLEEP_MS")"
-  kill -9 "$PID" 2>/dev/null || true
-  wait "$PID" 2>/dev/null || true
+  cargo run --quiet --manifest-path "$(dirname "$0")/../tools/query-harness/Cargo.toml" --locked -- \
+    gate crash-run --database "$DB" --script "$INGEST" --log "$LOG" \
+    --kill-after-ms "$SLEEP_MS"
 
   WM=$(grep -o 'WM [0-9]*' "$LOG" | tail -1 | cut -d' ' -f2 || true)
   WM=${WM:-0}
