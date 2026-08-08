@@ -683,9 +683,11 @@ fn measure_attribute_shape(
                 Ok((rows.len(), serde_json::to_vec(&rows)?.len()))
             }
             AttributeShape::BooleanTrue => {
-                let count: i64 = connection.query_row(sql, params![start, stop, operand], |row| {
-                    row.get(0)
-                })?;
+                let count: i64 = if candidate {
+                    connection.query_row(sql, params![start, stop, operand], |row| row.get(0))?
+                } else {
+                    connection.query_row(sql, params![start, stop], |row| row.get(0))?
+                };
                 let count = usize::try_from(count).context("negative attribute row count")?;
                 Ok((count, serde_json::to_vec(&count)?.len()))
             }
@@ -1911,5 +1913,41 @@ mod tests {
         assert_eq!(durations[4_095], 100_000);
         assert_eq!(durations[7_782], 900_000);
         assert_eq!(durations[8_109], 900_000);
+    }
+
+    #[test]
+    fn attribute_evidence_binds_each_query_shape_exactly() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE traces(\
+                   trace_id BLOB,span_id BLOB,start_ts INTEGER,attributes TEXT,\
+                   attribute_filter TEXT\
+                 )",
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .prepare(AttributeShape::ExactCount.control_sql())
+                .unwrap()
+                .parameter_count(),
+            3
+        );
+        assert_eq!(
+            connection
+                .prepare(AttributeShape::BooleanTrue.control_sql())
+                .unwrap()
+                .parameter_count(),
+            2
+        );
+        for shape in [AttributeShape::ExactCount, AttributeShape::BooleanTrue] {
+            assert_eq!(
+                connection
+                    .prepare(shape.candidate_sql())
+                    .unwrap()
+                    .parameter_count(),
+                3
+            );
+        }
     }
 }
