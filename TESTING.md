@@ -178,7 +178,7 @@ tests/dbhealth.sh
 
 for section in r1 r2 r3 r4 r8 logs-rich; do
   TIMELESS_EXT="$PWD/target/release/libtimeless_ext.so" \
-    tests/correctness.sh "$section"
+    tests/correctness.sh "$section" || exit
 done
 ```
 
