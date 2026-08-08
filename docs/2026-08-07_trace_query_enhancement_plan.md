@@ -140,6 +140,14 @@ Exit criteria:
   tests pass;
 - otherwise revert the prototype and retain the evidence.
 
+Status: complete; prototype gate not reached. Public work counters prove the
+existing posting intersection plus block-metadata time join reads only the
+theoretical overlapping status partitions for service, name, kind, and status
+over one- and four-box windows. No repeated time-disjoint decompression was
+observed, so no index or storage change was justified. Evidence and the future
+term-local-extrema prerequisite are recorded in
+[`2026-08-07_trace_query_posting_windows.md`](2026-08-07_trace_query_posting_windows.md).
+
 ## Session 5 — Rich-span v2 fidelity
 
 Design an additive public batch/codec revision for currently unretained OTLP

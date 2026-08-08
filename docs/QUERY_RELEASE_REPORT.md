@@ -154,7 +154,7 @@ authoritative two-hour release soak.
 ## Storage and query-boundary findings
 
 The append-only [findings log](QUERY_STORAGE_FINDINGS.md) contains `QSF-001`
-through `QSF-300`. The release-significant boundaries are:
+through `QSF-301`. The release-significant boundaries are:
 
 - metric storage remains timestamp-plus-float64; millisecond evaluation,
   lookback, staleness, extrapolation, labels, timestamps, and result envelopes
