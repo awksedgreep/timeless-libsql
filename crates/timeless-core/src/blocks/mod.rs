@@ -27,13 +27,17 @@
 pub mod codec;
 pub mod engine;
 pub mod mem;
+/// CLP-style template compression for the codec-8 message column
+/// (CLP_PLAN.md) — the codec-5 `encode_pairs_column` precedent applied
+/// to message text.
+pub mod template;
 
 #[cfg(test)]
 mod tests;
 
 pub use codec::{
     decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW,
-    CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_ZSTD,
+    CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_RICH_TEMPLATE, CODEC_ZSTD,
 };
 pub use engine::{
     BlockEngine, BlockEngineConfig, BlockEngineProfileSnapshot, LogQuery, LogQueryExecutionReport,

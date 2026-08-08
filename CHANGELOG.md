@@ -14,7 +14,18 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-No changes recorded after `0.4.2`.
+### Added
+
+- CLP-style template compression for rich log message columns
+  (`CODEC_RICH_TEMPLATE`, codec byte 8; `CLP_PLAN.md`). `optimize()` now
+  requests codec 8 for rich log groups: messages split into a per-block
+  template dictionary plus typed variable columns (numeric variables ride
+  the same pco/zstd encoders as every other column). Every block is
+  measured against the codec-7 encoding and silently falls back when
+  templates lose, so no block is ever larger than before. Real-corpus
+  whole-block wins: 1.29–2.44× on message-dominated rich blocks, ~1.03×
+  when the metadata envelope dominates. Ingest/flush is unchanged; all
+  prior codecs remain decodable.
 
 ## [0.4.2] — 2026-08-08
 

@@ -40,6 +40,14 @@
 //!                        encode_pairs_column below). This is what
 //!                        optimize() writes since the Session 8
 //!                        shredding bake-off.
+//!   CODEC_RICH_TEMPLATE (8) — identical to codec 7 EXCEPT the message
+//!                        column, which is CLP-style template-compressed
+//!                        (blocks/template.rs, CLP_PLAN.md): template
+//!                        ids + template dictionary + typed variable
+//!                        columns. encode_block measures it against the
+//!                        codec-7 message column and emits codec 7 when
+//!                        templates lose, so requesting 8 never costs
+//!                        bytes.
 //!
 //! Codec-5 metadata note: codec 4 kept TODAY'S pair serialization
 //! (below) compressed with plain zstd — same bytes as codec 2, and it
@@ -57,7 +65,7 @@
 //!
 //!   offset  size  field
 //!   0       1     format version (0x01)
-//!   1       1     codec (1, 2, 4 or 5)
+//!   1       1     codec (1, 2, 4, 5, 6, 7 or 8)
 //!   2       4     u32 entry_count
 //!   6       8     i64 ts_min
 //!   14      8     i64 ts_max
@@ -79,7 +87,7 @@ use timeless_codec::{
     encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
 };
 
-use super::{BlockMeta, LogEntry};
+use super::{template, BlockMeta, LogEntry};
 
 pub const CODEC_RAW: u8 = 1;
 pub const CODEC_ZSTD: u8 = 2;
@@ -94,6 +102,13 @@ pub const CODEC_RICH_RAW: u8 = 6;
 /// Rich logs compressed format. Timestamp/level/message use the established
 /// typed encoders; the rich envelope is independently zstd-compressed.
 pub const CODEC_RICH_COLUMNAR: u8 = 7;
+/// Rich logs, CLP-style template-compressed message column (CLP_PLAN.md):
+/// identical to codec 7 except the message column stores template ids +
+/// a template dictionary + typed variable columns (see blocks/template.rs).
+/// encode_block PROJECTS BOTH message encodings and silently emits codec 7
+/// when templates lose, so no block is ever larger than codec 7 — callers
+/// request 8 and read the winner off `BlockMeta::codec`.
+pub const CODEC_RICH_TEMPLATE: u8 = 8;
 
 const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = 38;
@@ -105,6 +120,7 @@ fn known_codec(codec: u8) -> bool {
         || codec == CODEC_COLUMNAR_V2
         || codec == CODEC_RICH_RAW
         || codec == CODEC_RICH_COLUMNAR
+        || codec == CODEC_RICH_TEMPLATE
 }
 
 pub fn is_raw_codec(codec: u8) -> bool {
@@ -132,10 +148,13 @@ pub fn encode_block(
     }
 
     let n = entries.len();
-    let rich_codec = matches!(codec, CODEC_RICH_RAW | CODEC_RICH_COLUMNAR);
+    let rich_codec = matches!(
+        codec,
+        CODEC_RICH_RAW | CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE
+    );
     if !rich_codec && entries.iter().any(LogEntry::is_rich) {
         return Err(format!(
-            "encode_block: rich log entry requires codec {CODEC_RICH_RAW} or {CODEC_RICH_COLUMNAR}"
+            "encode_block: rich log entry requires codec {CODEC_RICH_RAW}, {CODEC_RICH_COLUMNAR} or {CODEC_RICH_TEMPLATE}"
         ));
     }
     let mut ts_min = i64::MAX;
@@ -160,12 +179,18 @@ pub fn encode_block(
         serialize_metadata(entries)?
     };
 
+    // Codec 8 may downgrade itself to 7 below (per-block template
+    // fallback); the container byte and BlockMeta record what was
+    // actually written.
+    let mut codec = codec;
     let columns: [Vec<u8>; 4] = match codec {
-        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR => {
+        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE => {
             // Codecs 4/5: typed column encoders pick their own strategy
             // (and record it in the column frame). The ts delta pass
             // lives INSIDE encode_i64 now; we hand it absolutes. The
-            // ONLY difference between 4 and 5 is the metadata column.
+            // ONLY difference between 4 and 5 is the metadata column,
+            // and the only difference between 7 and 8 is the message
+            // column.
             let ts_values: Vec<i64> = entries.iter().map(|e| e.ts).collect();
             let col_meta = if codec == CODEC_COLUMNAR_V2 {
                 // Codec 5: metadata shredded into per-key columns
@@ -174,14 +199,33 @@ pub fn encode_block(
                     entries.iter().map(|e| e.metadata.as_slice()).collect();
                 encode_pairs_column(&pairs, &col_meta_raw, zstd_level)?
             } else {
-                // Codec 4: today's serialization + zstd, UNFRAMED
+                // Codecs 4/7/8: today's serialization + zstd, UNFRAMED
                 // (byte-identical to the codec-2 column).
                 zstd_compress(&col_meta_raw, zstd_level)?
+            };
+            let col_msg_str =
+                encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?.to_bytes();
+            let col_msg = if codec == CODEC_RICH_TEMPLATE {
+                // Codec 8: template-compress the message column, but
+                // MEASURE against the codec-7 encoding — if templates
+                // lose (near-unique lines, high-entropy blobs), emit a
+                // codec-7 block instead. No block is ever larger than
+                // codec 7 (CLP_PLAN.md, the mandatory per-block gate).
+                let msgs: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
+                let tpl = template::encode_template_str(&msgs, zstd_level)?;
+                if tpl.len() < col_msg_str.len() {
+                    tpl
+                } else {
+                    codec = CODEC_RICH_COLUMNAR;
+                    col_msg_str
+                }
+            } else {
+                col_msg_str
             };
             [
                 encode_i64(&ts_values, zstd_level)?.to_bytes(),
                 encode_u8(&col_lvl_raw, zstd_level)?.to_bytes(),
-                encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?.to_bytes(),
+                col_msg,
                 col_meta,
             ]
         }
@@ -257,8 +301,8 @@ pub fn encode_block(
 }
 
 /// Decode a block payload back into entries, in stored order. Speaks
-/// every codec ever written (1, 2 and 4) — existing databases must
-/// stay decodable forever, whatever optimize() currently emits.
+/// every codec ever written — existing databases must stay decodable
+/// forever, whatever optimize() currently emits.
 pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     let mut r = Reader::new(bytes);
     let version = r.u8("format version")?;
@@ -292,10 +336,10 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
         ));
     }
 
-    // ── Codecs 4/5: typed column decoders ────────────────────────────
+    // ── Codecs 4/5/7/8: typed column decoders ────────────────────────
     if matches!(
         codec,
-        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR
+        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE
     ) {
         let timestamps = decode_i64(stored[0], n)?;
         let levels = decode_u8(stored[1], n)?;
@@ -304,8 +348,12 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
                 return Err(format!("block: entry {i} has invalid level byte {lvl}"));
             }
         }
-        let messages = decode_str(stored[2], n)?;
-        let rich = codec == CODEC_RICH_COLUMNAR;
+        let messages = if codec == CODEC_RICH_TEMPLATE {
+            template::decode_template_str(stored[2], n)?
+        } else {
+            decode_str(stored[2], n)?
+        };
+        let rich = matches!(codec, CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE);
         let rich_metadatas = if rich {
             let raw = zstd_decompress(stored[3], "rich metadata column")?;
             Some(parse_rich_metadata(&raw, n)?)

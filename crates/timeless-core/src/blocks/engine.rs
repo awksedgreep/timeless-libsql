@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use super::codec::{
     decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR,
-    CODEC_RICH_RAW,
+    CODEC_RICH_RAW, CODEC_RICH_TEMPLATE,
 };
 use super::{
     canonical_severity, level_from_name, level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock,
@@ -1525,8 +1525,11 @@ impl BlockEngine {
             }
             entries.sort_by_key(|e| e.ts);
             let terms = self.extract_terms(&entries);
+            // Rich groups request the template codec; encode_block
+            // falls back to codec 7 per block when templates lose
+            // (CLP_PLAN.md), so this is never a size regression.
             let codec = if entries.iter().any(LogEntry::is_rich) {
-                CODEC_RICH_COLUMNAR
+                CODEC_RICH_TEMPLATE
             } else {
                 CODEC_COLUMNAR_V2
             };
@@ -2231,7 +2234,10 @@ impl BlockEngine {
                 // because that same bucket can contain critical/alert/etc.
                 (Some(level), Some(severity))
                     if severity == level_name(level)
-                        && !matches!(block.meta.codec, CODEC_RICH_RAW | CODEC_RICH_COLUMNAR) =>
+                        && !matches!(
+                            block.meta.codec,
+                            CODEC_RICH_RAW | CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE
+                        ) =>
                 {
                     block.partition == Some(level)
                 }

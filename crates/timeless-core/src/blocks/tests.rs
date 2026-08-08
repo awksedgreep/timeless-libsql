@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use super::codec::{
     decode_block, encode_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR,
-    CODEC_RICH_RAW, CODEC_ZSTD, PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS,
+    CODEC_RICH_RAW, CODEC_RICH_TEMPLATE, CODEC_ZSTD, PAIRS_LEGACY, PAIRS_SHREDDED, SHRED_MAX_KEYS,
 };
 use super::engine::{BlockEngine, BlockEngineConfig, LogQuery, LogQueryOrder};
 use super::mem::MemBlockStore;
@@ -61,9 +61,19 @@ fn rich_log_codecs_preserve_severity_and_typed_metadata() {
         metadata_json: Some("{\"nested\":{\"ok\":true},\"status\":202}".into()),
     };
 
-    for codec in [CODEC_RICH_RAW, CODEC_RICH_COLUMNAR] {
+    for codec in [CODEC_RICH_RAW, CODEC_RICH_COLUMNAR, CODEC_RICH_TEMPLATE] {
         let (bytes, meta) = encode_block(std::slice::from_ref(&rich), codec, 7).unwrap();
-        assert_eq!(meta.codec, codec);
+        // Codec 8 measures templates against the codec-7 message column
+        // and may legitimately emit 7 for a one-entry block; every other
+        // request must come back verbatim.
+        if codec == CODEC_RICH_TEMPLATE {
+            assert!(matches!(
+                meta.codec,
+                CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE
+            ));
+        } else {
+            assert_eq!(meta.codec, codec);
+        }
         let decoded = decode_block(&bytes).unwrap();
         assert_eq!(decoded, vec![rich.clone()]);
         assert_eq!(
@@ -74,6 +84,76 @@ fn rich_log_codecs_preserve_severity_and_typed_metadata() {
 
     assert!(encode_block(std::slice::from_ref(&rich), CODEC_RAW, 7).is_err());
     assert!(encode_block(&[rich], CODEC_COLUMNAR_V2, 7).is_err());
+}
+
+#[test]
+fn template_codec_wins_on_templated_messages_and_falls_back_on_noise() {
+    let rich_entry = |ts: i64, message: String| LogEntry {
+        ts,
+        level: 1,
+        severity: Some("info".into()),
+        message,
+        metadata: vec![("service".into(), "auth".into())],
+        metadata_json: Some("{\"service\":\"auth\"}".into()),
+    };
+
+    // Similar-but-not-identical lines: the CLP sweet spot. The block
+    // must come back as codec 8, be smaller than codec 7, and decode
+    // bit-exact.
+    let templated: Vec<LogEntry> = (0..2048)
+        .map(|i| {
+            rich_entry(
+                1_785_600_000_000_000 + i,
+                format!(
+                    "user {} logged in from 10.0.{}.{} in {}ms",
+                    1000 + i,
+                    i % 256,
+                    (i * 7) % 256,
+                    i % 900
+                ),
+            )
+        })
+        .collect();
+    let (tpl_bytes, tpl_meta) = encode_block(&templated, CODEC_RICH_TEMPLATE, 7).unwrap();
+    assert_eq!(tpl_meta.codec, CODEC_RICH_TEMPLATE);
+    let (col_bytes, _) = encode_block(&templated, CODEC_RICH_COLUMNAR, 7).unwrap();
+    assert!(
+        tpl_bytes.len() < col_bytes.len(),
+        "codec 8 block ({}) should beat codec 7 ({})",
+        tpl_bytes.len(),
+        col_bytes.len()
+    );
+    assert_eq!(decode_block(&tpl_bytes).unwrap(), templated);
+
+    // Near-unique high-entropy lines: the per-block gate must emit a
+    // codec 7 block instead (never larger than codec 7).
+    let mut state = 0x9e3779b97f4a7c15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let noisy: Vec<LogEntry> = (0..2048)
+        .map(|i| {
+            let blob: String = (0..40)
+                .map(|_| {
+                    let c = (next() % 62) as u8;
+                    (match c {
+                        0..=9 => b'0' + c,
+                        10..=35 => b'a' + c - 10,
+                        _ => b'A' + c - 36,
+                    }) as char
+                })
+                .collect();
+            rich_entry(1_785_600_000_000_000 + i, blob)
+        })
+        .collect();
+    let (noise_bytes, noise_meta) = encode_block(&noisy, CODEC_RICH_TEMPLATE, 7).unwrap();
+    assert_eq!(noise_meta.codec, CODEC_RICH_COLUMNAR, "fallback must fire");
+    assert_eq!(decode_block(&noise_bytes).unwrap(), noisy);
+    let (noise_col, _) = encode_block(&noisy, CODEC_RICH_COLUMNAR, 7).unwrap();
+    assert_eq!(noise_bytes.len(), noise_col.len(), "fallback == codec 7");
 }
 
 fn config(index_keys: &[&str]) -> BlockEngineConfig {
