@@ -805,6 +805,44 @@ fn trace_query_reads_only_blocks_containing_the_trace() {
 }
 
 #[test]
+fn trace_bucket_selection_observes_cancellation_after_buffer_scan() {
+    let store = SpyStore::new();
+    let cancelled = Arc::clone(&store.cancelled);
+    let engine = SpanBlockEngine::new(
+        Box::new(store),
+        SpanEngineConfig {
+            flush_threshold: 10_000,
+            ..SpanEngineConfig::default()
+        },
+    )
+    .unwrap();
+    for index in 0..4096_u16 {
+        let mut entry = span(
+            (index % 251) as u8,
+            (index % 251) as u8,
+            None,
+            "selection",
+            "api",
+            1,
+            1,
+            index as i64,
+            &[],
+        );
+        entry.duration_ns = i64::from(index.wrapping_mul(4051));
+        engine.push(entry).unwrap();
+    }
+    assert_eq!(engine.stats(), (0, 0, 4096));
+
+    let error = engine
+        .bucket_stats_after_snapshot(&full_range_query(), i64::MAX, || {
+            cancelled.store(true, Ordering::SeqCst);
+        })
+        .unwrap_err();
+    assert_eq!(error, "span query cancelled");
+    assert_eq!(engine.query_profile().query_cancelled, 1);
+}
+
+#[test]
 fn bounded_trace_query_is_exact_and_skips_older_blocks() {
     let engine = SpanBlockEngine::new(
         Box::new(MemSpanStore::new()),

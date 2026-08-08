@@ -148,6 +148,99 @@ fn contract_fixture() -> Vec<Span> {
     ]
 }
 
+const PERCENTILE_START: i64 = 1_800_000_000_000_000_000;
+
+fn percentile_cases() -> Vec<(String, Vec<i64>)> {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let large = (0..8192)
+        .map(|_| {
+            state ^= state << 7;
+            state ^= state >> 9;
+            state ^= state << 8;
+            (state % 1_000_003) as i64
+        })
+        .collect();
+    vec![
+        ("singleton".into(), vec![42]),
+        (
+            "duplicates".into(),
+            (0..129).map(|index| [7, 7, 7, 11][index % 4]).collect(),
+        ),
+        ("ordered".into(), (0..257).map(i64::from).collect()),
+        ("reverse".into(), (0..257).rev().map(i64::from).collect()),
+        ("large-random".into(), large),
+    ]
+}
+
+fn percentile_span(number: u64, service: &str, position: usize, duration_ns: i64) -> Span {
+    Span {
+        trace_id: fixed_be(number),
+        span_id: fixed_be(number),
+        parent_span_id: None,
+        name: "percentile.contract".into(),
+        service: service.into(),
+        kind: 0,
+        status: 1,
+        start_ts: PERCENTILE_START + position as i64,
+        duration_ns,
+        attributes: json!({"service.name": service}),
+        status_description: String::new(),
+        events: json!([]),
+        resource: json!({}),
+        instrumentation_scope: json!({}),
+    }
+}
+
+fn sorted_percentiles(values: &[i64]) -> (i64, i64, i64) {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let rank = |percent: usize| {
+        let one_based = (sorted.len() * percent).div_ceil(100);
+        sorted[one_based.clamp(1, sorted.len()) - 1]
+    };
+    (rank(50), rank(95), rank(99))
+}
+
+fn percentile_contract(
+    connection: &Connection,
+    table: &str,
+    cases: &[(String, Vec<i64>)],
+) -> Result<()> {
+    let empty: i64 = connection.query_row(
+        "SELECT count(*) FROM timeless_trace_buckets(?1,?2,?3,?4,?5)",
+        params![
+            table,
+            "empty",
+            PERCENTILE_START,
+            PERCENTILE_START + 20_000,
+            100_000_i64
+        ],
+        |row| row.get(0),
+    )?;
+    ensure!(empty == 0, "empty percentile input unexpectedly emitted a bucket");
+
+    for (service, values) in cases {
+        let actual: (i64, i64, i64, i64) = connection.query_row(
+            "SELECT spans,dur_p50,dur_p95,dur_p99 \
+             FROM timeless_trace_buckets(?1,?2,?3,?4,?5)",
+            params![
+                table,
+                service,
+                PERCENTILE_START,
+                PERCENTILE_START + 20_000,
+                100_000_i64
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let expected = sorted_percentiles(values);
+        ensure!(
+            actual == (values.len() as i64, expected.0, expected.1, expected.2),
+            "nearest-rank mismatch for {service}: got {actual:?}, expected {expected:?}"
+        );
+    }
+    Ok(())
+}
+
 fn hex<const N: usize>(value: &str) -> [u8; N] {
     assert_eq!(value.len(), N * 2);
     let mut output = [0_u8; N];
@@ -441,6 +534,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
          CREATE VIRTUAL TABLE txn_spans USING timeless_traces;
          CREATE VIRTUAL TABLE lifecycle_spans USING timeless_traces;
          CREATE VIRTUAL TABLE corrupt_spans USING timeless_traces;
+         CREATE VIRTUAL TABLE percentile_spans USING timeless_traces;
          CREATE VIRTUAL TABLE v0_spans USING timeless_traces;",
     )?;
     let fixture = contract_fixture();
@@ -478,6 +572,32 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     ensure!(root.events[0]["attributes"]["handled"] == false);
     ensure!(root.events[0]["attributes"]["exception.type"] == "ContractError");
     projection_contract(&connection, "batch_spans", &fixture, false)?;
+
+    let percentile_cases = percentile_cases();
+    let mut percentile_spans = Vec::new();
+    let mut number = 100_000_u64;
+    for (service, values) in &percentile_cases {
+        for (position, duration) in values.iter().copied().enumerate() {
+            percentile_spans.push(percentile_span(number, service, position, duration));
+            number += 1;
+        }
+    }
+    for spans in percentile_spans.chunks(8192) {
+        connection.execute(
+            "INSERT INTO percentile_spans(percentile_spans) VALUES (?1)",
+            params![batch(spans, 2)?],
+        )?;
+    }
+    percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
+    connection.execute(
+        "INSERT INTO percentile_spans(percentile_spans) VALUES ('flush')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO percentile_spans(percentile_spans) VALUES ('optimize')",
+        [],
+    )?;
+    percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
 
     let mut bad = rich_span(4, None);
     bad.attributes = json!([]);
@@ -603,6 +723,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
         )?;
     }
     projection_contract(&connection, "batch_spans", &fixture, true)?;
+    percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
     let expected_row = semantic_rows(&connection, "row_spans")?;
     let expected_batch = semantic_rows(&connection, "batch_spans")?;
     let expected_lifecycle = semantic_rows(&connection, "lifecycle_spans")?;
@@ -612,12 +733,13 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     ensure!(semantic_rows(&connection, "row_spans")? == expected_row);
     ensure!(semantic_rows(&connection, "batch_spans")? == expected_batch);
     projection_contract(&connection, "batch_spans", &fixture, true)?;
+    percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
     ensure!(semantic_rows(&connection, "lifecycle_spans")? == expected_lifecycle);
     ensure!(semantic_rows(&connection, "corrupt_spans")?[0].attributes == victim.attributes);
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     ensure!(integrity == "ok");
     println!(
-        "PASS: rich row/batch fidelity, threshold, transactions, maintenance, corruption, reopen"
+        "PASS: rich row/batch fidelity, threshold, transactions, maintenance, exact percentiles, corruption, reopen"
     );
     Ok(())
 }

@@ -427,6 +427,51 @@ struct SpanDurationBackfillOutcome {
     budget_limited: bool,
 }
 
+/// Return exact nearest-rank p50/p95/p99 without ordering the entire input.
+/// Selection is in-place, so the duration vector remains the only
+/// cardinality-dependent allocation. Cancellation is checked between each
+/// progressively smaller partition as well as after the final selection.
+fn exact_nearest_rank_percentiles<F>(
+    values: &mut [i64],
+    mut check_cancelled: F,
+) -> Result<(i64, i64, i64), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    if values.is_empty() {
+        return Err("cannot select a percentile from an empty bucket".into());
+    }
+    let nearest_rank_index = |percent: u128| {
+        let rank = (values.len() as u128 * percent).div_ceil(100);
+        (rank as usize).clamp(1, values.len()) - 1
+    };
+    let p50_index = nearest_rank_index(50);
+    let p95_index = nearest_rank_index(95);
+    let p99_index = nearest_rank_index(99);
+
+    check_cancelled()?;
+    let (_, p50, above_p50) = values.select_nth_unstable(p50_index);
+    let p50 = *p50;
+
+    let (p95, above_p95) = if p95_index == p50_index {
+        (p50, above_p50)
+    } else {
+        check_cancelled()?;
+        let (_, p95, above_p95) = above_p50.select_nth_unstable(p95_index - p50_index - 1);
+        (*p95, above_p95)
+    };
+
+    let p99 = if p99_index == p95_index {
+        p95
+    } else {
+        check_cancelled()?;
+        let (_, p99, _) = above_p95.select_nth_unstable(p99_index - p95_index - 1);
+        *p99
+    };
+    check_cancelled()?;
+    Ok((p50, p95, p99))
+}
+
 /// One entry in the engine's in-memory block index: persisted metadata
 /// plus the STATUS PARTITION tag — the same design as the logs
 /// IndexEntry (read blocks/engine.rs for the full "level-term weakness"
@@ -2288,13 +2333,12 @@ impl SpanBlockEngine {
         }
     }
 
-    /// F4 bucket kernel (FEATURE_PLAN.md): per-service span stats per
+    /// F4/F7 bucket kernel (FEATURE_PLAN.md): per-service span stats per
     /// CLOSED-OPEN `[start + k*step, +step)` bucket aligned to the
     /// query's ts_min (histograms bin forward). Per (bucket, service):
     /// span count, error count (status byte == error), and duration
-    /// sum/min/max (saturating i64 sums; ns fit comfortably). No
-    /// percentiles — quantile estimation is approximation policy and
-    /// stays above the waist. Rows sorted (bucket_ts, service).
+    /// sum/min/max (saturating i64 sums; ns fit comfortably), plus exact
+    /// nearest-rank p50/p95/p99. Rows sorted (bucket_ts, service).
     pub fn bucket_stats(
         &self,
         filter: &SpanQuery,
@@ -2378,21 +2422,19 @@ impl SpanBlockEngine {
             entry.0.dur_max = entry.0.dur_max.max(s.duration_ns);
             entry.1.push(s.duration_ns);
         }
-        Ok(stats
-            .into_values()
-            .map(|(mut stat, mut durs)| {
-                durs.sort_unstable();
-                let n = durs.len();
-                let rank = |q: f64| -> i64 {
-                    let r = ((q / 100.0) * n as f64).ceil() as usize;
-                    durs[r.clamp(1, n) - 1]
-                };
-                stat.dur_p50 = rank(50.0);
-                stat.dur_p95 = rank(95.0);
-                stat.dur_p99 = rank(99.0);
-                stat
-            })
-            .collect())
+        let mut result = Vec::with_capacity(stats.len());
+        for (mut stat, mut durations) in stats.into_values() {
+            let (p50, p95, p99) = exact_nearest_rank_percentiles(&mut durations, || {
+                self.store
+                    .check_cancelled()
+                    .map_err(|error| self.query_error(error))
+            })?;
+            stat.dur_p50 = p50;
+            stat.dur_p95 = p95;
+            stat.dur_p99 = p99;
+            result.push(stat);
+        }
+        Ok(result)
     }
 
     /// (persisted blocks, raw blocks, buffered spans) — cheap and payload-free.
