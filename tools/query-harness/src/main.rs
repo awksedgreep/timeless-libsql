@@ -3,6 +3,7 @@ mod evidence;
 mod gate;
 mod oracle;
 mod sql_equivalents;
+mod trace_baseline;
 
 use std::path::PathBuf;
 
@@ -33,6 +34,11 @@ enum Command {
     Gate(gate::GateArgs),
     /// Execute documented public SQL-equivalence recipes.
     Sql(sql_equivalents::SqlArgs),
+    /// Capture reproducible broad Jaeger and direct trace-bucket baselines.
+    TraceBaseline(trace_baseline::TraceBaselineArgs),
+    /// Isolated direct-SQL child used by trace-baseline for honest RSS HWM.
+    #[command(hide = true)]
+    TraceBaselineSql(trace_baseline::TraceBaselineSqlArgs),
 }
 
 fn main() -> Result<()> {
@@ -52,5 +58,7 @@ fn main() -> Result<()> {
         Command::Evidence(args) => evidence::run(&root, args),
         Command::Gate(args) => gate::run(&root, args),
         Command::Sql(args) => sql_equivalents::run(&root, args),
+        Command::TraceBaseline(args) => trace_baseline::run(&root, args),
+        Command::TraceBaselineSql(args) => trace_baseline::run_sql(args),
     }
 }
