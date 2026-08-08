@@ -154,7 +154,7 @@ authoritative two-hour release soak.
 ## Storage and query-boundary findings
 
 The append-only [findings log](QUERY_STORAGE_FINDINGS.md) contains `QSF-001`
-through `QSF-297`. The release-significant boundaries are:
+through `QSF-299`. The release-significant boundaries are:
 
 - metric storage remains timestamp-plus-float64; millisecond evaluation,
   lookback, staleness, extrapolation, labels, timestamps, and result envelopes
@@ -173,6 +173,9 @@ through `QSF-297`. The release-significant boundaries are:
 - trace duration predicates use exact inclusive block extrema when present;
   legacy blocks remain exact through conservative decode until bounded public
   optimize backfills the small metadata rows without rewriting payloads;
+- generation-2 trace reads honor SQLite projection and materialize rich values
+  after pushed predicates; older formats retain the conservative full decoder,
+  while large Jaeger response construction remains a separate API target;
 - required hidden virtual-table inputs must be bound directly in each public
   scan because SQLite may reorder joins;
 - `raw-series-v0` remains backward-readable but is not self-identifying;
@@ -244,7 +247,7 @@ cannot embed its own hash.
 
 | gate | result and evidence |
 |---|---|
-| matrix/document contracts | Pass: 49 Rust tests, including negative all-signal private-storage-boundary, final-report, fault-evidence, storage-finding, and tracked Markdown-table drift tests. |
+| matrix/document contracts | Pass: 52 Rust tests, including negative all-signal private-storage-boundary, final-report, fault-evidence, storage-finding, and tracked Markdown-table drift tests. |
 | SQL cookbook | Pass: 135 recipes / 173 real-extension statements. |
 | immutable oracles | Pass: manifest/image probes plus live Prometheus 549, VictoriaMetrics 196, and VictoriaLogs 1,498 cases. |
 | root extension | Pass: format, all targets/tests, strict Clippy/Rustdoc, and separate dbhealth artifact/shell gate. |

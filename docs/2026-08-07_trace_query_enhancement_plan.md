@@ -95,6 +95,13 @@ Exit criteria:
   improvement, and any response-memory experiment remains a separate change;
 - any new stats are public, bounded, documented, and transaction/reopen safe.
 
+Status: complete. Predicate-first generation-2 projection, conservative legacy
+fallback, direct-SQL/Rust API regressions, public work counters, and exact
+release comparison are recorded in
+[`2026-08-07_trace_query_projection.md`](2026-08-07_trace_query_projection.md)
+and its versioned
+[`JSON artifact`](evidence/2026-08-07_trace_query_projection.json).
+
 ## Session 3 — Exact percentile selection
 
 Replace full duration sorting inside `timeless_trace_buckets` with exact

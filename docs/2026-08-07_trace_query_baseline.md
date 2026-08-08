@@ -86,6 +86,8 @@ Session 1 passes. The measurements separate three costs:
 
 Session 2 should therefore test projection-aware, predicate-first late
 materialization against the exact-trace, full-decode-miss, and bucket shapes.
+That comparison is complete in the
+[Session 2 projection report](2026-08-07_trace_query_projection.md).
 It must not claim the 4,096-span response allocation as a storage defect, and
 it must not revise a codec unless the existing columnar representation cannot
 provide the measured benefit safely.
