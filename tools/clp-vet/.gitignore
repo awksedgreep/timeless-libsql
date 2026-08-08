@@ -1,0 +1,5 @@
+# Corpora are not committed: Loghub sets are re-fetchable (see CLP_PLAN.md
+# Phase 0), journal slices are host-local captures. results_phase0.txt IS
+# tracked — it is the decision-log evidence.
+corpora/
+target/

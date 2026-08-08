@@ -1,0 +1,116 @@
+== journal_ours: 50000 entries, 4.8 MB of message text
+
+### journal_ours
+entries 50000 | blocks 7 | msg bytes 4.77 MB | baseline 5.1 B/e
+  digit-run:   v1 6.1 B/e (x0.83) | v2-lite 3.3 B/e (x1.55) | v2-full 5.6 B/e (x0.91)
+  whole-token: v1 5.1 B/e (x1.01) | v2-lite 3.8 B/e (x1.33) | v2-full 5.9 B/e (x0.86)
+  per-block best: 3.3 B/e (x1.55) — wins: split 7 | whole 0 | codec-7 fallback 0
+templates: 37 avg/block | hit rate 99.8% | vars/msg 4.40 | num-vars 96.8%  (digit-run mode)
+  var shapes: Num 96.8% | Hex 3.2%
+tokenizer: 348 MB/s, 3.65 M entries/s | encode: baseline 16 ms, tokenize+v1 40 ms
+   (journal jsonl: skipped 2 non-string-MESSAGE lines)
+== journal_ours-rich: 29998 entries, 2.5 MB of message text
+
+### journal_ours-rich
+entries 29998 | blocks 4 | msg bytes 2.50 MB | baseline 4.5 B/e
+  digit-run:   v1 5.2 B/e (x0.87) | v2-lite 3.2 B/e (x1.43) | v2-full 5.2 B/e (x0.87)
+  whole-token: v1 4.4 B/e (x1.02) | v2-lite 3.8 B/e (x1.21) | v2-full 5.6 B/e (x0.82)
+  per-block best: 3.2 B/e (x1.43) — wins: split 4 | whole 0 | codec-7 fallback 0
+  whole rich block: 55.4 -> 54.0 B/e (x1.025; envelope+ts+level = 50.8 B/e)
+templates: 42 avg/block | hit rate 99.8% | vars/msg 3.94 | num-vars 96.4%  (digit-run mode)
+  var shapes: Num 96.4% | Hex 3.6%
+tokenizer: 302 MB/s, 3.61 M entries/s | encode: baseline 10 ms, tokenize+v1 22 ms
+== Apache: 56482 entries, 5.1 MB of message text
+
+### Apache
+entries 56482 | blocks 7 | msg bytes 5.08 MB | baseline 4.2 B/e
+  digit-run:   v1 4.7 B/e (x0.89) | v2-lite 3.4 B/e (x1.24) | v2-full 15.0 B/e (x0.28)
+  whole-token: v1 3.8 B/e (x1.11) | v2-lite 3.3 B/e (x1.28) | v2-full 9.4 B/e (x0.45)
+  per-block best: 3.2 B/e (x1.33) — wins: split 2 | whole 5 | codec-7 fallback 0
+templates: 297 avg/block | hit rate 99.0% | vars/msg 7.46 | num-vars 100.0%  (digit-run mode)
+  var shapes: Num 100.0%
+tokenizer: 269 MB/s, 2.99 M entries/s | encode: baseline 22 ms, tokenize+v1 73 ms
+== SSH: 655147 entries, 72.1 MB of message text
+
+### SSH
+entries 655147 | blocks 80 | msg bytes 72.11 MB | baseline 6.6 B/e
+  digit-run:   v1 7.0 B/e (x0.94) | v2-lite 2.9 B/e (x2.23) | v2-full 10.6 B/e (x0.62)
+  whole-token: v1 6.0 B/e (x1.10) | v2-lite 2.7 B/e (x2.39) | v2-full 7.1 B/e (x0.93)
+  per-block best: 2.7 B/e (x2.45) — wins: split 32 | whole 48 | codec-7 fallback 0
+templates: 196 avg/block | hit rate 98.7% | vars/msg 9.90 | num-vars 100.0%  (digit-run mode)
+  var shapes: Num 100.0%
+tokenizer: 264 MB/s, 2.40 M entries/s | encode: baseline 322 ms, tokenize+v1 1095 ms
+== HDFS_2k: 2000 entries, 0.3 MB of message text
+
+### HDFS_2k
+entries 2000 | blocks 1 | msg bytes 0.28 MB | baseline 26.0 B/e
+  digit-run:   v1 32.9 B/e (x0.79) | v2-lite 19.4 B/e (x1.34) | v2-full 29.1 B/e (x0.89)
+  whole-token: v1 26.2 B/e (x0.99) | v2-lite 21.8 B/e (x1.19) | v2-full 25.3 B/e (x1.03)
+  per-block best: 19.4 B/e (x1.34) — wins: split 1 | whole 0 | codec-7 fallback 0
+templates: 41 avg/block | hit rate 99.5% | vars/msg 9.29 | num-vars 100.0%  (digit-run mode)
+  var shapes: Num 100.0%
+tokenizer: 343 MB/s, 2.42 M entries/s | encode: baseline 2 ms, tokenize+v1 4 ms
+== OpenSSH_2k: 2000 entries, 0.2 MB of message text
+
+### OpenSSH_2k
+entries 2000 | blocks 1 | msg bytes 0.22 MB | baseline 7.3 B/e
+  digit-run:   v1 8.2 B/e (x0.88) | v2-lite 5.8 B/e (x1.24) | v2-full 37.8 B/e (x0.19)
+  whole-token: v1 7.5 B/e (x0.97) | v2-lite 4.8 B/e (x1.50) | v2-full 20.7 B/e (x0.35)
+  per-block best: 4.8 B/e (x1.50) — wins: split 0 | whole 1 | codec-7 fallback 0
+templates: 197 avg/block | hit rate 94.4% | vars/msg 9.95 | num-vars 100.0%  (digit-run mode)
+  var shapes: Num 100.0%
+tokenizer: 285 MB/s, 2.57 M entries/s | encode: baseline 1 ms, tokenize+v1 3 ms
+== Apache_2k: 2000 entries, 0.2 MB of message text
+
+### Apache_2k
+entries 2000 | blocks 1 | msg bytes 0.17 MB | baseline 4.9 B/e
+  digit-run:   v1 5.0 B/e (x0.96) | v2-lite 2.6 B/e (x1.84) | v2-full 4.2 B/e (x1.16)
+  whole-token: v1 5.3 B/e (x0.92) | v2-lite 3.0 B/e (x1.63) | v2-full 4.0 B/e (x1.21)
+  per-block best: 2.6 B/e (x1.84) — wins: split 1 | whole 0 | codec-7 fallback 0
+templates: 12 avg/block | hit rate 100.0% | vars/msg 6.90 | num-vars 100.0%  (digit-run mode)
+  var shapes: Num 100.0%
+tokenizer: 283 MB/s, 3.39 M entries/s | encode: baseline 1 ms, tokenize+v1 3 ms
+== Spark_2k: 2000 entries, 0.2 MB of message text
+
+### Spark_2k
+entries 2000 | blocks 1 | msg bytes 0.19 MB | baseline 5.9 B/e
+  digit-run:   v1 8.4 B/e (x0.70) | v2-lite 3.6 B/e (x1.62) | v2-full 9.8 B/e (x0.60)
+  whole-token: v1 5.9 B/e (x1.00) | v2-lite 4.0 B/e (x1.49) | v2-full 6.4 B/e (x0.92)
+  per-block best: 3.6 B/e (x1.62) — wins: split 1 | whole 0 | codec-7 fallback 0
+templates: 40 avg/block | hit rate 99.0% | vars/msg 9.86 | num-vars 100.0%  (digit-run mode)
+  var shapes: Num 100.0%
+tokenizer: 284 MB/s, 2.95 M entries/s | encode: baseline 1 ms, tokenize+v1 3 ms
+== adv-unique-ids: 100000 entries, 9.6 MB of message text
+
+### adv-unique-ids
+entries 100000 | blocks 13 | msg bytes 9.59 MB | baseline 35.9 B/e
+  digit-run:   v1 33.3 B/e (x1.08) | v2-lite 33.0 B/e (x1.09) | v2-full 33.2 B/e (x1.08)
+  whole-token: v1 33.3 B/e (x1.08) | v2-lite 33.0 B/e (x1.09) | v2-full 33.2 B/e (x1.08)
+  per-block best: 33.0 B/e (x1.09) — wins: split 13 | whole 0 | codec-7 fallback 0
+templates: 2 avg/block | hit rate 100.0% | vars/msg 3.00 | num-vars 33.4%  (digit-run mode)
+  var shapes: Num 33.4% | Hex 66.6%
+tokenizer: 183 MB/s, 1.91 M entries/s | encode: baseline 84 ms, tokenize+v1 168 ms
+== adv-random-text: 100000 entries, 7.2 MB of message text
+
+### adv-random-text
+entries 100000 | blocks 13 | msg bytes 7.22 MB | baseline 47.6 B/e
+  digit-run:   v1 45.2 B/e (x1.05) | v2-lite 45.2 B/e (x1.05) | v2-full 115.1 B/e (x0.41)
+  whole-token: v1 45.2 B/e (x1.05) | v2-lite 45.2 B/e (x1.05) | v2-full 115.1 B/e (x0.41)
+  per-block best: 45.2 B/e (x1.05) — wins: split 13 | whole 0 | codec-7 fallback 0
+templates: 7692 avg/block | hit rate 0.0% | vars/msg 2.10 | num-vars 100.0%  (digit-run mode)
+  var shapes: Num 100.0%
+tokenizer: 300 MB/s, 4.15 M entries/s | encode: baseline 79 ms, tokenize+v1 158 ms
+
+
+| corpus | entries | base B/e | best B/e | ratio | v2lite-split | v2lite-whole | wins s/w/base | tok MB/s | hit% | vars/msg | num-var% |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| journal_ours | 50000 | 5.1 | 3.3 | 1.55x | 3.3 | 3.8 | 7/0/0 | 348 | 99.8% | 4.40 | 96.8% |
+| journal_ours-rich | 29998 | 4.5 | 3.2 | 1.43x | 3.2 | 3.8 | 4/0/0 | 302 | 99.8% | 3.94 | 96.4% |
+| Apache | 56482 | 4.2 | 3.2 | 1.33x | 3.4 | 3.3 | 2/5/0 | 269 | 99.0% | 7.46 | 100.0% |
+| SSH | 655147 | 6.6 | 2.7 | 2.45x | 2.9 | 2.7 | 32/48/0 | 264 | 98.7% | 9.90 | 100.0% |
+| HDFS_2k | 2000 | 26.0 | 19.4 | 1.34x | 19.4 | 21.8 | 1/0/0 | 343 | 99.5% | 9.29 | 100.0% |
+| OpenSSH_2k | 2000 | 7.3 | 4.8 | 1.50x | 5.8 | 4.8 | 0/1/0 | 285 | 94.4% | 9.95 | 100.0% |
+| Apache_2k | 2000 | 4.9 | 2.6 | 1.84x | 2.6 | 3.0 | 1/0/0 | 283 | 100.0% | 6.90 | 100.0% |
+| Spark_2k | 2000 | 5.9 | 3.6 | 1.62x | 3.6 | 4.0 | 1/0/0 | 284 | 99.0% | 9.86 | 100.0% |
+| adv-unique-ids | 100000 | 35.9 | 33.0 | 1.09x | 33.0 | 33.0 | 13/0/0 | 183 | 100.0% | 3.00 | 33.4% |
+| adv-random-text | 100000 | 47.6 | 45.2 | 1.05x | 45.2 | 45.2 | 13/0/0 | 300 | 0.0% | 2.10 | 100.0% |

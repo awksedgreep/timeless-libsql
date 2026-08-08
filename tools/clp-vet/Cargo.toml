@@ -1,0 +1,24 @@
+[package]
+name = "clp-vet"
+version = "0.1.0"
+edition = "2021"
+
+# Phase-0 vetting harness for CLP-style template compression (CLP_PLAN.md).
+# Detached from the parent workspace like tools/bench: it is a measurement
+# tool, not a shippable crate, and must not join every workspace build.
+[workspace]
+
+[dependencies]
+# The candidate is measured against the REAL encoders, not a model of
+# them: projected sizes come from feeding tokenizer output through the
+# same typed columns codec 7 uses.
+timeless-codec = { path = "../../crates/timeless-codec" }
+# codec8-bench (Phase 3) drives the real encode_block/decode_block.
+timeless-core = { path = "../../crates/timeless-core" }
+# journalctl -o json corpus parsing only.
+serde_json = "1"
+
+# Throughput numbers must reflect the extension's release profile.
+[profile.release]
+lto = true
+codegen-units = 1
