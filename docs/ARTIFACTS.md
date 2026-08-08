@@ -22,6 +22,11 @@ Build from source until a later tag publishes all intended archives and the
 complete outer `SHA256SUMS`. Do not construct a download URL from the examples
 below or treat the existence of `v0.4.0` as binary availability.
 
+The `0.4.1` source line removes that known macOS link dependency by building
+the release tool with bundled SQLite. This is a packaging fix, not a
+publication claim: a `v0.4.1` tag must still complete all four native jobs and
+the outer checksum gate before its workflow artifacts form a complete set.
+
 The standalone dbhealth extension is intentionally not in this bundle. Build
 `dbhealth-ext` separately from compatible source when it is required.
 
