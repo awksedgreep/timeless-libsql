@@ -73,7 +73,8 @@ The current packager accepts exactly one native target and refuses a dirty
 tree by default:
 
 ```sh
-python3 tools/package_release.py \
+cargo run --release --manifest-path tools/release-tool/Cargo.toml \
+  --locked -- \
   --target x86_64-unknown-linux-gnu \
   --output dist
 ```
@@ -82,10 +83,12 @@ It builds both locked Rust workspaces in release mode, embeds the exact Git
 commit and target, executes every server's `--version`, loads the extension
 and reads `timeless_capabilities()`, produces the SPDX/notice inventories,
 normalizes archive ownership/mode/time metadata, and writes both checksum
-levels. `--allow-dirty` is for local diagnostics only; a public artifact from
-a dirty source tree is not a release candidate. `--force` replaces a local
-candidate with the same name and must never be used to mutate an already
-published release.
+levels. Before returning success it verifies the inner hashes and identities,
+then installs and removes the candidate under an isolated temporary prefix and
+proves data/configuration sentinels survive. `--allow-dirty` is for local
+diagnostics only; a public artifact from a dirty source tree is not a release
+candidate. `--force` replaces a local candidate with the same name and must
+never be used to mutate an already published release.
 
 Because runtime identity includes the commit, package only after the intended
 session is committed on `main`. Rebuild after any commit that changes source

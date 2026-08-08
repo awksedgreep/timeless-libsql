@@ -34,6 +34,9 @@ pub(crate) struct EvidenceArgs {
     log_entries: usize,
     #[arg(long, required = true)]
     output: PathBuf,
+    /// Preserve temporary databases and server logs when evidence capture fails.
+    #[arg(long)]
+    keep_failed: bool,
 }
 
 fn free_port() -> Result<u16> {
@@ -74,16 +77,19 @@ fn require_clean_worktree(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn preserve_failed_evidence<T>(temporary: TempDir, result: Result<T>) -> Result<T> {
+fn finish_evidence<T>(temporary: TempDir, result: Result<T>, keep_failed: bool) -> Result<T> {
     match result {
         Ok(value) => Ok(value),
-        Err(error) => {
+        Err(error) if keep_failed => {
             let preserved = temporary.keep();
             Err(error.context(format!(
                 "failed evidence database and server logs preserved at {}",
                 preserved.display()
             )))
         }
+        Err(error) => Err(error.context(
+            "failed evidence temporary databases and server logs were removed; pass --keep-failed to preserve them",
+        )),
     }
 }
 
@@ -3930,7 +3936,7 @@ pub(crate) fn run(root: &Path, args: EvidenceArgs) -> Result<()> {
             "logs": logs_evidence(&logs_context, args.log_entries)?,
         }))
     })();
-    let evidence = preserve_failed_evidence(temporary, evidence)?;
+    let evidence = finish_evidence(temporary, evidence, args.keep_failed)?;
     let output = root.join(&args.output);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
@@ -4104,9 +4110,8 @@ mod tests {
         fs::write(path.join("logs.db"), b"diagnostic database").unwrap();
         fs::write(path.join("logs.server.log"), b"diagnostic log").unwrap();
 
-        let error =
-            preserve_failed_evidence::<()>(temporary, Err(anyhow::anyhow!("decode failed")))
-                .unwrap_err();
+        let error = finish_evidence::<()>(temporary, Err(anyhow::anyhow!("decode failed")), true)
+            .unwrap_err();
         let rendered = format!("{error:#}");
         assert!(rendered.contains("decode failed"));
         assert!(rendered.contains(&path.display().to_string()));
@@ -4119,6 +4124,18 @@ mod tests {
             b"diagnostic log"
         );
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn failed_evidence_cleans_up_by_default() {
+        let temporary = TempDir::with_prefix("timeless-evidence-cleanup-test-").unwrap();
+        let path = temporary.path().to_path_buf();
+        fs::write(path.join("metrics.db"), b"diagnostic database").unwrap();
+
+        let error = finish_evidence::<()>(temporary, Err(anyhow::anyhow!("query failed")), false)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("--keep-failed"));
+        assert!(!path.exists());
     }
 
     #[test]

@@ -734,8 +734,7 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
             == 1
     );
     ensure!(
-        stat(&current, "query_decoded_spans")?
-            - stat(&before_duration, "query_decoded_spans")?
+        stat(&current, "query_decoded_spans")? - stat(&before_duration, "query_decoded_spans")?
             == 4
     );
     ensure!(stat(&current, "duration_bounded_blocks")? == 3);
@@ -779,8 +778,7 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
             == stat(&before_miss, "query_payload_blocks_read")?
     );
     ensure!(
-        stat(&after_miss, "query_decoded_spans")?
-            == stat(&before_miss, "query_decoded_spans")?
+        stat(&after_miss, "query_decoded_spans")? == stat(&before_miss, "query_decoded_spans")?
     );
     ensure!(scalar_i64(&connection, "SELECT COUNT(*) FROM traces")? == 12);
     let after = stats(&connection, "traces")?;

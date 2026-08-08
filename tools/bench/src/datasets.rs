@@ -79,9 +79,26 @@ pub const LOG_BASE_TS: i64 = 1_700_000_000_000; // unix millis
 pub const LOG_STEP_MS: i64 = 3;
 
 pub const LOG_PATHS: [&str; 20] = [
-    "/", "/login", "/logout", "/signup", "/checkout", "/cart", "/products", "/products/detail",
-    "/search", "/api/v1/users", "/api/v1/orders", "/api/v1/items", "/health", "/metrics",
-    "/admin", "/settings", "/profile", "/invoices", "/reports", "/webhooks",
+    "/",
+    "/login",
+    "/logout",
+    "/signup",
+    "/checkout",
+    "/cart",
+    "/products",
+    "/products/detail",
+    "/search",
+    "/api/v1/users",
+    "/api/v1/orders",
+    "/api/v1/items",
+    "/health",
+    "/metrics",
+    "/admin",
+    "/settings",
+    "/profile",
+    "/invoices",
+    "/reports",
+    "/webhooks",
 ];
 pub const LOG_STATUSES: [&str; 6] = ["200", "201", "204", "404", "500", "503"];
 
@@ -233,13 +250,13 @@ fn attrs(method: &str, status: &str) -> String {
 }
 
 pub fn generate_traces() -> Vec<SpanRecord> {
-    let mut rng = Rng::new(0x7247_CE5); // "TRACES", squint
+    let mut rng = Rng::new(0x0724_7CE5); // "TRACES", squint
     let mut out = Vec::with_capacity(N_TRACES * 10);
     for t in 0..N_TRACES {
         let trace_id: [u8; 16] = rng.bytes();
         let is_error = rng.below(20) == 0; // 5% error traces
-        // Span count 5..=20, skewed low: 80% short chains (5..=11),
-        // 20% fan-outs (12..=20) → mean ≈ 10.
+                                           // Span count 5..=20, skewed low: 80% short chains (5..=11),
+                                           // 20% fan-outs (12..=20) → mean ≈ 10.
         let n_spans = if rng.below(10) < 8 {
             5 + rng.below(7)
         } else {
@@ -258,8 +275,12 @@ pub fn generate_traces() -> Vec<SpanRecord> {
             let (kind, kind_num) = if root {
                 ("server", 1u8)
             } else {
-                [("internal", 0u8), ("client", 2), ("producer", 3), ("consumer", 4)]
-                    [rng.below(4) as usize]
+                [
+                    ("internal", 0u8),
+                    ("client", 2),
+                    ("producer", 3),
+                    ("consumer", 4),
+                ][rng.below(4) as usize]
             };
             let (status, status_num) = if this_error {
                 ("error", 2u8)
@@ -269,7 +290,11 @@ pub fn generate_traces() -> Vec<SpanRecord> {
                 ("ok", 1)
             };
             let http_status = if this_error {
-                if rng.below(2) == 0 { "500" } else { "503" }
+                if rng.below(2) == 0 {
+                    "500"
+                } else {
+                    "503"
+                }
             } else {
                 "200"
             };
@@ -295,7 +320,11 @@ pub fn generate_traces() -> Vec<SpanRecord> {
                 } else {
                     trace_start + rng.below(root_dur as u64) as i64
                 },
-                duration_ns: if root { root_dur } else { rng.duration(scale).max(1_000) },
+                duration_ns: if root {
+                    root_dur
+                } else {
+                    rng.duration(scale).max(1_000)
+                },
                 attributes: attrs(method, http_status),
                 http_method: method,
                 http_status,

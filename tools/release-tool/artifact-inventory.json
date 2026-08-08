@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "binaries": [
+    "timeless-metrics-api",
+    "timeless-logs-api",
+    "timeless-traces-api"
+  ],
+  "targets": [
+    {
+      "triple": "x86_64-unknown-linux-gnu",
+      "extension_suffix": "so",
+      "platform": "linux"
+    },
+    {
+      "triple": "aarch64-unknown-linux-gnu",
+      "extension_suffix": "so",
+      "platform": "linux"
+    },
+    {
+      "triple": "x86_64-apple-darwin",
+      "extension_suffix": "dylib",
+      "platform": "macos"
+    },
+    {
+      "triple": "aarch64-apple-darwin",
+      "extension_suffix": "dylib",
+      "platform": "macos"
+    }
+  ],
+  "fixed_files": [
+    "install.sh",
+    "uninstall.sh",
+    "licenses/timeless-libsql-MIT.txt",
+    "SBOM.spdx.json",
+    "THIRD_PARTY_LICENSES.txt",
+    "artifact-manifest.json",
+    "SHA256SUMS"
+  ]
+}

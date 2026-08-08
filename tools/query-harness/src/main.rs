@@ -2,6 +2,7 @@ mod contracts;
 mod evidence;
 mod gate;
 mod oracle;
+mod production;
 mod sql_equivalents;
 mod trace_baseline;
 
@@ -32,6 +33,8 @@ enum Command {
     Evidence(evidence::EvidenceArgs),
     /// Run Rust-native extension fixtures and release-gate regressions.
     Gate(gate::GateArgs),
+    /// Run the completion-aware production fault and soak gate.
+    Production(production::ProductionArgs),
     /// Execute documented public SQL-equivalence recipes.
     Sql(sql_equivalents::SqlArgs),
     /// Capture reproducible broad Jaeger and direct trace-bucket baselines.
@@ -57,6 +60,7 @@ fn main() -> Result<()> {
         Command::Oracle(args) => oracle::run(&root, args),
         Command::Evidence(args) => evidence::run(&root, args),
         Command::Gate(args) => gate::run(&root, args),
+        Command::Production(args) => production::run(&root, args),
         Command::Sql(args) => sql_equivalents::run(&root, args),
         Command::TraceBaseline(args) => trace_baseline::run(&root, args),
         Command::TraceBaselineSql(args) => trace_baseline::run_sql(args),

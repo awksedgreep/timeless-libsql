@@ -920,12 +920,13 @@ fn inline_code(value: &str) -> Result<Vec<String>> {
 }
 
 fn validate_public_artifact_inventory(root: &Path) -> Result<Vec<String>> {
-    let source_relative = "tools/package_release.py";
+    let source_relative = "tools/release-tool/artifact-inventory.json";
     let source_path = root.join(source_relative);
     if !source_path.is_file() {
         return Ok(Vec::new());
     }
-    let source = fs::read_to_string(&source_path)?;
+    let inventory: serde_json::Value = serde_json::from_str(&fs::read_to_string(&source_path)?)
+        .with_context(|| format!("decode {source_relative}"))?;
     let document_relative = "docs/ARTIFACTS.md";
     let document_path = root.join(document_relative);
     if !document_path.is_file() {
@@ -936,23 +937,25 @@ fn validate_public_artifact_inventory(root: &Path) -> Result<Vec<String>> {
     let document = fs::read_to_string(&document_path)?;
     let mut errors = Vec::new();
 
-    let targets_block = Regex::new(r"(?s)SUPPORTED_TARGETS\s*=\s*\{(.*?)\n\}")?
-        .captures(&source)
-        .and_then(|captures| captures.get(1))
-        .context("tools/package_release.py: cannot derive SUPPORTED_TARGETS")?
-        .as_str();
-    let target_row = Regex::new(r#""([^"]+)"\s*:\s*\("([^"]+)",\s*"([^"]+)"\)"#)?;
-    let expected_targets: BTreeMap<String, String> = target_row
-        .captures_iter(targets_block)
-        .map(|captures| {
-            (
-                captures[1].to_owned(),
-                format!("lib/libtimeless_ext.{}", &captures[2]),
-            )
+    let expected_targets: BTreeMap<String, String> = inventory
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .context("artifact inventory targets must be an array")?
+        .iter()
+        .map(|target| {
+            let triple = target
+                .get("triple")
+                .and_then(serde_json::Value::as_str)
+                .context("artifact inventory target is missing triple")?;
+            let suffix = target
+                .get("extension_suffix")
+                .and_then(serde_json::Value::as_str)
+                .context("artifact inventory target is missing extension_suffix")?;
+            Ok((triple.to_owned(), format!("lib/libtimeless_ext.{suffix}")))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     if expected_targets.is_empty() {
-        bail!("{source_relative}: SUPPORTED_TARGETS has no recognized entries");
+        bail!("{source_relative}: targets has no entries");
     }
 
     let (target_region, mut marker_errors) =
@@ -996,31 +999,31 @@ fn validate_public_artifact_inventory(root: &Path) -> Result<Vec<String>> {
         ));
     }
 
-    let binaries_block = Regex::new(r"(?s)BINARIES\s*=\s*\((.*?)\)")?
-        .captures(&source)
-        .and_then(|captures| captures.get(1))
-        .context("tools/package_release.py: cannot derive BINARIES")?
-        .as_str();
-    let quoted = Regex::new(r#""([^"]+)""#)?;
-    let mut expected_files: BTreeSet<String> = quoted
-        .captures_iter(binaries_block)
-        .map(|captures| format!("bin/{}", &captures[1]))
-        .collect();
-    let staged_path = Regex::new(r#"stage\s*/\s*"([^"]+)"(?:\s*/\s*"([^"]+)")?"#)?;
-    for captures in staged_path.captures_iter(&source) {
-        let first = &captures[1];
-        let path = captures.get(2).map_or_else(
-            || first.to_owned(),
-            |second| format!("{first}/{}", second.as_str()),
-        );
-        if path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.contains('.'))
-        {
-            expected_files.insert(path);
-        }
-    }
+    let mut expected_files: BTreeSet<String> = inventory
+        .get("binaries")
+        .and_then(serde_json::Value::as_array)
+        .context("artifact inventory binaries must be an array")?
+        .iter()
+        .map(|binary| {
+            binary
+                .as_str()
+                .map(|binary| format!("bin/{binary}"))
+                .context("artifact inventory binary must be a string")
+        })
+        .collect::<Result<_>>()?;
+    expected_files.extend(
+        inventory
+            .get("fixed_files")
+            .and_then(serde_json::Value::as_array)
+            .context("artifact inventory fixed_files must be an array")?
+            .iter()
+            .map(|path| {
+                path.as_str()
+                    .map(str::to_owned)
+                    .context("artifact inventory fixed file must be a string")
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
     for suffix in expected_targets
         .values()
         .filter_map(|path| path.rsplit_once('.'))
@@ -1041,7 +1044,7 @@ fn validate_public_artifact_inventory(root: &Path) -> Result<Vec<String>> {
             continue;
         }
         for path in inline_code(values[0])? {
-            if path.contains('/') || path.contains('.') {
+            if path.contains('/') || path.contains('.') || expected_files.contains(&path) {
                 documented_files.insert(path);
             }
         }
@@ -2464,23 +2467,26 @@ mod tests {
         let root = temporary.path();
         fs::create_dir_all(root.join("tools")).unwrap();
         fs::create_dir_all(root.join("docs")).unwrap();
+        fs::create_dir_all(root.join("tools/release-tool")).unwrap();
         fs::write(
-            root.join("tools/package_release.py"),
-            r#"SUPPORTED_TARGETS = {
-    "x86_64-unknown-linux-gnu": ("so", "linux"),
-    "aarch64-apple-darwin": ("dylib", "macos"),
-}
-BINARIES = ("timeless-metrics-api", "timeless-logs-api", "timeless-traces-api")
-stage / "bin"
-stage / "lib"
-stage / "licenses" / "timeless-libsql-MIT.txt"
-stage / "install.sh"
-stage / "uninstall.sh"
-stage / "SBOM.spdx.json"
-stage / "THIRD_PARTY_LICENSES.txt"
-stage / "artifact-manifest.json"
-stage / "SHA256SUMS"
-"#,
+            root.join("tools/release-tool/artifact-inventory.json"),
+            r#"{
+  "schema": 1,
+  "binaries": ["timeless-metrics-api", "timeless-logs-api", "timeless-traces-api"],
+  "targets": [
+    {"triple": "x86_64-unknown-linux-gnu", "extension_suffix": "so", "platform": "linux"},
+    {"triple": "aarch64-apple-darwin", "extension_suffix": "dylib", "platform": "macos"}
+  ],
+  "fixed_files": [
+    "install.sh",
+    "uninstall.sh",
+    "licenses/timeless-libsql-MIT.txt",
+    "SBOM.spdx.json",
+    "THIRD_PARTY_LICENSES.txt",
+    "artifact-manifest.json",
+    "SHA256SUMS"
+  ]
+}"#,
         )
         .unwrap();
         let document = r#"# Artifacts

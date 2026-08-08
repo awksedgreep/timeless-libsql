@@ -5,6 +5,10 @@ pinned upstream-oracle refreshes, public SQL recipe execution, and reproducible
 query evidence capture. It is a detached Cargo workspace so query tooling does
 not become part of the extension or signal-server dependency graphs.
 
+The repository-wide command order, prerequisites, and distinction between
+local, live-oracle, evidence, fault/soak, embedding, packaging, and benchmark
+gates are maintained in [TESTING.md](../../TESTING.md).
+
 Run every unit and negative-path regression:
 
 ```bash
@@ -26,6 +30,15 @@ real public extension:
 ```bash
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- \
   sql --extension target/release/libtimeless_ext.so
+```
+
+Run the two-minute production fault gate against release builds:
+
+```bash
+cargo run --release --manifest-path tools/query-harness/Cargo.toml \
+  --locked -- production \
+  --mode short \
+  --output /tmp/timeless-production-short.json
 ```
 
 The SQL runner links to the host SQLite library because it tests the same
@@ -50,6 +63,9 @@ The modules have narrow responsibilities:
 - `evidence` owns signal processes, fixture admission and durability barriers,
   query latency/counter/cardinality measurements, cancellation contracts,
   storage accounting, and RSS HWM capture; and
+- `production` owns the completion-aware mixed-signal fault and soak gate,
+  process generations, backups, startup/storage/resource faults, durable
+  completion, and its stable JSON report; and
 - `gate` replaces language-specific test drivers with Rust binary fixtures,
   persistent SQLite hosts, packed-frame decoders, focused correctness cases,
   crash-workload generation, and dbhealth lifecycle checks used by the shell

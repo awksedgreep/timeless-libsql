@@ -564,9 +564,7 @@ impl AttributeShape {
             Self::ExactCount => {
                 format!(r#"{{"scope":"span","path":"/count","value":{target}}}"#)
             }
-            Self::BooleanTrue => {
-                r#"{"scope":"span","path":"/bool","value":true}"#.to_owned()
-            }
+            Self::BooleanTrue => r#"{"scope":"span","path":"/bool","value":true}"#.to_owned(),
         }
     }
 }

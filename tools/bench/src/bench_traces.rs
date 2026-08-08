@@ -42,12 +42,13 @@
 
 mod datasets;
 
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
+
+mod scratch;
 
 // The workload lives in the shared datasets module (Session 7 codec
 // bake-off refactor) so bench-codec measures the exact bytes this
@@ -616,10 +617,7 @@ fn query_bench(data: &[Span], plain_path: &str, vtab_path: &str, ext: &str) {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let ext = env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: bench-traces <path-to-libtimeless_ext.so>");
-        std::process::exit(2);
-    });
+    let (ext, scratch) = scratch::Scratch::from_args("bench-traces", "timeless-bench-traces-");
     assert!(
         Path::new(&ext).exists(),
         "extension not found at {ext} (build with: cargo build -p timeless-ext --release)"
@@ -638,12 +636,16 @@ fn main() {
         tg.elapsed().as_secs_f64() * 1e3
     );
 
-    let plain = bench_plain(&data, "/tmp/tl_bench_traces_plain.db");
+    let plain_path = scratch.database("plain.db");
+    let vtab_path = scratch.database("vtab.db");
+    let tier2_v0_path = scratch.database("tier2-v0.db");
+    let tier2_v1_path = scratch.database("tier2-v1.db");
+    let plain = bench_plain(&data, &plain_path);
     println!("- plain baseline done ({:.2}s insert)", plain.insert_secs);
-    let vtab = bench_vtab(&data, "/tmp/tl_bench_traces_vtab.db", &ext);
+    let vtab = bench_vtab(&data, &vtab_path, &ext);
     println!("- vtab done ({:.2}s insert)", vtab.insert_secs);
-    let t2_v0 = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2_v0.db", &ext, false);
-    let t2_v1 = bench_vtab_tier2(&data, "/tmp/tl_bench_traces_t2_v1.db", &ext, true);
+    let t2_v0 = bench_vtab_tier2(&data, &tier2_v0_path, &ext, false);
+    let t2_v1 = bench_vtab_tier2(&data, &tier2_v1_path, &ext, true);
     println!(
         "- vtab tier2 v0 done ({:.2}s ingest + {:.1} ms final flush): {} durable (vs tier1 {}; count + status=error verified equal)",
         t2_v0.insert_secs,
@@ -702,12 +704,7 @@ fn main() {
         vtab.optimize_ms.unwrap_or(0.0)
     );
 
-    query_bench(
-        &data,
-        "/tmp/tl_bench_traces_plain.db",
-        "/tmp/tl_bench_traces_vtab.db",
-        &ext,
-    );
+    query_bench(&data, &plain_path, &vtab_path, &ext);
 
-    println!("\ndone. dbs left in /tmp/tl_bench_traces_{{plain,vtab}}.db for inspection.");
+    println!("\ndone. {}.", scratch.finish_message());
 }

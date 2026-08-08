@@ -34,7 +34,7 @@ jobs:
             . -> target
             servers -> servers/target
       - name: Build versioned native bundle
-        run: python3 tools/package_release.py --target "${{ matrix.target }}"
+        run: cargo run --release --manifest-path tools/release-tool/Cargo.toml --locked -- --target "${{ matrix.target }}"
       - uses: actions/upload-artifact@v4
         with:
           name: timeless-telemetry-data-plane-${{ matrix.target }}

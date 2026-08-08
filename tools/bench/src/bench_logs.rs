@@ -28,8 +28,8 @@
 //!     traffic, so the vtab's 1h merge-span cap never fragments it)
 
 mod datasets;
+mod scratch;
 
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
@@ -42,8 +42,8 @@ use rusqlite::{params, Connection};
 // benchmark body diff-minimal against the recorded Session 5 runs.
 use datasets::{
     generate_logs as generate, LogRecord as Entry, LOG_BASE_TS as BASE_TS,
-    LOG_ENTRIES as N_ENTRIES, LOG_PATHS as PATHS, LOG_STATUSES as STATUSES,
-    LOG_STEP_MS as STEP_MS, SERVICES,
+    LOG_ENTRIES as N_ENTRIES, LOG_PATHS as PATHS, LOG_STATUSES as STATUSES, LOG_STEP_MS as STEP_MS,
+    SERVICES,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,8 @@ fn open_with_ext(path: &str, ext: &str) -> Connection {
     let conn = Connection::open(path).expect("open db");
     unsafe {
         conn.load_extension_enable().expect("enable ext loading");
-        conn.load_extension(ext, None::<&str>).expect("load extension");
+        conn.load_extension(ext, None::<&str>)
+            .expect("load extension");
     }
     conn.load_extension_disable().expect("disable ext loading");
     conn
@@ -93,10 +94,8 @@ struct IngestResult {
 fn bench_plain(data: &[Entry], path: &str) -> IngestResult {
     scrub(path);
     let conn = Connection::open(path).expect("open plain db");
-    conn.execute_batch(
-        "CREATE TABLE logs(ts INTEGER, level TEXT, message TEXT, metadata TEXT);",
-    )
-    .expect("create plain table");
+    conn.execute_batch("CREATE TABLE logs(ts INTEGER, level TEXT, message TEXT, metadata TEXT);")
+        .expect("create plain table");
 
     let t0 = Instant::now();
     conn.execute_batch("BEGIN").unwrap();
@@ -270,7 +269,10 @@ fn bench_vtab_tier2(data: &[Entry], path: &str, ext: &str) -> IngestResult {
 fn time_count(conn: &Connection, label: &str, sql: &str, params: &[&dyn rusqlite::ToSql]) -> i64 {
     let t = Instant::now();
     let n: i64 = conn.query_row(sql, params, |r| r.get(0)).expect(label);
-    println!("- {label}: {n} rows, {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "- {label}: {n} rows, {:.1} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
     n
 }
 
@@ -283,7 +285,12 @@ fn query_bench(data: &[Entry], plain_path: &str, vtab_path: &str, ext: &str) {
 
     println!("plain table:");
     let plain = Connection::open(plain_path).expect("reopen plain");
-    let p1 = time_count(&plain, "level=error count", "SELECT COUNT(*) FROM logs WHERE level='error'", &[]);
+    let p1 = time_count(
+        &plain,
+        "level=error count",
+        "SELECT COUNT(*) FROM logs WHERE level='error'",
+        &[],
+    );
     let p2 = time_count(
         &plain,
         "service+level+range",
@@ -301,9 +308,19 @@ fn query_bench(data: &[Entry], plain_path: &str, vtab_path: &str, ext: &str) {
 
     println!("logs vtab:");
     let vtab = open_with_ext(vtab_path, ext);
-    let v0 = time_count(&vtab, "count(*) after reopen", "SELECT COUNT(*) FROM logs", &[]);
+    let v0 = time_count(
+        &vtab,
+        "count(*) after reopen",
+        "SELECT COUNT(*) FROM logs",
+        &[],
+    );
     assert_eq!(v0 as usize, N_ENTRIES, "vtab lost entries across reopen!");
-    let v1 = time_count(&vtab, "level=error count", "SELECT COUNT(*) FROM logs WHERE level='error'", &[]);
+    let v1 = time_count(
+        &vtab,
+        "level=error count",
+        "SELECT COUNT(*) FROM logs WHERE level='error'",
+        &[],
+    );
     let v2 = time_count(
         &vtab,
         "service+level+range (pushdown)",
@@ -353,9 +370,9 @@ fn query_bench(data: &[Entry], plain_path: &str, vtab_path: &str, ext: &str) {
     // (blob ingest), then the LIKE benchmark that used to be our one
     // losing row. The plain-table count is the oracle.
     {
-        let tg_path = "/tmp/tl_bench_logs_tg.db";
-        scrub(tg_path);
-        let tg = open_with_ext(tg_path, ext);
+        let tg_path = format!("{vtab_path}.trigram");
+        scrub(&tg_path);
+        let tg = open_with_ext(&tg_path, ext);
         tg.execute_batch(
             "CREATE VIRTUAL TABLE logs USING timeless_logs(             index_keys='service,path,status', message_index='trigram');",
         )
@@ -366,13 +383,16 @@ fn query_bench(data: &[Entry], plain_path: &str, vtab_path: &str, ext: &str) {
                 .prepare("INSERT INTO logs(logs) VALUES (?1)")
                 .expect("prepare tg ingest");
             for chunk in data.chunks(50_000) {
-                stmt.execute(params![encode_log_blob(chunk)]).expect("tg ingest");
+                stmt.execute(params![encode_log_blob(chunk)])
+                    .expect("tg ingest");
             }
         }
         tg.execute_batch("COMMIT").unwrap();
-        tg.execute("INSERT INTO logs(logs) VALUES ('flush')", []).unwrap();
+        tg.execute("INSERT INTO logs(logs) VALUES ('flush')", [])
+            .unwrap();
         let topt = Instant::now();
-        tg.execute("INSERT INTO logs(logs) VALUES ('optimize')", []).unwrap();
+        tg.execute("INSERT INTO logs(logs) VALUES ('optimize')", [])
+            .unwrap();
         let opt_ms = topt.elapsed().as_secs_f64() * 1e3;
         let tq = Instant::now();
         let n: i64 = tg
@@ -414,10 +434,7 @@ fn query_bench(data: &[Entry], plain_path: &str, vtab_path: &str, ext: &str) {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let ext = env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: bench-logs <path-to-libtimeless_ext.so>");
-        std::process::exit(2);
-    });
+    let (ext, scratch) = scratch::Scratch::from_args("bench-logs", "timeless-bench-logs-");
     assert!(
         Path::new(&ext).exists(),
         "extension not found at {ext} (build with: cargo build -p timeless-ext --release)"
@@ -432,23 +449,31 @@ fn main() {
 
     let tg = Instant::now();
     let data = generate();
-    println!("- generated workload in {:.1} ms", tg.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "- generated workload in {:.1} ms",
+        tg.elapsed().as_secs_f64() * 1e3
+    );
 
-    let plain = bench_plain(&data, "/tmp/tl_bench_logs_plain.db");
+    let plain_path = scratch.database("plain.db");
+    let vtab_path = scratch.database("vtab.db");
+    let tier2_path = scratch.database("tier2.db");
+    let plain = bench_plain(&data, &plain_path);
     println!("- plain baseline done ({:.2}s insert)", plain.insert_secs);
-    let vtab = bench_vtab(&data, "/tmp/tl_bench_logs_vtab.db", &ext);
+    let vtab = bench_vtab(&data, &vtab_path, &ext);
     println!("- vtab done ({:.2}s insert)", vtab.insert_secs);
-    let tier2 = bench_vtab_tier2(&data, "/tmp/tl_bench_logs_t2.db", &ext);
+    let tier2 = bench_vtab_tier2(&data, &tier2_path, &ext);
     println!("- vtab tier2 done ({:.2}s ingest)", tier2.insert_secs);
     // Cross-check: the blob path must land the identical dataset.
     {
-        let conn = open_with_ext("/tmp/tl_bench_logs_t2.db", &ext);
+        let conn = open_with_ext(&tier2_path, &ext);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM logs", [], |r| r.get(0))
             .expect("tier2 count");
         assert_eq!(n as usize, N_ENTRIES, "tier2 lost entries");
         let errs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM logs WHERE level='error'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM logs WHERE level='error'", [], |r| {
+                r.get(0)
+            })
             .expect("tier2 level count");
         let expect = data.iter().filter(|e| e.level == "error").count() as i64;
         assert_eq!(errs, expect, "tier2 level counts disagree with the dataset");
@@ -479,7 +504,7 @@ fn main() {
         vtab.optimize_ms.unwrap_or(0.0)
     );
 
-    query_bench(&data, "/tmp/tl_bench_logs_plain.db", "/tmp/tl_bench_logs_vtab.db", &ext);
+    query_bench(&data, &plain_path, &vtab_path, &ext);
 
-    println!("\ndone. dbs left in /tmp/tl_bench_logs_{{plain,vtab}}.db for inspection.");
+    println!("\ndone. {}.", scratch.finish_message());
 }

@@ -44,7 +44,7 @@ jobs:
           cargo test --manifest-path servers/Cargo.toml -p timeless-logs-api --test api_e2e -- --ignored
       - name: Two-minute mixed fault gate
         run: >-
-          python3 tools/production_gate.py
+          cargo run --release --manifest-path tools/query-harness/Cargo.toml --locked -- production
           --mode short
           --duration-seconds 120
           --output production-gate-short.json

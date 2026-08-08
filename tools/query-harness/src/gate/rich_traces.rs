@@ -964,7 +964,10 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
         (r#"{"scope":"span","path":"/typed","value":1}"#, 1),
         (r#"{"scope":"span","path":"/typed","value":1.0}"#, 1),
         (r#"{"scope":"resource","path":"/debug","value":false}"#, 8),
-        (r#"{"scope":"scope","path":"/name","value":"attribute-scope"}"#, 8),
+        (
+            r#"{"scope":"scope","path":"/name","value":"attribute-scope"}"#,
+            8,
+        ),
     ] {
         let result = attribute_count(connection, table, filter);
         if filter.contains("/missing") {
@@ -1000,11 +1003,13 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
         [],
     )?;
     connection.execute_batch("ROLLBACK")?;
-    ensure!(attribute_count(
-        connection,
-        table,
-        r#"{"scope":"span","path":"/typed","value":"rollback"}"#
-    )? == 0);
+    ensure!(
+        attribute_count(
+            connection,
+            table,
+            r#"{"scope":"span","path":"/typed","value":"rollback"}"#
+        )? == 0
+    );
 
     connection.execute(
         &format!("INSERT INTO {table}({table}) VALUES ('flush')"),
@@ -1125,16 +1130,20 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
         "INSERT INTO attribute_lifecycle(attribute_lifecycle) VALUES ('prune:150')",
         [],
     )?;
-    ensure!(attribute_count(
-        connection,
-        "attribute_lifecycle",
-        r#"{"scope":"span","path":"/typed","value":"old"}"#
-    )? == 0);
-    ensure!(attribute_count(
-        connection,
-        "attribute_lifecycle",
-        r#"{"scope":"span","path":"/typed","value":"keep"}"#
-    )? == 1);
+    ensure!(
+        attribute_count(
+            connection,
+            "attribute_lifecycle",
+            r#"{"scope":"span","path":"/typed","value":"old"}"#
+        )? == 0
+    );
+    ensure!(
+        attribute_count(
+            connection,
+            "attribute_lifecycle",
+            r#"{"scope":"span","path":"/typed","value":"keep"}"#
+        )? == 1
+    );
     let lifecycle_rows: i64 = connection.query_row(
         "SELECT count(*) FROM attribute_lifecycle_attribute_blooms",
         [],
@@ -1162,11 +1171,13 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
         )?;
     }
     let before = integer_stats(connection, "attribute_chunks")?;
-    ensure!(attribute_count(
-        connection,
-        "attribute_chunks",
-        r#"{"scope":"span","path":"/key","value":"target"}"#,
-    )? == 1);
+    ensure!(
+        attribute_count(
+            connection,
+            "attribute_chunks",
+            r#"{"scope":"span","path":"/key","value":"target"}"#,
+        )? == 1
+    );
     let after = integer_stats(connection, "attribute_chunks")?;
     ensure!(stat_value(&after, "blocks")? == 257);
     ensure!(stat_value(&after, "attribute_bloom_rows")? == 257);
@@ -1210,7 +1221,10 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
         r#"CREATE VIRTUAL TABLE duplicate_attribute_path USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/x"},{"scope":"span","path":"/x"}]')"#,
         r#"CREATE VIRTUAL TABLE too_many_attribute_paths USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/a"},{"scope":"span","path":"/b"},{"scope":"span","path":"/c"},{"scope":"span","path":"/d"},{"scope":"span","path":"/e"},{"scope":"span","path":"/f"},{"scope":"span","path":"/g"},{"scope":"span","path":"/h"},{"scope":"span","path":"/i"}]')"#,
     ] {
-        ensure!(connection.execute(invalid, []).is_err(), "accepted {invalid}");
+        ensure!(
+            connection.execute(invalid, []).is_err(),
+            "accepted {invalid}"
+        );
     }
     let fixture = contract_fixture();
     for span in &fixture {
@@ -1441,15 +1455,14 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
     ensure!(semantic_rows(&connection, "lifecycle_spans")? == expected_lifecycle);
     ensure!(semantic_rows(&connection, "attribute_spans")? == expected_attributes);
+    ensure!(semantic_rows(&connection, "attribute_lifecycle")?[0] == expected_attribute_lifecycle);
     ensure!(
-        semantic_rows(&connection, "attribute_lifecycle")?[0]
-            == expected_attribute_lifecycle
+        attribute_count(
+            &connection,
+            "attribute_spans",
+            r#"{"scope":"span","path":"/typed","value":1}"#
+        )? == 1
     );
-    ensure!(attribute_count(
-        &connection,
-        "attribute_spans",
-        r#"{"scope":"span","path":"/typed","value":1}"#
-    )? == 1);
     ensure!(semantic_rows(&connection, "attribute_legacy")? == expected_attribute_legacy);
     ensure!(attribute_count(
         &connection,

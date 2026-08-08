@@ -167,6 +167,7 @@ fn fmt_mb(b: usize) -> String {
     format!("{:.2} MB", b as f64 / 1.0e6)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn report(
     label: &str,
     col_names: &[&str],
@@ -273,6 +274,7 @@ fn main() {
         .map(|r| LogEntry {
             ts: r.ts,
             level: r.level_num,
+            severity: None,
             message: r.message.clone(),
             // Canonical sorted pair order (path < service < status) —
             // exactly what the vtab stores after its JSON parse.
@@ -281,6 +283,7 @@ fn main() {
                 ("service".into(), r.service.into()),
                 ("status".into(), r.status.into()),
             ],
+            metadata_json: None,
         })
         .collect();
     drop(logs);
@@ -400,6 +403,16 @@ fn main() {
             events: "[]".into(),
             resource: "{}".into(),
             instrumentation_scope: "{}".into(),
+            links: "[]".into(),
+            trace_state: "".into(),
+            trace_flags: 0,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: "".into(),
+            scope_schema_url: "".into(),
+            resource_dropped_attributes_count: 0,
+            scope_dropped_attributes_count: 0,
         })
         .collect();
     let n_spans = spans.len();

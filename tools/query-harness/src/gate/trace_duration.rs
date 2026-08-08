@@ -160,12 +160,19 @@ pub(super) fn run(options: Options<'_>) -> Result<()> {
     } = options;
     validate_table(table)?;
     ensure!(iterations > 0, "--iterations must be positive");
-    ensure!(database.is_file(), "database does not exist: {}", database.display());
+    ensure!(
+        database.is_file(),
+        "database does not exist: {}",
+        database.display()
+    );
 
     let connection = super::open(extension, database)?;
     if wal {
         let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-        ensure!(mode.eq_ignore_ascii_case("wal"), "failed to enable WAL mode");
+        ensure!(
+            mode.eq_ignore_ascii_case("wal"),
+            "failed to enable WAL mode"
+        );
     }
     let query = format!(
         "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
@@ -183,8 +190,7 @@ pub(super) fn run(options: Options<'_>) -> Result<()> {
     );
     let physical_before = physical_bytes(database);
     let files_before = storage_files(database);
-    let journal_mode: String =
-        connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    let journal_mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
 
     let mut statement = connection.prepare(&query)?;
     for _ in 0..warmup {
@@ -208,8 +214,7 @@ pub(super) fn run(options: Options<'_>) -> Result<()> {
         "public optimize left legacy duration metadata behind"
     );
     ensure!(
-        stat(&after_optimize, "duration_bounded_blocks")?
-            == stat(&after_optimize, "blocks")?,
+        stat(&after_optimize, "duration_bounded_blocks")? == stat(&after_optimize, "blocks")?,
         "not every persisted trace block has duration bounds after optimize"
     );
 
@@ -224,11 +229,10 @@ pub(super) fn run(options: Options<'_>) -> Result<()> {
     drop(statement);
     let files_after_optimize = storage_files(database);
     let checkpoint_started = Instant::now();
-    let checkpoint: (i64, i64, i64) = connection.query_row(
-        "PRAGMA wal_checkpoint(TRUNCATE)",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+    let checkpoint: (i64, i64, i64) =
+        connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
     let checkpoint_ms = checkpoint_started.elapsed().as_secs_f64() * 1_000.0;
     let files_after_checkpoint = storage_files(database);
 
@@ -279,7 +283,9 @@ pub(super) fn run(options: Options<'_>) -> Result<()> {
         || stat(&after_legacy, "query_decoded_spans")?
             == stat(&before_legacy, "query_decoded_spans")?
     {
-        bail!("legacy duration evidence did not decode candidate blocks; check --service and fixture");
+        bail!(
+            "legacy duration evidence did not decode candidate blocks; check --service and fixture"
+        );
     }
     if stat(&after_bounded, "query_candidate_blocks")?
         != stat(&before_bounded, "query_candidate_blocks")?

@@ -87,7 +87,11 @@ fn encode_blob(group: &[&SourceSeries]) -> Vec<u8> {
         out.extend_from_slice(&(s.name.len() as u32).to_le_bytes());
         out.extend_from_slice(s.name.as_bytes());
         // '{}' → empty labels field (the blob's "no labels" spelling).
-        let labels = if s.labels_json == "{}" { "" } else { &s.labels_json };
+        let labels = if s.labels_json == "{}" {
+            ""
+        } else {
+            &s.labels_json
+        };
         out.extend_from_slice(&(labels.len() as u32).to_le_bytes());
         out.extend_from_slice(labels.as_bytes());
     }
@@ -163,20 +167,19 @@ fn run_import(data_dir: &Path, ext: &str, db_path: &str, table: &str) -> Result<
             .map_err(|e| format!("prepare ingest: {e}"))?;
         let mut group: Vec<&SourceSeries> = Vec::new();
         let mut group_points = 0usize;
-        let mut flush_group = |group: &mut Vec<&SourceSeries>,
-                               group_points: &mut usize|
-         -> Result<(), String> {
-            if group.is_empty() {
-                return Ok(());
-            }
-            let blob = encode_blob(group);
-            stmt.execute(params![blob])
-                .map_err(|e| format!("blob ingest: {e}"))?;
-            shipped += group.len();
-            group.clear();
-            *group_points = 0;
-            Ok(())
-        };
+        let mut flush_group =
+            |group: &mut Vec<&SourceSeries>, group_points: &mut usize| -> Result<(), String> {
+                if group.is_empty() {
+                    return Ok(());
+                }
+                let blob = encode_blob(group);
+                stmt.execute(params![blob])
+                    .map_err(|e| format!("blob ingest: {e}"))?;
+                shipped += group.len();
+                group.clear();
+                *group_points = 0;
+                Ok(())
+            };
         for s in &series {
             if group_points + s.points.len() > 100_000 || group.len() >= 10_000 {
                 flush_group(&mut group, &mut group_points)?;
@@ -271,8 +274,14 @@ fn selftest(ext: &str, scratch: &Path) -> Result<(), String> {
             mk(&[]),
         ];
         for (i, labels) in hostile.iter().enumerate() {
-            let sid = engine.resolve_cached("hostile.metric", labels).map_err(|e| e.to_string())?;
-            engine.write_point(sid, -1_000 - i as i64, f64::from_bits(0x7ff8_dead_beef_0001)); // NaN payload
+            let sid = engine
+                .resolve_cached("hostile.metric", labels)
+                .map_err(|e| e.to_string())?;
+            engine.write_point(
+                sid,
+                -1_000 - i as i64,
+                f64::from_bits(0x7ff8_dead_beef_0001),
+            ); // NaN payload
             engine.write_point(sid, 0, -0.0);
             engine.write_point(sid, 5, 5.0);
             engine.write_point(sid, 5, 6.0); // duplicate ts
@@ -299,7 +308,8 @@ fn selftest(ext: &str, scratch: &Path) -> Result<(), String> {
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     unsafe {
         conn.load_extension_enable().map_err(|e| e.to_string())?;
-        conn.load_extension(ext, None::<&str>).map_err(|e| e.to_string())?;
+        conn.load_extension(ext, None::<&str>)
+            .map_err(|e| e.to_string())?;
     }
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM metrics", [], |r| r.get(0))
@@ -309,11 +319,9 @@ fn selftest(ext: &str, scratch: &Path) -> Result<(), String> {
         return Err(format!("selftest: expected {expect} rows, got {n}"));
     }
     let cat: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM timeless_series('metrics')",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM timeless_series('metrics')", [], |r| {
+            r.get(0)
+        })
         .map_err(|e| e.to_string())?;
     if cat != 4 {
         return Err(format!("selftest: expected 4 catalog series, got {cat}"));
