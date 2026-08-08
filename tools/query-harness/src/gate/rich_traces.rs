@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{ensure, Result};
@@ -296,6 +297,141 @@ fn semantic_rows(connection: &Connection, table: &str) -> Result<Vec<SemanticSpa
     Ok(rows)
 }
 
+fn integer_stats(connection: &Connection, table: &str) -> Result<BTreeMap<String, i64>> {
+    let mut statement = connection
+        .prepare("SELECT key,value FROM timeless_stats(?1) WHERE typeof(value)='integer'")?;
+    let rows = statement.query_map([table], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut stats = BTreeMap::new();
+    for row in rows {
+        let (key, value) = row?;
+        stats.insert(key, value);
+    }
+    Ok(stats)
+}
+
+fn stat_delta(
+    before: &BTreeMap<String, i64>,
+    after: &BTreeMap<String, i64>,
+    key: &str,
+) -> Result<i64> {
+    let before = before
+        .get(key)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("timeless_stats omitted {key:?} before query"))?;
+    let after = after
+        .get(key)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("timeless_stats omitted {key:?} after query"))?;
+    Ok(after.saturating_sub(before))
+}
+
+fn projection_contract(
+    connection: &Connection,
+    table: &str,
+    fixture: &[Span],
+    assert_selective_work: bool,
+) -> Result<()> {
+    let columns = COLUMNS.split(',').collect::<Vec<_>>();
+    for column in &columns {
+        let sql = format!(
+            "SELECT {column} FROM \"{table}\" WHERE service='contract-svc' \
+             ORDER BY start_ts,span_id"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query([])?;
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            let _ = row.get_ref(0)?;
+            count += 1;
+        }
+        ensure!(count == fixture.len(), "individual projection {column} lost rows");
+    }
+
+    let mixed: (Vec<u8>, String, String, i64) = connection.query_row(
+        &format!(
+            "SELECT trace_id,attributes,events,duration_ns FROM \"{table}\" \
+             WHERE status='error' AND service='contract-svc'"
+        ),
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    ensure!(mixed.0 == fixture[0].trace_id);
+    ensure!(serde_json::from_str::<Value>(&mixed.1)? == fixture[0].attributes);
+    ensure!(serde_json::from_str::<Value>(&mixed.2)? == fixture[0].events);
+    ensure!(mixed.3 == fixture[0].duration_ns);
+    if !assert_selective_work {
+        return Ok(());
+    }
+
+    let before = integer_stats(connection, table)?;
+    let count: i64 = connection.query_row(
+        &format!("SELECT count(*) FROM \"{table}\""),
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(count == fixture.len() as i64);
+    let after = integer_stats(connection, table)?;
+    ensure!(stat_delta(&before, &after, "query_decoded_columns")? == 0);
+    ensure!(stat_delta(&before, &after, "query_decoded_column_bytes")? == 0);
+    ensure!(stat_delta(&before, &after, "query_materialized_rich_values")? == 0);
+
+    let before = after;
+    let count: i64 = connection.query_row(
+        &format!(
+            "SELECT count(*) FROM \"{table}\" \
+             WHERE trace_id=?1 AND name='missing-operation'"
+        ),
+        [fixture[0].trace_id.as_slice()],
+        |row| row.get(0),
+    )?;
+    ensure!(count == 0);
+    let after = integer_stats(connection, table)?;
+    let payload_blocks = stat_delta(&before, &after, "query_payload_blocks_read")?;
+    ensure!(payload_blocks > 0);
+    ensure!(
+        stat_delta(&before, &after, "query_decoded_columns")? == payload_blocks * 2
+    );
+    ensure!(stat_delta(&before, &after, "query_decoded_column_bytes")? > 0);
+    ensure!(stat_delta(&before, &after, "query_materialized_rich_values")? == 0);
+
+    let before = after;
+    let attributes: String = connection.query_row(
+        &format!(
+            "SELECT attributes FROM \"{table}\" \
+             WHERE trace_id=?1 AND name='GET /contract'"
+        ),
+        [fixture[0].trace_id.as_slice()],
+        |row| row.get(0),
+    )?;
+    ensure!(serde_json::from_str::<Value>(&attributes)? == fixture[0].attributes);
+    let after = integer_stats(connection, table)?;
+    let payload_blocks = stat_delta(&before, &after, "query_payload_blocks_read")?;
+    ensure!(payload_blocks > 0);
+    ensure!(
+        stat_delta(&before, &after, "query_decoded_columns")? == payload_blocks * 2 + 1
+    );
+    ensure!(stat_delta(&before, &after, "query_materialized_rich_values")? == 1);
+
+    let before = after;
+    connection.execute_batch("BEGIN")?;
+    let value: String = connection.query_row(
+        &format!(
+            "SELECT attributes FROM \"{table}\" \
+             WHERE trace_id=?1 AND name='GET /contract'"
+        ),
+        [fixture[0].trace_id.as_slice()],
+        |row| row.get(0),
+    )?;
+    ensure!(serde_json::from_str::<Value>(&value)? == fixture[0].attributes);
+    connection.execute_batch("ROLLBACK")?;
+    let after = integer_stats(connection, table)?;
+    ensure!(stat_delta(&before, &after, "query_count")? == 1);
+    ensure!(stat_delta(&before, &after, "query_materialized_rich_values")? == 1);
+    Ok(())
+}
+
 pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     let connection = open(extension, database)?;
     connection.execute_batch(
@@ -341,6 +477,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     ensure!(root.events[0]["timestamp"] == 1_700_000_000_040_000_000_i64);
     ensure!(root.events[0]["attributes"]["handled"] == false);
     ensure!(root.events[0]["attributes"]["exception.type"] == "ContractError");
+    projection_contract(&connection, "batch_spans", &fixture, false)?;
 
     let mut bad = rich_span(4, None);
     bad.attributes = json!([]);
@@ -465,6 +602,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
             [],
         )?;
     }
+    projection_contract(&connection, "batch_spans", &fixture, true)?;
     let expected_row = semantic_rows(&connection, "row_spans")?;
     let expected_batch = semantic_rows(&connection, "batch_spans")?;
     let expected_lifecycle = semantic_rows(&connection, "lifecycle_spans")?;
@@ -473,6 +611,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     let connection = open(extension, database)?;
     ensure!(semantic_rows(&connection, "row_spans")? == expected_row);
     ensure!(semantic_rows(&connection, "batch_spans")? == expected_batch);
+    projection_contract(&connection, "batch_spans", &fixture, true)?;
     ensure!(semantic_rows(&connection, "lifecycle_spans")? == expected_lifecycle);
     ensure!(semantic_rows(&connection, "corrupt_spans")?[0].attributes == victim.attributes);
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;

@@ -457,6 +457,15 @@ storage engine can use to *skip* decompression:
 | logs | `level = ...`, any index-key `= ...`, `ts` ranges, `message_contains = ...`; `max_work_entries = ...` bounds examined entries |
 | traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges, inclusive `duration_ns` lower/upper bounds |
 
+Optimized generation-2 trace blocks also honor SQLite's projection. The
+engine first decodes only columns required by pushed predicates, then
+materializes selected rich columns for matching rows. Thus `count(*)`, scalar
+projections, misses, and `timeless_trace_buckets` avoid expanding unrelated
+rich JSON. Older readable block formats use the exact full-decoder fallback.
+Inspect `query_decoded_columns`, `query_decoded_column_bytes`,
+`query_materialized_values`, and `query_materialized_rich_values` through
+`timeless_stats('traces')` when attributing a workload.
+
 Everything else still *works* — it's ordinary SQL over the decompressed rows
 — it just reads more blocks. Practical guidance:
 

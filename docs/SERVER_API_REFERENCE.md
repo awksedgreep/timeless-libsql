@@ -110,6 +110,11 @@ block, index-byte, and optimizer-source accounting only from the public
 Whole-database page/freelist and file/WAL/SHM sizes still come from public
 SQLite PRAGMAs and filesystem metadata. If `dbstat` is unavailable,
 `sqlite_index_bytes` is zero while all logical counts remain available.
+Trace responses additionally pass through the cumulative public
+`query_decoded_columns`, `query_decoded_column_bytes`,
+`query_materialized_values`, and `query_materialized_rich_values` values as
+`extension_query_*` fields; they remain aggregate diagnostics rather than
+request-local attribution when readers overlap.
 
 ## Metrics requests
 

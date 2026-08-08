@@ -705,6 +705,104 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
     }
 }
 
+/// Decode only the requested zero-based rows from a string column.
+///
+/// `selected` must be strictly increasing and each index must be below `n`.
+/// The complete encoded stream is still validated, but unselected strings are
+/// never materialized. This is the late-materialization path for callers that
+/// first evaluate predicates from cheaper physical columns.
+pub fn decode_str_selected(
+    bytes: &[u8],
+    n: usize,
+    selected: &[usize],
+) -> Result<Vec<String>, String> {
+    if selected.windows(2).any(|pair| pair[0] >= pair[1])
+        || selected.last().is_some_and(|index| *index >= n)
+    {
+        return Err("string column: selected rows must be strictly increasing and in range".into());
+    }
+    let (enc, payload) = read_column_frame(bytes, "string column")?;
+    let mut out = Vec::with_capacity(selected.len());
+    match enc {
+        ENC_STR_ZSTD => {
+            let raw = zstd_decompress(payload, "string column")?;
+            let mut reader = Reader::new(&raw);
+            let mut selected_pos = 0usize;
+            for row in 0..n {
+                let len = reader.u32("string length")? as usize;
+                let value = reader.take(len, "string bytes")?;
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| format!("string column: value {row} is not valid UTF-8"))?;
+                if selected.get(selected_pos) == Some(&row) {
+                    out.push(value.to_owned());
+                    selected_pos += 1;
+                }
+            }
+            if reader.remaining() != 0 {
+                return Err("string column: trailing bytes after last string".into());
+            }
+        }
+        ENC_STR_DICT => {
+            let mut reader = Reader::new(payload);
+            let dict_count = reader.u32("dict count")? as usize;
+            let dict_zstd_len = reader.u32("dict zstd length")? as usize;
+            let dict_zstd = reader.take(dict_zstd_len, "dict bytes")?;
+            let codes_zstd = reader.take(reader.remaining(), "code bytes")?;
+
+            let dict_raw = zstd_decompress(dict_zstd, "string dictionary")?;
+            let mut dict_reader = Reader::new(&dict_raw);
+            let mut dict = Vec::with_capacity(dict_count);
+            for index in 0..dict_count {
+                let len = dict_reader.u32("dict entry length")? as usize;
+                let value = dict_reader.take(len, "dict entry bytes")?;
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| format!("string column: dict entry {index} is not valid UTF-8"))?;
+                dict.push(value.to_owned());
+            }
+            if dict_reader.remaining() != 0 {
+                return Err("string column: trailing bytes in dictionary".into());
+            }
+
+            let codes_raw = zstd_decompress(codes_zstd, "string codes")?;
+            if codes_raw.len() % 8 != 0 {
+                return Err("string column: RLE stream is not (u32,u32) pairs".into());
+            }
+            let mut row = 0usize;
+            let mut selected_pos = 0usize;
+            for pair in codes_raw.chunks_exact(8) {
+                let run = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
+                let code = u32::from_le_bytes(pair[4..8].try_into().unwrap()) as usize;
+                if code >= dict.len() {
+                    return Err(format!(
+                        "string column: code {code} out of range (dict has {})",
+                        dict.len()
+                    ));
+                }
+                if run == 0 || row.checked_add(run).is_none_or(|end| end > n) {
+                    return Err(format!(
+                        "string column: RLE runs sum past expected count {n}"
+                    ));
+                }
+                let end = row + run;
+                while selected.get(selected_pos).is_some_and(|index| *index < end) {
+                    debug_assert!(selected[selected_pos] >= row);
+                    out.push(dict[code].clone());
+                    selected_pos += 1;
+                }
+                row = end;
+            }
+            if row != n {
+                return Err(format!(
+                    "string column: RLE expanded to {row} values, expected {n}"
+                ));
+            }
+        }
+        other => return Err(format!("string column: unknown encoding id {other}")),
+    }
+    debug_assert_eq!(out.len(), selected.len());
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // u8 columns (levels, kinds, statuses — near-constant after the
 // engines' level/status partitioning, so RLE usually collapses them
@@ -976,6 +1074,33 @@ mod tests {
         let owned: Vec<String> = (0..500).map(|i| format!("request {i} failed")).collect();
         let msgs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
         rt_str(&msgs, Some(ENC_STR_ZSTD));
+    }
+
+    #[test]
+    fn selected_string_decode_validates_all_rows_and_materializes_only_selection() {
+        for values in [
+            (0..3000)
+                .map(|index| ["api", "web", "auth"][index % 3].to_owned())
+                .collect::<Vec<_>>(),
+            (0..500)
+                .map(|index| format!("request {index} failed"))
+                .collect::<Vec<_>>(),
+        ] {
+            let encoded = encode_str(values.iter().map(String::as_str), values.len(), LVL)
+                .unwrap()
+                .to_bytes();
+            let selected = [0, 7, values.len() / 2, values.len() - 1];
+            let decoded = decode_str_selected(&encoded, values.len(), &selected).unwrap();
+            assert_eq!(
+                decoded,
+                selected
+                    .iter()
+                    .map(|index| values[*index].clone())
+                    .collect::<Vec<_>>()
+            );
+            assert!(decode_str_selected(&encoded, values.len(), &[7, 7]).is_err());
+            assert!(decode_str_selected(&encoded, values.len(), &[values.len()]).is_err());
+        }
     }
 
     #[test]

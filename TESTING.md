@@ -45,7 +45,8 @@ What lives where:
 - `timeless-core/tests/dup_min_ts.rs` — the (series,min_ts) shadowing
   regression (found by the oracle, fixed here and upstream)
 - unit tests inside `src/blocks/` and `src/spans/` — codecs, partitioned
-  flush, term pruning read-count proofs, merge caps
+  flush, term pruning read-count proofs, projection/late-materialization, and
+  merge caps
 
 ### The CLI suite (the real integration harness)
 

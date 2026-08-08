@@ -56,7 +56,7 @@ use rusqlite::vtab::{
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{
     kind_from_name, kind_name, status_from_name, status_name, SpanBlockEngine, SpanBlockStore,
-    SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder, SpanQueryStream,
+    SpanColumnMask, SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder, SpanQueryStream,
 };
 
 use crate::batch::BatchReader;
@@ -99,6 +99,7 @@ const BIT_TS_LO: c_int = 32;
 const BIT_TS_HI: c_int = 64;
 const BIT_DURATION_LO: c_int = 128;
 const BIT_DURATION_HI: c_int = 256;
+const PROJECTION_SHIFT: u32 = 9;
 
 const PLAN_BOUNDED_TS_ASC: &str = "bounded-ts-asc";
 const PLAN_BOUNDED_TS_ASC_OFFSET: &str = "bounded-ts-asc-offset";
@@ -728,6 +729,8 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             claim(info, offset_c, 0);
         }
 
+        let projection = (info.col_used() & u64::from(SpanColumnMask::ALL.bits())) as c_int;
+        mask |= projection << PROJECTION_SHIFT;
         info.set_idx_num(mask);
         if let Some(order) = bounded_order {
             info.set_idx_str(match (order, offset_c.is_some()) {
@@ -1199,6 +1202,7 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         } else {
             i64::MAX
         };
+        let projection = SpanColumnMask::from_bits((idx_num >> PROJECTION_SHIFT) as u16);
 
         let bounded_order = match idx_str {
             Some(PLAN_BOUNDED_TS_ASC) => Some((SpanQueryOrder::Asc, false)),
@@ -1248,12 +1252,13 @@ unsafe impl VTabCursor for TracesCursor<'_> {
                 self.rows = self
                     .shared
                     .engine
-                    .query_ordered_with_duration_after_snapshot(
+                    .query_ordered_projected_with_duration_after_snapshot(
                         &query,
                         duration_min,
                         duration_max,
                         order,
                         capacity,
+                        projection,
                         move || drop(read),
                     )
                     .map_err(module_err)?;
@@ -1262,10 +1267,11 @@ unsafe impl VTabCursor for TracesCursor<'_> {
                 let mut stream = self
                     .shared
                     .engine
-                    .query_stream_with_duration_after_snapshot(
+                    .query_stream_projected_with_duration_after_snapshot(
                         &query,
                         duration_min,
                         duration_max,
+                        projection,
                         move || drop(read),
                     )
                     .map_err(module_err)?;

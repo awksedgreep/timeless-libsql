@@ -5013,6 +5013,22 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(query.query_decoded_spans as i64),
                     ),
                     (
+                        "query_decoded_columns",
+                        Value::Integer(query.query_decoded_columns as i64),
+                    ),
+                    (
+                        "query_decoded_column_bytes",
+                        Value::Integer(query.query_decoded_column_bytes as i64),
+                    ),
+                    (
+                        "query_materialized_values",
+                        Value::Integer(query.query_materialized_values as i64),
+                    ),
+                    (
+                        "query_materialized_rich_values",
+                        Value::Integer(query.query_materialized_rich_values as i64),
+                    ),
+                    (
                         "query_buffered_spans_examined",
                         Value::Integer(query.query_buffered_spans_examined as i64),
                     ),

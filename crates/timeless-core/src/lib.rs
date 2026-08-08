@@ -31,8 +31,8 @@ pub use rollup::{
 };
 pub use spans::{
     kind_from_name, kind_name, status_from_name, status_name, EncodedSpanBlock, MemSpanStore,
-    SpanBlockEngine, SpanBlockStore, SpanDurationBounds, SpanEngineConfig, SpanEntry, SpanQuery,
-    SpanQueryOrder, SpanQueryStream, TraceBucketStat,
+    SpanBlockEngine, SpanBlockStore, SpanColumnMask, SpanDecodeProfile, SpanDurationBounds,
+    SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder, SpanQueryStream, TraceBucketStat,
 };
 pub use store::{
     ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, FsStore,

@@ -77,6 +77,13 @@ and query bounds are inclusive, blocks written by older extensions retain an
 exact decode fallback, and the ordinary public `optimize` command backfills
 missing extrema without rewriting compressed payloads.
 
+It also advertises `projection_decode.version=1`. SQLite's requested-column
+mask is honored for generation-2 adaptive columnar blocks: predicate columns
+are decoded first and requested rich values are materialized only for matching
+rows. Raw, zstd, and generation-1 blocks remain exact through the conservative
+full-decoder fallback. This is an additive read optimization and does not
+change the data ABI or block format.
+
 ## Registered SQL symbol inventory
 
 The following table is machine-checked against the Rust registration source.
@@ -330,7 +337,7 @@ b-trees, not the database file or result payload.
 |---|---|
 | metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
-| traces | `blocks`, `raw_blocks`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `duration_bounded_blocks`, `duration_unknown_blocks`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
+| traces | `blocks`, `raw_blocks`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `duration_bounded_blocks`, `duration_unknown_blocks`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
 
 The logs/traces `optimize_source_*` values use the extension's current raw-or-
 undersized source predicate and authoritative 8,192-entry/span merge target.
@@ -343,6 +350,16 @@ calling connection's visible state.
 counters describe completed decode/update attempts; the visible coverage rows
 remain the authoritative transactional state if a surrounding transaction is
 rolled back.
+
+Trace projection counters are cumulative per process. `query_decoded_columns`
+counts physical column-decoder invocations and `query_decoded_column_bytes`
+counts their stored column bytes. `query_materialized_values` counts values
+owned by predicate or result vectors; `query_materialized_rich_values` is the
+subset from attributes, status description, events, resource, and
+instrumentation scope. The conservative legacy/raw fallback charges every
+physical column and the complete block bytes because it intentionally uses the
+full decoder. Take before/after snapshots only for isolated diagnostics; these
+global counters are not request-local under concurrent readers.
 
 Log `filter` is a flat JSON object: `level` selects severity and other string
 members are indexed metadata equality predicates. `message_contains` is the

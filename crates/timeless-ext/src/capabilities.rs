@@ -60,6 +60,12 @@ fn document() -> &'static str {
                     "timestamp_unit": "nanoseconds",
                     "authoritative_batch_spans": 8192,
                     "rich_span_fidelity": true,
+                    "projection_decode": {
+                        "version": 1,
+                        "sqlite_col_used": true,
+                        "predicate_first": true,
+                        "legacy_full_decode_fallback": true
+                    },
                     "duration_block_pruning": {
                         "version": 1,
                         "inclusive_bounds": true,
@@ -173,6 +179,18 @@ mod tests {
         assert_eq!(value["signals"]["metrics"]["native_histograms"], false);
         assert_eq!(value["signals"]["logs"]["typed_metadata"], true);
         assert_eq!(value["signals"]["traces"]["rich_span_fidelity"], true);
+        assert_eq!(
+            value["signals"]["traces"]["projection_decode"]["version"],
+            1
+        );
+        assert_eq!(
+            value["signals"]["traces"]["projection_decode"]["predicate_first"],
+            true
+        );
+        assert_eq!(
+            value["signals"]["traces"]["projection_decode"]["legacy_full_decode_fallback"],
+            true
+        );
         assert_eq!(
             value["signals"]["traces"]["duration_block_pruning"]["version"],
             1

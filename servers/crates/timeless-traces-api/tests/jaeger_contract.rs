@@ -149,6 +149,10 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     assert_eq!(stats.extension_query_candidate_blocks, 5);
     assert_eq!(stats.extension_query_payload_blocks_read, 5);
     assert_eq!(stats.extension_query_decoded_spans, 5);
+    assert!(stats.extension_query_decoded_columns > 0);
+    assert!(stats.extension_query_decoded_column_bytes > 0);
+    assert!(stats.extension_query_materialized_values > 0);
+    assert!(stats.extension_query_materialized_rich_values > 0);
     // Discovery is metadata-native and duration is now an exact engine
     // predicate, so only the five API-visible span rows cross the vtab.
     assert_eq!(stats.extension_query_matched_spans, 5);
@@ -241,11 +245,9 @@ async fn dropped_query_cancels_and_the_same_reader_is_reusable() {
     let task = tokio::spawn(async move {
         slow_app
             .oneshot(
-                Request::get(
-                    "/select/jaeger/api/traces?service=svc&minDuration=1&limit=131072",
-                )
-                .body(Body::empty())
-                .unwrap(),
+                Request::get("/select/jaeger/api/traces?service=svc&minDuration=1&limit=131072")
+                    .body(Body::empty())
+                    .unwrap(),
             )
             .await
     });

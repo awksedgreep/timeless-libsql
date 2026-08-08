@@ -480,6 +480,12 @@ SELECT key, value FROM timeless_stats('traces')
                'optimize_source_bytes')
  ORDER BY key;
 
+-- Trace scans also expose cumulative physical decode/materialization work:
+SELECT key, value FROM timeless_stats('traces')
+ WHERE key IN ('query_decoded_columns','query_decoded_column_bytes',
+               'query_materialized_values','query_materialized_rich_values')
+ ORDER BY key;
+
 -- Request-local work is separate from cumulative/aggregate stats. Fully
 -- consume this scan and immediately consume its single-use report on the
 -- same connection:

@@ -17,13 +17,14 @@ use std::thread;
 use std::time::Duration;
 
 use super::codec::{
-    decode_span_block, encode_span_block, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
+    decode_span_block, decode_span_block_projected, encode_span_block, CODEC_COLUMNAR,
+    CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD,
 };
 use super::engine::{SpanBlockEngine, SpanEngineConfig, SpanQuery, SpanQueryOrder};
 use super::mem::MemSpanStore;
 use super::{
     kind_from_name, status_from_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore,
-    SpanEntry,
+    SpanColumnMask, SpanEntry,
 };
 use crate::blocks::codec::encode_pairs_column;
 use timeless_codec::{encode_fixed_bytes, encode_i64, encode_str, encode_u8, zstd_compress};
@@ -502,6 +503,49 @@ fn generation_1_blocks_of_every_codec_remain_readable_with_defaults() {
             .iter()
             .all(|entry| entry.instrumentation_scope == "{}"));
     }
+}
+
+#[test]
+fn projected_columnar_decode_filters_before_rich_materialization() {
+    let entries = vec![
+        span(1, 1, None, "keep", "api", 1, 2, 10, &[("row", "one")]),
+        span(1, 2, Some(1), "drop", "api", 2, 0, 20, &[("row", "two")]),
+        span(2, 3, None, "drop", "db", 3, 1, 30, &[("row", "three")]),
+    ];
+    let (bytes, _) = encode_span_block(&entries, CODEC_COLUMNAR_V2, 7).unwrap();
+    let predicate_mask = SpanColumnMask::TRACE_ID.union(SpanColumnMask::NAME);
+    let (projected, profile) =
+        decode_span_block_projected(&bytes, predicate_mask, SpanColumnMask::ATTRIBUTES, |row| {
+            row.trace_id == &tid(1) && row.name == "keep"
+        })
+        .unwrap();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].trace_id, tid(1));
+    assert_eq!(projected[0].name, "keep");
+    assert_eq!(projected[0].attributes, entries[0].attributes);
+    assert_eq!(profile.examined_spans, 3);
+    assert_eq!(profile.columns, 3);
+    assert_eq!(profile.materialized_rich_values, 1);
+
+    let (miss, miss_profile) =
+        decode_span_block_projected(&bytes, predicate_mask, SpanColumnMask::ALL, |row| {
+            row.trace_id == &tid(1) && row.name == "missing"
+        })
+        .unwrap();
+    assert!(miss.is_empty());
+    assert_eq!(miss_profile.columns, 2);
+    assert_eq!(miss_profile.materialized_rich_values, 0);
+
+    let (count_rows, count_profile) = decode_span_block_projected(
+        &bytes,
+        SpanColumnMask::default(),
+        SpanColumnMask::default(),
+        |_| true,
+    )
+    .unwrap();
+    assert_eq!(count_rows.len(), entries.len());
+    assert_eq!(count_profile.columns, 0);
+    assert_eq!(count_profile.materialized_values, 0);
 }
 
 #[test]

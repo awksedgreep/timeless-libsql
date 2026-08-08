@@ -26,10 +26,13 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
-use super::codec::{decode_span_block, encode_span_block, CODEC_COLUMNAR_V2, CODEC_RAW};
+use super::codec::{
+    decode_span_block, decode_span_block_projected, encode_span_block, SpanPredicateRow,
+    CODEC_COLUMNAR_V2, CODEC_RAW,
+};
 use super::{
-    status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanDurationBounds,
-    SpanEntry,
+    status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanColumnMask,
+    SpanDecodeProfile, SpanDurationBounds, SpanEntry,
 };
 
 /// Tuning knobs. All ts_* values are in the SAME opaque unit as
@@ -170,6 +173,7 @@ pub struct SpanQueryStream {
     query: SpanQuery,
     duration_min: i64,
     duration_max: i64,
+    projection: SpanColumnMask,
     blocks: VecDeque<SpanQueryBlockSnapshot>,
     buffered: std::vec::IntoIter<SpanEntry>,
     decoded: std::vec::IntoIter<SpanEntry>,
@@ -177,6 +181,7 @@ pub struct SpanQueryStream {
     payload_blocks_read: u64,
     payload_bytes_read: u64,
     decoded_spans: u64,
+    decode_profile: SpanDecodeProfile,
     matched_spans: u64,
     returned_spans: u64,
     finished: bool,
@@ -194,6 +199,10 @@ pub struct SpanQueryProfileSnapshot {
     pub query_payload_blocks_read: u64,
     pub query_payload_bytes_read: u64,
     pub query_decoded_spans: u64,
+    pub query_decoded_columns: u64,
+    pub query_decoded_column_bytes: u64,
+    pub query_materialized_values: u64,
+    pub query_materialized_rich_values: u64,
     pub query_buffered_spans_examined: u64,
     pub query_matched_spans: u64,
     pub query_returned_spans: u64,
@@ -220,6 +229,10 @@ struct SpanQueryProfile {
     query_payload_blocks_read: AtomicU64,
     query_payload_bytes_read: AtomicU64,
     query_decoded_spans: AtomicU64,
+    query_decoded_columns: AtomicU64,
+    query_decoded_column_bytes: AtomicU64,
+    query_materialized_values: AtomicU64,
+    query_materialized_rich_values: AtomicU64,
     query_buffered_spans_examined: AtomicU64,
     query_matched_spans: AtomicU64,
     query_returned_spans: AtomicU64,
@@ -248,6 +261,10 @@ impl SpanQueryProfile {
             query_payload_blocks_read: load(&self.query_payload_blocks_read),
             query_payload_bytes_read: load(&self.query_payload_bytes_read),
             query_decoded_spans: load(&self.query_decoded_spans),
+            query_decoded_columns: load(&self.query_decoded_columns),
+            query_decoded_column_bytes: load(&self.query_decoded_column_bytes),
+            query_materialized_values: load(&self.query_materialized_values),
+            query_materialized_rich_values: load(&self.query_materialized_rich_values),
             query_buffered_spans_examined: load(&self.query_buffered_spans_examined),
             query_matched_spans: load(&self.query_matched_spans),
             query_returned_spans: load(&self.query_returned_spans),
@@ -1560,6 +1577,34 @@ impl SpanBlockEngine {
     where
         F: FnOnce(),
     {
+        self.query_ordered_projected_with_duration_after_snapshot(
+            q,
+            duration_min,
+            duration_max,
+            order,
+            max_spans,
+            SpanColumnMask::ALL,
+            after_snapshot,
+        )
+    }
+
+    /// Projection-aware bounded query used by the SQLite trace vtable. The
+    /// returned entries populate the requested columns plus internal predicate
+    /// and ordering columns; callers must read only their declared projection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_ordered_projected_with_duration_after_snapshot<F>(
+        &self,
+        q: &SpanQuery,
+        duration_min: i64,
+        duration_max: i64,
+        order: SpanQueryOrder,
+        max_spans: Option<usize>,
+        projection: SpanColumnMask,
+        after_snapshot: F,
+    ) -> Result<Vec<SpanEntry>, String>
+    where
+        F: FnOnce(),
+    {
         let started = Instant::now();
         let snapshot_started = Instant::now();
         let snapshot = self.snapshot_query(q, duration_min, duration_max)?;
@@ -1577,6 +1622,7 @@ impl SpanBlockEngine {
         };
         let mut payload_bytes_read = snapshot_payload_bytes;
         let mut decoded_spans = 0_u64;
+        let mut decode_profile = SpanDecodeProfile::default();
         let mut matched_spans = 0_u64;
         let mut blocks_skipped_by_bound = 0_u64;
         let mut out;
@@ -1629,24 +1675,30 @@ impl SpanBlockEngine {
                 if store_read != 0 {
                     payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
                 }
-                let entries = decode_span_block(&bytes)?;
-                decoded_spans = decoded_spans.saturating_add(entries.len() as u64);
+                let predicate_mask = query_predicate_mask(q, duration_min, duration_max);
+                let output_mask = projection
+                    .union(SpanColumnMask::START_TS)
+                    .union(SpanColumnMask::SPAN_ID);
+                let (entries, profile) =
+                    decode_span_block_projected(&bytes, predicate_mask, output_mask, |row| {
+                        predicate_row_matches(row, q, duration_min, duration_max)
+                    })?;
+                decoded_spans = decoded_spans.saturating_add(profile.examined_spans);
+                decode_profile.add(profile);
                 for (row, entry) in entries.into_iter().enumerate() {
-                    if entry_matches(&entry, q, duration_min, duration_max) {
-                        matched_spans = matched_spans.saturating_add(1);
-                        Self::retain_bounded(
-                            &mut heap,
-                            BoundedSpan {
-                                entry,
-                                sequence: QuerySequence {
-                                    source: position,
-                                    row,
-                                },
-                                order,
+                    matched_spans = matched_spans.saturating_add(1);
+                    Self::retain_bounded(
+                        &mut heap,
+                        BoundedSpan {
+                            entry,
+                            sequence: QuerySequence {
+                                source: position,
+                                row,
                             },
-                            capacity,
-                        );
-                    }
+                            order,
+                        },
+                        capacity,
+                    );
                 }
             }
             let mut ranked = heap.into_vec();
@@ -1660,14 +1712,18 @@ impl SpanBlockEngine {
                 if store_read != 0 {
                     payload_bytes_read = payload_bytes_read.saturating_add(bytes.len() as u64);
                 }
-                let entries = decode_span_block(&bytes)?;
-                decoded_spans = decoded_spans.saturating_add(entries.len() as u64);
-                for entry in entries {
-                    if entry_matches(&entry, q, duration_min, duration_max) {
-                        matched_spans = matched_spans.saturating_add(1);
-                        out.push(entry);
-                    }
-                }
+                let predicate_mask = query_predicate_mask(q, duration_min, duration_max);
+                let output_mask = projection
+                    .union(SpanColumnMask::START_TS)
+                    .union(SpanColumnMask::SPAN_ID);
+                let (entries, profile) =
+                    decode_span_block_projected(&bytes, predicate_mask, output_mask, |row| {
+                        predicate_row_matches(row, q, duration_min, duration_max)
+                    })?;
+                decoded_spans = decoded_spans.saturating_add(profile.examined_spans);
+                decode_profile.add(profile);
+                matched_spans = matched_spans.saturating_add(entries.len() as u64);
+                out.extend(entries);
             }
             matched_spans = matched_spans.saturating_add(snapshot.buffered.len() as u64);
             out.extend(snapshot.buffered);
@@ -1688,6 +1744,7 @@ impl SpanBlockEngine {
             buffered_spans_examined,
             matched_spans,
             out.len() as u64,
+            decode_profile,
         );
         if let Some(capacity) = max_spans {
             let requested = capacity as u64;
@@ -1725,6 +1782,28 @@ impl SpanBlockEngine {
         q: &SpanQuery,
         duration_min: i64,
         duration_max: i64,
+        after_snapshot: F,
+    ) -> Result<SpanQueryStream, String>
+    where
+        F: FnOnce(),
+    {
+        self.query_stream_projected_with_duration_after_snapshot(
+            q,
+            duration_min,
+            duration_max,
+            SpanColumnMask::ALL,
+            after_snapshot,
+        )
+    }
+
+    /// Projection-aware streaming query used by SQLite unbounded scans and
+    /// scalar trace kernels.
+    pub fn query_stream_projected_with_duration_after_snapshot<F>(
+        &self,
+        q: &SpanQuery,
+        duration_min: i64,
+        duration_max: i64,
+        projection: SpanColumnMask,
         after_snapshot: F,
     ) -> Result<SpanQueryStream, String>
     where
@@ -1773,9 +1852,11 @@ impl SpanBlockEngine {
             },
             payload_bytes_read: snapshot.payload_bytes,
             decoded_spans: 0,
+            decode_profile: SpanDecodeProfile::default(),
             matched_spans: 0,
             returned_spans: 0,
             finished: false,
+            projection,
         })
     }
 
@@ -1785,17 +1866,8 @@ impl SpanBlockEngine {
     ) -> Result<Option<SpanEntry>, String> {
         loop {
             if let Some(entry) = stream.decoded.next() {
-                if entry_matches(
-                    &entry,
-                    &stream.query,
-                    stream.duration_min,
-                    stream.duration_max,
-                ) {
-                    stream.matched_spans = stream.matched_spans.saturating_add(1);
-                    stream.returned_spans = stream.returned_spans.saturating_add(1);
-                    return Ok(Some(entry));
-                }
-                continue;
+                stream.returned_spans = stream.returned_spans.saturating_add(1);
+                return Ok(Some(entry));
             }
             if let Some(block) = stream.blocks.pop_front() {
                 let (bytes, store_read) = self.query_block_bytes(block)?;
@@ -1804,8 +1876,24 @@ impl SpanBlockEngine {
                     stream.payload_bytes_read =
                         stream.payload_bytes_read.saturating_add(bytes.len() as u64);
                 }
-                let entries = decode_span_block(&bytes)?;
-                stream.decoded_spans = stream.decoded_spans.saturating_add(entries.len() as u64);
+                let predicate_mask =
+                    query_predicate_mask(&stream.query, stream.duration_min, stream.duration_max);
+                let (entries, profile) = decode_span_block_projected(
+                    &bytes,
+                    predicate_mask,
+                    stream.projection,
+                    |row| {
+                        predicate_row_matches(
+                            row,
+                            &stream.query,
+                            stream.duration_min,
+                            stream.duration_max,
+                        )
+                    },
+                )?;
+                stream.decoded_spans = stream.decoded_spans.saturating_add(profile.examined_spans);
+                stream.matched_spans = stream.matched_spans.saturating_add(entries.len() as u64);
+                stream.decode_profile.add(profile);
                 self.store
                     .check_cancelled()
                     .map_err(|error| self.query_error(error))?;
@@ -1839,6 +1927,19 @@ impl SpanBlockEngine {
         self.query_profile
             .query_decoded_spans
             .fetch_add(stream.decoded_spans, Ordering::Relaxed);
+        self.query_profile
+            .query_decoded_columns
+            .fetch_add(stream.decode_profile.columns, Ordering::Relaxed);
+        self.query_profile
+            .query_decoded_column_bytes
+            .fetch_add(stream.decode_profile.column_bytes, Ordering::Relaxed);
+        self.query_profile
+            .query_materialized_values
+            .fetch_add(stream.decode_profile.materialized_values, Ordering::Relaxed);
+        self.query_profile.query_materialized_rich_values.fetch_add(
+            stream.decode_profile.materialized_rich_values,
+            Ordering::Relaxed,
+        );
         self.query_profile
             .query_matched_spans
             .fetch_add(stream.matched_spans, Ordering::Relaxed);
@@ -1995,6 +2096,7 @@ impl SpanBlockEngine {
         buffered_spans_examined: u64,
         matched_spans: u64,
         returned_spans: u64,
+        decode_profile: SpanDecodeProfile,
     ) {
         for (counter, value) in [
             (&self.query_profile.query_count, 1),
@@ -2014,6 +2116,22 @@ impl SpanBlockEngine {
                 snapshot_payload_bytes,
             ),
             (&self.query_profile.query_decoded_spans, decoded_spans),
+            (
+                &self.query_profile.query_decoded_columns,
+                decode_profile.columns,
+            ),
+            (
+                &self.query_profile.query_decoded_column_bytes,
+                decode_profile.column_bytes,
+            ),
+            (
+                &self.query_profile.query_materialized_values,
+                decode_profile.materialized_values,
+            ),
+            (
+                &self.query_profile.query_materialized_rich_values,
+                decode_profile.materialized_rich_values,
+            ),
             (
                 &self.query_profile.query_buffered_spans_examined,
                 buffered_spans_examined,
@@ -2058,8 +2176,13 @@ impl SpanBlockEngine {
         let mut values = match catalog {
             Some(values) => values.into_iter().collect::<BTreeSet<_>>(),
             None => {
-                let mut stream =
-                    self.query_stream_after_snapshot(&unbounded_span_query(), || {})?;
+                let mut stream = self.query_stream_projected_with_duration_after_snapshot(
+                    &unbounded_span_query(),
+                    i64::MIN,
+                    i64::MAX,
+                    SpanColumnMask::SERVICE,
+                    || {},
+                )?;
                 let mut values = BTreeSet::new();
                 while let Some(span) = self.query_stream_next(&mut stream)? {
                     if !span.service.is_empty() {
@@ -2205,7 +2328,17 @@ impl SpanBlockEngine {
                 ));
             }
         }
-        let mut stream = self.query_stream_after_snapshot(filter, after_snapshot)?;
+        let projection = SpanColumnMask::SERVICE
+            .union(SpanColumnMask::STATUS)
+            .union(SpanColumnMask::START_TS)
+            .union(SpanColumnMask::DURATION_NS);
+        let mut stream = self.query_stream_projected_with_duration_after_snapshot(
+            filter,
+            i64::MIN,
+            i64::MAX,
+            projection,
+            after_snapshot,
+        )?;
         // Exact percentiles require duration vectors, but not the rich span
         // rows that previously dominated memory.
         let mut stats: std::collections::BTreeMap<(i64, String), (TraceBucketStat, Vec<i64>)> =
@@ -2409,6 +2542,70 @@ fn entry_matches(e: &SpanEntry, q: &SpanQuery, duration_min: i64, duration_max: 
         if &e.name != n {
             return false;
         }
+    }
+    true
+}
+
+fn query_predicate_mask(query: &SpanQuery, duration_min: i64, duration_max: i64) -> SpanColumnMask {
+    let mut mask = SpanColumnMask::default();
+    if query.trace_id.is_some() {
+        mask = mask.union(SpanColumnMask::TRACE_ID);
+    }
+    if query.name.is_some() {
+        mask = mask.union(SpanColumnMask::NAME);
+    }
+    if query.service.is_some() {
+        mask = mask.union(SpanColumnMask::SERVICE);
+    }
+    if query.kind.is_some() {
+        mask = mask.union(SpanColumnMask::KIND);
+    }
+    if query.status.is_some() {
+        mask = mask.union(SpanColumnMask::STATUS);
+    }
+    if query.ts_min != i64::MIN || query.ts_max != i64::MAX {
+        mask = mask.union(SpanColumnMask::START_TS);
+    }
+    if duration_min != i64::MIN || duration_max != i64::MAX {
+        mask = mask.union(SpanColumnMask::DURATION_NS);
+    }
+    mask
+}
+
+fn predicate_row_matches(
+    row: SpanPredicateRow<'_>,
+    query: &SpanQuery,
+    duration_min: i64,
+    duration_max: i64,
+) -> bool {
+    if row.start_ts < query.ts_min || row.start_ts > query.ts_max {
+        return false;
+    }
+    if row.duration_ns < duration_min || row.duration_ns > duration_max {
+        return false;
+    }
+    if query
+        .trace_id
+        .as_ref()
+        .is_some_and(|value| row.trace_id != value)
+    {
+        return false;
+    }
+    if query
+        .service
+        .as_deref()
+        .is_some_and(|value| row.service != value)
+    {
+        return false;
+    }
+    if query.kind.is_some_and(|value| row.kind != value) {
+        return false;
+    }
+    if query.status.is_some_and(|value| row.status != value) {
+        return false;
+    }
+    if query.name.as_deref().is_some_and(|value| row.name != value) {
+        return false;
     }
     true
 }

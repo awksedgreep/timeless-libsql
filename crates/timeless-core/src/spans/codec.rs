@@ -81,8 +81,8 @@
 //! panic or garbage spans.
 
 use timeless_codec::{
-    decode_fixed_bytes, decode_i64, decode_str, decode_u8, encode_fixed_bytes, encode_i64,
-    encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
+    decode_fixed_bytes, decode_i64, decode_str, decode_str_selected, decode_u8, encode_fixed_bytes,
+    encode_i64, encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
 };
 
 pub use crate::blocks::codec::{CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD};
@@ -126,6 +126,92 @@ const V1_COLUMN_NAMES: [&str; V1_N_COLUMNS] = [
     "duration column",
     "attributes column",
 ];
+
+/// Physical/output span columns requested by a query. Bits map exactly to the
+/// public `timeless_traces` column order, allowing SQLite's `colUsed` mask to
+/// cross the vtable boundary without inventing another schema vocabulary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpanColumnMask(u16);
+
+impl SpanColumnMask {
+    pub const TRACE_ID: Self = Self(1 << 0);
+    pub const SPAN_ID: Self = Self(1 << 1);
+    pub const PARENT_SPAN_ID: Self = Self(1 << 2);
+    pub const NAME: Self = Self(1 << 3);
+    pub const SERVICE: Self = Self(1 << 4);
+    pub const KIND: Self = Self(1 << 5);
+    pub const STATUS: Self = Self(1 << 6);
+    pub const START_TS: Self = Self(1 << 7);
+    pub const DURATION_NS: Self = Self(1 << 8);
+    pub const ATTRIBUTES: Self = Self(1 << 9);
+    pub const STATUS_DESCRIPTION: Self = Self(1 << 10);
+    pub const EVENTS: Self = Self(1 << 11);
+    pub const RESOURCE: Self = Self(1 << 12);
+    pub const INSTRUMENTATION_SCOPE: Self = Self(1 << 13);
+    pub const RICH: Self = Self(
+        Self::ATTRIBUTES.0
+            | Self::STATUS_DESCRIPTION.0
+            | Self::EVENTS.0
+            | Self::RESOURCE.0
+            | Self::INSTRUMENTATION_SCOPE.0,
+    );
+    pub const ALL: Self = Self((1 << N_COLUMNS) - 1);
+
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits & Self::ALL.0)
+    }
+
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    const fn column(self, index: usize) -> bool {
+        self.0 & (1 << index) != 0
+    }
+}
+
+/// Work performed below the row boundary by one projected block decode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpanDecodeProfile {
+    pub columns: u64,
+    pub column_bytes: u64,
+    pub materialized_values: u64,
+    pub materialized_rich_values: u64,
+    pub examined_spans: u64,
+}
+
+impl SpanDecodeProfile {
+    pub(crate) fn add(&mut self, other: Self) {
+        self.columns = self.columns.saturating_add(other.columns);
+        self.column_bytes = self.column_bytes.saturating_add(other.column_bytes);
+        self.materialized_values = self
+            .materialized_values
+            .saturating_add(other.materialized_values);
+        self.materialized_rich_values = self
+            .materialized_rich_values
+            .saturating_add(other.materialized_rich_values);
+        self.examined_spans = self.examined_spans.saturating_add(other.examined_spans);
+    }
+}
+
+/// Borrowed predicate view over only the columns requested by the engine.
+pub(crate) struct SpanPredicateRow<'a> {
+    pub trace_id: &'a [u8; 16],
+    pub name: &'a str,
+    pub service: &'a str,
+    pub kind: u8,
+    pub status: u8,
+    pub start_ts: i64,
+    pub duration_ns: i64,
+}
 
 fn known_codec(codec: u8) -> bool {
     codec == CODEC_RAW
@@ -338,6 +424,347 @@ pub fn encode_span_block(
         codec,
     };
     Ok((out, meta))
+}
+
+enum ProjectedColumn {
+    TraceIds(Vec<[u8; 16]>),
+    SpanIds(Vec<[u8; 8]>),
+    Parents(Vec<Option<[u8; 8]>>),
+    Strings(Vec<String>),
+    Bytes(Vec<u8>),
+    Integers(Vec<i64>),
+}
+
+impl ProjectedColumn {
+    fn assign(&self, column: usize, source: usize, entry: &mut SpanEntry) {
+        match (column, self) {
+            (0, Self::TraceIds(values)) => entry.trace_id = values[source],
+            (1, Self::SpanIds(values)) => entry.span_id = values[source],
+            (2, Self::Parents(values)) => entry.parent_span_id = values[source],
+            (3, Self::Strings(values)) => entry.name.clone_from(&values[source]),
+            (4, Self::Strings(values)) => entry.service.clone_from(&values[source]),
+            (5, Self::Bytes(values)) => entry.kind = values[source],
+            (6, Self::Bytes(values)) => entry.status = values[source],
+            (7, Self::Integers(values)) => entry.start_ts = values[source],
+            (8, Self::Integers(values)) => entry.duration_ns = values[source],
+            (9, Self::Strings(values)) => entry.attributes = values[source].clone().into(),
+            (10, Self::Strings(values)) => entry.status_description = values[source].clone().into(),
+            (11, Self::Strings(values)) => entry.events = values[source].clone().into(),
+            (12, Self::Strings(values)) => entry.resource = values[source].clone().into(),
+            (13, Self::Strings(values)) => {
+                entry.instrumentation_scope = values[source].clone().into()
+            }
+            _ => unreachable!("projected span column type mismatch"),
+        }
+    }
+}
+
+fn empty_projected_span() -> SpanEntry {
+    SpanEntry {
+        trace_id: [0; 16],
+        span_id: [0; 8],
+        parent_span_id: None,
+        name: String::new(),
+        service: String::new(),
+        kind: 0,
+        status: 0,
+        status_description: "".into(),
+        start_ts: 0,
+        duration_ns: 0,
+        attributes: "{}".into(),
+        events: "[]".into(),
+        resource: "{}".into(),
+        instrumentation_scope: "{}".into(),
+    }
+}
+
+fn selected_fixed<const WIDTH: usize>(flat: Vec<u8>, selected: &[usize]) -> Vec<[u8; WIDTH]> {
+    selected
+        .iter()
+        .map(|index| {
+            let start = index * WIDTH;
+            flat[start..start + WIDTH].try_into().unwrap()
+        })
+        .collect()
+}
+
+fn selected_parents(
+    raw: &[u8],
+    n: usize,
+    selected: &[usize],
+) -> Result<Vec<Option<[u8; 8]>>, String> {
+    let parents = parse_parents(raw, n)?;
+    Ok(selected.iter().map(|index| parents[*index]).collect())
+}
+
+fn decode_v2_columnar_column(
+    stored: &[&[u8]],
+    n: usize,
+    column: usize,
+    selected: &[usize],
+) -> Result<ProjectedColumn, String> {
+    match column {
+        0 => Ok(ProjectedColumn::TraceIds(selected_fixed(
+            decode_fixed_bytes(stored[0], n, 16)?,
+            selected,
+        ))),
+        1 => Ok(ProjectedColumn::SpanIds(selected_fixed(
+            decode_fixed_bytes(stored[1], n, 8)?,
+            selected,
+        ))),
+        2 => {
+            let raw = zstd_decompress(stored[2], COLUMN_NAMES[2])?;
+            Ok(ProjectedColumn::Parents(selected_parents(
+                &raw, n, selected,
+            )?))
+        }
+        3 | 4 | 9..=13 => Ok(ProjectedColumn::Strings(decode_str_selected(
+            stored[column],
+            n,
+            selected,
+        )?)),
+        5 | 6 => {
+            let values = decode_u8(stored[column], n)?;
+            if column == 5 {
+                validate_kinds_statuses(&values, &[])?;
+            } else {
+                validate_kinds_statuses(&[], &values)?;
+            }
+            Ok(ProjectedColumn::Bytes(
+                selected.iter().map(|index| values[*index]).collect(),
+            ))
+        }
+        7 | 8 => {
+            let values = decode_i64(stored[column], n)?;
+            Ok(ProjectedColumn::Integers(
+                selected.iter().map(|index| values[*index]).collect(),
+            ))
+        }
+        _ => unreachable!("span projection column out of range"),
+    }
+}
+
+fn parse_v2_columnar(bytes: &[u8]) -> Result<Option<(usize, Vec<&[u8]>)>, String> {
+    let mut reader = Reader::new(bytes);
+    let version = reader.u8("format version")?;
+    if version != FORMAT_VERSION {
+        return Ok(None);
+    }
+    let codec = reader.u8("codec")?;
+    if !known_codec(codec) {
+        return Err(format!("span block: unknown codec {codec}"));
+    }
+    if codec != CODEC_COLUMNAR && codec != CODEC_COLUMNAR_V2 {
+        return Ok(None);
+    }
+    let n = reader.u32("entry_count")? as usize;
+    let _ts_min = reader.i64("ts_min")?;
+    let _ts_max = reader.i64("ts_max")?;
+    let mut lengths = [0usize; N_COLUMNS];
+    for (index, length) in lengths.iter_mut().enumerate() {
+        *length = reader.u32(COLUMN_NAMES[index])? as usize;
+    }
+    let mut stored = Vec::with_capacity(N_COLUMNS);
+    for (index, length) in lengths.iter().enumerate() {
+        stored.push(reader.take(*length, COLUMN_NAMES[index])?);
+    }
+    if reader.remaining() != 0 {
+        return Err(format!(
+            "span block: {} trailing byte(s) after last column (corrupt header?)",
+            reader.remaining()
+        ));
+    }
+    Ok(Some((n, stored)))
+}
+
+fn projected_row<'a>(columns: &'a [Option<ProjectedColumn>], row: usize) -> SpanPredicateRow<'a> {
+    static ZERO_TRACE: [u8; 16] = [0; 16];
+    let trace_id = match &columns[0] {
+        Some(ProjectedColumn::TraceIds(values)) => &values[row],
+        _ => &ZERO_TRACE,
+    };
+    let string = |column| match &columns[column] {
+        Some(ProjectedColumn::Strings(values)) => values[row].as_str(),
+        _ => "",
+    };
+    let byte = |column| match &columns[column] {
+        Some(ProjectedColumn::Bytes(values)) => values[row],
+        _ => 0,
+    };
+    let integer = |column| match &columns[column] {
+        Some(ProjectedColumn::Integers(values)) => values[row],
+        _ => 0,
+    };
+    SpanPredicateRow {
+        trace_id,
+        name: string(3),
+        service: string(4),
+        kind: byte(5),
+        status: byte(6),
+        start_ts: integer(7),
+        duration_ns: integer(8),
+    }
+}
+
+fn entry_predicate_row(entry: &SpanEntry) -> SpanPredicateRow<'_> {
+    SpanPredicateRow {
+        trace_id: &entry.trace_id,
+        name: &entry.name,
+        service: &entry.service,
+        kind: entry.kind,
+        status: entry.status,
+        start_ts: entry.start_ts,
+        duration_ns: entry.duration_ns,
+    }
+}
+
+fn clear_unprojected(entry: &mut SpanEntry, mask: SpanColumnMask) {
+    let defaults = empty_projected_span();
+    if !mask.column(0) {
+        entry.trace_id = defaults.trace_id;
+    }
+    if !mask.column(1) {
+        entry.span_id = defaults.span_id;
+    }
+    if !mask.column(2) {
+        entry.parent_span_id = None;
+    }
+    if !mask.column(3) {
+        entry.name.clear();
+    }
+    if !mask.column(4) {
+        entry.service.clear();
+    }
+    if !mask.column(5) {
+        entry.kind = 0;
+    }
+    if !mask.column(6) {
+        entry.status = 0;
+    }
+    if !mask.column(7) {
+        entry.start_ts = 0;
+    }
+    if !mask.column(8) {
+        entry.duration_ns = 0;
+    }
+    if !mask.column(9) {
+        entry.attributes = defaults.attributes;
+    }
+    if !mask.column(10) {
+        entry.status_description = defaults.status_description;
+    }
+    if !mask.column(11) {
+        entry.events = defaults.events;
+    }
+    if !mask.column(12) {
+        entry.resource = defaults.resource;
+    }
+    if !mask.column(13) {
+        entry.instrumentation_scope = defaults.instrumentation_scope;
+    }
+}
+
+/// Predicate-first projected block decode. Generation-2 adaptive columnar
+/// blocks decode only predicate columns first, then materialize requested
+/// columns for matching rows. Older readable formats retain the exact full
+/// decoder as a conservative compatibility fallback.
+pub(crate) fn decode_span_block_projected<F>(
+    bytes: &[u8],
+    predicate_mask: SpanColumnMask,
+    output_mask: SpanColumnMask,
+    mut predicate: F,
+) -> Result<(Vec<SpanEntry>, SpanDecodeProfile), String>
+where
+    F: FnMut(SpanPredicateRow<'_>) -> bool,
+{
+    let Some((n, stored)) = parse_v2_columnar(bytes)? else {
+        let mut entries = decode_span_block(bytes)?;
+        let examined = entries.len() as u64;
+        entries.retain(|entry| predicate(entry_predicate_row(entry)));
+        let materialized = predicate_mask.union(output_mask);
+        for entry in &mut entries {
+            clear_unprojected(entry, materialized);
+        }
+        let physical_columns = if bytes.first() == Some(&FORMAT_VERSION_V1) {
+            V1_N_COLUMNS
+        } else {
+            N_COLUMNS
+        };
+        return Ok((
+            entries,
+            SpanDecodeProfile {
+                columns: physical_columns as u64,
+                column_bytes: bytes.len() as u64,
+                materialized_values: examined.saturating_mul(physical_columns as u64),
+                materialized_rich_values: if physical_columns == N_COLUMNS {
+                    examined.saturating_mul(5)
+                } else {
+                    examined
+                },
+                examined_spans: examined,
+            },
+        ));
+    };
+
+    let all_rows = (0..n).collect::<Vec<_>>();
+    let mut profile = SpanDecodeProfile {
+        examined_spans: n as u64,
+        ..SpanDecodeProfile::default()
+    };
+    let mut columns = (0..N_COLUMNS).map(|_| None).collect::<Vec<_>>();
+    for (column, slot) in columns.iter_mut().enumerate() {
+        if predicate_mask.column(column) {
+            *slot = Some(decode_v2_columnar_column(&stored, n, column, &all_rows)?);
+            profile.columns += 1;
+            profile.column_bytes = profile
+                .column_bytes
+                .saturating_add(stored[column].len() as u64);
+            profile.materialized_values = profile.materialized_values.saturating_add(n as u64);
+            if SpanColumnMask::RICH.column(column) {
+                profile.materialized_rich_values =
+                    profile.materialized_rich_values.saturating_add(n as u64);
+            }
+        }
+    }
+    let selected = (0..n)
+        .filter(|row| predicate(projected_row(&columns, *row)))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Ok((Vec::new(), profile));
+    }
+
+    let materialized = predicate_mask.union(output_mask);
+    let mut entries = (0..selected.len())
+        .map(|_| empty_projected_span())
+        .collect::<Vec<_>>();
+    for column in 0..N_COLUMNS {
+        if !materialized.column(column) {
+            continue;
+        }
+        if let Some(values) = &columns[column] {
+            for (target, source) in selected.iter().copied().enumerate() {
+                values.assign(column, source, &mut entries[target]);
+            }
+            continue;
+        }
+        let values = decode_v2_columnar_column(&stored, n, column, &selected)?;
+        profile.columns += 1;
+        profile.column_bytes = profile
+            .column_bytes
+            .saturating_add(stored[column].len() as u64);
+        profile.materialized_values = profile
+            .materialized_values
+            .saturating_add(selected.len() as u64);
+        if SpanColumnMask::RICH.column(column) {
+            profile.materialized_rich_values = profile
+                .materialized_rich_values
+                .saturating_add(selected.len() as u64);
+        }
+        for (target, entry) in entries.iter_mut().enumerate() {
+            values.assign(column, target, entry);
+        }
+    }
+    Ok((entries, profile))
 }
 
 /// Decode a span block payload back into spans, in stored order.

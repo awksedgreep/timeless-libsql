@@ -55,7 +55,7 @@ pub mod mem;
 #[cfg(test)]
 mod tests;
 
-pub use codec::{decode_span_block, encode_span_block};
+pub use codec::{decode_span_block, encode_span_block, SpanColumnMask, SpanDecodeProfile};
 pub use engine::{
     SpanBlockEngine, SpanEngineConfig, SpanOptimizeBacklog, SpanOptimizeProfileSnapshot, SpanQuery,
     SpanQueryOrder, SpanQueryStream, TraceBucketStat,
