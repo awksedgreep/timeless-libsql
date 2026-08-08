@@ -78,11 +78,12 @@ exact decode fallback, and the ordinary public `optimize` command backfills
 missing extrema without rewriting compressed payloads.
 
 It also advertises `projection_decode.version=1`. SQLite's requested-column
-mask is honored for generation-2 adaptive columnar blocks: predicate columns
+mask is honored for generation-2 and generation-3 adaptive columnar blocks: predicate columns
 are decoded first and requested rich values are materialized only for matching
-rows. Raw, zstd, and generation-1 blocks remain exact through the conservative
+rows. The ten rich-span-v2 fields form one late-materialized projection group
+because SQLite `idxNum` is signed 32-bit. Raw, zstd, and generation-1 blocks remain exact through the conservative
 full-decoder fallback. This is an additive read optimization and does not
-change the data ABI or block format.
+change the data ABI.
 
 ## Registered SQL symbol inventory
 
@@ -229,15 +230,23 @@ CREATE VIRTUAL TABLE traces USING timeless_traces(retention='72h');
 Columns are `trace_id BLOB`, `span_id BLOB`, `parent_span_id BLOB`,
 `name TEXT`, `service TEXT`, `kind TEXT`, `status TEXT`, `start_ts INTEGER`,
 `duration_ns INTEGER`, `attributes TEXT`, `status_description TEXT`,
-`events TEXT`, `resource TEXT`, `instrumentation_scope TEXT`, and the hidden
-command column named after the table.
+`events TEXT`, `resource TEXT`, `instrumentation_scope TEXT`, `links TEXT`,
+`trace_state TEXT`, `trace_flags INTEGER`, `dropped_attributes_count INTEGER`,
+`dropped_events_count INTEGER`, `dropped_links_count INTEGER`,
+`resource_schema_url TEXT`, `scope_schema_url TEXT`,
+`resource_dropped_attributes_count INTEGER`,
+`scope_dropped_attributes_count INTEGER`, and the hidden command column named
+after the table.
 
 Trace/span/parent IDs accept packed 16/8/8-byte BLOBs or 32/16/16-digit hex
 TEXT and are returned as BLOBs. An all-zero parent means no parent. `kind` is
 `internal|server|client|producer|consumer`; `status` is
 `unset|ok|error`. `start_ts` and `duration_ns` use nanoseconds.
 `attributes`, `resource`, and `instrumentation_scope` are typed JSON objects;
-`events` is a typed JSON array. Service identity uses the stored
+`events` and `links` are typed JSON arrays. `trace_flags` and all dropped-value
+counts are lossless unsigned 32-bit values represented as non-negative SQLite
+INTEGERs. Legacy rows default links to `[]`, strings to empty, and counts/flags
+to `0`. Service identity uses the stored
 `service.name` precedence documented in the [user guide](GUIDE.md#6-storing-traces).
 
 The only creation argument is `retention`. Writes are append-only. Commands
@@ -270,6 +279,7 @@ the format:
 | logs `rich-v1` | `0x02` | `n_entries:u32`, `ts:i64[n]`, then length-prefixed exact eight-level severities, messages, and canonical typed metadata JSON. Timestamps follow the table's persisted `timestamp_unit`. |
 | traces `span-v0` | `0x01` | `n_spans:u32`; packed trace/span/parent ids, length-prefixed names/services, `kind:u8[n]`, `status:u8[n]`, `start_ts:i64[n]`, `duration_ns:i64[n]`, and flat attributes JSON. |
 | traces `rich-span-v1` | `0x02` | The complete v0 prefix with typed attributes, followed by length-prefixed status descriptions, events arrays, resource objects, and instrumentation-scope objects. |
+| traces `rich-span-v2` | `0x03` | The complete v1 prefix, followed by length-prefixed links arrays and trace states; `trace_flags:u32[n]`, span dropped-attribute/event/link counts; length-prefixed resource/scope schema URLs; and resource/scope dropped-attribute counts. Exact order and link/event JSON shape are in the [rich-span v2 contract](2026-08-08_trace_rich_span_v2_contract.md). |
 
 The common prefix is `version:u8`, `flags:u8=0`, `reserved:u16=0`. A
 length-prefixed string is `length:u32` followed by that many UTF-8 bytes.
@@ -355,8 +365,8 @@ Trace projection counters are cumulative per process. `query_decoded_columns`
 counts physical column-decoder invocations and `query_decoded_column_bytes`
 counts their stored column bytes. `query_materialized_values` counts values
 owned by predicate or result vectors; `query_materialized_rich_values` is the
-subset from attributes, status description, events, resource, and
-instrumentation scope. The conservative legacy/raw fallback charges every
+subset from attributes, status description, events, resource,
+instrumentation scope, and the rich-span-v2 fidelity group. The conservative legacy/raw fallback charges every
 physical column and the complete block bytes because it intentionally uses the
 full decoder. Take before/after snapshots only for isolated diagnostics; these
 global counters are not request-local under concurrent readers.

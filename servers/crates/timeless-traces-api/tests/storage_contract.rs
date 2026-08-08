@@ -10,6 +10,147 @@ use tempfile::TempDir;
 use timeless_traces_api::{router, Storage, DEFAULT_RETENTION, MAX_BODY_BYTES, TRACE_CAPABILITY};
 use tower::ServiceExt;
 
+#[test]
+fn direct_sql_mixed_batches_optimize_rollback_and_reopen_preserve_v2() {
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("direct-v2.db");
+    let conn = Connection::open(&database).unwrap();
+    load_extension(&conn, &extension);
+    conn.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+        .unwrap();
+    conn.execute_batch(
+        r#"INSERT INTO traces(
+             trace_id,span_id,name,service,start_ts,duration_ns,attributes,
+             status_description,events,resource,instrumentation_scope,links,
+             trace_state,trace_flags,dropped_attributes_count,dropped_events_count,
+             dropped_links_count,resource_schema_url,scope_schema_url,
+             resource_dropped_attributes_count,scope_dropped_attributes_count)
+           VALUES(
+             'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbb','direct','svc',10,20,
+             '{"typed":true}','ok','[{"name":"event","dropped_attributes_count":1}]',
+             '{"service.name":"svc"}','{"name":"scope"}',
+             '[{"trace_id":"00112233445566778899aabbccddeeff","span_id":"0102030405060708","trace_state":"x=y","attributes":{},"dropped_attributes_count":2,"flags":3}]',
+             'vendor=direct',4294967295,4,5,6,'resource-schema','scope-schema',7,8);"#,
+    )
+    .unwrap();
+
+    let v0 = RichSpan::minimal(20);
+    let mut v1 = RichSpan::minimal(21);
+    v1.name = "legacy-v1".into();
+    v1.status_description = "retained by v1".into();
+    let v2 = RichSpan::fixture();
+    conn.execute(
+        "INSERT INTO traces(traces) VALUES (?1)",
+        [legacy_batch(&[v0], 0x01)],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO traces(traces) VALUES (?1)",
+        [legacy_batch(&[v1], 0x02)],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO traces(traces) VALUES (?1)",
+        [rich_batch(&[v2])],
+    )
+    .unwrap();
+    conn.execute_batch("INSERT INTO traces(traces) VALUES ('flush');")
+        .unwrap();
+
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM traces WHERE links='[]' AND trace_state='' AND trace_flags=0
+              AND dropped_attributes_count=0 AND dropped_events_count=0
+              AND dropped_links_count=0 AND resource_schema_url=''
+              AND scope_schema_url='' AND resource_dropped_attributes_count=0
+              AND scope_dropped_attributes_count=0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        2,
+        "v0 and v1 batches receive exact v2 defaults"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT trace_flags FROM traces WHERE name='direct'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        i64::from(u32::MAX)
+    );
+
+    let before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM traces", [], |row| row.get(0))
+        .unwrap();
+    let mut malformed = rich_batch(&[RichSpan::fixture()]);
+    malformed.pop();
+    assert!(conn
+        .execute("INSERT INTO traces(traces) VALUES (?1)", [malformed])
+        .is_err());
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM traces", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        before,
+        "malformed v2 batch is all-or-nothing"
+    );
+    conn.execute_batch(
+        "BEGIN;
+         INSERT INTO traces(trace_id,span_id,name,service,start_ts,trace_flags)
+           VALUES('cccccccccccccccccccccccccccccccc','dddddddddddddddd','rollback','svc',30,9);
+         ROLLBACK;",
+    )
+    .unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM traces WHERE name='rollback'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
+    assert!(conn
+        .execute_batch(
+            "INSERT INTO traces(trace_id,span_id,name,service,start_ts,trace_flags)
+               VALUES('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee','ffffffffffffffff','bad','svc',40,-1);"
+        )
+        .is_err());
+    conn.execute_batch("INSERT INTO traces(traces) VALUES ('optimize');")
+        .unwrap();
+    drop(conn);
+
+    let reopened = Connection::open(&database).unwrap();
+    load_extension(&reopened, &extension);
+    assert_eq!(
+        reopened
+            .query_row(
+                "SELECT trace_state,trace_flags,dropped_attributes_count,
+                        resource_schema_url,scope_dropped_attributes_count
+                   FROM traces WHERE name='direct'",
+                [],
+                |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?
+                )),
+            )
+            .unwrap(),
+        (
+            "vendor=direct".into(),
+            i64::from(u32::MAX),
+            4,
+            "resource-schema".into(),
+            8
+        )
+    );
+}
+
 #[tokio::test]
 async fn release_backup_preserves_rich_spans_and_is_no_clobber() {
     let extension = required_extension();
@@ -454,6 +595,14 @@ fn required_extension() -> PathBuf {
     path
 }
 
+fn load_extension(conn: &Connection, extension: &Path) {
+    unsafe {
+        conn.load_extension_enable().unwrap();
+        conn.load_extension(extension, None::<&str>).unwrap();
+    }
+    conn.load_extension_disable().unwrap();
+}
+
 fn assert_fixture_persisted(database: &Path, extension: &Path) {
     let conn = Connection::open(database).unwrap();
     unsafe {
@@ -512,6 +661,39 @@ fn assert_fixture_persisted(database: &Path, extension: &Path) {
         serde_json::from_str::<Value>(&row.13).unwrap()["name"],
         "contract-lib"
     );
+    let fidelity = conn
+        .query_row(
+            "SELECT links,trace_state,trace_flags,dropped_attributes_count,
+                    dropped_events_count,dropped_links_count,resource_schema_url,
+                    scope_schema_url,resource_dropped_attributes_count,
+                    scope_dropped_attributes_count FROM traces",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&fidelity.0).unwrap()[0]["trace_id"],
+        "ffeeddccbbaa99887766554433221100"
+    );
+    assert_eq!(fidelity.1, "vendor=contract");
+    assert_eq!(fidelity.2, i64::from(u32::MAX));
+    assert_eq!((fidelity.3, fidelity.4, fidelity.5), (3, 4, 5));
+    assert_eq!(fidelity.6, "https://example.test/resource/1");
+    assert_eq!(fidelity.7, "https://example.test/scope/2");
+    assert_eq!((fidelity.8, fidelity.9), (6, 7));
 }
 
 #[derive(Clone)]
@@ -530,6 +712,16 @@ struct RichSpan {
     events: String,
     resource: String,
     scope: String,
+    links: String,
+    trace_state: String,
+    trace_flags: u32,
+    dropped_attributes_count: u32,
+    dropped_events_count: u32,
+    dropped_links_count: u32,
+    resource_schema_url: String,
+    scope_schema_url: String,
+    resource_dropped_attributes_count: u32,
+    scope_dropped_attributes_count: u32,
 }
 
 impl RichSpan {
@@ -546,9 +738,19 @@ impl RichSpan {
             duration_ns: 120_000_000,
             attributes: r#"{"http.status_code":503,"retryable":true,"service.name":"contract-svc"}"#.into(),
             status_description: "contract failure".into(),
-            events: r#"[{"attributes":{"handled":false},"name":"exception","timestamp":1700000000040000000}]"#.into(),
+            events: r#"[{"attributes":{"handled":false},"dropped_attributes_count":8,"name":"exception","timestamp":1700000000040000000}]"#.into(),
             resource: r#"{"replica":7,"service.name":"contract-svc"}"#.into(),
             scope: r#"{"name":"contract-lib","version":"4.5.6"}"#.into(),
+            links: r#"[{"attributes":{"reason":"retry"},"dropped_attributes_count":9,"flags":257,"span_id":"8877665544332211","trace_id":"ffeeddccbbaa99887766554433221100","trace_state":"link=state"}]"#.into(),
+            trace_state: "vendor=contract".into(),
+            trace_flags: u32::MAX,
+            dropped_attributes_count: 3,
+            dropped_events_count: 4,
+            dropped_links_count: 5,
+            resource_schema_url: "https://example.test/resource/1".into(),
+            scope_schema_url: "https://example.test/scope/2".into(),
+            resource_dropped_attributes_count: 6,
+            scope_dropped_attributes_count: 7,
         }
     }
 
@@ -568,6 +770,16 @@ impl RichSpan {
             events: "[]".into(),
             resource: "{}".into(),
             scope: "{}".into(),
+            links: "[]".into(),
+            trace_state: String::new(),
+            trace_flags: 0,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: String::new(),
+            scope_schema_url: String::new(),
+            resource_dropped_attributes_count: 0,
+            scope_dropped_attributes_count: 0,
         }
     }
 }
@@ -579,7 +791,7 @@ fn minimal_spans(count: usize) -> Vec<RichSpan> {
 }
 
 fn rich_batch(spans: &[RichSpan]) -> Vec<u8> {
-    let mut out = vec![0x02, 0, 0, 0];
+    let mut out = vec![0x03, 0, 0, 0];
     out.extend_from_slice(&(spans.len() as u32).to_le_bytes());
     for span in spans {
         out.extend_from_slice(&span.trace_id);
@@ -608,6 +820,69 @@ fn rich_batch(spans: &[RichSpan]) -> Vec<u8> {
     text_column(&mut out, spans.iter().map(|span| span.events.as_str()));
     text_column(&mut out, spans.iter().map(|span| span.resource.as_str()));
     text_column(&mut out, spans.iter().map(|span| span.scope.as_str()));
+    text_column(&mut out, spans.iter().map(|span| span.links.as_str()));
+    text_column(&mut out, spans.iter().map(|span| span.trace_state.as_str()));
+    u32_column(&mut out, spans.iter().map(|span| span.trace_flags));
+    u32_column(
+        &mut out,
+        spans.iter().map(|span| span.dropped_attributes_count),
+    );
+    u32_column(&mut out, spans.iter().map(|span| span.dropped_events_count));
+    u32_column(&mut out, spans.iter().map(|span| span.dropped_links_count));
+    text_column(
+        &mut out,
+        spans.iter().map(|span| span.resource_schema_url.as_str()),
+    );
+    text_column(
+        &mut out,
+        spans.iter().map(|span| span.scope_schema_url.as_str()),
+    );
+    u32_column(
+        &mut out,
+        spans
+            .iter()
+            .map(|span| span.resource_dropped_attributes_count),
+    );
+    u32_column(
+        &mut out,
+        spans.iter().map(|span| span.scope_dropped_attributes_count),
+    );
+    out
+}
+
+fn legacy_batch(spans: &[RichSpan], version: u8) -> Vec<u8> {
+    assert!(matches!(version, 0x01 | 0x02));
+    let mut out = vec![version, 0, 0, 0];
+    out.extend_from_slice(&(spans.len() as u32).to_le_bytes());
+    for span in spans {
+        out.extend_from_slice(&span.trace_id);
+    }
+    for span in spans {
+        out.extend_from_slice(&span.span_id);
+    }
+    for span in spans {
+        out.extend_from_slice(&span.parent_span_id);
+    }
+    text_column(&mut out, spans.iter().map(|span| span.name.as_str()));
+    text_column(&mut out, spans.iter().map(|span| span.service.as_str()));
+    out.extend(spans.iter().map(|span| span.kind));
+    out.extend(spans.iter().map(|span| span.status));
+    for span in spans {
+        out.extend_from_slice(&span.start_ts.to_le_bytes());
+    }
+    for span in spans {
+        out.extend_from_slice(&span.duration_ns.to_le_bytes());
+    }
+    text_column(&mut out, spans.iter().map(|span| span.attributes.as_str()));
+    if version == 0x02 {
+        text_column(
+            &mut out,
+            spans.iter().map(|span| span.status_description.as_str()),
+        );
+        text_column(&mut out, spans.iter().map(|span| span.events.as_str()));
+        text_column(&mut out, spans.iter().map(|span| span.resource.as_str()));
+        text_column(&mut out, spans.iter().map(|span| span.scope.as_str()));
+    }
     out
 }
 
@@ -615,6 +890,12 @@ fn text_column<'a>(out: &mut Vec<u8>, values: impl Iterator<Item = &'a str>) {
     for value in values {
         out.extend_from_slice(&(value.len() as u32).to_le_bytes());
         out.extend_from_slice(value.as_bytes());
+    }
+}
+
+fn u32_column(out: &mut Vec<u8>, values: impl Iterator<Item = u32>) {
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
     }
 }
 

@@ -15,7 +15,14 @@
 //!                  start_ts INTEGER, duration_ns INTEGER,
 //!                  attributes TEXT, status_description TEXT,
 //!                  events TEXT, resource TEXT,
-//!                  instrumentation_scope TEXT, `"<table>"` HIDDEN)
+//!                  instrumentation_scope TEXT, links TEXT,
+//!                  trace_state TEXT, trace_flags INTEGER,
+//!                  dropped_attributes_count INTEGER,
+//!                  dropped_events_count INTEGER, dropped_links_count INTEGER,
+//!                  resource_schema_url TEXT, scope_schema_url TEXT,
+//!                  resource_dropped_attributes_count INTEGER,
+//!                  scope_dropped_attributes_count INTEGER,
+//!                  `"<table>"` HIDDEN)
 //!
 //! Ids: trace_id/span_id/parent_span_id accept either a BLOB of the
 //! exact packed length (16/8/8 bytes) or a hex TEXT string (32/16/16
@@ -121,8 +128,18 @@ const COL_STATUS_DESCRIPTION: usize = 10;
 const COL_EVENTS: usize = 11;
 const COL_RESOURCE: usize = 12;
 const COL_SCOPE: usize = 13;
+const COL_LINKS: usize = 14;
+const COL_TRACE_STATE: usize = 15;
+const COL_TRACE_FLAGS: usize = 16;
+const COL_DROPPED_ATTRIBUTES: usize = 17;
+const COL_DROPPED_EVENTS: usize = 18;
+const COL_DROPPED_LINKS: usize = 19;
+const COL_RESOURCE_SCHEMA_URL: usize = 20;
+const COL_SCOPE_SCHEMA_URL: usize = 21;
+const COL_RESOURCE_DROPPED_ATTRIBUTES: usize = 22;
+const COL_SCOPE_DROPPED_ATTRIBUTES: usize = 23;
 /// The hidden command column (named after the table, FTS5 idiom).
-const COL_COMMAND: usize = 14;
+const COL_COMMAND: usize = 24;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
@@ -329,7 +346,12 @@ impl TracesTab {
              name TEXT, service TEXT, kind TEXT, status TEXT, \
              start_ts INTEGER, duration_ns INTEGER, attributes TEXT, \
              status_description TEXT, events TEXT, resource TEXT, \
-             instrumentation_scope TEXT, \
+             instrumentation_scope TEXT, links TEXT, trace_state TEXT, \
+             trace_flags INTEGER, dropped_attributes_count INTEGER, \
+             dropped_events_count INTEGER, dropped_links_count INTEGER, \
+             resource_schema_url TEXT, scope_schema_url TEXT, \
+             resource_dropped_attributes_count INTEGER, \
+             scope_dropped_attributes_count INTEGER, \
              \"{}\" HIDDEN)",
             escape_double_quote(&table)
         );
@@ -373,9 +395,9 @@ impl TracesTab {
     }
 
     /// Versioned Tier 2 batch ingest. Both layouts are little-endian.
-    /// v0 (0x01) remains byte-for-byte compatible. v1 (0x02) retains
-    /// its complete prefix and appends rich columns after attributes.
-    ///   0    u8   version = 0x01 (v0) | 0x02 (v1)
+    /// v0 (0x01) and v1 (0x02) remain byte-for-byte compatible. v2
+    /// (0x03) retains the complete v1 prefix and appends fidelity columns.
+    ///   0    u8   version = 0x01 (v0) | 0x02 (v1) | 0x03 (v2)
     ///   1    u8   flags = 0
     ///   2    u16  reserved
     ///   4    u32  n_spans
@@ -394,20 +416,22 @@ impl TracesTab {
     ///   —    events[] n × { u32 len, JSON array; '' = [] }
     ///   —    resource[] n × { u32 len, JSON object; '' = {} }
     ///   —    instrumentation_scope[] n × { u32 len, JSON object; '' = {} }
+    /// v2 continues with the columns documented in
+    /// docs/2026-08-08_trace_rich_span_v2_contract.md.
     ///
     /// All-or-nothing, same durability contract as row inserts.
     fn ingest_batch(&self, blob: &[u8]) -> Result<i64> {
         let mut r = BatchReader::new(blob);
         let version = r.u8("version")?;
-        if version != 0x01 && version != 0x02 {
+        if !matches!(version, 0x01..=0x03) {
             return Err(module_err(format!(
-                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01 and v1 = 0x02)"
+                "batch blob: unsupported version 0x{version:02x} (this build speaks v0 = 0x01, v1 = 0x02, and v2 = 0x03)"
             )));
         }
         let flags = r.u8("flags")?;
         if flags != 0 {
             return Err(module_err(format!(
-                "batch blob: unknown flags 0x{flags:02x} (v0/v1 define none; must be 0)"
+                "batch blob: unknown flags 0x{flags:02x} (v0/v1/v2 define none; must be 0)"
             )));
         }
         r.skip(2, "reserved header bytes")?;
@@ -471,7 +495,7 @@ impl TracesTab {
         let mut events = vec![Cow::Borrowed("[]"); n];
         let mut resources = vec![Cow::Borrowed("{}"); n];
         let mut scopes = vec![Cow::Borrowed("{}"); n];
-        if version == 0x02 {
+        if version >= 0x02 {
             for (i, status_description) in status_descriptions.iter_mut().enumerate() {
                 *status_description =
                     Cow::Owned(r.str(&format!("status_description {i}"))?.to_owned());
@@ -496,6 +520,52 @@ impl TracesTab {
                     )
                     .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
                 );
+            }
+        }
+
+        let mut links = vec![Cow::Borrowed("[]"); n];
+        let mut trace_states = vec![Cow::Borrowed(""); n];
+        let mut trace_flags = vec![0_u32; n];
+        let mut dropped_attributes = vec![0_u32; n];
+        let mut dropped_events = vec![0_u32; n];
+        let mut dropped_links = vec![0_u32; n];
+        let mut resource_schema_urls = vec![Cow::Borrowed(""); n];
+        let mut scope_schema_urls = vec![Cow::Borrowed(""); n];
+        let mut resource_dropped_attributes = vec![0_u32; n];
+        let mut scope_dropped_attributes = vec![0_u32; n];
+        if version == 0x03 {
+            for (i, link) in links.iter_mut().enumerate() {
+                *link = Cow::Owned(
+                    otel_json::array(Some(r.str(&format!("links {i}"))?), "links")
+                        .map_err(|error| module_err(format!("batch blob: span {i} {error}")))?,
+                );
+            }
+            for (i, trace_state) in trace_states.iter_mut().enumerate() {
+                *trace_state = Cow::Owned(r.str(&format!("trace_state {i}"))?.to_owned());
+            }
+            for (i, value) in trace_flags.iter_mut().enumerate() {
+                *value = r.u32(&format!("trace_flags {i}"))?;
+            }
+            for (i, value) in dropped_attributes.iter_mut().enumerate() {
+                *value = r.u32(&format!("dropped_attributes_count {i}"))?;
+            }
+            for (i, value) in dropped_events.iter_mut().enumerate() {
+                *value = r.u32(&format!("dropped_events_count {i}"))?;
+            }
+            for (i, value) in dropped_links.iter_mut().enumerate() {
+                *value = r.u32(&format!("dropped_links_count {i}"))?;
+            }
+            for (i, value) in resource_schema_urls.iter_mut().enumerate() {
+                *value = Cow::Owned(r.str(&format!("resource_schema_url {i}"))?.to_owned());
+            }
+            for (i, value) in scope_schema_urls.iter_mut().enumerate() {
+                *value = Cow::Owned(r.str(&format!("scope_schema_url {i}"))?.to_owned());
+            }
+            for (i, value) in resource_dropped_attributes.iter_mut().enumerate() {
+                *value = r.u32(&format!("resource_dropped_attributes_count {i}"))?;
+            }
+            for (i, value) in scope_dropped_attributes.iter_mut().enumerate() {
+                *value = r.u32(&format!("scope_dropped_attributes_count {i}"))?;
             }
         }
 
@@ -530,6 +600,16 @@ impl TracesTab {
                 events: std::mem::take(&mut events[i]),
                 resource: std::mem::take(&mut resources[i]),
                 instrumentation_scope: std::mem::take(&mut scopes[i]),
+                links: std::mem::take(&mut links[i]),
+                trace_state: std::mem::take(&mut trace_states[i]),
+                trace_flags: trace_flags[i],
+                dropped_attributes_count: dropped_attributes[i],
+                dropped_events_count: dropped_events[i],
+                dropped_links_count: dropped_links[i],
+                resource_schema_url: std::mem::take(&mut resource_schema_urls[i]),
+                scope_schema_url: std::mem::take(&mut scope_schema_urls[i]),
+                resource_dropped_attributes_count: resource_dropped_attributes[i],
+                scope_dropped_attributes_count: scope_dropped_attributes[i],
             });
         }
         let count = self.shared.engine.push_batch(entries).map_err(module_err)?;
@@ -729,7 +809,7 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             claim(info, offset_c, 0);
         }
 
-        let projection = (info.col_used() & u64::from(SpanColumnMask::ALL.bits())) as c_int;
+        let projection = SpanColumnMask::from_col_used(info.col_used()).bits() as c_int;
         mask |= projection << PROJECTION_SHIFT;
         info.set_idx_num(mask);
         if let Some(order) = bounded_order {
@@ -824,14 +904,14 @@ impl UpdateVTab<'_> for TracesTab {
             Some(ValueRef::Null) | None => {} // plain data row
             Some(ValueRef::Blob(blob)) => {
                 // Dispatch by version byte. v0 stays readable forever;
-                // v1 carries the rich span shape.
+                // v1 carries the original rich shape; v2 completes OTLP fidelity.
                 return match blob.first() {
-                    Some(0x01 | 0x02) => self.ingest_batch(blob),
-                    Some(b @ (0x00 | 0x03..=0x08)) => Err(module_err(format!(
-                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01 and v1 = 0x02)"
+                    Some(0x01..=0x03) => self.ingest_batch(blob),
+                    Some(b @ (0x00 | 0x04..=0x08)) => Err(module_err(format!(
+                        "unknown batch version 0x{b:02x} (this build speaks v0 = 0x01, v1 = 0x02, and v2 = 0x03)"
                     ))),
                     Some(b) => Err(module_err(format!(
-                        "unknown blob format (first byte 0x{b:02x}; traces batches start with 0x01/0x02)"
+                        "unknown blob format (first byte 0x{b:02x}; traces batches start with 0x01/0x02/0x03)"
                     ))),
                     None => Err(module_err("empty blob".into())),
                 };
@@ -929,6 +1009,46 @@ impl UpdateVTab<'_> for TracesTab {
             ),
             None => Cow::Borrowed("{}"),
         };
+        let links_json: Option<String> = args.get(2 + COL_LINKS)?;
+        let links = match links_json.as_deref() {
+            Some(text) => Cow::Owned(otel_json::array(Some(text), "links").map_err(module_err)?),
+            None => Cow::Borrowed("[]"),
+        };
+        let trace_state: Option<String> = args.get(2 + COL_TRACE_STATE)?;
+        let trace_state = trace_state.map(Cow::Owned).unwrap_or(Cow::Borrowed(""));
+        let unsigned = |column: usize, name: &str| -> Result<u32> {
+            let value: Option<i64> = args.get(2 + column)?;
+            match value {
+                None => Ok(0),
+                Some(value) => u32::try_from(value).map_err(|_| {
+                    module_err(format!(
+                        "{name} must be an INTEGER from 0 through {}",
+                        u32::MAX
+                    ))
+                }),
+            }
+        };
+        let trace_flags = unsigned(COL_TRACE_FLAGS, "trace_flags")?;
+        let dropped_attributes_count =
+            unsigned(COL_DROPPED_ATTRIBUTES, "dropped_attributes_count")?;
+        let dropped_events_count = unsigned(COL_DROPPED_EVENTS, "dropped_events_count")?;
+        let dropped_links_count = unsigned(COL_DROPPED_LINKS, "dropped_links_count")?;
+        let resource_schema_url: Option<String> = args.get(2 + COL_RESOURCE_SCHEMA_URL)?;
+        let resource_schema_url = resource_schema_url
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(""));
+        let scope_schema_url: Option<String> = args.get(2 + COL_SCOPE_SCHEMA_URL)?;
+        let scope_schema_url = scope_schema_url
+            .map(Cow::Owned)
+            .unwrap_or(Cow::Borrowed(""));
+        let resource_dropped_attributes_count = unsigned(
+            COL_RESOURCE_DROPPED_ATTRIBUTES,
+            "resource_dropped_attributes_count",
+        )?;
+        let scope_dropped_attributes_count = unsigned(
+            COL_SCOPE_DROPPED_ATTRIBUTES,
+            "scope_dropped_attributes_count",
+        )?;
         let service =
             otel_json::derive_service(attributes.as_ref(), resource.as_ref(), explicit_service)
                 .map_err(module_err)?;
@@ -952,6 +1072,16 @@ impl UpdateVTab<'_> for TracesTab {
                 events,
                 resource,
                 instrumentation_scope,
+                links,
+                trace_state,
+                trace_flags,
+                dropped_attributes_count,
+                dropped_events_count,
+                dropped_links_count,
+                resource_schema_url,
+                scope_schema_url,
+                resource_dropped_attributes_count,
+                scope_dropped_attributes_count,
             })
             .map_err(module_err)?;
 
@@ -1333,6 +1463,20 @@ unsafe impl VTabCursor for TracesCursor<'_> {
             COL_EVENTS => ctx.set_result(&row.events.as_ref()),
             COL_RESOURCE => ctx.set_result(&row.resource.as_ref()),
             COL_SCOPE => ctx.set_result(&row.instrumentation_scope.as_ref()),
+            COL_LINKS => ctx.set_result(&row.links.as_ref()),
+            COL_TRACE_STATE => ctx.set_result(&row.trace_state.as_ref()),
+            COL_TRACE_FLAGS => ctx.set_result(&(i64::from(row.trace_flags))),
+            COL_DROPPED_ATTRIBUTES => ctx.set_result(&(i64::from(row.dropped_attributes_count))),
+            COL_DROPPED_EVENTS => ctx.set_result(&(i64::from(row.dropped_events_count))),
+            COL_DROPPED_LINKS => ctx.set_result(&(i64::from(row.dropped_links_count))),
+            COL_RESOURCE_SCHEMA_URL => ctx.set_result(&row.resource_schema_url.as_ref()),
+            COL_SCOPE_SCHEMA_URL => ctx.set_result(&row.scope_schema_url.as_ref()),
+            COL_RESOURCE_DROPPED_ATTRIBUTES => {
+                ctx.set_result(&(i64::from(row.resource_dropped_attributes_count)))
+            }
+            COL_SCOPE_DROPPED_ATTRIBUTES => {
+                ctx.set_result(&(i64::from(row.scope_dropped_attributes_count)))
+            }
             // The hidden command column reads as NULL.
             _ => ctx.set_result(&Null),
         }

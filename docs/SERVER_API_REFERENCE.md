@@ -20,7 +20,7 @@ not implemented.
 |---|---:|---|---|
 | `timeless-metrics-api` | `127.0.0.1:19439` | `metric_samples` for a fresh database; legacy public `metrics` vtab remains readable | `named-v0` |
 | `timeless-logs-api` | `127.0.0.1:19429` | `logs` with epoch-microsecond timestamps | `rich-v1` |
-| `timeless-traces-api` | `127.0.0.1:19449` | `traces` | `rich-span-v1` |
+| `timeless-traces-api` | `127.0.0.1:19449` | `traces` | `rich-span-v2` |
 
 All three use the same positional command line:
 
@@ -211,7 +211,7 @@ in the [LogsQL matrix](LOGSQL_FEATURE_MATRIX.md) and
 `POST /insert/opentelemetry/v1/traces` accepts OTLP JSON by default and OTLP
 protobuf when `Content-Type` contains `application/x-protobuf`. Protobuf may
 also use `Content-Encoding: gzip`. The handler validates the complete request,
-encodes one public rich-span-v1 batch, and waits for its SQLite insertion
+encodes one public rich-span-v2 batch, and waits for its SQLite insertion
 statement before returning `{"partialSuccess":{}}`. That statement may leave
 spans in the extension's authoritative 8,192-span buffer; call flush when a
 durability barrier is required. There is no server-owned span buffer.

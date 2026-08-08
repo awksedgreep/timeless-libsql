@@ -72,6 +72,16 @@ fn span(
         events: "[]".into(),
         resource: "{}".into(),
         instrumentation_scope: "{}".into(),
+        links: "[]".into(),
+        trace_state: "".into(),
+        trace_flags: 0,
+        dropped_attributes_count: 0,
+        dropped_events_count: 0,
+        dropped_links_count: 0,
+        resource_schema_url: "".into(),
+        scope_schema_url: "".into(),
+        resource_dropped_attributes_count: 0,
+        scope_dropped_attributes_count: 0,
     }
 }
 
@@ -315,6 +325,16 @@ fn span_codec_round_trips_all_codecs() {
             events: r#"[{"attributes":{"escaped":"a\"b","retry":false},"name":"exception","timestamp":1700000000000000124}]"#.into(),
             resource: r#"{"host":{"arch":"arm64"},"service.name":"api"}"#.into(),
             instrumentation_scope: r#"{"name":"checkout-lib","version":"1.2.3"}"#.into(),
+            links: r#"[{"attributes":{"reason":"retry"},"dropped_attributes_count":2,"flags":257,"span_id":"1111111111111111","trace_id":"22222222222222222222222222222222","trace_state":"vendor=value"}]"#.into(),
+            trace_state: "rojo=00f067aa0ba902b7".into(),
+            trace_flags: u32::MAX,
+            dropped_attributes_count: 3,
+            dropped_events_count: 4,
+            dropped_links_count: 5,
+            resource_schema_url: "https://opentelemetry.io/schemas/1.26.0".into(),
+            scope_schema_url: "https://example.test/scope/2".into(),
+            resource_dropped_attributes_count: 6,
+            scope_dropped_attributes_count: 7,
         },
         SpanEntry {
             trace_id: [0x00; 16],
@@ -331,6 +351,16 @@ fn span_codec_round_trips_all_codecs() {
             events: "[]".into(),
             resource: "{}".into(),
             instrumentation_scope: "{}".into(),
+            links: "[]".into(),
+            trace_state: "".into(),
+            trace_flags: 0,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: "".into(),
+            scope_schema_url: "".into(),
+            resource_dropped_attributes_count: 0,
+            scope_dropped_attributes_count: 0,
         },
         SpanEntry {
             trace_id: [0xAB; 16],
@@ -347,6 +377,16 @@ fn span_codec_round_trips_all_codecs() {
             events: "[]".into(),
             resource: r#"{"service.name":"db"}"#.into(),
             instrumentation_scope: "{}".into(),
+            links: "[]".into(),
+            trace_state: "".into(),
+            trace_flags: 0,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: "".into(),
+            scope_schema_url: "".into(),
+            resource_dropped_attributes_count: 0,
+            scope_dropped_attributes_count: 0,
         },
     ];
     // CODEC_ZSTD and CODEC_COLUMNAR stay in this loop FOREVER even
@@ -361,7 +401,67 @@ fn span_codec_round_trips_all_codecs() {
         assert_eq!(meta.codec, codec);
         let back = decode_span_block(&bytes).unwrap();
         assert_eq!(back, entries, "codec {codec} round-trip");
+
+        // Generation 2 is the exact first fourteen columns of generation 3.
+        // Pin old databases with every codec and deterministic defaults for
+        // each additive rich-span-v2 field.
+        let legacy = generation_two_prefix(&bytes);
+        let decoded = decode_span_block(&legacy).unwrap();
+        for (actual, expected) in decoded.iter().zip(&entries) {
+            assert_eq!(actual.trace_id, expected.trace_id);
+            assert_eq!(actual.span_id, expected.span_id);
+            assert_eq!(actual.parent_span_id, expected.parent_span_id);
+            assert_eq!(actual.name, expected.name);
+            assert_eq!(actual.service, expected.service);
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.status, expected.status);
+            assert_eq!(actual.status_description, expected.status_description);
+            assert_eq!(actual.start_ts, expected.start_ts);
+            assert_eq!(actual.duration_ns, expected.duration_ns);
+            assert_eq!(actual.attributes, expected.attributes);
+            assert_eq!(actual.events, expected.events);
+            assert_eq!(actual.resource, expected.resource);
+            assert_eq!(actual.instrumentation_scope, expected.instrumentation_scope);
+            assert_eq!(actual.links, "[]");
+            assert!(actual.trace_state.is_empty());
+            assert_eq!(actual.trace_flags, 0);
+            assert_eq!(actual.dropped_attributes_count, 0);
+            assert_eq!(actual.dropped_events_count, 0);
+            assert_eq!(actual.dropped_links_count, 0);
+            assert!(actual.resource_schema_url.is_empty());
+            assert!(actual.scope_schema_url.is_empty());
+            assert_eq!(actual.resource_dropped_attributes_count, 0);
+            assert_eq!(actual.scope_dropped_attributes_count, 0);
+        }
     }
+}
+
+fn generation_two_prefix(generation_three: &[u8]) -> Vec<u8> {
+    const COMMON: usize = 22;
+    const V2_COLUMNS: usize = 14;
+    const V3_COLUMNS: usize = 24;
+    let mut lengths = [0_usize; V3_COLUMNS];
+    for (index, length) in lengths.iter_mut().enumerate() {
+        let offset = COMMON + index * 4;
+        *length =
+            u32::from_le_bytes(generation_three[offset..offset + 4].try_into().unwrap()) as usize;
+    }
+    let mut out =
+        Vec::with_capacity(COMMON + V2_COLUMNS * 4 + lengths[..V2_COLUMNS].iter().sum::<usize>());
+    out.extend_from_slice(&generation_three[..COMMON]);
+    out[0] = 2;
+    for length in &lengths[..V2_COLUMNS] {
+        out.extend_from_slice(&(*length as u32).to_le_bytes());
+    }
+    let mut payload = COMMON + V3_COLUMNS * 4;
+    for (index, length) in lengths.iter().enumerate() {
+        if index < V2_COLUMNS {
+            out.extend_from_slice(&generation_three[payload..payload + length]);
+        }
+        payload += length;
+    }
+    assert_eq!(payload, generation_three.len());
+    out
 }
 
 // ---------------------------------------------------------------------------

@@ -253,6 +253,24 @@ async fn dashboard_search_and_trace_return_complete_native_rich_spans() {
     assert_eq!(spans.len(), 2);
     assert_eq!(spans[0]["parent_span_id"], Value::Null);
     assert_eq!(spans[0]["events"][0]["attributes"]["handled"], false);
+    assert_eq!(spans[0]["events"][0]["dropped_attributes_count"], 8);
+    assert_eq!(
+        spans[0]["links"][0]["trace_id"],
+        "ffeeddccbbaa99887766554433221100"
+    );
+    assert_eq!(spans[0]["links"][0]["flags"], 257);
+    assert_eq!(spans[0]["trace_state"], "vendor=contract");
+    assert_eq!(spans[0]["trace_flags"], 4_294_967_295_u64);
+    assert_eq!(spans[0]["dropped_attributes_count"], 3);
+    assert_eq!(spans[0]["dropped_events_count"], 4);
+    assert_eq!(spans[0]["dropped_links_count"], 5);
+    assert_eq!(
+        spans[0]["resource_schema_url"],
+        "https://example.test/resource/1"
+    );
+    assert_eq!(spans[0]["scope_schema_url"], "https://example.test/scope/2");
+    assert_eq!(spans[0]["resource_dropped_attributes_count"], 6);
+    assert_eq!(spans[0]["scope_dropped_attributes_count"], 7);
     assert_eq!(spans[0]["status_message"], "contract failure");
     assert_eq!(spans[1]["parent_span_id"], "0102030405060708");
 
@@ -318,16 +336,22 @@ fn rich_protobuf_fixture() -> Vec<u8> {
                     attr("replica", Any::IntValue(7)),
                     attr("debug", Any::BoolValue(false)),
                 ],
+                dropped_attributes_count: 6,
             }),
+            schema_url: "https://example.test/resource/1".into(),
             scope_spans: vec![fixture_proto::ScopeSpans {
                 scope: Some(fixture_proto::InstrumentationScope {
                     name: "contract-lib".into(),
                     version: "4.5.6".into(),
+                    attributes: vec![attr("scope.attr", Any::StringValue("preserved".into()))],
+                    dropped_attributes_count: 7,
                 }),
+                schema_url: "https://example.test/scope/2".into(),
                 spans: vec![
                     fixture_proto::Span {
                         trace_id: hex("00112233445566778899aabbccddeeff"),
                         span_id: hex("0102030405060708"),
+                        trace_state: "vendor=contract".into(),
                         parent_span_id: Vec::new(),
                         name: "GET /contract".into(),
                         kind: 2,
@@ -346,15 +370,29 @@ fn rich_protobuf_fixture() -> Vec<u8> {
                                 attr("exception.type", Any::StringValue("ContractError".into())),
                                 attr("handled", Any::BoolValue(false)),
                             ],
+                            dropped_attributes_count: 8,
                         }],
+                        dropped_attributes_count: 3,
+                        dropped_events_count: 4,
+                        links: vec![fixture_proto::Link {
+                            trace_id: hex("ffeeddccbbaa99887766554433221100"),
+                            span_id: hex("8877665544332211"),
+                            trace_state: "link=state".into(),
+                            attributes: vec![attr("reason", Any::StringValue("retry".into()))],
+                            dropped_attributes_count: 9,
+                            flags: 257,
+                        }],
+                        dropped_links_count: 5,
                         status: Some(fixture_proto::Status {
                             message: "contract failure".into(),
                             code: 2,
                         }),
+                        flags: u32::MAX,
                     },
                     fixture_proto::Span {
                         trace_id: hex("00112233445566778899aabbccddeeff"),
                         span_id: hex("1112131415161718"),
+                        trace_state: String::new(),
                         parent_span_id: hex("0102030405060708"),
                         name: "DB contract".into(),
                         kind: 3,
@@ -365,10 +403,15 @@ fn rich_protobuf_fixture() -> Vec<u8> {
                             attr("rows", Any::IntValue(3)),
                         ],
                         events: Vec::new(),
+                        dropped_attributes_count: 0,
+                        dropped_events_count: 0,
+                        links: Vec::new(),
+                        dropped_links_count: 0,
                         status: Some(fixture_proto::Status {
                             message: String::new(),
                             code: 0,
                         }),
+                        flags: 0,
                     },
                 ],
             }],
@@ -393,10 +436,28 @@ fn assert_exact_rich_rows(database: &Path, extension: &Path, count: i64) {
               WHERE service='contract-svc'
                 AND json_extract(resource,'$.replica')=7
                 AND json_extract(instrumentation_scope,'$.name')='contract-lib'
-                AND (name='DB contract' OR (
+                AND json_extract(instrumentation_scope,'$.attributes.\"scope.attr\"')='preserved'
+                AND resource_schema_url='https://example.test/resource/1'
+                AND scope_schema_url='https://example.test/scope/2'
+                AND resource_dropped_attributes_count=6
+                AND scope_dropped_attributes_count=7
+                AND ((name='DB contract' AND links='[]' AND trace_state=''
+                    AND trace_flags=0 AND dropped_attributes_count=0
+                    AND dropped_events_count=0 AND dropped_links_count=0) OR (
                     status_description='contract failure'
                     AND json_extract(attributes,'$.retryable')=1
-                    AND json_extract(events,'$[0].name')='exception'))",
+                    AND json_extract(events,'$[0].name')='exception'
+                    AND json_extract(events,'$[0].dropped_attributes_count')=8
+                    AND json_extract(links,'$[0].trace_id')='ffeeddccbbaa99887766554433221100'
+                    AND json_extract(links,'$[0].span_id')='8877665544332211'
+                    AND json_extract(links,'$[0].attributes.reason')='retry'
+                    AND json_extract(links,'$[0].dropped_attributes_count')=9
+                    AND json_extract(links,'$[0].flags')=257
+                    AND trace_state='vendor=contract'
+                    AND trace_flags=4294967295
+                    AND dropped_attributes_count=3
+                    AND dropped_events_count=4
+                    AND dropped_links_count=5))",
             [],
             |row| row.get(0),
         )
@@ -465,11 +526,15 @@ mod fixture_proto {
         pub resource: Option<Resource>,
         #[prost(message, repeated, tag = "2")]
         pub scope_spans: Vec<ScopeSpans>,
+        #[prost(string, tag = "3")]
+        pub schema_url: String,
     }
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Resource {
         #[prost(message, repeated, tag = "1")]
         pub attributes: Vec<KeyValue>,
+        #[prost(uint32, tag = "2")]
+        pub dropped_attributes_count: u32,
     }
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct ScopeSpans {
@@ -477,6 +542,8 @@ mod fixture_proto {
         pub scope: Option<InstrumentationScope>,
         #[prost(message, repeated, tag = "2")]
         pub spans: Vec<Span>,
+        #[prost(string, tag = "3")]
+        pub schema_url: String,
     }
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct InstrumentationScope {
@@ -484,6 +551,10 @@ mod fixture_proto {
         pub name: String,
         #[prost(string, tag = "2")]
         pub version: String,
+        #[prost(message, repeated, tag = "3")]
+        pub attributes: Vec<KeyValue>,
+        #[prost(uint32, tag = "4")]
+        pub dropped_attributes_count: u32,
     }
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Span {
@@ -491,6 +562,8 @@ mod fixture_proto {
         pub trace_id: Vec<u8>,
         #[prost(bytes = "vec", tag = "2")]
         pub span_id: Vec<u8>,
+        #[prost(string, tag = "3")]
+        pub trace_state: String,
         #[prost(bytes = "vec", tag = "4")]
         pub parent_span_id: Vec<u8>,
         #[prost(string, tag = "5")]
@@ -503,10 +576,20 @@ mod fixture_proto {
         pub end_time_unix_nano: u64,
         #[prost(message, repeated, tag = "9")]
         pub attributes: Vec<KeyValue>,
+        #[prost(uint32, tag = "10")]
+        pub dropped_attributes_count: u32,
         #[prost(message, repeated, tag = "11")]
         pub events: Vec<Event>,
+        #[prost(uint32, tag = "12")]
+        pub dropped_events_count: u32,
+        #[prost(message, repeated, tag = "13")]
+        pub links: Vec<Link>,
+        #[prost(uint32, tag = "14")]
+        pub dropped_links_count: u32,
         #[prost(message, optional, tag = "15")]
         pub status: Option<Status>,
+        #[prost(fixed32, tag = "16")]
+        pub flags: u32,
     }
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Event {
@@ -516,6 +599,23 @@ mod fixture_proto {
         pub name: String,
         #[prost(message, repeated, tag = "3")]
         pub attributes: Vec<KeyValue>,
+        #[prost(uint32, tag = "4")]
+        pub dropped_attributes_count: u32,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Link {
+        #[prost(bytes = "vec", tag = "1")]
+        pub trace_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        pub span_id: Vec<u8>,
+        #[prost(string, tag = "3")]
+        pub trace_state: String,
+        #[prost(message, repeated, tag = "4")]
+        pub attributes: Vec<KeyValue>,
+        #[prost(uint32, tag = "5")]
+        pub dropped_attributes_count: u32,
+        #[prost(fixed32, tag = "6")]
+        pub flags: u32,
     }
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct Status {

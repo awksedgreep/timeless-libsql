@@ -3,7 +3,7 @@
 //! codec byte semantics are identical, and the zstd helpers + bounds-
 //! checked Reader come from the shared timeless-codec crate).
 //!
-//! Generation 2 has fourteen columns — spans are wider than log lines, and
+//! Generation 3 has twenty-four columns — spans are wider than log lines, and
 //! the columnar split is where the compression comes from: each column
 //! is long runs of SIMILAR data (all the 16-byte trace ids together,
 //! all the u8 kinds together...), which every codec rewards far more
@@ -24,6 +24,16 @@
 //!   col 12  events      canonical typed JSON array
 //!   col 13  resource    canonical typed JSON object
 //!   col 14  instrumentation_scope canonical typed JSON object
+//!   col 15  links       canonical typed JSON array
+//!   col 16  trace_state UTF-8 text
+//!   col 17  trace_flags u32
+//!   col 18  dropped_attributes_count u32
+//!   col 19  dropped_events_count u32
+//!   col 20  dropped_links_count u32
+//!   col 21  resource_schema_url UTF-8 text
+//!   col 22  scope_schema_url UTF-8 text
+//!   col 23  resource_dropped_attributes_count u32
+//!   col 24  scope_dropped_attributes_count u32
 //!
 //! Codec map (same ids as logs — the constants ARE the logs constants):
 //!   CODEC_RAW      (1) — everything uncompressed; the flush format.
@@ -68,13 +78,13 @@
 //! codecs — only the column payloads differ):
 //!
 //!   offset  size   field
-//!   0       1      format version (0x02 for new writes; 0x01 readable)
+//!   0       1      format version (0x03 for new writes; 0x01/0x02 readable)
 //!   1       1      codec (1, 2, 4 or 5; 3 reserved for OpenZL)
 //!   2       4      u32 entry_count
 //!   6       8      i64 ts_min   (min start_ts)
 //!   14      8      i64 ts_max   (max start_ts)
-//!   22      14×4   u32 stored length of each generation-2 column
-//!   78      —      the 14 columns, back to back
+//!   22      24×4   u32 stored length of each generation-3 column
+//!   118     —      the 24 columns, back to back
 //!
 //! decode_span_block() is the exact inverse and validates everything —
 //! a truncated or corrupt block is an error naming the field, never a
@@ -92,10 +102,12 @@ use crate::blocks::codec::decode_pairs_column;
 use super::{BlockMeta, SpanEntry};
 
 const FORMAT_VERSION_V1: u8 = 1;
-const FORMAT_VERSION: u8 = 2;
+const FORMAT_VERSION_V2: u8 = 2;
+const FORMAT_VERSION: u8 = 3;
 const V1_N_COLUMNS: usize = 10;
-const N_COLUMNS: usize = 14;
-const HEADER_LEN: usize = 22 + N_COLUMNS * 4; // 78
+const V2_N_COLUMNS: usize = 14;
+const N_COLUMNS: usize = 24;
+const HEADER_LEN: usize = 22 + N_COLUMNS * 4; // 118
 
 const COLUMN_NAMES: [&str; N_COLUMNS] = [
     "trace_id column",
@@ -112,6 +124,16 @@ const COLUMN_NAMES: [&str; N_COLUMNS] = [
     "events column",
     "resource column",
     "instrumentation_scope column",
+    "links column",
+    "trace_state column",
+    "trace_flags column",
+    "dropped_attributes_count column",
+    "dropped_events_count column",
+    "dropped_links_count column",
+    "resource_schema_url column",
+    "scope_schema_url column",
+    "resource_dropped_attributes_count column",
+    "scope_dropped_attributes_count column",
 ];
 
 const V1_COLUMN_NAMES: [&str; V1_N_COLUMNS] = [
@@ -127,9 +149,11 @@ const V1_COLUMN_NAMES: [&str; V1_N_COLUMNS] = [
     "attributes column",
 ];
 
-/// Physical/output span columns requested by a query. Bits map exactly to the
-/// public `timeless_traces` column order, allowing SQLite's `colUsed` mask to
-/// cross the vtable boundary without inventing another schema vocabulary.
+/// Physical/output span columns requested by a query. The original fourteen
+/// public columns map directly. The ten additive rich-span-v2 columns share
+/// one fidelity bit because SQLite's signed 32-bit `idxNum` cannot carry 24
+/// projection bits above the nine predicate bits. They remain independent
+/// physical/SQL columns; selecting any one late-materializes that group.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SpanColumnMask(u16);
 
@@ -148,14 +172,16 @@ impl SpanColumnMask {
     pub const EVENTS: Self = Self(1 << 11);
     pub const RESOURCE: Self = Self(1 << 12);
     pub const INSTRUMENTATION_SCOPE: Self = Self(1 << 13);
+    pub const FIDELITY_V2: Self = Self(1 << 14);
     pub const RICH: Self = Self(
         Self::ATTRIBUTES.0
             | Self::STATUS_DESCRIPTION.0
             | Self::EVENTS.0
             | Self::RESOURCE.0
-            | Self::INSTRUMENTATION_SCOPE.0,
+            | Self::INSTRUMENTATION_SCOPE.0
+            | Self::FIDELITY_V2.0,
     );
-    pub const ALL: Self = Self((1 << N_COLUMNS) - 1);
+    pub const ALL: Self = Self((1 << 15) - 1);
 
     pub const fn from_bits(bits: u16) -> Self {
         Self(bits & Self::ALL.0)
@@ -163,6 +189,21 @@ impl SpanColumnMask {
 
     pub const fn bits(self) -> u16 {
         self.0
+    }
+
+    /// Convert SQLite's visible-column bitmap into the compact projection
+    /// vocabulary carried through `idxNum`.
+    pub const fn from_col_used(bits: u64) -> Self {
+        let original = bits & ((1_u64 << V2_N_COLUMNS) - 1);
+        let fidelity = bits & (((1_u64 << N_COLUMNS) - 1) ^ ((1_u64 << V2_N_COLUMNS) - 1));
+        Self::from_bits(
+            original as u16
+                | if fidelity != 0 {
+                    Self::FIDELITY_V2.0
+                } else {
+                    0
+                },
+        )
     }
 
     pub const fn contains(self, other: Self) -> bool {
@@ -174,7 +215,11 @@ impl SpanColumnMask {
     }
 
     const fn column(self, index: usize) -> bool {
-        self.0 & (1 << index) != 0
+        if index < V2_N_COLUMNS {
+            self.0 & (1 << index) != 0
+        } else {
+            self.contains(Self::FIDELITY_V2)
+        }
     }
 }
 
@@ -290,6 +335,10 @@ pub fn encode_span_block(
             ("events", &e.events),
             ("resource", &e.resource),
             ("instrumentation_scope", &e.instrumentation_scope),
+            ("links", &e.links),
+            ("trace_state", &e.trace_state),
+            ("resource_schema_url", &e.resource_schema_url),
+            ("scope_schema_url", &e.scope_schema_url),
         ] {
             if s.len() > u32::MAX as usize {
                 return Err(format!("encode_span_block: {label} exceeds u32::MAX bytes"));
@@ -301,6 +350,27 @@ pub fn encode_span_block(
         // ── Codecs 4/5: typed encoders per column ───────────────────
         let starts: Vec<i64> = entries.iter().map(|e| e.start_ts).collect();
         let durs: Vec<i64> = entries.iter().map(|e| e.duration_ns).collect();
+        let trace_flags: Vec<i64> = entries.iter().map(|e| i64::from(e.trace_flags)).collect();
+        let dropped_attributes: Vec<i64> = entries
+            .iter()
+            .map(|e| i64::from(e.dropped_attributes_count))
+            .collect();
+        let dropped_events: Vec<i64> = entries
+            .iter()
+            .map(|e| i64::from(e.dropped_events_count))
+            .collect();
+        let dropped_links: Vec<i64> = entries
+            .iter()
+            .map(|e| i64::from(e.dropped_links_count))
+            .collect();
+        let resource_dropped_attributes: Vec<i64> = entries
+            .iter()
+            .map(|e| i64::from(e.resource_dropped_attributes_count))
+            .collect();
+        let scope_dropped_attributes: Vec<i64> = entries
+            .iter()
+            .map(|e| i64::from(e.scope_dropped_attributes_count))
+            .collect();
         vec![
             encode_fixed_bytes(&col_trace, 16, zstd_level)?.to_bytes(),
             encode_fixed_bytes(&col_span, 8, zstd_level)?.to_bytes(),
@@ -331,6 +401,31 @@ pub fn encode_span_block(
                 zstd_level,
             )?
             .to_bytes(),
+            encode_str(entries.iter().map(|e| e.links.as_ref()), n, zstd_level)?.to_bytes(),
+            encode_str(
+                entries.iter().map(|e| e.trace_state.as_ref()),
+                n,
+                zstd_level,
+            )?
+            .to_bytes(),
+            encode_i64(&trace_flags, zstd_level)?.to_bytes(),
+            encode_i64(&dropped_attributes, zstd_level)?.to_bytes(),
+            encode_i64(&dropped_events, zstd_level)?.to_bytes(),
+            encode_i64(&dropped_links, zstd_level)?.to_bytes(),
+            encode_str(
+                entries.iter().map(|e| e.resource_schema_url.as_ref()),
+                n,
+                zstd_level,
+            )?
+            .to_bytes(),
+            encode_str(
+                entries.iter().map(|e| e.scope_schema_url.as_ref()),
+                n,
+                zstd_level,
+            )?
+            .to_bytes(),
+            encode_i64(&resource_dropped_attributes, zstd_level)?.to_bytes(),
+            encode_i64(&scope_dropped_attributes, zstd_level)?.to_bytes(),
         ]
     } else {
         // ── Codecs 1/2 — the Session 6 formats, byte-for-byte ────────
@@ -343,6 +438,16 @@ pub fn encode_span_block(
         let mut col_events = Vec::new();
         let mut col_resource = Vec::new();
         let mut col_scope = Vec::new();
+        let mut col_links = Vec::new();
+        let mut col_trace_state = Vec::new();
+        let mut col_trace_flags = Vec::with_capacity(n * 4);
+        let mut col_dropped_attributes = Vec::with_capacity(n * 4);
+        let mut col_dropped_events = Vec::with_capacity(n * 4);
+        let mut col_dropped_links = Vec::with_capacity(n * 4);
+        let mut col_resource_schema_url = Vec::new();
+        let mut col_scope_schema_url = Vec::new();
+        let mut col_resource_dropped_attributes = Vec::with_capacity(n * 4);
+        let mut col_scope_dropped_attributes = Vec::with_capacity(n * 4);
         let mut prev_ts = 0i64;
         for e in entries {
             for (s, col) in [(&e.name, &mut col_name), (&e.service, &mut col_svc)] {
@@ -367,10 +472,22 @@ pub fn encode_span_block(
                 (&e.events, &mut col_events),
                 (&e.resource, &mut col_resource),
                 (&e.instrumentation_scope, &mut col_scope),
+                (&e.links, &mut col_links),
+                (&e.trace_state, &mut col_trace_state),
+                (&e.resource_schema_url, &mut col_resource_schema_url),
+                (&e.scope_schema_url, &mut col_scope_schema_url),
             ] {
                 col.extend_from_slice(&(s.len() as u32).to_le_bytes());
                 col.extend_from_slice(s.as_bytes());
             }
+            col_trace_flags.extend_from_slice(&e.trace_flags.to_le_bytes());
+            col_dropped_attributes.extend_from_slice(&e.dropped_attributes_count.to_le_bytes());
+            col_dropped_events.extend_from_slice(&e.dropped_events_count.to_le_bytes());
+            col_dropped_links.extend_from_slice(&e.dropped_links_count.to_le_bytes());
+            col_resource_dropped_attributes
+                .extend_from_slice(&e.resource_dropped_attributes_count.to_le_bytes());
+            col_scope_dropped_attributes
+                .extend_from_slice(&e.scope_dropped_attributes_count.to_le_bytes());
         }
 
         let raw_cols: [Vec<u8>; N_COLUMNS] = [
@@ -388,6 +505,16 @@ pub fn encode_span_block(
             col_events,
             col_resource,
             col_scope,
+            col_links,
+            col_trace_state,
+            col_trace_flags,
+            col_dropped_attributes,
+            col_dropped_events,
+            col_dropped_links,
+            col_resource_schema_url,
+            col_scope_schema_url,
+            col_resource_dropped_attributes,
+            col_scope_dropped_attributes,
         ];
         if codec == CODEC_ZSTD {
             raw_cols
@@ -433,6 +560,7 @@ enum ProjectedColumn {
     Strings(Vec<String>),
     Bytes(Vec<u8>),
     Integers(Vec<i64>),
+    Unsigned(Vec<u32>),
 }
 
 impl ProjectedColumn {
@@ -454,6 +582,20 @@ impl ProjectedColumn {
             (13, Self::Strings(values)) => {
                 entry.instrumentation_scope = values[source].clone().into()
             }
+            (14, Self::Strings(values)) => entry.links = values[source].clone().into(),
+            (15, Self::Strings(values)) => entry.trace_state = values[source].clone().into(),
+            (16, Self::Unsigned(values)) => entry.trace_flags = values[source],
+            (17, Self::Unsigned(values)) => entry.dropped_attributes_count = values[source],
+            (18, Self::Unsigned(values)) => entry.dropped_events_count = values[source],
+            (19, Self::Unsigned(values)) => entry.dropped_links_count = values[source],
+            (20, Self::Strings(values)) => {
+                entry.resource_schema_url = values[source].clone().into()
+            }
+            (21, Self::Strings(values)) => entry.scope_schema_url = values[source].clone().into(),
+            (22, Self::Unsigned(values)) => {
+                entry.resource_dropped_attributes_count = values[source]
+            }
+            (23, Self::Unsigned(values)) => entry.scope_dropped_attributes_count = values[source],
             _ => unreachable!("projected span column type mismatch"),
         }
     }
@@ -475,6 +617,16 @@ fn empty_projected_span() -> SpanEntry {
         events: "[]".into(),
         resource: "{}".into(),
         instrumentation_scope: "{}".into(),
+        links: "[]".into(),
+        trace_state: "".into(),
+        trace_flags: 0,
+        dropped_attributes_count: 0,
+        dropped_events_count: 0,
+        dropped_links_count: 0,
+        resource_schema_url: "".into(),
+        scope_schema_url: "".into(),
+        resource_dropped_attributes_count: 0,
+        scope_dropped_attributes_count: 0,
     }
 }
 
@@ -497,7 +649,7 @@ fn selected_parents(
     Ok(selected.iter().map(|index| parents[*index]).collect())
 }
 
-fn decode_v2_columnar_column(
+fn decode_columnar_column(
     stored: &[&[u8]],
     n: usize,
     column: usize,
@@ -518,7 +670,7 @@ fn decode_v2_columnar_column(
                 &raw, n, selected,
             )?))
         }
-        3 | 4 | 9..=13 => Ok(ProjectedColumn::Strings(decode_str_selected(
+        3 | 4 | 9..=15 | 20 | 21 => Ok(ProjectedColumn::Strings(decode_str_selected(
             stored[column],
             n,
             selected,
@@ -540,16 +692,36 @@ fn decode_v2_columnar_column(
                 selected.iter().map(|index| values[*index]).collect(),
             ))
         }
+        16..=19 | 22 | 23 => {
+            let values = decode_i64(stored[column], n)?;
+            let values = values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    u32::try_from(value).map_err(|_| {
+                        format!(
+                            "span block: span {index}: {} value {value} is outside uint32",
+                            COLUMN_NAMES[column]
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ProjectedColumn::Unsigned(
+                selected.iter().map(|index| values[*index]).collect(),
+            ))
+        }
         _ => unreachable!("span projection column out of range"),
     }
 }
 
-fn parse_v2_columnar(bytes: &[u8]) -> Result<Option<(usize, Vec<&[u8]>)>, String> {
+fn parse_columnar(bytes: &[u8]) -> Result<Option<(usize, usize, Vec<&[u8]>)>, String> {
     let mut reader = Reader::new(bytes);
     let version = reader.u8("format version")?;
-    if version != FORMAT_VERSION {
-        return Ok(None);
-    }
+    let physical_columns = match version {
+        FORMAT_VERSION_V2 => V2_N_COLUMNS,
+        FORMAT_VERSION => N_COLUMNS,
+        _ => return Ok(None),
+    };
     let codec = reader.u8("codec")?;
     if !known_codec(codec) {
         return Err(format!("span block: unknown codec {codec}"));
@@ -560,11 +732,11 @@ fn parse_v2_columnar(bytes: &[u8]) -> Result<Option<(usize, Vec<&[u8]>)>, String
     let n = reader.u32("entry_count")? as usize;
     let _ts_min = reader.i64("ts_min")?;
     let _ts_max = reader.i64("ts_max")?;
-    let mut lengths = [0usize; N_COLUMNS];
+    let mut lengths = vec![0usize; physical_columns];
     for (index, length) in lengths.iter_mut().enumerate() {
         *length = reader.u32(COLUMN_NAMES[index])? as usize;
     }
-    let mut stored = Vec::with_capacity(N_COLUMNS);
+    let mut stored = Vec::with_capacity(physical_columns);
     for (index, length) in lengths.iter().enumerate() {
         stored.push(reader.take(*length, COLUMN_NAMES[index])?);
     }
@@ -574,7 +746,7 @@ fn parse_v2_columnar(bytes: &[u8]) -> Result<Option<(usize, Vec<&[u8]>)>, String
             reader.remaining()
         ));
     }
-    Ok(Some((n, stored)))
+    Ok(Some((n, physical_columns, stored)))
 }
 
 fn projected_row<'a>(columns: &'a [Option<ProjectedColumn>], row: usize) -> SpanPredicateRow<'a> {
@@ -662,9 +834,21 @@ fn clear_unprojected(entry: &mut SpanEntry, mask: SpanColumnMask) {
     if !mask.column(13) {
         entry.instrumentation_scope = defaults.instrumentation_scope;
     }
+    if !mask.contains(SpanColumnMask::FIDELITY_V2) {
+        entry.links = defaults.links;
+        entry.trace_state = defaults.trace_state;
+        entry.trace_flags = 0;
+        entry.dropped_attributes_count = 0;
+        entry.dropped_events_count = 0;
+        entry.dropped_links_count = 0;
+        entry.resource_schema_url = defaults.resource_schema_url;
+        entry.scope_schema_url = defaults.scope_schema_url;
+        entry.resource_dropped_attributes_count = 0;
+        entry.scope_dropped_attributes_count = 0;
+    }
 }
 
-/// Predicate-first projected block decode. Generation-2 adaptive columnar
+/// Predicate-first projected block decode. Generation-2/3 adaptive columnar
 /// blocks decode only predicate columns first, then materialize requested
 /// columns for matching rows. Older readable formats retain the exact full
 /// decoder as a conservative compatibility fallback.
@@ -677,7 +861,7 @@ pub(crate) fn decode_span_block_projected<F>(
 where
     F: FnMut(SpanPredicateRow<'_>) -> bool,
 {
-    let Some((n, stored)) = parse_v2_columnar(bytes)? else {
+    let Some((n, physical_columns, stored)) = parse_columnar(bytes)? else {
         let mut entries = decode_span_block(bytes)?;
         let examined = entries.len() as u64;
         entries.retain(|entry| predicate(entry_predicate_row(entry)));
@@ -685,10 +869,10 @@ where
         for entry in &mut entries {
             clear_unprojected(entry, materialized);
         }
-        let physical_columns = if bytes.first() == Some(&FORMAT_VERSION_V1) {
-            V1_N_COLUMNS
-        } else {
-            N_COLUMNS
+        let physical_columns = match bytes.first().copied() {
+            Some(FORMAT_VERSION_V1) => V1_N_COLUMNS,
+            Some(FORMAT_VERSION_V2) => V2_N_COLUMNS,
+            _ => N_COLUMNS,
         };
         return Ok((
             entries,
@@ -696,11 +880,8 @@ where
                 columns: physical_columns as u64,
                 column_bytes: bytes.len() as u64,
                 materialized_values: examined.saturating_mul(physical_columns as u64),
-                materialized_rich_values: if physical_columns == N_COLUMNS {
-                    examined.saturating_mul(5)
-                } else {
-                    examined
-                },
+                materialized_rich_values: examined
+                    .saturating_mul(physical_columns.saturating_sub(9) as u64),
                 examined_spans: examined,
             },
         ));
@@ -712,9 +893,9 @@ where
         ..SpanDecodeProfile::default()
     };
     let mut columns = (0..N_COLUMNS).map(|_| None).collect::<Vec<_>>();
-    for (column, slot) in columns.iter_mut().enumerate() {
+    for (column, slot) in columns.iter_mut().take(physical_columns).enumerate() {
         if predicate_mask.column(column) {
-            *slot = Some(decode_v2_columnar_column(&stored, n, column, &all_rows)?);
+            *slot = Some(decode_columnar_column(&stored, n, column, &all_rows)?);
             profile.columns += 1;
             profile.column_bytes = profile
                 .column_bytes
@@ -741,13 +922,16 @@ where
         if !materialized.column(column) {
             continue;
         }
+        if column >= physical_columns {
+            continue;
+        }
         if let Some(values) = &columns[column] {
             for (target, source) in selected.iter().copied().enumerate() {
                 values.assign(column, source, &mut entries[target]);
             }
             continue;
         }
-        let values = decode_v2_columnar_column(&stored, n, column, &selected)?;
+        let values = decode_columnar_column(&stored, n, column, &selected)?;
         profile.columns += 1;
         profile.column_bytes = profile
             .column_bytes
@@ -768,15 +952,15 @@ where
 }
 
 /// Decode a span block payload back into spans, in stored order.
-/// Generation 1 (the original ten-column/string-attribute layout) is
-/// permanently readable. Generation 2 stores all rich OTel fields and
-/// typed JSON text in fourteen independent columns.
+/// Generation 1 (the original ten-column/string-attribute layout) and
+/// generation 2 (the first fourteen rich columns) are permanently readable.
+/// Generation 3 appends complete rich-span-v2 fidelity.
 pub fn decode_span_block(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
     match bytes.first().copied() {
         Some(FORMAT_VERSION_V1) => decode_span_block_v1(bytes),
-        Some(FORMAT_VERSION) => decode_span_block_v2(bytes),
+        Some(FORMAT_VERSION_V2 | FORMAT_VERSION) => decode_span_block_v2_v3(bytes),
         Some(version) => Err(format!(
-            "span block: unsupported format version {version} (this build speaks 1 and 2)"
+            "span block: unsupported format version {version} (this build speaks 1, 2, and 3)"
         )),
         None => Err("span block: missing format version".into()),
     }
@@ -823,10 +1007,33 @@ fn parse_len_strings(
     Ok(out)
 }
 
-fn decode_span_block_v2(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
+fn decode_adaptive_u32(stored: &[u8], n: usize, label: &'static str) -> Result<Vec<u32>, String> {
+    decode_i64(stored, n)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            u32::try_from(value).map_err(|_| {
+                format!("span block: span {index}: {label} value {value} is outside uint32")
+            })
+        })
+        .collect()
+}
+
+fn decode_raw_u32(raw: &[u8]) -> Vec<u32> {
+    raw.chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
+fn decode_span_block_v2_v3(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
     let mut r = Reader::new(bytes);
     let version = r.u8("format version")?;
-    debug_assert_eq!(version, FORMAT_VERSION);
+    debug_assert!(version == FORMAT_VERSION_V2 || version == FORMAT_VERSION);
+    let physical_columns = if version == FORMAT_VERSION_V2 {
+        V2_N_COLUMNS
+    } else {
+        N_COLUMNS
+    };
     let codec = r.u8("codec")?;
     if !known_codec(codec) {
         return Err(format!("span block: unknown codec {codec}"));
@@ -834,11 +1041,11 @@ fn decode_span_block_v2(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
     let n = r.u32("entry_count")? as usize;
     let _ts_min = r.i64("ts_min")?;
     let _ts_max = r.i64("ts_max")?;
-    let mut lens = [0usize; N_COLUMNS];
+    let mut lens = vec![0usize; physical_columns];
     for (i, len) in lens.iter_mut().enumerate() {
         *len = r.u32(COLUMN_NAMES[i])? as usize;
     }
-    let mut stored = Vec::with_capacity(N_COLUMNS);
+    let mut stored = Vec::with_capacity(physical_columns);
     for (i, len) in lens.iter().enumerate() {
         stored.push(r.take(*len, COLUMN_NAMES[i])?);
     }
@@ -973,7 +1180,90 @@ fn decode_span_block_v2(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
             events: events[i].clone().into(),
             resource: resources[i].clone().into(),
             instrumentation_scope: scopes[i].clone().into(),
+            links: "[]".into(),
+            trace_state: "".into(),
+            trace_flags: 0,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: "".into(),
+            scope_schema_url: "".into(),
+            resource_dropped_attributes_count: 0,
+            scope_dropped_attributes_count: 0,
         });
+    }
+    if version == FORMAT_VERSION {
+        let (
+            links,
+            trace_states,
+            trace_flags,
+            dropped_attributes,
+            dropped_events,
+            dropped_links,
+            resource_schema_urls,
+            scope_schema_urls,
+            resource_dropped_attributes,
+            scope_dropped_attributes,
+        ) = if codec == CODEC_COLUMNAR || codec == CODEC_COLUMNAR_V2 {
+            (
+                decode_str(stored[14], n)?,
+                decode_str(stored[15], n)?,
+                decode_adaptive_u32(stored[16], n, COLUMN_NAMES[16])?,
+                decode_adaptive_u32(stored[17], n, COLUMN_NAMES[17])?,
+                decode_adaptive_u32(stored[18], n, COLUMN_NAMES[18])?,
+                decode_adaptive_u32(stored[19], n, COLUMN_NAMES[19])?,
+                decode_str(stored[20], n)?,
+                decode_str(stored[21], n)?,
+                decode_adaptive_u32(stored[22], n, COLUMN_NAMES[22])?,
+                decode_adaptive_u32(stored[23], n, COLUMN_NAMES[23])?,
+            )
+        } else {
+            let cols = stored[14..]
+                .iter()
+                .enumerate()
+                .map(|(offset, column)| {
+                    if codec == CODEC_ZSTD {
+                        zstd_decompress(column, COLUMN_NAMES[14 + offset])
+                    } else {
+                        Ok(column.to_vec())
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for index in [2_usize, 3, 4, 5, 8, 9] {
+                if cols[index].len() != n * 4 {
+                    return Err(format!(
+                        "span block: {} is {} bytes, expected {} for {n} spans",
+                        COLUMN_NAMES[14 + index],
+                        cols[index].len(),
+                        n * 4
+                    ));
+                }
+            }
+            (
+                parse_len_strings(&cols[0], n, COLUMN_NAMES[14], true)?,
+                parse_len_strings(&cols[1], n, COLUMN_NAMES[15], true)?,
+                decode_raw_u32(&cols[2]),
+                decode_raw_u32(&cols[3]),
+                decode_raw_u32(&cols[4]),
+                decode_raw_u32(&cols[5]),
+                parse_len_strings(&cols[6], n, COLUMN_NAMES[20], true)?,
+                parse_len_strings(&cols[7], n, COLUMN_NAMES[21], true)?,
+                decode_raw_u32(&cols[8]),
+                decode_raw_u32(&cols[9]),
+            )
+        };
+        for (index, entry) in out.iter_mut().enumerate() {
+            entry.links = links[index].clone().into();
+            entry.trace_state = trace_states[index].clone().into();
+            entry.trace_flags = trace_flags[index];
+            entry.dropped_attributes_count = dropped_attributes[index];
+            entry.dropped_events_count = dropped_events[index];
+            entry.dropped_links_count = dropped_links[index];
+            entry.resource_schema_url = resource_schema_urls[index].clone().into();
+            entry.scope_schema_url = scope_schema_urls[index].clone().into();
+            entry.resource_dropped_attributes_count = resource_dropped_attributes[index];
+            entry.scope_dropped_attributes_count = scope_dropped_attributes[index];
+        }
     }
     Ok(out)
 }
@@ -1054,6 +1344,16 @@ fn decode_span_block_v1(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
                 events: "[]".into(),
                 resource: "{}".into(),
                 instrumentation_scope: "{}".into(),
+                links: "[]".into(),
+                trace_state: "".into(),
+                trace_flags: 0,
+                dropped_attributes_count: 0,
+                dropped_events_count: 0,
+                dropped_links_count: 0,
+                resource_schema_url: "".into(),
+                scope_schema_url: "".into(),
+                resource_dropped_attributes_count: 0,
+                scope_dropped_attributes_count: 0,
             });
         }
         return Ok(out);
@@ -1166,6 +1466,16 @@ fn decode_span_block_v1(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
             events: "[]".into(),
             resource: "{}".into(),
             instrumentation_scope: "{}".into(),
+            links: "[]".into(),
+            trace_state: "".into(),
+            trace_flags: 0,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: "".into(),
+            scope_schema_url: "".into(),
+            resource_dropped_attributes_count: 0,
+            scope_dropped_attributes_count: 0,
         });
     }
     Ok(out)

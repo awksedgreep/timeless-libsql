@@ -377,17 +377,28 @@ CREATE VIRTUAL TABLE traces USING timeless_traces;
 | `events` | TEXT | no | typed JSON array of span events (default `[]`) |
 | `resource` | TEXT | no | typed JSON object of resource attributes (default `{}`) |
 | `instrumentation_scope` | TEXT | no | typed JSON scope object (default `{}`) |
+| `links` | TEXT | no | typed JSON array of OTLP link objects (default `[]`) |
+| `trace_state` | TEXT | no | W3C trace state (default empty) |
+| `trace_flags` | INTEGER | no | OTLP unsigned 32-bit flags (default 0) |
+| `dropped_attributes_count` | INTEGER | no | span dropped attributes (default 0) |
+| `dropped_events_count` | INTEGER | no | span dropped events (default 0) |
+| `dropped_links_count` | INTEGER | no | span dropped links (default 0) |
+| `resource_schema_url` | TEXT | no | resource semantic-convention schema URL |
+| `scope_schema_url` | TEXT | no | scope semantic-convention schema URL |
+| `resource_dropped_attributes_count` | INTEGER | no | resource dropped attributes (default 0) |
+| `scope_dropped_attributes_count` | INTEGER | no | scope dropped attributes (default 0) |
 
 The indexed `service` value follows product semantics: a string
 `service.name` in `attributes` wins, then a string `service.name` in
 `resource`, then the explicit `service` value. At least one source must supply
 a non-empty string.
 
-Current timeless_traces behavior deliberately remains unchanged for fields
-its public Span model does not retain: OTLP links, trace state, trace flags,
-resource/scope schema URLs, and dropped attribute/event/link counts are
-ignored at ingest. They are not silently placed in a private blob. Adding any
-of them requires another additive public column and batch/codec revision.
+Rich-span v2 retains OTLP links, trace state/flags, resource and scope schema
+URLs, resource/scope/span dropped counts, per-event dropped counts, and
+per-link flags, trace state, typed attributes, and dropped counts. Scope
+attributes remain inside `instrumentation_scope`. The additive public batch
+and compatibility defaults are specified in the
+[rich-span v2 contract](2026-08-08_trace_rich_span_v2_contract.md).
 
 Ids are flexible on the way in — OTel tooling hands you hex strings, so hex
 TEXT and packed BLOBs are both accepted. On the way out they're always
@@ -457,9 +468,10 @@ storage engine can use to *skip* decompression:
 | logs | `level = ...`, any index-key `= ...`, `ts` ranges, `message_contains = ...`; `max_work_entries = ...` bounds examined entries |
 | traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges, inclusive `duration_ns` lower/upper bounds |
 
-Optimized generation-2 trace blocks also honor SQLite's projection. The
+Optimized generation-2 and generation-3 trace blocks also honor SQLite's projection. The
 engine first decodes only columns required by pushed predicates, then
-materializes selected rich columns for matching rows. Thus `count(*)`, scalar
+materializes selected rich columns for matching rows. The ten rich-span-v2
+columns are one late-materialized group. Thus `count(*)`, scalar
 projections, misses, and `timeless_trace_buckets` avoid expanding unrelated
 rich JSON. Older readable block formats use the exact full-decoder fallback.
 Inspect `query_decoded_columns`, `query_decoded_column_bytes`,

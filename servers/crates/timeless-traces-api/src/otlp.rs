@@ -22,6 +22,28 @@ pub(crate) struct Span {
     events: String,
     resource: String,
     scope: String,
+    links: String,
+    trace_state: String,
+    trace_flags: u32,
+    dropped_attributes_count: u32,
+    dropped_events_count: u32,
+    dropped_links_count: u32,
+    resource_schema_url: String,
+    scope_schema_url: String,
+    resource_dropped_attributes_count: u32,
+    scope_dropped_attributes_count: u32,
+}
+
+struct ResourceContext {
+    attributes: Map<String, Value>,
+    schema_url: String,
+    dropped_attributes_count: u32,
+}
+
+struct ScopeContext {
+    value: Map<String, Value>,
+    schema_url: String,
+    dropped_attributes_count: u32,
 }
 
 pub(crate) fn parse_json(body: &[u8]) -> Result<Vec<Span>, String> {
@@ -34,12 +56,27 @@ pub(crate) fn parse_json(body: &[u8]) -> Result<Vec<Span>, String> {
     let mut out = Vec::new();
     for (resource_index, resource_spans) in resource_spans.iter().enumerate() {
         let resource_spans = object(resource_spans, &format!("resourceSpans[{resource_index}]"))?;
-        let resource = match resource_spans.get("resource") {
-            None | Some(Value::Null) => Map::new(),
+        let resource_value = match resource_spans.get("resource") {
+            None | Some(Value::Null) => (Map::new(), 0),
             Some(resource) => {
                 let resource = object(resource, "resource")?;
-                json_attributes(resource.get("attributes"), "resource.attributes")?
+                (
+                    json_attributes(resource.get("attributes"), "resource.attributes")?,
+                    json_u32(
+                        resource.get("droppedAttributesCount"),
+                        "resource.droppedAttributesCount",
+                    )?,
+                )
             }
+        };
+        let resource = ResourceContext {
+            attributes: resource_value.0,
+            schema_url: optional_string(
+                resource_spans.get("schemaUrl"),
+                "resourceSpans.schemaUrl",
+            )?
+            .unwrap_or_default(),
+            dropped_attributes_count: resource_value.1,
         };
         let scope_spans = match resource_spans.get("scopeSpans") {
             None | Some(Value::Null) => &[][..],
@@ -47,7 +84,14 @@ pub(crate) fn parse_json(body: &[u8]) -> Result<Vec<Span>, String> {
         };
         for (scope_index, scope_spans) in scope_spans.iter().enumerate() {
             let scope_spans = object(scope_spans, &format!("scopeSpans[{scope_index}]"))?;
-            let scope = json_scope(scope_spans.get("scope"))?;
+            let (scope_value, scope_dropped_attributes_count) =
+                json_scope(scope_spans.get("scope"))?;
+            let scope = ScopeContext {
+                value: scope_value,
+                schema_url: optional_string(scope_spans.get("schemaUrl"), "scopeSpans.schemaUrl")?
+                    .unwrap_or_default(),
+                dropped_attributes_count: scope_dropped_attributes_count,
+            };
             let spans = match scope_spans.get("spans") {
                 None | Some(Value::Null) => &[][..],
                 Some(value) => array(value, "spans")?,
@@ -70,15 +114,22 @@ pub(crate) fn parse_protobuf(body: &[u8]) -> Result<Vec<Span>, String> {
         .map_err(|_| "invalid protobuf".to_owned())?;
     let mut out = Vec::new();
     for (resource_index, resource_spans) in request.resource_spans.into_iter().enumerate() {
-        let resource = protobuf_attributes(
-            resource_spans
-                .resource
-                .map(|resource| resource.attributes)
-                .unwrap_or_default(),
-            &format!("resourceSpans[{resource_index}].resource.attributes"),
-        )?;
+        let resource_value = resource_spans.resource.unwrap_or_default();
+        let resource = ResourceContext {
+            attributes: protobuf_attributes(
+                resource_value.attributes,
+                &format!("resourceSpans[{resource_index}].resource.attributes"),
+            )?,
+            schema_url: resource_spans.schema_url,
+            dropped_attributes_count: resource_value.dropped_attributes_count,
+        };
         for (scope_index, scope_spans) in resource_spans.scope_spans.into_iter().enumerate() {
-            let scope = protobuf_scope(scope_spans.scope);
+            let (scope_value, scope_dropped_attributes_count) = protobuf_scope(scope_spans.scope)?;
+            let scope = ScopeContext {
+                value: scope_value,
+                schema_url: scope_spans.schema_url,
+                dropped_attributes_count: scope_dropped_attributes_count,
+            };
             for (span_index, span) in scope_spans.spans.into_iter().enumerate() {
                 out.push(protobuf_span(
                     span,
@@ -142,7 +193,7 @@ pub(crate) fn encode_rich_batch(spans: &[Span]) -> Result<Vec<u8>, String> {
     let count = u32::try_from(spans.len())
         .map_err(|_| "OTLP request contains more than u32::MAX spans".to_owned())?;
     let mut out = Vec::with_capacity(8 + spans.len().saturating_mul(128));
-    out.extend_from_slice(&[0x02, 0, 0, 0]);
+    out.extend_from_slice(&[0x03, 0, 0, 0]);
     out.extend_from_slice(&count.to_le_bytes());
     for span in spans {
         out.extend_from_slice(&span.trace_id);
@@ -173,13 +224,40 @@ pub(crate) fn encode_rich_batch(spans: &[Span]) -> Result<Vec<u8>, String> {
     text_column(&mut out, spans.iter().map(|span| span.events.as_str()))?;
     text_column(&mut out, spans.iter().map(|span| span.resource.as_str()))?;
     text_column(&mut out, spans.iter().map(|span| span.scope.as_str()))?;
+    text_column(&mut out, spans.iter().map(|span| span.links.as_str()))?;
+    text_column(&mut out, spans.iter().map(|span| span.trace_state.as_str()))?;
+    u32_column(&mut out, spans.iter().map(|span| span.trace_flags));
+    u32_column(
+        &mut out,
+        spans.iter().map(|span| span.dropped_attributes_count),
+    );
+    u32_column(&mut out, spans.iter().map(|span| span.dropped_events_count));
+    u32_column(&mut out, spans.iter().map(|span| span.dropped_links_count));
+    text_column(
+        &mut out,
+        spans.iter().map(|span| span.resource_schema_url.as_str()),
+    )?;
+    text_column(
+        &mut out,
+        spans.iter().map(|span| span.scope_schema_url.as_str()),
+    )?;
+    u32_column(
+        &mut out,
+        spans
+            .iter()
+            .map(|span| span.resource_dropped_attributes_count),
+    );
+    u32_column(
+        &mut out,
+        spans.iter().map(|span| span.scope_dropped_attributes_count),
+    );
     Ok(out)
 }
 
 fn json_span(
     value: &Value,
-    resource: &Map<String, Value>,
-    scope: &Map<String, Value>,
+    resource: &ResourceContext,
+    scope: &ScopeContext,
     context: &str,
 ) -> Result<Span, String> {
     let span = object(value, context)?;
@@ -205,6 +283,7 @@ fn json_span(
     let (status, status_description) = json_status(span.get("status"))?;
     let attributes = json_attributes(span.get("attributes"), "span.attributes")?;
     let events = json_events(span.get("events"))?;
+    let links = json_links(span.get("links"))?;
     Ok(Span {
         trace_id,
         span_id,
@@ -217,15 +296,28 @@ fn json_span(
         duration_ns: duration,
         attributes: canonical_object(attributes)?,
         events: canonical_array(events)?,
-        resource: canonical_object(resource.clone())?,
-        scope: canonical_object(scope.clone())?,
+        resource: canonical_object(resource.attributes.clone())?,
+        scope: canonical_object(scope.value.clone())?,
+        links: canonical_array(links)?,
+        trace_state: optional_string(span.get("traceState"), "traceState")?.unwrap_or_default(),
+        trace_flags: json_u32(span.get("flags"), "flags")?,
+        dropped_attributes_count: json_u32(
+            span.get("droppedAttributesCount"),
+            "droppedAttributesCount",
+        )?,
+        dropped_events_count: json_u32(span.get("droppedEventsCount"), "droppedEventsCount")?,
+        dropped_links_count: json_u32(span.get("droppedLinksCount"), "droppedLinksCount")?,
+        resource_schema_url: resource.schema_url.clone(),
+        scope_schema_url: scope.schema_url.clone(),
+        resource_dropped_attributes_count: resource.dropped_attributes_count,
+        scope_dropped_attributes_count: scope.dropped_attributes_count,
     })
 }
 
 fn protobuf_span(
     span: proto::Span,
-    resource: &Map<String, Value>,
-    scope: &Map<String, Value>,
+    resource: &ResourceContext,
+    scope: &ScopeContext,
     context: &str,
 ) -> Result<Span, String> {
     let trace_id = bytes_id::<16>(&span.trace_id, "trace_id")?;
@@ -252,6 +344,12 @@ fn protobuf_span(
         .enumerate()
         .map(|(index, event)| protobuf_event(event, index))
         .collect::<Result<Vec<_>, _>>()?;
+    let links = span
+        .links
+        .into_iter()
+        .enumerate()
+        .map(|(index, link)| protobuf_link(link, index))
+        .collect::<Result<Vec<_>, _>>()?;
     let (status, status_description) = span.status.map_or((0, String::new()), |status| {
         (protobuf_status(status.code), status.message)
     });
@@ -267,8 +365,18 @@ fn protobuf_span(
         duration_ns: duration,
         attributes: canonical_object(attributes)?,
         events: canonical_array(events)?,
-        resource: canonical_object(resource.clone())?,
-        scope: canonical_object(scope.clone())?,
+        resource: canonical_object(resource.attributes.clone())?,
+        scope: canonical_object(scope.value.clone())?,
+        links: canonical_array(links)?,
+        trace_state: span.trace_state,
+        trace_flags: span.flags,
+        dropped_attributes_count: span.dropped_attributes_count,
+        dropped_events_count: span.dropped_events_count,
+        dropped_links_count: span.dropped_links_count,
+        resource_schema_url: resource.schema_url.clone(),
+        scope_schema_url: scope.schema_url.clone(),
+        resource_dropped_attributes_count: resource.dropped_attributes_count,
+        scope_dropped_attributes_count: scope.dropped_attributes_count,
     })
 }
 
@@ -292,6 +400,30 @@ fn bytes_id<const N: usize>(value: &[u8], name: &str) -> Result<[u8; N], String>
     value
         .try_into()
         .map_err(|_| format!("{name} must contain exactly {N} bytes"))
+}
+
+fn hex_id<const N: usize>(value: &[u8; N]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(N * 2);
+    for byte in value {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn json_u32(value: Option<&Value>, name: &str) -> Result<u32, String> {
+    match value {
+        None | Some(Value::Null) => Ok(0),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("{name} must be an unsigned 32-bit integer")),
+        Some(Value::String(value)) => value
+            .parse::<u32>()
+            .map_err(|_| format!("{name} must be an unsigned 32-bit integer")),
+        _ => Err(format!("{name} must be an unsigned 32-bit integer")),
+    }
 }
 
 fn json_time(value: Option<&Value>, name: &str) -> Result<i64, String> {
@@ -486,6 +618,16 @@ fn json_events(value: Option<&Value>) -> Result<Vec<Value>, String> {
                     "event.attributes",
                 )?),
             );
+            out.insert(
+                "dropped_attributes_count".into(),
+                Value::Number(
+                    json_u32(
+                        event.get("droppedAttributesCount"),
+                        "event.droppedAttributesCount",
+                    )?
+                    .into(),
+                ),
+            );
             Ok(Value::Object(out))
         })
         .collect()
@@ -505,12 +647,90 @@ fn protobuf_event(event: proto::Event, index: usize) -> Result<Value, String> {
             &format!("events[{index}].attributes"),
         )?),
     );
+    out.insert(
+        "dropped_attributes_count".into(),
+        Value::Number(event.dropped_attributes_count.into()),
+    );
     Ok(Value::Object(out))
 }
 
-fn json_scope(value: Option<&Value>) -> Result<Map<String, Value>, String> {
+fn json_links(value: Option<&Value>) -> Result<Vec<Value>, String> {
+    let values = match value {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(value) => array(value, "links")?,
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, link)| {
+            let link = object(link, &format!("links[{index}]"))?;
+            let mut out = Map::new();
+            out.insert(
+                "trace_id".into(),
+                Value::String(hex_id(&json_id::<16>(link.get("traceId"), "link.traceId")?)),
+            );
+            out.insert(
+                "span_id".into(),
+                Value::String(hex_id(&json_id::<8>(link.get("spanId"), "link.spanId")?)),
+            );
+            out.insert(
+                "trace_state".into(),
+                Value::String(
+                    optional_string(link.get("traceState"), "link.traceState")?.unwrap_or_default(),
+                ),
+            );
+            out.insert(
+                "attributes".into(),
+                Value::Object(json_attributes(link.get("attributes"), "link.attributes")?),
+            );
+            out.insert(
+                "dropped_attributes_count".into(),
+                Value::Number(
+                    json_u32(
+                        link.get("droppedAttributesCount"),
+                        "link.droppedAttributesCount",
+                    )?
+                    .into(),
+                ),
+            );
+            out.insert(
+                "flags".into(),
+                Value::Number(json_u32(link.get("flags"), "link.flags")?.into()),
+            );
+            Ok(Value::Object(out))
+        })
+        .collect()
+}
+
+fn protobuf_link(link: proto::Link, index: usize) -> Result<Value, String> {
+    let mut out = Map::new();
+    out.insert(
+        "trace_id".into(),
+        Value::String(hex_id(&bytes_id::<16>(&link.trace_id, "link.trace_id")?)),
+    );
+    out.insert(
+        "span_id".into(),
+        Value::String(hex_id(&bytes_id::<8>(&link.span_id, "link.span_id")?)),
+    );
+    out.insert("trace_state".into(), Value::String(link.trace_state));
+    out.insert(
+        "attributes".into(),
+        Value::Object(protobuf_attributes(
+            link.attributes,
+            &format!("links[{index}].attributes"),
+        )?),
+    );
+    out.insert(
+        "dropped_attributes_count".into(),
+        Value::Number(link.dropped_attributes_count.into()),
+    );
+    out.insert("flags".into(), Value::Number(link.flags.into()));
+    Ok(Value::Object(out))
+}
+
+fn json_scope(value: Option<&Value>) -> Result<(Map<String, Value>, u32), String> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
-        return Ok(Map::new());
+        return Ok((Map::new(), 0));
     };
     let scope = object(value, "scope")?;
     let mut out = Map::new();
@@ -524,12 +744,27 @@ fn json_scope(value: Option<&Value>) -> Result<Map<String, Value>, String> {
             .map(Value::String)
             .unwrap_or(Value::Null),
     );
-    Ok(out)
+    out.insert(
+        "attributes".into(),
+        Value::Object(json_attributes(
+            scope.get("attributes"),
+            "scope.attributes",
+        )?),
+    );
+    Ok((
+        out,
+        json_u32(
+            scope.get("droppedAttributesCount"),
+            "scope.droppedAttributesCount",
+        )?,
+    ))
 }
 
-fn protobuf_scope(value: Option<proto::InstrumentationScope>) -> Map<String, Value> {
+fn protobuf_scope(
+    value: Option<proto::InstrumentationScope>,
+) -> Result<(Map<String, Value>, u32), String> {
     let Some(scope) = value else {
-        return Map::new();
+        return Ok((Map::new(), 0));
     };
     let mut out = Map::new();
     out.insert("name".into(), Value::String(scope.name));
@@ -541,7 +776,11 @@ fn protobuf_scope(value: Option<proto::InstrumentationScope>) -> Map<String, Val
             Value::String(scope.version)
         },
     );
-    out
+    out.insert(
+        "attributes".into(),
+        Value::Object(protobuf_attributes(scope.attributes, "scope.attributes")?),
+    );
+    Ok((out, scope.dropped_attributes_count))
 }
 
 fn optional_string(value: Option<&Value>, name: &str) -> Result<Option<String>, String> {
@@ -581,6 +820,12 @@ fn text_column<'a>(out: &mut Vec<u8>, values: impl Iterator<Item = &'a str>) -> 
         out.extend_from_slice(value.as_bytes());
     }
     Ok(())
+}
+
+fn u32_column(out: &mut Vec<u8>, values: impl Iterator<Item = u32>) {
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
 }
 
 pub(crate) mod proto {

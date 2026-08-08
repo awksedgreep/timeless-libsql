@@ -201,7 +201,7 @@ pub(crate) fn execute(
             let spans = query_spans(
                 conn,
                 "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
-                        duration_ns,attributes,status_description,events,resource,instrumentation_scope \
+                        duration_ns,attributes,status_description,events,resource,instrumentation_scope,links,trace_state,trace_flags,dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url,scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count \
                    FROM traces WHERE trace_id=?1 ORDER BY start_ts,span_id",
                 vec![SqlValue::Text(trace_id.clone())],
                 cancelled,
@@ -214,7 +214,7 @@ pub(crate) fn execute(
             let spans = query_spans(
                 conn,
                 "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
-                        duration_ns,attributes,status_description,events,resource,instrumentation_scope \
+                        duration_ns,attributes,status_description,events,resource,instrumentation_scope,links,trace_state,trace_flags,dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url,scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count \
                    FROM traces WHERE trace_id=?1 ORDER BY start_ts,span_id",
                 vec![SqlValue::Text(trace_id)],
                 cancelled,
@@ -262,7 +262,7 @@ fn execute_search(
 ) -> Result<ReadOutput, String> {
     let mut sql = String::from(
         "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
-                duration_ns,attributes,status_description,events,resource,instrumentation_scope \
+                duration_ns,attributes,status_description,events,resource,instrumentation_scope,links,trace_state,trace_flags,dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url,scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count \
            FROM traces",
     );
     let mut values = Vec::new();
@@ -323,7 +323,7 @@ fn execute_dashboard_search(
 ) -> Result<ReadOutput, String> {
     let mut sql = String::from(
         "SELECT trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,\
-                duration_ns,attributes,status_description,events,resource,instrumentation_scope \
+                duration_ns,attributes,status_description,events,resource,instrumentation_scope,links,trace_state,trace_flags,dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url,scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count \
            FROM traces",
     );
     let mut values = Vec::new();
@@ -431,6 +431,16 @@ struct SpanRow {
     resource: Map<String, Value>,
     #[allow(dead_code)]
     instrumentation_scope: Map<String, Value>,
+    links: Vec<Value>,
+    trace_state: String,
+    trace_flags: i64,
+    dropped_attributes_count: i64,
+    dropped_events_count: i64,
+    dropped_links_count: i64,
+    resource_schema_url: String,
+    scope_schema_url: String,
+    resource_dropped_attributes_count: i64,
+    scope_dropped_attributes_count: i64,
 }
 
 fn query_spans(
@@ -467,6 +477,7 @@ fn decode_span_row(row: &rusqlite::Row<'_>) -> Result<SpanRow, String> {
     let events = json_array(column!(11), "events")?;
     let resource = json_object(column!(12), "resource")?;
     let instrumentation_scope = json_object(column!(13), "instrumentation_scope")?;
+    let links = json_array(column!(14), "links")?;
     let parent_span_id: Option<Vec<u8>> = column!(2);
     let service: String = column!(4);
     Ok(SpanRow {
@@ -490,6 +501,16 @@ fn decode_span_row(row: &rusqlite::Row<'_>) -> Result<SpanRow, String> {
         events,
         resource,
         instrumentation_scope,
+        links,
+        trace_state: column!(15),
+        trace_flags: column!(16),
+        dropped_attributes_count: column!(17),
+        dropped_events_count: column!(18),
+        dropped_links_count: column!(19),
+        resource_schema_url: column!(20),
+        scope_schema_url: column!(21),
+        resource_dropped_attributes_count: column!(22),
+        scope_dropped_attributes_count: column!(23),
     })
 }
 
@@ -520,12 +541,24 @@ fn jaeger_trace(
     let mut rendered = Vec::with_capacity(spans.len());
     for span in spans {
         check_cancelled(cancelled)?;
-        let references = span
+        let mut references = span
             .parent_span_id
             .as_ref()
             .map_or_else(Vec::new, |parent| {
                 vec![json!({"refType":"CHILD_OF", "traceID":trace_id, "spanID":parent})]
             });
+        for link in &span.links {
+            let link = link
+                .as_object()
+                .ok_or_else(|| "stored link is not a JSON object".to_string())?;
+            let link_trace_id = stored_link_id(link, "trace_id", 32)?;
+            let link_span_id = stored_link_id(link, "span_id", 16)?;
+            references.push(json!({
+                "refType": "FOLLOWS_FROM",
+                "traceID": link_trace_id,
+                "spanID": link_span_id
+            }));
+        }
         let mut tags = vec![
             json!({"key":"span.kind", "type":"string", "value":span.kind}),
             json!({"key":"otel.status_code", "type":"string", "value":span.status.to_uppercase()}),
@@ -563,6 +596,23 @@ fn jaeger_trace(
         "processes": processes,
         "warnings": Value::Null
     }))
+}
+
+fn stored_link_id<'a>(
+    link: &'a Map<String, Value>,
+    key: &str,
+    length: usize,
+) -> Result<&'a str, String> {
+    let value = link
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("stored link {key} is not a string"))?;
+    if value.len() != length || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "stored link {key} must be a {length}-character hexadecimal string"
+        ));
+    }
+    Ok(value)
 }
 
 fn jaeger_log(event: &Value) -> Result<Value, String> {
@@ -671,7 +721,17 @@ fn dashboard_span(span: SpanRow) -> Result<Value, String> {
         "attributes": span.attributes,
         "events": span.events,
         "resource": span.resource,
-        "instrumentation_scope": span.instrumentation_scope
+        "instrumentation_scope": span.instrumentation_scope,
+        "links": span.links,
+        "trace_state": span.trace_state,
+        "trace_flags": span.trace_flags,
+        "dropped_attributes_count": span.dropped_attributes_count,
+        "dropped_events_count": span.dropped_events_count,
+        "dropped_links_count": span.dropped_links_count,
+        "resource_schema_url": span.resource_schema_url,
+        "scope_schema_url": span.scope_schema_url,
+        "resource_dropped_attributes_count": span.resource_dropped_attributes_count,
+        "scope_dropped_attributes_count": span.scope_dropped_attributes_count
     }))
 }
 

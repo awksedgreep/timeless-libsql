@@ -116,13 +116,13 @@ pub fn status_name(status: u8) -> &'static str {
 ///
 /// Ids are PACKED BINARY (the timeless_traces lesson: no hex text
 /// anywhere in storage — hex doubles the bytes and compresses worse).
-/// The four JSON fields contain canonical JSON text. Keeping JSON at
+/// The five JSON fields contain canonical JSON text. Keeping JSON at
 /// this public boundary is intentional: OTel values are typed and may
 /// be nested, so flattening them to string pairs loses information.
 /// The SQLite extension validates and canonicalizes all four values
 /// before they reach the engine. Direct engine users must provide an
-/// object for `attributes`/`resource`/`instrumentation_scope` and an
-/// array for `events`.
+/// object for `attributes`/`resource`/`instrumentation_scope` and arrays
+/// for `events`/`links`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpanEntry {
     pub trace_id: [u8; 16],
@@ -151,6 +151,18 @@ pub struct SpanEntry {
     /// Canonical JSON object containing instrumentation scope name,
     /// version, and attributes when supplied.
     pub instrumentation_scope: Cow<'static, str>,
+    /// Canonical JSON array of OTel span links. Link ids are lowercase
+    /// hexadecimal strings because JSON has no packed-byte type.
+    pub links: Cow<'static, str>,
+    pub trace_state: Cow<'static, str>,
+    pub trace_flags: u32,
+    pub dropped_attributes_count: u32,
+    pub dropped_events_count: u32,
+    pub dropped_links_count: u32,
+    pub resource_schema_url: Cow<'static, str>,
+    pub scope_schema_url: Cow<'static, str>,
+    pub resource_dropped_attributes_count: u32,
+    pub scope_dropped_attributes_count: u32,
 }
 
 /// A fully-encoded span block ready to persist: payload + metadata +

@@ -2,6 +2,7 @@
   "resourceSpans": [
     {
       "resource": {
+        "droppedAttributesCount": 6,
         "attributes": [
           {"key": "service.name", "value": {"stringValue": "contract-svc"}},
           {"key": "service.version", "value": {"stringValue": "1.2.3"}},
@@ -9,9 +10,18 @@
           {"key": "debug", "value": {"boolValue": false}}
         ]
       },
+      "schemaUrl": "https://example.test/resource/1",
       "scopeSpans": [
         {
-          "scope": {"name": "contract-lib", "version": "4.5.6"},
+          "scope": {
+            "name": "contract-lib",
+            "version": "4.5.6",
+            "attributes": [
+              {"key": "scope.attr", "value": {"stringValue": "preserved"}}
+            ],
+            "droppedAttributesCount": 7
+          },
+          "schemaUrl": "https://example.test/scope/2",
           "spans": [
             {
               "traceId": "00112233445566778899aabbccddeeff",
@@ -19,6 +29,8 @@
               "parentSpanId": "",
               "name": "GET /contract",
               "kind": "SPAN_KIND_SERVER",
+              "traceState": "vendor=contract",
+              "flags": 4294967295,
               "startTimeUnixNano": "1700000000000000000",
               "endTimeUnixNano": "1700000000120000000",
               "status": {"code": "STATUS_CODE_ERROR", "message": "contract failure"},
@@ -32,9 +44,25 @@
                 {
                   "name": "exception",
                   "timeUnixNano": "1700000000040000000",
+                  "droppedAttributesCount": 8,
                   "attributes": [
                     {"key": "exception.type", "value": {"stringValue": "ContractError"}},
                     {"key": "handled", "value": {"boolValue": false}}
+                  ]
+                }
+              ],
+              "droppedAttributesCount": 3,
+              "droppedEventsCount": 4,
+              "droppedLinksCount": 5,
+              "links": [
+                {
+                  "traceId": "ffeeddccbbaa99887766554433221100",
+                  "spanId": "8877665544332211",
+                  "traceState": "link=state",
+                  "flags": 257,
+                  "droppedAttributesCount": 9,
+                  "attributes": [
+                    {"key": "reason", "value": {"stringValue": "retry"}}
                   ]
                 }
               ]

@@ -70,7 +70,14 @@ async fn session_zero_fixture_has_semantically_exact_jaeger_routes() {
     assert_eq!(root["operationName"], "GET /contract");
     assert_eq!(root["startTime"], 1_700_000_000_000_000_i64);
     assert_eq!(root["duration"], 120_000);
-    assert_eq!(root["references"], serde_json::json!([]));
+    assert_eq!(
+        root["references"],
+        serde_json::json!([{
+            "refType":"FOLLOWS_FROM",
+            "traceID":"ffeeddccbbaa99887766554433221100",
+            "spanID":"8877665544332211"
+        }])
+    );
     assert_eq!(
         tag_map(&root["tags"]),
         serde_json::json!({
@@ -446,7 +453,7 @@ impl Span {
 }
 
 fn rich_batch(spans: &[Span]) -> Vec<u8> {
-    let mut out = vec![0x02, 0, 0, 0];
+    let mut out = vec![0x03, 0, 0, 0];
     out.extend_from_slice(&(spans.len() as u32).to_le_bytes());
     for span in spans {
         out.extend_from_slice(&span.trace_id);
@@ -469,6 +476,16 @@ fn rich_batch(spans: &[Span]) -> Vec<u8> {
     }
     for value in ["{}", "", "[]", "{}", "{}"] {
         text_column(&mut out, std::iter::repeat_n(value, spans.len()));
+    }
+    text_column(&mut out, std::iter::repeat_n("[]", spans.len()));
+    text_column(&mut out, std::iter::repeat_n("", spans.len()));
+    for _ in 0..4 {
+        out.extend(std::iter::repeat_n(0_u8, spans.len() * 4));
+    }
+    text_column(&mut out, std::iter::repeat_n("", spans.len()));
+    text_column(&mut out, std::iter::repeat_n("", spans.len()));
+    for _ in 0..2 {
+        out.extend(std::iter::repeat_n(0_u8, spans.len() * 4));
     }
     out
 }

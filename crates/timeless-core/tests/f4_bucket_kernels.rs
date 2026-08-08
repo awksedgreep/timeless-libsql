@@ -158,6 +158,16 @@ fn trace_bucket_stats_match_naive() {
             events: "[]".into(),
             resource: "{}".into(),
             instrumentation_scope: "{}".into(),
+            links: "[]".into(),
+            trace_state: "".into(),
+            trace_flags: 0,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: "".into(),
+            scope_schema_url: "".into(),
+            resource_dropped_attributes_count: 0,
+            scope_dropped_attributes_count: 0,
         };
         all.push(e.clone());
         engine.push(e).unwrap();

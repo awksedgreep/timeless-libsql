@@ -56,10 +56,23 @@ fn document() -> &'static str {
                 },
                 "traces": {
                     "module": "timeless_traces",
-                    "batches": ["span-v0", "rich-span-v1"],
+                    "batches": ["span-v0", "rich-span-v1", "rich-span-v2"],
                     "timestamp_unit": "nanoseconds",
                     "authoritative_batch_spans": 8192,
                     "rich_span_fidelity": true,
+                    "rich_span_fidelity_version": 2,
+                    "rich_span_fields": [
+                        "links",
+                        "trace_state",
+                        "trace_flags",
+                        "dropped_attributes_count",
+                        "dropped_events_count",
+                        "dropped_links_count",
+                        "resource_schema_url",
+                        "scope_schema_url",
+                        "resource_dropped_attributes_count",
+                        "scope_dropped_attributes_count"
+                    ],
                     "projection_decode": {
                         "version": 1,
                         "sqlite_col_used": true,
@@ -179,6 +192,11 @@ mod tests {
         assert_eq!(value["signals"]["metrics"]["native_histograms"], false);
         assert_eq!(value["signals"]["logs"]["typed_metadata"], true);
         assert_eq!(value["signals"]["traces"]["rich_span_fidelity"], true);
+        assert_eq!(value["signals"]["traces"]["rich_span_fidelity_version"], 2);
+        assert!(value["signals"]["traces"]["batches"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rich-span-v2")));
         assert_eq!(
             value["signals"]["traces"]["projection_decode"]["version"],
             1

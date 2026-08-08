@@ -72,6 +72,12 @@ struct FixtureSpan {
     attributes: String,
     status_description: &'static str,
     events: String,
+    links: String,
+    trace_state: &'static str,
+    trace_flags: u32,
+    dropped_attributes_count: u32,
+    dropped_events_count: u32,
+    dropped_links_count: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,6 +98,24 @@ struct FixtureReport {
     spans: usize,
     stop_ns: i64,
     report: Value,
+}
+
+struct RichProbe {
+    service: String,
+    attributes: String,
+    events: String,
+    resource: String,
+    scope: String,
+    links: String,
+    trace_state: String,
+    trace_flags: i64,
+    dropped_attributes: i64,
+    dropped_events: i64,
+    dropped_links: i64,
+    resource_schema_url: String,
+    scope_schema_url: String,
+    resource_dropped_attributes: i64,
+    scope_dropped_attributes: i64,
 }
 
 struct TraceServer {
@@ -299,7 +323,13 @@ pub(crate) fn run(root: &Path, args: TraceBaselineArgs) -> Result<()> {
                 "batches": args.batches,
                 "logical_spans": fixture.spans,
                 "time_boxes": args.batches,
-                "rich_fields": ["attributes", "status_description", "events", "resource", "instrumentation_scope"],
+                "rich_fields": [
+                    "attributes", "status_description", "events", "resource",
+                    "instrumentation_scope", "links", "trace_state", "trace_flags",
+                    "dropped_attributes_count", "dropped_events_count",
+                    "dropped_links_count", "resource_schema_url", "scope_schema_url",
+                    "resource_dropped_attributes_count", "scope_dropped_attributes_count"
+                ],
                 "duration_values_ns": [100_000, 900_000],
                 "iterations": args.iterations,
                 "warmup": args.warmup,
@@ -612,28 +642,58 @@ fn build_fixture(extension: &Path, database: &Path, batches: usize) -> Result<Fi
         minimum == BASE_NS && maximum == stop_ns,
         "fixture timestamp range changed"
     );
-    let rich: (String, String, String, String, String) = connection.query_row(
-        "SELECT service,attributes,events,resource,instrumentation_scope \
+    let rich: RichProbe = connection.query_row(
+        "SELECT service,attributes,events,resource,instrumentation_scope,links,trace_state,trace_flags, \
+                dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url, \
+                scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count \
            FROM traces ORDER BY start_ts LIMIT 1",
         [],
         |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
+            Ok(RichProbe {
+                service: row.get(0)?,
+                attributes: row.get(1)?,
+                events: row.get(2)?,
+                resource: row.get(3)?,
+                scope: row.get(4)?,
+                links: row.get(5)?,
+                trace_state: row.get(6)?,
+                trace_flags: row.get(7)?,
+                dropped_attributes: row.get(8)?,
+                dropped_events: row.get(9)?,
+                dropped_links: row.get(10)?,
+                resource_schema_url: row.get(11)?,
+                scope_schema_url: row.get(12)?,
+                resource_dropped_attributes: row.get(13)?,
+                scope_dropped_attributes: row.get(14)?,
+            })
         },
     )?;
     ensure!(
-        rich.0 == "bench",
+        rich.service == "bench",
         "service.name precedence was not preserved"
     );
-    ensure!(serde_json::from_str::<Value>(&rich.1)?["nested"]["unicode"] == "空🔥");
-    ensure!(serde_json::from_str::<Value>(&rich.2)?[0]["name"] == "exception");
-    ensure!(serde_json::from_str::<Value>(&rich.3)?["deployment.environment"] == "baseline");
-    ensure!(serde_json::from_str::<Value>(&rich.4)?["name"] == "trace-baseline");
+    ensure!(serde_json::from_str::<Value>(&rich.attributes)?["nested"]["unicode"] == "空🔥");
+    ensure!(serde_json::from_str::<Value>(&rich.events)?[0]["name"] == "exception");
+    ensure!(serde_json::from_str::<Value>(&rich.resource)?["deployment.environment"] == "baseline");
+    ensure!(serde_json::from_str::<Value>(&rich.scope)?["name"] == "trace-baseline");
+    ensure!(serde_json::from_str::<Value>(&rich.scope)?["attributes"]["debug"] == false);
+    ensure!(serde_json::from_str::<Value>(&rich.links)?[0]["attributes"]["reason"] == "baseline");
+    ensure!(rich.trace_state == "bench=root" && rich.trace_flags == i64::from(u32::MAX));
+    ensure!(
+        (
+            rich.dropped_attributes,
+            rich.dropped_events,
+            rich.dropped_links
+        ) == (1, 2, 3)
+    );
+    ensure!(rich.resource_schema_url == "https://example.test/resource/1");
+    ensure!(rich.scope_schema_url == "https://example.test/scope/2");
+    ensure!(
+        (
+            rich.resource_dropped_attributes,
+            rich.scope_dropped_attributes
+        ) == (4, 5)
+    );
     let reopen_stats = sqlite_stats(&connection)?;
     drop(connection);
     let mut before_storage = select_fields(
@@ -736,16 +796,39 @@ fn rich_batch(batch_number: usize) -> Vec<u8> {
                     ""
                 },
                 events: format!(
-                    "[{{\"attributes\":{{\"attempt\":{},\"fatal\":false}},\"name\":\"exception\",\"timestamp\":{}}}]",
+                    "[{{\"attributes\":{{\"attempt\":{},\"fatal\":false}},\"dropped_attributes_count\":{},\"name\":\"exception\",\"timestamp\":{}}}]",
                     global % 5,
+                    global % 3,
                     start_ts + 50_000
                 ),
+                links: if global.is_multiple_of(8) {
+                    format!(
+                        "[{{\"attributes\":{{\"reason\":\"baseline\"}},\"dropped_attributes_count\":6,\"flags\":257,\"span_id\":\"{:016x}\",\"trace_id\":\"{:032x}\",\"trace_state\":\"linked=yes\"}}]",
+                        trace_number + 2_000_000,
+                        trace_number + 1_000_000
+                    )
+                } else {
+                    "[]".to_owned()
+                },
+                trace_state: if global.is_multiple_of(8) {
+                    "bench=root"
+                } else {
+                    ""
+                },
+                trace_flags: if global.is_multiple_of(8) {
+                    u32::MAX
+                } else {
+                    1
+                },
+                dropped_attributes_count: (global % 4 + 1) as u32,
+                dropped_events_count: (global % 3 + 2) as u32,
+                dropped_links_count: (global % 2 + 3) as u32,
             }
         })
         .collect::<Vec<_>>();
     let resource = br#"{"deployment.environment":"baseline","replica":7,"service.name":"resource-fallback","service.version":"1.2.3"}"#;
     let scope = br#"{"attributes":{"debug":false},"name":"trace-baseline","version":"1.0.0"}"#;
-    let mut output = vec![2, 0, 0, 0];
+    let mut output = vec![3, 0, 0, 0];
     output.extend_from_slice(&(spans.len() as u32).to_le_bytes());
     for span in &spans {
         output.extend_from_slice(&span.trace_id);
@@ -785,6 +868,33 @@ fn rich_batch(batch_number: usize) -> Vec<u8> {
     for _ in &spans {
         framed(&mut output, scope);
     }
+    for span in &spans {
+        framed(&mut output, span.links.as_bytes());
+    }
+    for span in &spans {
+        framed(&mut output, span.trace_state.as_bytes());
+    }
+    u32_column(&mut output, spans.iter().map(|span| span.trace_flags));
+    u32_column(
+        &mut output,
+        spans.iter().map(|span| span.dropped_attributes_count),
+    );
+    u32_column(
+        &mut output,
+        spans.iter().map(|span| span.dropped_events_count),
+    );
+    u32_column(
+        &mut output,
+        spans.iter().map(|span| span.dropped_links_count),
+    );
+    for _ in &spans {
+        framed(&mut output, b"https://example.test/resource/1");
+    }
+    for _ in &spans {
+        framed(&mut output, b"https://example.test/scope/2");
+    }
+    u32_column(&mut output, spans.iter().map(|_| 4));
+    u32_column(&mut output, spans.iter().map(|_| 5));
     output
 }
 
@@ -799,6 +909,12 @@ fn fixed_be<const N: usize>(number: u64) -> [u8; N] {
 fn framed(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(&(value.len() as u32).to_le_bytes());
     output.extend_from_slice(value);
+}
+
+fn u32_column(output: &mut Vec<u8>, values: impl Iterator<Item = u32>) {
+    for value in values {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
 }
 
 fn fixture_duration(batch_offset: usize) -> i64 {

@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::query::{self, ReadKind, ReadOutput, ReadRequest};
 
-pub const TRACE_CAPABILITY: &str = "timeless_traces/rich-span-batch-v1";
+pub const TRACE_CAPABILITY: &str = "timeless_traces/rich-span-batch-v2";
 
 const EXPECTED_COLUMNS: &[(&str, &str, i64)] = &[
     ("trace_id", "BLOB", 0),
@@ -36,6 +36,16 @@ const EXPECTED_COLUMNS: &[(&str, &str, i64)] = &[
     ("events", "TEXT", 0),
     ("resource", "TEXT", 0),
     ("instrumentation_scope", "TEXT", 0),
+    ("links", "TEXT", 0),
+    ("trace_state", "TEXT", 0),
+    ("trace_flags", "INTEGER", 0),
+    ("dropped_attributes_count", "INTEGER", 0),
+    ("dropped_events_count", "INTEGER", 0),
+    ("dropped_links_count", "INTEGER", 0),
+    ("resource_schema_url", "TEXT", 0),
+    ("scope_schema_url", "TEXT", 0),
+    ("resource_dropped_attributes_count", "INTEGER", 0),
+    ("scope_dropped_attributes_count", "INTEGER", 0),
     ("traces", "", 1),
 ];
 
@@ -1251,7 +1261,7 @@ fn open_connection(
         .map_err(|error| format!("disable extension loading: {error}"))?;
     let spec = DataPlaneSpec {
         signal: "traces",
-        required_batch: "rich-span-v1",
+        required_batch: "rich-span-v2",
     };
     let capabilities = preflight_extension(&conn, spec)?;
     preflight_database(&conn, spec.signal)?;
@@ -1345,11 +1355,11 @@ fn verify_capability(
     }
 
     if probe_batch {
-        // A zero-span v1 batch is a public, non-data capability probe. The
+        // A zero-span v2 batch is a public, non-data capability probe. The
         // schema alone cannot distinguish a rich-schema build that lacks the
         // matching versioned batch decoder.
-        let empty_v1 = [0x02_u8, 0, 0, 0, 0, 0, 0, 0];
-        conn.execute("INSERT INTO traces(traces) VALUES (?1)", params![empty_v1])
+        let empty_v2 = [0x03_u8, 0, 0, 0, 0, 0, 0, 0];
+        conn.execute("INSERT INTO traces(traces) VALUES (?1)", params![empty_v2])
             .map_err(|error| {
                 format!(
                     "incompatible timeless_traces extension: {TRACE_CAPABILITY} batch probe failed: {error}"
@@ -1357,7 +1367,7 @@ fn verify_capability(
             })?;
     } else {
         conn.prepare(
-            "SELECT status_description,events,resource,instrumentation_scope FROM traces LIMIT 0",
+            "SELECT status_description,events,resource,instrumentation_scope,links,trace_state,trace_flags,dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url,scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count FROM traces LIMIT 0",
         )
         .map_err(|error| format!("connect rich traces virtual table: {error}"))?;
     }
@@ -1365,8 +1375,8 @@ fn verify_capability(
 }
 
 fn insert_rich_batch(conn: &Connection, blob: &[u8], spans: usize) -> Result<(), String> {
-    if blob.first() != Some(&0x02) {
-        return Err("traces API writer accepts only public rich-span batch v1 (0x02)".into());
+    if blob.first() != Some(&0x03) {
+        return Err("traces API writer accepts only public rich-span batch v2 (0x03)".into());
     }
     let expected =
         i64::try_from(spans).map_err(|_| "traces batch span count exceeds i64::MAX".to_string())?;

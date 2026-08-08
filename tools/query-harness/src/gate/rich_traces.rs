@@ -23,6 +23,16 @@ struct Span {
     events: Value,
     resource: Value,
     instrumentation_scope: Value,
+    links: Value,
+    trace_state: String,
+    trace_flags: u32,
+    dropped_attributes_count: u32,
+    dropped_events_count: u32,
+    dropped_links_count: u32,
+    resource_schema_url: String,
+    scope_schema_url: String,
+    resource_dropped_attributes_count: u32,
+    scope_dropped_attributes_count: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -41,9 +51,19 @@ struct SemanticSpan {
     events: Value,
     resource: Value,
     instrumentation_scope: Value,
+    links: Value,
+    trace_state: String,
+    trace_flags: i64,
+    dropped_attributes_count: i64,
+    dropped_events_count: i64,
+    dropped_links_count: i64,
+    resource_schema_url: String,
+    scope_schema_url: String,
+    resource_dropped_attributes_count: i64,
+    scope_dropped_attributes_count: i64,
 }
 
-const COLUMNS: &str = "trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,duration_ns,attributes,status_description,events,resource,instrumentation_scope";
+const COLUMNS: &str = "trace_id,span_id,parent_span_id,name,service,kind,status,start_ts,duration_ns,attributes,status_description,events,resource,instrumentation_scope,links,trace_state,trace_flags,dropped_attributes_count,dropped_events_count,dropped_links_count,resource_schema_url,scope_schema_url,resource_dropped_attributes_count,scope_dropped_attributes_count";
 
 fn fixed_be<const N: usize>(number: u64) -> [u8; N] {
     let mut result = [0_u8; N];
@@ -92,6 +112,23 @@ fn rich_span(number: u64, start_ts: Option<i64>) -> Span {
             "name": "rich-lib",
             "version": "4.5.6"
         }),
+        links: json!([{
+            "trace_id": format!("{:032x}", number.saturating_add(1_000_000)),
+            "span_id": format!("{:016x}", number.saturating_add(2_000_000)),
+            "trace_state": "linked=yes",
+            "attributes": {"reason": "retry"},
+            "dropped_attributes_count": 6,
+            "flags": 257
+        }]),
+        trace_state: format!("vendor={number}"),
+        trace_flags: u32::MAX - number as u32,
+        dropped_attributes_count: (number % 5) as u32,
+        dropped_events_count: (number % 7) as u32,
+        dropped_links_count: (number % 11) as u32,
+        resource_schema_url: "https://example.test/resource/1".into(),
+        scope_schema_url: "https://example.test/scope/2".into(),
+        resource_dropped_attributes_count: 12,
+        scope_dropped_attributes_count: 13,
     }
 }
 
@@ -128,6 +165,23 @@ fn contract_fixture() -> Vec<Span> {
             }]),
             resource: resource.clone(),
             instrumentation_scope: scope.clone(),
+            links: json!([{
+                "trace_id":"ffeeddccbbaa99887766554433221100",
+                "span_id":"8877665544332211",
+                "trace_state":"link=state",
+                "attributes":{"reason":"retry"},
+                "dropped_attributes_count":9,
+                "flags":257
+            }]),
+            trace_state: "vendor=contract".into(),
+            trace_flags: u32::MAX,
+            dropped_attributes_count: 3,
+            dropped_events_count: 4,
+            dropped_links_count: 5,
+            resource_schema_url: "https://example.test/resource/1".into(),
+            scope_schema_url: "https://example.test/scope/2".into(),
+            resource_dropped_attributes_count: 6,
+            scope_dropped_attributes_count: 7,
         },
         Span {
             trace_id: hex("00112233445566778899aabbccddeeff"),
@@ -144,6 +198,16 @@ fn contract_fixture() -> Vec<Span> {
             events: json!([]),
             resource,
             instrumentation_scope: scope,
+            links: json!([]),
+            trace_state: String::new(),
+            trace_flags: 1,
+            dropped_attributes_count: 0,
+            dropped_events_count: 0,
+            dropped_links_count: 0,
+            resource_schema_url: "https://example.test/resource/1".into(),
+            scope_schema_url: "https://example.test/scope/2".into(),
+            resource_dropped_attributes_count: 6,
+            scope_dropped_attributes_count: 7,
         },
     ]
 }
@@ -188,6 +252,16 @@ fn percentile_span(number: u64, service: &str, position: usize, duration_ns: i64
         events: json!([]),
         resource: json!({}),
         instrumentation_scope: json!({}),
+        links: json!([]),
+        trace_state: String::new(),
+        trace_flags: 0,
+        dropped_attributes_count: 0,
+        dropped_events_count: 0,
+        dropped_links_count: 0,
+        resource_schema_url: String::new(),
+        scope_schema_url: String::new(),
+        resource_dropped_attributes_count: 0,
+        scope_dropped_attributes_count: 0,
     }
 }
 
@@ -217,7 +291,10 @@ fn percentile_contract(
         ],
         |row| row.get(0),
     )?;
-    ensure!(empty == 0, "empty percentile input unexpectedly emitted a bucket");
+    ensure!(
+        empty == 0,
+        "empty percentile input unexpectedly emitted a bucket"
+    );
 
     for (service, values) in cases {
         let actual: (i64, i64, i64, i64) = connection.query_row(
@@ -255,6 +332,12 @@ fn framed(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(value);
 }
 
+fn u32_column(out: &mut Vec<u8>, values: impl Iterator<Item = u32>) {
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
 fn batch(spans: &[Span], version: u8) -> Result<Vec<u8>> {
     let mut out = vec![version, 0, 0, 0];
     out.extend_from_slice(&(spans.len() as u32).to_le_bytes());
@@ -287,7 +370,7 @@ fn batch(spans: &[Span], version: u8) -> Result<Vec<u8>> {
             serde_json::to_string(&span.attributes)?.as_bytes(),
         );
     }
-    if version == 2 {
+    if version >= 2 {
         for span in spans {
             framed(&mut out, span.status_description.as_bytes());
         }
@@ -304,12 +387,43 @@ fn batch(spans: &[Span], version: u8) -> Result<Vec<u8>> {
             );
         }
     }
+    if version == 3 {
+        for span in spans {
+            framed(&mut out, serde_json::to_string(&span.links)?.as_bytes());
+        }
+        for span in spans {
+            framed(&mut out, span.trace_state.as_bytes());
+        }
+        u32_column(&mut out, spans.iter().map(|span| span.trace_flags));
+        u32_column(
+            &mut out,
+            spans.iter().map(|span| span.dropped_attributes_count),
+        );
+        u32_column(&mut out, spans.iter().map(|span| span.dropped_events_count));
+        u32_column(&mut out, spans.iter().map(|span| span.dropped_links_count));
+        for span in spans {
+            framed(&mut out, span.resource_schema_url.as_bytes());
+        }
+        for span in spans {
+            framed(&mut out, span.scope_schema_url.as_bytes());
+        }
+        u32_column(
+            &mut out,
+            spans
+                .iter()
+                .map(|span| span.resource_dropped_attributes_count),
+        );
+        u32_column(
+            &mut out,
+            spans.iter().map(|span| span.scope_dropped_attributes_count),
+        );
+    }
     Ok(out)
 }
 
 fn insert_row(connection: &Connection, table: &str, span: &Span) -> Result<()> {
     let sql = format!(
-        "INSERT INTO \"{table}\"({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"
+        "INSERT INTO \"{table}\"({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)"
     );
     let kinds = ["internal", "server", "client", "producer", "consumer"];
     let statuses = ["unset", "ok", "error"];
@@ -330,6 +444,16 @@ fn insert_row(connection: &Connection, table: &str, span: &Span) -> Result<()> {
             serde_json::to_string(&span.events)?,
             serde_json::to_string(&span.resource)?,
             serde_json::to_string(&span.instrumentation_scope)?,
+            serde_json::to_string(&span.links)?,
+            span.trace_state,
+            i64::from(span.trace_flags),
+            i64::from(span.dropped_attributes_count),
+            i64::from(span.dropped_events_count),
+            i64::from(span.dropped_links_count),
+            span.resource_schema_url,
+            span.scope_schema_url,
+            i64::from(span.resource_dropped_attributes_count),
+            i64::from(span.scope_dropped_attributes_count),
         ],
     )?;
     Ok(())
@@ -369,6 +493,13 @@ fn semantic_rows(connection: &Connection, table: &str) -> Result<Vec<SemanticSpa
                         Box::new(error),
                     )
                 })?;
+            let links = serde_json::from_str(&row.get::<_, String>(14)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    14,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
             Ok(SemanticSpan {
                 trace_id: row.get(0)?,
                 span_id: row.get(1)?,
@@ -384,6 +515,16 @@ fn semantic_rows(connection: &Connection, table: &str) -> Result<Vec<SemanticSpa
                 events,
                 resource,
                 instrumentation_scope,
+                links,
+                trace_state: row.get(15)?,
+                trace_flags: row.get(16)?,
+                dropped_attributes_count: row.get(17)?,
+                dropped_events_count: row.get(18)?,
+                dropped_links_count: row.get(19)?,
+                resource_schema_url: row.get(20)?,
+                scope_schema_url: row.get(21)?,
+                resource_dropped_attributes_count: row.get(22)?,
+                scope_dropped_attributes_count: row.get(23)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -439,31 +580,44 @@ fn projection_contract(
             let _ = row.get_ref(0)?;
             count += 1;
         }
-        ensure!(count == fixture.len(), "individual projection {column} lost rows");
+        ensure!(
+            count == fixture.len(),
+            "individual projection {column} lost rows"
+        );
     }
 
-    let mixed: (Vec<u8>, String, String, i64) = connection.query_row(
+    let mixed: (Vec<u8>, String, String, i64, String, i64) = connection.query_row(
         &format!(
-            "SELECT trace_id,attributes,events,duration_ns FROM \"{table}\" \
+            "SELECT trace_id,attributes,events,duration_ns,links,trace_flags FROM \"{table}\" \
              WHERE status='error' AND service='contract-svc'"
         ),
         [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
     )?;
     ensure!(mixed.0 == fixture[0].trace_id);
     ensure!(serde_json::from_str::<Value>(&mixed.1)? == fixture[0].attributes);
     ensure!(serde_json::from_str::<Value>(&mixed.2)? == fixture[0].events);
     ensure!(mixed.3 == fixture[0].duration_ns);
+    ensure!(serde_json::from_str::<Value>(&mixed.4)? == fixture[0].links);
+    ensure!(mixed.5 == i64::from(fixture[0].trace_flags));
     if !assert_selective_work {
         return Ok(());
     }
 
     let before = integer_stats(connection, table)?;
-    let count: i64 = connection.query_row(
-        &format!("SELECT count(*) FROM \"{table}\""),
-        [],
-        |row| row.get(0),
-    )?;
+    let count: i64 =
+        connection.query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |row| {
+            row.get(0)
+        })?;
     ensure!(count == fixture.len() as i64);
     let after = integer_stats(connection, table)?;
     ensure!(stat_delta(&before, &after, "query_decoded_columns")? == 0);
@@ -483,9 +637,7 @@ fn projection_contract(
     let after = integer_stats(connection, table)?;
     let payload_blocks = stat_delta(&before, &after, "query_payload_blocks_read")?;
     ensure!(payload_blocks > 0);
-    ensure!(
-        stat_delta(&before, &after, "query_decoded_columns")? == payload_blocks * 2
-    );
+    ensure!(stat_delta(&before, &after, "query_decoded_columns")? == payload_blocks * 2);
     ensure!(stat_delta(&before, &after, "query_decoded_column_bytes")? > 0);
     ensure!(stat_delta(&before, &after, "query_materialized_rich_values")? == 0);
 
@@ -502,10 +654,24 @@ fn projection_contract(
     let after = integer_stats(connection, table)?;
     let payload_blocks = stat_delta(&before, &after, "query_payload_blocks_read")?;
     ensure!(payload_blocks > 0);
-    ensure!(
-        stat_delta(&before, &after, "query_decoded_columns")? == payload_blocks * 2 + 1
-    );
+    ensure!(stat_delta(&before, &after, "query_decoded_columns")? == payload_blocks * 2 + 1);
     ensure!(stat_delta(&before, &after, "query_materialized_rich_values")? == 1);
+
+    let before = after;
+    let links: String = connection.query_row(
+        &format!(
+            "SELECT links FROM \"{table}\" \
+             WHERE trace_id=?1 AND name='GET /contract'"
+        ),
+        [fixture[0].trace_id.as_slice()],
+        |row| row.get(0),
+    )?;
+    ensure!(serde_json::from_str::<Value>(&links)? == fixture[0].links);
+    let after = integer_stats(connection, table)?;
+    let payload_blocks = stat_delta(&before, &after, "query_payload_blocks_read")?;
+    ensure!(payload_blocks > 0);
+    ensure!(stat_delta(&before, &after, "query_decoded_columns")? == payload_blocks * 2 + 10);
+    ensure!(stat_delta(&before, &after, "query_materialized_rich_values")? == 10);
 
     let before = after;
     connection.execute_batch("BEGIN")?;
@@ -535,7 +701,8 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
          CREATE VIRTUAL TABLE lifecycle_spans USING timeless_traces;
          CREATE VIRTUAL TABLE corrupt_spans USING timeless_traces;
          CREATE VIRTUAL TABLE percentile_spans USING timeless_traces;
-         CREATE VIRTUAL TABLE v0_spans USING timeless_traces;",
+         CREATE VIRTUAL TABLE v0_spans USING timeless_traces;
+         CREATE VIRTUAL TABLE v1_spans USING timeless_traces;",
     )?;
     let fixture = contract_fixture();
     for span in &fixture {
@@ -543,7 +710,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     }
     connection.execute(
         "INSERT INTO batch_spans(batch_spans) VALUES (?1)",
-        params![batch(&fixture, 2)?],
+        params![batch(&fixture, 3)?],
     )?;
     let row_spans = semantic_rows(&connection, "row_spans")?;
     let batch_spans = semantic_rows(&connection, "batch_spans")?;
@@ -585,7 +752,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     for spans in percentile_spans.chunks(8192) {
         connection.execute(
             "INSERT INTO percentile_spans(percentile_spans) VALUES (?1)",
-            params![batch(spans, 2)?],
+            params![batch(spans, 3)?],
         )?;
     }
     percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
@@ -625,13 +792,26 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     )?;
     ensure!(serde_json::from_str::<Value>(&legacy.0)? == json!({"legacy":"string-only"}));
     ensure!(legacy.1.is_empty() && legacy.2 == "[]" && legacy.3 == "{}" && legacy.4 == "{}");
+    connection.execute(
+        "INSERT INTO v1_spans(v1_spans) VALUES (?1)",
+        params![batch(&[rich_span(91, None)], 2)?],
+    )?;
+    let legacy_v2_defaults: i64 = connection.query_row(
+        "SELECT count(*) FROM v1_spans WHERE links='[]' AND trace_state='' AND trace_flags=0
+                AND dropped_attributes_count=0 AND dropped_events_count=0
+                AND dropped_links_count=0 AND resource_schema_url='' AND scope_schema_url=''
+                AND resource_dropped_attributes_count=0 AND scope_dropped_attributes_count=0",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(legacy_v2_defaults == 1);
 
     let threshold = (0..8191)
         .map(|index| rich_span(10_000 + index, None))
         .collect::<Vec<_>>();
     connection.execute(
         "INSERT INTO threshold_spans(threshold_spans) VALUES (?1)",
-        params![batch(&threshold, 2)?],
+        params![batch(&threshold, 3)?],
     )?;
     let blocks: i64 =
         connection.query_row("SELECT COUNT(*) FROM threshold_spans_blocks", [], |row| {
@@ -648,7 +828,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
         connection.query_row("SELECT COUNT(*) FROM threshold_spans", [], |row| row.get(0))?;
     ensure!(count == 8192);
 
-    let mut truncated = batch(&fixture, 2)?;
+    let mut truncated = batch(&fixture, 3)?;
     truncated.pop();
     ensure!(connection
         .execute(
@@ -661,7 +841,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     connection.execute("SAVEPOINT rich", [])?;
     connection.execute(
         "INSERT INTO txn_spans(txn_spans) VALUES (?1)",
-        params![batch(&[rich_span(30_002, None)], 2)?],
+        params![batch(&[rich_span(30_002, None)], 3)?],
     )?;
     connection.execute("ROLLBACK TO rich", [])?;
     connection.execute("RELEASE rich", [])?;
@@ -672,7 +852,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     let keep = rich_span(40_002, Some(200));
     connection.execute(
         "INSERT INTO lifecycle_spans(lifecycle_spans) VALUES (?1)",
-        params![batch(&[old, keep.clone()], 2)?],
+        params![batch(&[old, keep.clone()], 3)?],
     )?;
     connection.execute(
         "INSERT INTO lifecycle_spans(lifecycle_spans) VALUES ('flush')",

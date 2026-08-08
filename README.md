@@ -112,7 +112,7 @@ benchmark, deferred-work, and higher-order interface verdict is in the
 |---|---|---|---|
 | `timeless_metrics` | `(name, ts, value, labels)` | **seconds** | `name` =, `ts` ranges |
 | `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column =, exact `message_contains` =; optional hidden `max_work_entries` bounds examined entries |
-| `timeless_traces` | core IDs/timing plus typed `attributes`, `status_description`, `events`, `resource`, `instrumentation_scope` | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
+| `timeless_traces` | complete rich-span v2 IDs/timing, typed attributes/events/links, scope/resource schema and dropped-value fidelity | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
 
 All three share the same lifecycle: inserts land in an in-memory buffer
 (queryable immediately, auto-flushed at a size threshold), `'flush'` encodes
@@ -672,14 +672,15 @@ SELECT hex(trace_id), name, service, status, duration_ns FROM traces
 - `kind` (`internal|server|client|producer|consumer`) and `status`
   (`unset|ok|error`) are strict TEXT vocabularies mapped to storage bytes.
 - `attributes`, `resource`, and `instrumentation_scope` are typed JSON
-  objects; `events` is a typed JSON array. Booleans, numbers, nulls, arrays,
-  and nested objects survive flush, optimize, and reopen.
+  objects; `events` and `links` are typed JSON arrays. Trace state/flags,
+  schema URLs, dropped-value counts, scope attributes, and per-event/link
+  fidelity survive flush, optimize, backup, and reopen.
 - `service` is derived with the same precedence as timeless_traces:
   string `attributes["service.name"]`, then resource `service.name`, then the
   explicit compatibility column. The derived value is what gets indexed.
-- Batch byte `0x01` is the stable core-span v0 format. Byte `0x02` is the
-  additive rich-span v1 format; both remain readable. The extension's
-  8,192-span auto-flush threshold is authoritative for both paths.
+- Batch byte `0x01` is stable core-span v0, `0x02` is rich-span v1, and
+  `0x03` is complete rich-span v2. All remain readable. The extension's
+  8,192-span auto-flush threshold is authoritative for every path.
 
 **Bucket kernel** — per-service span stats per time bucket (count,
 errors, duration sum/min/max; percentiles stay above the waist):
