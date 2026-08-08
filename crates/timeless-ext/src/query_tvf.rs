@@ -3813,6 +3813,7 @@ unsafe impl VTabCursor for TraceBucketsCursor<'_> {
             kind: None,
             status: None,
             name: None,
+            attribute: None,
         };
         self.rows = shared
             .engine
@@ -4345,6 +4346,16 @@ fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
     conn.query_row(&sql, [], |r| r.get(0))
 }
 
+fn sum_blob_bytes(database: &str, table: &str, suffix: &str, column: &str) -> Result<i64> {
+    let conn = shared::current_conn().map_err(module_err)?;
+    let sql = format!(
+        "SELECT COALESCE(SUM(length(\"{}\")),0) FROM {}",
+        column.replace('"', "\"\""),
+        crate::sql_ident::qualified_shadow(database, table, suffix)
+    );
+    conn.query_row(&sql, [], |row| row.get(0))
+}
+
 struct LogStorageSummary {
     disk_entries: i64,
     bytes_on_disk: i64,
@@ -4466,6 +4477,7 @@ fn trace_index_bytes(database: &str, table: &str) -> Option<i64> {
             crate::sql_ident::shadow_object(table, "terms"),
             crate::sql_ident::shadow_object(table, "trace_blocks"),
             crate::sql_ident::shadow_object(table, "duration_bounds"),
+            crate::sql_ident::shadow_object(table, "attribute_blooms"),
             autoindex_name(table, "meta"),
         ],
     )
@@ -4945,6 +4957,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let optimize_backlog = shared.engine.optimize_backlog();
                 let gate = shared.write_gate.profile();
                 let storage = trace_storage_summary(&database, &table)?;
+                let attribute_index_fields = shared.engine.config().attribute_indexes.len();
                 debug_assert_eq!(buffered as u64, counted_buffered);
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
@@ -4972,6 +4985,23 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "trace_index_rows",
                         Value::Integer(count_rows(&database, &table, "trace_blocks")?),
+                    ),
+                    (
+                        "attribute_index_fields",
+                        Value::Integer(attribute_index_fields as i64),
+                    ),
+                    (
+                        "attribute_bloom_rows",
+                        Value::Integer(count_rows(&database, &table, "attribute_blooms")?),
+                    ),
+                    (
+                        "attribute_bloom_bytes",
+                        Value::Integer(sum_blob_bytes(
+                            &database,
+                            &table,
+                            "attribute_blooms",
+                            "bits",
+                        )?),
                     ),
                     (
                         "index_bytes",

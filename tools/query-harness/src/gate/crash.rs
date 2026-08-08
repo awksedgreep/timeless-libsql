@@ -61,7 +61,12 @@ pub(super) fn write_sql(
         out,
         "CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');"
     )?;
-    writeln!(out, "CREATE VIRTUAL TABLE traces USING timeless_traces;")?;
+    writeln!(
+        out,
+        "CREATE VIRTUAL TABLE traces USING timeless_traces(\
+           attribute_indexes='[{{\"scope\":\"span\",\"path\":\"/count\"}},{{\"scope\":\"span\",\"path\":\"/bool\"}}]'\
+         );"
+    )?;
     for round in 1..=rounds {
         writeln!(out, "BEGIN;")?;
         for index in 0..metrics_per_round {

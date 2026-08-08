@@ -77,6 +77,11 @@ and query bounds are inclusive, blocks written by older extensions retain an
 exact decode fallback, and the ordinary public `optimize` command backfills
 missing extrema without rewriting compressed payloads.
 
+It advertises `attribute_equality.version=1` when bounded, opt-in trace
+attribute equality is available. `configuration`, `hidden_input`, `scopes`,
+`path`, `typed_scalars`, `max_fields`, and `legacy_decode_fallback` describe
+the public contract. This is an SQLite predicate surface, not TraceQL syntax.
+
 It also advertises `projection_decode.version=1`. SQLite's requested-column
 mask is honored for generation-2 and generation-3 adaptive columnar blocks: predicate columns
 are decoded first and requested rich values are materialized only for matching
@@ -224,7 +229,13 @@ always makes progress. The authoritative ingest buffer is 8,192 entries.
 ### `timeless_traces`
 
 ```sql
-CREATE VIRTUAL TABLE traces USING timeless_traces(retention='72h');
+CREATE VIRTUAL TABLE traces USING timeless_traces(
+  retention='72h',
+  attribute_indexes='[
+    {"scope":"span","path":"/http.method"},
+    {"scope":"resource","path":"/deployment.environment"}
+  ]'
+);
 ```
 
 Columns are `trace_id BLOB`, `span_id BLOB`, `parent_span_id BLOB`,
@@ -235,8 +246,8 @@ Columns are `trace_id BLOB`, `span_id BLOB`, `parent_span_id BLOB`,
 `dropped_events_count INTEGER`, `dropped_links_count INTEGER`,
 `resource_schema_url TEXT`, `scope_schema_url TEXT`,
 `resource_dropped_attributes_count INTEGER`,
-`scope_dropped_attributes_count INTEGER`, and the hidden command column named
-after the table.
+`scope_dropped_attributes_count INTEGER`, hidden query input
+`attribute_filter TEXT`, and the hidden command column named after the table.
 
 Trace/span/parent IDs accept packed 16/8/8-byte BLOBs or 32/16/16-digit hex
 TEXT and are returned as BLOBs. An all-zero parent means no parent. `kind` is
@@ -249,9 +260,19 @@ INTEGERs. Legacy rows default links to `[]`, strings to empty, and counts/flags
 to `0`. Service identity uses the stored
 `service.name` precedence documented in the [user guide](GUIDE.md#6-storing-traces).
 
-The only creation argument is `retention`. Writes are append-only. Commands
-are `flush`, `optimize`, `optimize:<positive max source spans>`, and
-`prune:<epoch-nanoseconds>`. The authoritative ingest buffer is 8,192 spans.
+Creation arguments:
+
+- `retention=<n>[s|m|h|d]`: data-time retention in nanoseconds; a bare
+  integer is interpreted as nanoseconds.
+- `attribute_indexes=<JSON array>`: immutable allowlist of zero through eight
+  unique fields. Each element has exactly `scope` (`span`, `resource`, or
+  `scope`) and `path` (a non-empty RFC 6901 JSON Pointer no longer than 256
+  UTF-8 bytes). Events and links are not valid scopes.
+
+Writes are append-only. `attribute_filter` is query-only and an attempt to
+insert it fails explicitly. Commands are `flush`, `optimize`,
+`optimize:<positive max source spans>`, and `prune:<epoch-nanoseconds>`. The
+authoritative ingest buffer is 8,192 spans.
 Flush and optimize persist exact duration extrema per block. Inclusive
 `duration_ns` lower/upper predicates use those extrema to reject a block only
 when it cannot contain a match; exact filtering still occurs per span. Older
@@ -260,6 +281,64 @@ normal `optimize` computes the missing metadata in bounded block-sized work,
 updates only the metadata, and preserves payload/index bytes. The positive
 entry budget also bounds this backfill and always permits one block when it
 is the first maintenance unit.
+
+### Bounded typed attribute equality
+
+For an allowlisted field, bind one JSON object to the hidden
+`attribute_filter` input:
+
+```sql
+SELECT lower(hex(trace_id)), lower(hex(span_id)), start_ts
+  FROM traces
+ WHERE start_ts >= :start_ns
+   AND start_ts <= :stop_ns
+   AND attribute_filter = :filter_json
+ ORDER BY start_ts, span_id;
+```
+
+For a span string predicate, `:filter_json` is, for example,
+`{"scope":"span","path":"/http.method","value":"GET"}`. The value must
+be one JSON scalar: null, boolean, string, or number. Arrays, objects,
+malformed JSON, unknown keys, and fields absent from `attribute_indexes` fail
+explicitly. Missing, JSON null, empty string, string `"1"`, integer `1`, real
+`1.0`, and boolean `true` remain distinct. Stored arrays and objects never
+match this equality primitive.
+
+Every persisted block has one fixed 4,096-byte probabilistic negative filter
+per configured field. A negative result skips that block; every survivor is
+decoded and rechecked exactly, so collisions can cost work but cannot change
+rows. Metadata reads use fixed 256-block chunks. A missing legacy filter row
+falls back to exact decode; a bad version, size, or checksum fails closed.
+Buffer rows are checked exactly. Flush, optimize, retention, rollback, and
+reopen publish or remove filter rows with their payload blocks.
+
+The configuration is a table data property and cannot be changed through
+replayed `CREATE` arguments. Create a side-by-side table and copy through the
+public row or batch surface when a different allowlist is required; do not
+edit shadow tables.
+
+Direct users who do not configure an index can express the same scalar-row
+predicate with SQLite JSON1. Here `:json1_path` uses SQLite JSON-path syntax,
+`:json_type` is one of `null|true|false|integer|real|text`, and
+`:scalar_json` is an encoded JSON scalar such as `"GET"`, `1`, `1.0`, or
+`null`:
+
+```sql
+SELECT lower(hex(trace_id)), lower(hex(span_id)), start_ts
+  FROM traces
+ WHERE start_ts >= :start_ns
+   AND start_ts <= :stop_ns
+   AND json_type(attributes, :json1_path) = :json_type
+   AND attributes -> :json1_path = json(:scalar_json)
+ ORDER BY start_ts, span_id;
+```
+
+That is the exact public control, but JSON1 cannot reject blocks before the
+public attributes column is decoded. Use JSON1 for existence, containers,
+non-equality comparisons, and unconfigured fields. Use `attribute_filter`
+only when the measured reduction in decoded blocks justifies its fixed
+write/storage cost. Trace quantifiers, structural relationships, event/link
+predicates, and TraceQL parsing remain higher-order Rust-library work.
 
 ### Retained trace summaries
 
@@ -424,7 +503,7 @@ b-trees, not the database file or result payload.
 |---|---|
 | metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
-| traces | `blocks`, `raw_blocks`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `duration_bounded_blocks`, `duration_unknown_blocks`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
+| traces | `blocks`, `raw_blocks`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `duration_bounded_blocks`, `duration_unknown_blocks`, `attribute_index_fields`, `attribute_bloom_rows`, `attribute_bloom_bytes`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
 
 The logs/traces `optimize_source_*` values use the extension's current raw-or-
 undersized source predicate and authoritative 8,192-entry/span merge target.

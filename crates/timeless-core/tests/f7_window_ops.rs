@@ -275,6 +275,7 @@ fn trace_duration_percentiles_match_naive() {
         kind: None,
         status: None,
         name: None,
+        attribute: None,
     };
     for step in [500i64, 2_000, 100_000] {
         let stats = engine.bucket_stats(&q, step).unwrap();

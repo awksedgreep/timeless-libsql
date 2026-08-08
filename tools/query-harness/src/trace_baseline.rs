@@ -1222,6 +1222,9 @@ fn build_fixture(
             "index_bytes",
             "duration_bounded_blocks",
             "duration_unknown_blocks",
+            "attribute_index_fields",
+            "attribute_bloom_rows",
+            "attribute_bloom_bytes",
         ],
     );
     reopen_storage

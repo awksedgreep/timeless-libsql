@@ -22,6 +22,7 @@
 //!                  resource_schema_url TEXT, scope_schema_url TEXT,
 //!                  resource_dropped_attributes_count INTEGER,
 //!                  scope_dropped_attributes_count INTEGER,
+//!                  attribute_filter TEXT HIDDEN,
 //!                  `"<table>"` HIDDEN)
 //!
 //! Ids: trace_id/span_id/parent_span_id accept either a BLOB of the
@@ -62,8 +63,10 @@ use rusqlite::vtab::{
 };
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{
-    kind_from_name, kind_name, status_from_name, status_name, SpanBlockEngine, SpanBlockStore,
-    SpanColumnMask, SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder, SpanQueryStream,
+    encode_span_attribute_indexes, kind_from_name, kind_name, parse_span_attribute_indexes,
+    status_from_name, status_name, SpanAttributeFilter, SpanAttributeIndex, SpanBlockEngine,
+    SpanBlockStore, SpanColumnMask, SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder,
+    SpanQueryStream,
 };
 
 use crate::batch::BatchReader;
@@ -112,6 +115,8 @@ const PLAN_BOUNDED_TS_ASC: &str = "bounded-ts-asc";
 const PLAN_BOUNDED_TS_ASC_OFFSET: &str = "bounded-ts-asc-offset";
 const PLAN_BOUNDED_TS_DESC: &str = "bounded-ts-desc";
 const PLAN_BOUNDED_TS_DESC_OFFSET: &str = "bounded-ts-desc-offset";
+const PLAN_ATTRIBUTE: &str = "attribute";
+const PLAN_ATTRIBUTE_SUFFIX: &str = "+attribute";
 
 /// Declared column indices (argv in xUpdate = these + 2).
 const COL_TRACE_ID: usize = 0;
@@ -138,11 +143,23 @@ const COL_RESOURCE_SCHEMA_URL: usize = 20;
 const COL_SCOPE_SCHEMA_URL: usize = 21;
 const COL_RESOURCE_DROPPED_ATTRIBUTES: usize = 22;
 const COL_SCOPE_DROPPED_ATTRIBUTES: usize = 23;
+const COL_ATTRIBUTE_FILTER: usize = 24;
 /// The hidden command column (named after the table, FTS5 idiom).
-const COL_COMMAND: usize = 24;
+const COL_COMMAND: usize = 25;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
+}
+
+fn load_attribute_indexes(
+    host: &Connection,
+    database: &str,
+    table: &str,
+) -> Result<Vec<SpanAttributeIndex>> {
+    let encoded = shadow_meta::load_meta_text(host, database, table, "attribute_indexes")
+        .map_err(module_err)?
+        .unwrap_or_else(|| "[]".to_owned());
+    parse_span_attribute_indexes(&encoded).map_err(module_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +243,8 @@ impl TracesTab {
     ) -> Result<Arc<SharedEngine<SpanBlockEngine>>> {
         let host = unsafe { Connection::from_handle(handle) }?;
         shadow_span_store::ensure_duration_bounds_table(&host, database, table)?;
+        shadow_span_store::ensure_attribute_blooms_table(&host, database, table)?;
+        let attribute_indexes = load_attribute_indexes(&host, database, table)?;
         let instance_id =
             shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
         let store = ShadowSpanStore::new(database, table);
@@ -238,6 +257,7 @@ impl TracesTab {
                     zstd_level: ZSTD_LEVEL,
                     merge_target_entries: MERGE_TARGET_ENTRIES,
                     merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    attribute_indexes,
                 },
             )
             .map_err(module_err)
@@ -264,10 +284,9 @@ impl TracesTab {
         // (DDL, _meta writes, recovery scans). RAII unbind.
         let _bind = DbGuard::bind(handle);
 
-        // Unlike logs there is no index_keys knob (spans/mod.rs explains
-        // why the four span dimensions are indexed unconditionally); the
-        // only supported argument is F2's retention, parsed after the
-        // engine exists below. Typo'd args still fail loudly there.
+        // The four fixed span dimensions remain indexed unconditionally.
+        // Open-ended JSON attributes use only the explicit, bounded
+        // attribute_indexes allowlist parsed and persisted below.
 
         let host = unsafe { Connection::from_handle(handle) }?;
         let store = ShadowSpanStore::new(&database, &table);
@@ -282,34 +301,16 @@ impl TracesTab {
             store.save_meta("ts_unit", b"ns").map_err(module_err)?;
         }
         shadow_span_store::ensure_duration_bounds_table(&host, &database, &table)?;
+        shadow_span_store::ensure_attribute_blooms_table(&host, &database, &table)?;
         let instance_id =
             shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
 
-        // R4: one engine per (db file, schema alias, table, instance). First
-        // connection in builds it — SpanBlockEngine::new recovers the
-        // block index via scan() and status partitions via the
-        // `status:` posting lists (re-entrant SELECTs routed to the
-        // calling connection by the DbGuard above, safe because THIS
-        // thread holds the connection mutex recursively) — every later
-        // xConnect just bumps the Arc, no re-recovery.
-        let key = shared::registry_key(handle, database_name, &table, instance_id);
-        let shared_engine = shared::get_or_create(&key, move || {
-            SpanBlockEngine::new(
-                Box::new(store),
-                SpanEngineConfig {
-                    flush_threshold: FLUSH_THRESHOLD,
-                    zstd_level: ZSTD_LEVEL,
-                    merge_target_entries: MERGE_TARGET_ENTRIES,
-                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
-                },
-            )
-            .map_err(module_err)
-        })?;
-
-        // F2 retention: unit-resolved (ns) at create, persisted in
-        // _meta; xConnect loads it back and ignores replayed args.
-        let retention = if is_create {
+        // Retention and attribute index configuration are data properties:
+        // xCreate validates and persists them, xConnect loads metadata and
+        // never trusts replayed module arguments.
+        let (retention, attribute_indexes) = if is_create {
             let mut retention = None;
+            let mut attribute_indexes = Vec::new();
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 match name.as_str() {
                     "retention" => {
@@ -318,9 +319,13 @@ impl TracesTab {
                                 .map_err(module_err)?,
                         );
                     }
+                    "attribute_indexes" => {
+                        attribute_indexes =
+                            parse_span_attribute_indexes(&value).map_err(module_err)?;
+                    }
                     other => {
                         return Err(module_err(format!(
-                            "unrecognized argument {other:?}; timeless_traces supports: retention"
+                            "unrecognized argument {other:?}; timeless_traces supports: retention, attribute_indexes"
                         )));
                     }
                 }
@@ -335,10 +340,38 @@ impl TracesTab {
                 )
                 .map_err(module_err)?;
             }
-            retention
+            shadow_meta::save_meta_text(
+                &host,
+                &database,
+                &table,
+                "attribute_indexes",
+                &encode_span_attribute_indexes(&attribute_indexes),
+            )
+            .map_err(module_err)?;
+            (retention, attribute_indexes)
         } else {
-            shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?
+            (
+                shadow_meta::load_retention(&host, &database, &table).map_err(module_err)?,
+                load_attribute_indexes(&host, &database, &table)?,
+            )
         };
+
+        // R4: one engine per (db file, schema alias, table, instance). First
+        // connection recovers block metadata; later connections share it.
+        let key = shared::registry_key(handle, database_name, &table, instance_id);
+        let shared_engine = shared::get_or_create(&key, move || {
+            SpanBlockEngine::new(
+                Box::new(store),
+                SpanEngineConfig {
+                    flush_threshold: FLUSH_THRESHOLD,
+                    zstd_level: ZSTD_LEVEL,
+                    merge_target_entries: MERGE_TARGET_ENTRIES,
+                    merge_max_ts_span: MERGE_MAX_TS_SPAN,
+                    attribute_indexes,
+                },
+            )
+            .map_err(module_err)
+        })?;
         shared_engine.engine.set_retention(retention);
 
         let schema = format!(
@@ -352,6 +385,7 @@ impl TracesTab {
              resource_schema_url TEXT, scope_schema_url TEXT, \
              resource_dropped_attributes_count INTEGER, \
              scope_dropped_attributes_count INTEGER, \
+             attribute_filter TEXT HIDDEN, \
              \"{}\" HIDDEN)",
             escape_double_quote(&table)
         );
@@ -699,6 +733,7 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
         let mut hi_c: Option<usize> = None;
         let mut duration_lo_c: Option<usize> = None;
         let mut duration_hi_c: Option<usize> = None;
+        let mut attribute_c: Option<usize> = None;
         let mut limit_c: Option<usize> = None;
         let mut offset_c: Option<usize> = None;
         let mut bounded_safe = true;
@@ -747,6 +782,9 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
                 (COL_DURATION, SQLITE_INDEX_CONSTRAINT_LT) if duration_hi_c.is_none() => {
                     duration_hi_c = Some(i);
                     bounded_safe = false;
+                }
+                (COL_ATTRIBUTE_FILTER, SQLITE_INDEX_CONSTRAINT_EQ) if attribute_c.is_none() => {
+                    attribute_c = Some(i)
                 }
                 _ => bounded_safe = false,
             }
@@ -804,6 +842,12 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
         claim(info, hi_c, BIT_TS_HI);
         claim(info, duration_lo_c, BIT_DURATION_LO);
         claim(info, duration_hi_c, BIT_DURATION_HI);
+        claim(info, attribute_c, 0);
+        if let Some(index) = attribute_c {
+            // The hidden input is an exact extension-owned predicate. Its
+            // visible value is not part of the stored span row.
+            info.constraint_usage(index).set_omit(true);
+        }
         if bounded_order.is_some() {
             claim(info, limit_c, 0);
             claim(info, offset_c, 0);
@@ -812,15 +856,23 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
         let projection = SpanColumnMask::from_col_used(info.col_used()).bits() as c_int;
         mask |= projection << PROJECTION_SHIFT;
         info.set_idx_num(mask);
-        if let Some(order) = bounded_order {
-            info.set_idx_str(match (order, offset_c.is_some()) {
-                (SpanQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
-                (SpanQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
-                (SpanQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
-                (SpanQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
-            });
+        let bounded_plan = bounded_order.map(|order| match (order, offset_c.is_some()) {
+            (SpanQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
+            (SpanQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
+            (SpanQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
+            (SpanQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
+        });
+        if let Some(plan) = bounded_plan {
+            let plan = if attribute_c.is_some() {
+                format!("{plan}{PLAN_ATTRIBUTE_SUFFIX}")
+            } else {
+                plan.to_owned()
+            };
+            info.set_idx_str(&plan);
             info.set_order_by_consumed(true);
             info.set_estimated_rows(100);
+        } else if attribute_c.is_some() {
+            info.set_idx_str(PLAN_ATTRIBUTE);
         }
         // Cost ladder steers the planner: a trace_id lookup is a
         // point probe of the trace index (the entire reason this vtab
@@ -831,7 +883,7 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             BIT_TRACE | BIT_SERVICE | BIT_KIND | BIT_STATUS | BIT_NAME | BIT_TS_LO | BIT_TS_HI;
         info.set_estimated_cost(if mask & BIT_TRACE != 0 {
             10.0
-        } else if mask & pruning_mask != 0 {
+        } else if mask & pruning_mask != 0 || attribute_c.is_some() {
             1e3
         } else {
             1e6
@@ -849,6 +901,7 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             pos: 0,
             stream: None,
             current: None,
+            attribute_filter: None,
             phantom: PhantomData,
         })
     }
@@ -888,8 +941,7 @@ impl CreateVTab<'_> for TracesTab {
 
 impl UpdateVTab<'_> for TracesTab {
     /// INSERT. argv: [0] NULL, [1] requested rowid, then declared
-    /// columns from index 2 (COL_* + 2); the hidden command column is
-    /// argv[16].
+    /// columns from index 2 (COL_* + 2).
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
         // Connection routing + writer gate, as in metrics_vtab.rs
         // (gate is normally taken by begin(); this is the defensive
@@ -926,6 +978,11 @@ impl UpdateVTab<'_> for TracesTab {
         // not just FromSql conversion).
         let vals: Vec<ValueRef<'_>> = args.iter().collect();
         let col = |c: usize| vals[2 + c];
+        if !matches!(col(COL_ATTRIBUTE_FILTER), ValueRef::Null) {
+            return Err(module_err(
+                "attribute_filter is a query-only hidden input".into(),
+            ));
+        }
 
         // Required ids: packed BLOB or hex TEXT (see module header).
         let v = col(COL_TRACE_ID);
@@ -1187,6 +1244,7 @@ pub struct TracesCursor<'vtab> {
     /// sized result vector behind the extension boundary.
     stream: Option<SpanQueryStream>,
     current: Option<SpanEntry>,
+    attribute_filter: Option<String>,
     phantom: PhantomData<&'vtab TracesTab>,
 }
 
@@ -1211,6 +1269,7 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         }
         self.rows.clear();
         self.current = None;
+        self.attribute_filter = None;
         self.pos = 0;
 
         // argv slots were claimed in canonical order (trace, service,
@@ -1332,9 +1391,26 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         } else {
             i64::MAX
         };
+        let has_attribute = matches!(idx_str, Some(PLAN_ATTRIBUTE))
+            || idx_str.is_some_and(|plan| plan.ends_with(PLAN_ATTRIBUTE_SUFFIX));
+        let attribute = if has_attribute {
+            let encoded: Option<String> = args.get(next())?;
+            let encoded = encoded.ok_or_else(|| {
+                module_err("attribute_filter must be a non-NULL JSON object".into())
+            })?;
+            let filter = SpanAttributeFilter::parse(&encoded).map_err(module_err)?;
+            self.attribute_filter = Some(encoded);
+            Some(filter)
+        } else {
+            None
+        };
         let projection = SpanColumnMask::from_bits((idx_num >> PROJECTION_SHIFT) as u16);
 
-        let bounded_order = match idx_str {
+        let plan = idx_str.and_then(|plan| {
+            plan.strip_suffix(PLAN_ATTRIBUTE_SUFFIX)
+                .or((plan != PLAN_ATTRIBUTE).then_some(plan))
+        });
+        let bounded_order = match plan {
             Some(PLAN_BOUNDED_TS_ASC) => Some((SpanQueryOrder::Asc, false)),
             Some(PLAN_BOUNDED_TS_ASC_OFFSET) => Some((SpanQueryOrder::Asc, true)),
             Some(PLAN_BOUNDED_TS_DESC) => Some((SpanQueryOrder::Desc, false)),
@@ -1371,6 +1447,7 @@ unsafe impl VTabCursor for TracesCursor<'_> {
             kind,
             status,
             name,
+            attribute,
         };
         let read = self
             .shared
@@ -1477,6 +1554,10 @@ unsafe impl VTabCursor for TracesCursor<'_> {
             COL_SCOPE_DROPPED_ATTRIBUTES => {
                 ctx.set_result(&(i64::from(row.scope_dropped_attributes_count)))
             }
+            COL_ATTRIBUTE_FILTER => match &self.attribute_filter {
+                Some(filter) => ctx.set_result(filter),
+                None => ctx.set_result(&Null),
+            },
             // The hidden command column reads as NULL.
             _ => ctx.set_result(&Null),
         }

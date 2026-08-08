@@ -48,6 +48,7 @@
 
 use std::borrow::Cow;
 
+mod attributes;
 pub mod codec;
 pub mod engine;
 pub mod mem;
@@ -55,6 +56,12 @@ pub mod mem;
 #[cfg(test)]
 mod tests;
 
+pub use attributes::{
+    build_span_attribute_blooms, encode_span_attribute_indexes, parse_span_attribute_indexes,
+    span_attribute_bloom_checksum, validate_span_attribute_bloom, SpanAttributeBloom,
+    SpanAttributeFilter, SpanAttributeIndex, SpanAttributeScope, MAX_SPAN_ATTRIBUTE_INDEXES,
+    SPAN_ATTRIBUTE_BLOOM_BYTES, SPAN_ATTRIBUTE_BLOOM_HASHES, SPAN_ATTRIBUTE_BLOOM_VERSION,
+};
 pub use codec::{decode_span_block, encode_span_block, SpanColumnMask, SpanDecodeProfile};
 pub use engine::{
     SpanBlockEngine, SpanEngineConfig, SpanOptimizeBacklog, SpanOptimizeProfileSnapshot, SpanQuery,
@@ -179,6 +186,9 @@ pub struct EncodedSpanBlock {
     pub terms: Vec<String>,
     /// Deduplicated, sorted packed trace ids present in this block.
     pub trace_ids: Vec<[u8; 16]>,
+    /// Fixed-size, opt-in attribute filters for this block. Empty when the
+    /// trace table has no configured attribute indexes.
+    pub attribute_blooms: Vec<SpanAttributeBloom>,
 }
 
 /// Exact duration extrema for one persisted span block. Stores may persist
@@ -354,6 +364,18 @@ pub trait SpanBlockStore: Send + Sync {
         _duration_max_ns: i64,
     ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
         self.query_trace(trace_id)
+    }
+
+    /// Conservatively reject candidate blocks whose configured attribute
+    /// filter proves the typed scalar absent. The default retains every block
+    /// so legacy/custom stores remain exact without implementing the optional
+    /// accelerator.
+    fn filter_attribute_blocks(
+        &self,
+        _filter: &SpanAttributeFilter,
+        blocks: &[(BlockLoc, BlockMeta)],
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        Ok(blocks.to_vec())
     }
 
     /// Distinct suffixes of terms beginning with `prefix`, when the backend

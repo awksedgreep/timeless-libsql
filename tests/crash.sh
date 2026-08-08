@@ -129,6 +129,21 @@ for ((iter = 1; iter <= ITERATIONS; iter++)); do
     fail "rich trace fidelity count $rich != trace count $tc"
   fi
 
+  # 2aa. Session 7: configured attribute filter rows publish atomically with
+  # their blocks. A post-crash exact query validates checksums, falls back for
+  # any legacy/missing row, and must match the same durable population.
+  attr=$(sqlite3 "$DB" ".load $EXT" \
+    "SELECT COUNT(*) FROM traces
+       WHERE attribute_filter='{\"scope\":\"span\",\"path\":\"/bool\",\"value\":true}';" 2>&1) || {
+    fail "attribute-filter reopen query failed: $attr"
+    continue
+  }
+  if [[ "$attr" == "$tc" ]]; then
+    pass "all $tc decoded traces retain crash-safe attribute filters"
+  else
+    fail "attribute-filter count $attr != trace count $tc"
+  fi
+
   # 2b. F3: every surviving rollup chunk must decode (count forces a
   #     full read of the 60s tier); errors here mean a torn rollup row
   #     escaped the transaction, which must be impossible.

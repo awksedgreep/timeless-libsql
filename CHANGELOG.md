@@ -38,6 +38,11 @@ artifact exists until a tag is created from the finished, validated `main`.
 - Additive trace-block duration extrema with inclusive pruning, conservative
   legacy decode fallback, bounded metadata-only optimize backfill, capability
   negotiation, and public coverage/work statistics.
+- Opt-in exact typed trace-attribute equality for up to eight configured
+  span, resource, or instrumentation-scope JSON Pointers. Fixed-size
+  per-block negative filters avoid false negatives, surviving spans are
+  rechecked exactly, legacy missing metadata decodes conservatively, and
+  public stats expose field/row/byte cost.
 - Executable SQL equivalents for every matrix row that honestly has a public
   SQL foundation, plus pinned Prometheus, VictoriaMetrics, and VictoriaLogs
   semantic oracles and measured query evidence.

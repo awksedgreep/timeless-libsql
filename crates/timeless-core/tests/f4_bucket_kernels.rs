@@ -188,6 +188,7 @@ fn trace_bucket_stats_match_naive() {
             kind: None,
             status: None,
             name: None,
+            attribute: None,
         };
         let kernel = engine.bucket_stats(&q, step).unwrap();
         type NaiveTraceBucket = (u64, u64, i64, i64, i64);
@@ -231,6 +232,7 @@ fn trace_bucket_stats_match_naive() {
         kind: None,
         status: None,
         name: None,
+        attribute: None,
     };
     let filtered = engine.bucket_stats(&q, 100_000).unwrap();
     assert!(!filtered.is_empty());

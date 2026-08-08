@@ -256,6 +256,9 @@ pub(crate) struct SpanPredicateRow<'a> {
     pub status: u8,
     pub start_ts: i64,
     pub duration_ns: i64,
+    pub attributes: &'a str,
+    pub resource: &'a str,
+    pub instrumentation_scope: &'a str,
 }
 
 fn known_codec(codec: u8) -> bool {
@@ -775,6 +778,9 @@ fn projected_row<'a>(columns: &'a [Option<ProjectedColumn>], row: usize) -> Span
         status: byte(6),
         start_ts: integer(7),
         duration_ns: integer(8),
+        attributes: string(9),
+        resource: string(12),
+        instrumentation_scope: string(13),
     }
 }
 
@@ -787,6 +793,9 @@ fn entry_predicate_row(entry: &SpanEntry) -> SpanPredicateRow<'_> {
         status: entry.status,
         start_ts: entry.start_ts,
         duration_ns: entry.duration_ns,
+        attributes: entry.attributes.as_ref(),
+        resource: entry.resource.as_ref(),
+        instrumentation_scope: entry.instrumentation_scope.as_ref(),
     }
 }
 
@@ -859,15 +868,18 @@ pub(crate) fn decode_span_block_projected<F>(
     mut predicate: F,
 ) -> Result<(Vec<SpanEntry>, SpanDecodeProfile), String>
 where
-    F: FnMut(SpanPredicateRow<'_>) -> bool,
+    F: FnMut(SpanPredicateRow<'_>) -> Result<bool, String>,
 {
     let Some((n, physical_columns, stored)) = parse_columnar(bytes)? else {
-        let mut entries = decode_span_block(bytes)?;
+        let entries = decode_span_block(bytes)?;
         let examined = entries.len() as u64;
-        entries.retain(|entry| predicate(entry_predicate_row(entry)));
         let materialized = predicate_mask.union(output_mask);
-        for entry in &mut entries {
-            clear_unprojected(entry, materialized);
+        let mut selected = Vec::new();
+        for mut entry in entries {
+            if predicate(entry_predicate_row(&entry))? {
+                clear_unprojected(&mut entry, materialized);
+                selected.push(entry);
+            }
         }
         let physical_columns = match bytes.first().copied() {
             Some(FORMAT_VERSION_V1) => V1_N_COLUMNS,
@@ -875,7 +887,7 @@ where
             _ => N_COLUMNS,
         };
         return Ok((
-            entries,
+            selected,
             SpanDecodeProfile {
                 columns: physical_columns as u64,
                 column_bytes: bytes.len() as u64,
@@ -907,9 +919,12 @@ where
             }
         }
     }
-    let selected = (0..n)
-        .filter(|row| predicate(projected_row(&columns, *row)))
-        .collect::<Vec<_>>();
+    let mut selected = Vec::new();
+    for row in 0..n {
+        if predicate(projected_row(&columns, row))? {
+            selected.push(row);
+        }
+    }
     if selected.is_empty() {
         return Ok((Vec::new(), profile));
     }

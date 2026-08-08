@@ -436,6 +436,7 @@ fn span_query() -> SpanQuery {
         kind: None,
         status: None,
         name: None,
+        attribute: None,
     }
 }
 

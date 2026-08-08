@@ -2,7 +2,7 @@
 
 Date: 2026-08-08  
 Session: 7 of the [trace query enhancement plan](2026-08-07_trace_query_enhancement_plan.md)  
-Status: candidate; not yet shipped
+Status: implemented candidate; final measured verdict pending
 
 ## Scope
 
@@ -73,7 +73,7 @@ container, and non-equality predicates. Invalid configuration, an unconfigured
 query path, malformed filter JSON, unknown keys/scopes, and composite operands
 all fail explicitly.
 
-## Candidate storage behavior
+## Storage behavior
 
 Each configured field receives one fixed-size filter per persisted block. The
 filter stores typed scalar hashes only; missing and container values add no
@@ -86,6 +86,38 @@ retention, transactions, rollback, savepoints, and block replacement must
 publish or remove filter rows atomically with their payload block. Filter
 version, size, or checksum corruption must fail closed rather than prune data.
 
-This is a candidate contract. The final Session 7 report will either replace
-this status with shipped evidence and exact constants or mark the primitive
-rejected and explain why it was reverted.
+Version 1 uses exactly 4,096 bytes and four stable hashes per configured
+field/block. Metadata lookups process at most 256 candidate blocks per SQLite
+statement and discard that Bloom working set before reading the next chunk;
+the complete candidate/result vectors remain subject to the ordinary trace
+query contract. Public `timeless_stats` rows report
+`attribute_index_fields`, `attribute_bloom_rows`, and
+`attribute_bloom_bytes`; `index_bytes` includes their physical b-tree.
+
+The allowlist is immutable table metadata. Replayed creation arguments do not
+change it, and a table created without an allowlist rejects
+`attribute_filter`. Changing fields requires a side-by-side table populated
+through the public row or batch surface.
+
+## Ordinary SQL equivalent
+
+For a span attribute, public JSON1 provides the exact decoded control:
+
+```sql
+SELECT lower(hex(trace_id)), lower(hex(span_id)), start_ts
+FROM traces
+WHERE start_ts >= :start_ns
+  AND start_ts <= :stop_ns
+  AND json_type(attributes, :json1_path) = :json_type
+  AND attributes -> :json1_path = json(:scalar_json)
+ORDER BY start_ts, span_id;
+```
+
+Use SQLite JSON-path syntax for `:json1_path`, the exact JSON1 type name for
+`:json_type`, and an encoded scalar for `:scalar_json`. This preserves the
+same missing/null/empty/number-type distinctions but cannot prune a block
+before its public JSON column is decoded. Resource and scope controls replace
+`attributes` with `resource` or `instrumentation_scope`.
+
+The final Session 7 report will either mark this implementation shipped with
+release-build evidence or record its rejection and reversion.

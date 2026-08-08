@@ -84,6 +84,16 @@ fn document() -> &'static str {
                         "inclusive_bounds": true,
                         "legacy_decode_fallback": true,
                         "optimize_backfill": true
+                    },
+                    "attribute_equality": {
+                        "version": 1,
+                        "configuration": "attribute_indexes",
+                        "hidden_input": "attribute_filter",
+                        "scopes": ["span", "resource", "scope"],
+                        "path": "RFC6901",
+                        "typed_scalars": true,
+                        "max_fields": 8,
+                        "legacy_decode_fallback": true
                     }
                 }
             },
@@ -224,6 +234,22 @@ mod tests {
         assert_eq!(
             value["signals"]["traces"]["duration_block_pruning"]["optimize_backfill"],
             true
+        );
+        assert_eq!(
+            value["signals"]["traces"]["attribute_equality"]["version"],
+            1
+        );
+        assert_eq!(
+            value["signals"]["traces"]["attribute_equality"]["configuration"],
+            "attribute_indexes"
+        );
+        assert_eq!(
+            value["signals"]["traces"]["attribute_equality"]["hidden_input"],
+            "attribute_filter"
+        );
+        assert_eq!(
+            value["signals"]["traces"]["attribute_equality"]["max_fields"],
+            8
         );
         assert_eq!(
             value["query_surfaces"]["timeless_raw_frame"]["max_work_points"],

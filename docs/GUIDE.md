@@ -355,10 +355,13 @@ substring search, and compression.
 
 ## 6. Storing traces
 
-OpenTelemetry-shaped spans, fixed schema, no arguments:
+OpenTelemetry-shaped spans have a fixed row schema plus optional retention and
+a bounded attribute-index allowlist:
 
 ```sql
-CREATE VIRTUAL TABLE traces USING timeless_traces;
+CREATE VIRTUAL TABLE traces USING timeless_traces(
+  attribute_indexes='[{"scope":"span","path":"/http.method"}]'
+);
 ```
 
 | column | type | required | notes |
@@ -440,6 +443,29 @@ SELECT name, count(*), avg(duration_ns) / 1e6 AS avg_ms
  GROUP BY name ORDER BY avg_ms DESC LIMIT 10;
 ```
 
+When a deployment repeatedly filters a small known set of typed attributes,
+declare up to eight exact RFC 6901 paths at table creation and use the hidden
+`attribute_filter` input:
+
+```sql
+SELECT hex(trace_id), name, duration_ns
+  FROM traces
+ WHERE start_ts BETWEEN :start_ns AND :stop_ns
+   AND attribute_filter =
+       '{"scope":"span","path":"/http.method","value":"GET"}'
+ ORDER BY start_ts, span_id;
+```
+
+Scopes are `span`, `resource`, and `scope`; event and link arrays are not
+supported. Matching is exact and typed, so missing, null, empty text, text
+`"1"`, integer `1`, real `1.0`, and booleans are different. The filters are
+fixed-size per block and can return false positives internally, but surviving
+spans are always rechecked. Low-cardinality values present in every block do
+not prune and still pay the fixed index cost. Use ordinary JSON1 for
+unconfigured paths, existence, arrays/objects, ranges, or regex-like work.
+The complete setup, SQL control, compatibility, and accounting contract is in
+the [SQL API reference](SQL_API_REFERENCE.md#bounded-typed-attribute-equality).
+
 New blocks carry exact per-block duration extrema in a private side table. A
 database created by an older extension gains that table when it is opened; a
 missing metadata row means the block's duration range is unknown, so unknown
@@ -475,7 +501,7 @@ storage engine can use to *skip* decompression:
 |---|---|
 | metrics | `series_id = ...`, `name = ...`, `ts` ranges (`>`, `>=`, `<`, `<=`, `BETWEEN`) |
 | logs | `level = ...`, any index-key `= ...`, `ts` ranges, `message_contains = ...`; `max_work_entries = ...` bounds examined entries |
-| traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges, inclusive `duration_ns` lower/upper bounds |
+| traces | `trace_id = ...`, `service`/`name`/`kind`/`status` `= ...`, `start_ts` ranges, inclusive `duration_ns` lower/upper bounds, configured `attribute_filter = ...` typed scalar equality |
 
 Optimized generation-2 and generation-3 trace blocks also honor SQLite's projection. The
 engine first decodes only columns required by pushed predicates, then

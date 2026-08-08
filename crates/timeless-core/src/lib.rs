@@ -30,9 +30,13 @@ pub use rollup::{
     RollupTier, ENC_ROLLUP_V1,
 };
 pub use spans::{
-    kind_from_name, kind_name, status_from_name, status_name, EncodedSpanBlock, MemSpanStore,
-    SpanBlockEngine, SpanBlockStore, SpanColumnMask, SpanDecodeProfile, SpanDurationBounds,
-    SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder, SpanQueryStream, TraceBucketStat,
+    build_span_attribute_blooms, encode_span_attribute_indexes, kind_from_name, kind_name,
+    parse_span_attribute_indexes, span_attribute_bloom_checksum, status_from_name, status_name,
+    validate_span_attribute_bloom, EncodedSpanBlock, MemSpanStore, SpanAttributeBloom,
+    SpanAttributeFilter, SpanAttributeIndex, SpanAttributeScope, SpanBlockEngine, SpanBlockStore,
+    SpanColumnMask, SpanDecodeProfile, SpanDurationBounds, SpanEngineConfig, SpanEntry, SpanQuery,
+    SpanQueryOrder, SpanQueryStream, TraceBucketStat, MAX_SPAN_ATTRIBUTE_INDEXES,
+    SPAN_ATTRIBUTE_BLOOM_BYTES, SPAN_ATTRIBUTE_BLOOM_HASHES, SPAN_ATTRIBUTE_BLOOM_VERSION,
 };
 pub use store::{
     ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, FsStore,

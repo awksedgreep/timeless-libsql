@@ -35,7 +35,7 @@ struct Span {
     scope_dropped_attributes_count: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct SemanticSpan {
     trace_id: Vec<u8>,
     span_id: Vec<u8>,
@@ -763,6 +763,13 @@ fn integer_stats(connection: &Connection, table: &str) -> Result<BTreeMap<String
     Ok(stats)
 }
 
+fn stat_value(values: &BTreeMap<String, i64>, key: &str) -> Result<i64> {
+    values
+        .get(key)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("timeless_stats omitted {key:?}"))
+}
+
 fn stat_delta(
     before: &BTreeMap<String, i64>,
     after: &BTreeMap<String, i64>,
@@ -909,10 +916,239 @@ fn projection_contract(
     Ok(())
 }
 
+fn attribute_count(connection: &Connection, table: &str, filter: &str) -> Result<i64> {
+    let sql = format!("SELECT count(*) FROM \"{table}\" WHERE attribute_filter=?1");
+    connection
+        .query_row(&sql, [filter], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan>, SemanticSpan)> {
+    let table = "attribute_spans";
+    let mut spans = Vec::new();
+    for (offset, typed) in [
+        None,
+        Some(Value::Null),
+        Some(json!("")),
+        Some(json!("1")),
+        Some(json!(1)),
+        Some(json!(1.0)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut span = rich_span(80_000 + offset as u64, Some(1_000 + offset as i64));
+        span.status = 1;
+        span.attributes = json!({"http.method":"GET","service.name":"attribute-svc"});
+        if let Some(value) = typed {
+            span.attributes["typed"] = value;
+        }
+        span.resource = json!({"debug":false,"service.name":"attribute-resource"});
+        span.instrumentation_scope = json!({"name":"attribute-scope"});
+        spans.push(span);
+    }
+    connection.execute(
+        &format!("INSERT INTO {table}({table}) VALUES (?1)"),
+        params![batch(&spans, 3)?],
+    )?;
+
+    // Buffered rows already obey the complete typed contract before a filter
+    // row can exist on disk.
+    for (filter, expected) in [
+        (r#"{"scope":"span","path":"/missing","value":null}"#, 0),
+        (r#"{"scope":"span","path":"/typed","value":null}"#, 1),
+        (r#"{"scope":"span","path":"/typed","value":""}"#, 1),
+        (r#"{"scope":"span","path":"/typed","value":"1"}"#, 1),
+        (r#"{"scope":"span","path":"/typed","value":1}"#, 1),
+        (r#"{"scope":"span","path":"/typed","value":1.0}"#, 1),
+        (r#"{"scope":"resource","path":"/debug","value":false}"#, 6),
+        (r#"{"scope":"scope","path":"/name","value":"attribute-scope"}"#, 6),
+    ] {
+        let result = attribute_count(connection, table, filter);
+        if filter.contains("/missing") {
+            // The missing path is intentionally not configured; querying an
+            // unconfigured field fails instead of silently scanning.
+            ensure!(result.is_err());
+        } else {
+            ensure!(result? == expected, "attribute filter mismatch: {filter}");
+        }
+    }
+    for invalid in [
+        r#"{"scope":"span","path":"/typed","value":[1]}"#,
+        r#"{"scope":"span","path":"/typed","value":{"x":1}}"#,
+        r#"{"scope":"event","path":"/typed","value":1}"#,
+        r#"{"scope":"span","path":"/typed","value":1,"extra":true}"#,
+    ] {
+        ensure!(attribute_count(connection, table, invalid).is_err());
+    }
+    ensure!(connection
+        .execute(
+            &format!("INSERT INTO {table}(attribute_filter) VALUES (?1)"),
+            [r#"{"scope":"span","path":"/typed","value":1}"#],
+        )
+        .is_err());
+
+    connection.execute_batch("BEGIN")?;
+    let mut rolled_back = rich_span(80_100, Some(2_000));
+    rolled_back.status = 1;
+    rolled_back.attributes = json!({"service.name":"attribute-svc","typed":"rollback"});
+    insert_row(connection, table, &rolled_back)?;
+    connection.execute(
+        &format!("INSERT INTO {table}({table}) VALUES ('flush')"),
+        [],
+    )?;
+    connection.execute_batch("ROLLBACK")?;
+    ensure!(attribute_count(
+        connection,
+        table,
+        r#"{"scope":"span","path":"/typed","value":"rollback"}"#
+    )? == 0);
+
+    connection.execute(
+        &format!("INSERT INTO {table}({table}) VALUES ('flush')"),
+        [],
+    )?;
+    let stats = integer_stats(connection, table)?;
+    let blocks = stat_value(&stats, "blocks")?;
+    ensure!(blocks == 1);
+    ensure!(stat_value(&stats, "attribute_index_fields")? == 4);
+    ensure!(stat_value(&stats, "attribute_bloom_rows")? == blocks * 4);
+    ensure!(stat_value(&stats, "attribute_bloom_bytes")? == blocks * 4 * 4096);
+
+    // Exercise exact composition with existing bounds, deterministic order,
+    // and LIMIT. The hidden input is returned when explicitly selected.
+    let filter = r#"{"scope":"span","path":"/typed","value":1}"#;
+    let selected: (String, String) = connection.query_row(
+        &format!(
+            "SELECT lower(hex(span_id)),attribute_filter FROM {table} \
+             WHERE start_ts>=1000 AND start_ts<=2000 AND attribute_filter=?1 \
+             ORDER BY start_ts,span_id LIMIT 1"
+        ),
+        [filter],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    ensure!(selected.0 == format!("{:016x}", 80_004));
+    ensure!(selected.1 == filter);
+
+    connection.execute(
+        &format!("INSERT INTO {table}({table}) VALUES ('optimize')"),
+        [],
+    )?;
+    ensure!(attribute_count(connection, table, filter)? == 1);
+
+    // A missing per-block filter row is the legacy compatibility state: it
+    // must decode and recheck, never prune. Other configured fields remain.
+    connection.execute(
+        "DELETE FROM attribute_spans_attribute_blooms \
+         WHERE scope='span' AND path='/typed'",
+        [],
+    )?;
+    ensure!(attribute_count(connection, table, filter)? == 1);
+
+    // Bit/metadata corruption fails closed. Restore the exact blob afterward
+    // so the database remains a valid reopen fixture.
+    let (block_id, bits): (i64, Vec<u8>) = connection.query_row(
+        "SELECT block_id,bits FROM attribute_spans_attribute_blooms \
+         WHERE scope='resource' AND path='/debug'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    connection.execute(
+        "UPDATE attribute_spans_attribute_blooms SET bits=zeroblob(length(bits)) \
+         WHERE scope='resource' AND path='/debug' AND block_id=?1",
+        [block_id],
+    )?;
+    ensure!(attribute_count(
+        connection,
+        table,
+        r#"{"scope":"resource","path":"/debug","value":false}"#
+    )
+    .is_err());
+    connection.execute(
+        "UPDATE attribute_spans_attribute_blooms SET bits=?1 \
+         WHERE scope='resource' AND path='/debug' AND block_id=?2",
+        params![bits, block_id],
+    )?;
+
+    // Retention removes filter rows in the same operation as their blocks.
+    let mut old = rich_span(81_000, Some(100));
+    old.status = 1;
+    old.attributes = json!({"service.name":"attribute-lifecycle","typed":"old"});
+    let mut keep = rich_span(81_001, Some(200));
+    keep.status = 1;
+    keep.attributes = json!({"service.name":"attribute-lifecycle","typed":"keep"});
+    for span in [&old, &keep] {
+        connection.execute(
+            "INSERT INTO attribute_lifecycle(attribute_lifecycle) VALUES (?1)",
+            params![batch(std::slice::from_ref(span), 3)?],
+        )?;
+        connection.execute(
+            "INSERT INTO attribute_lifecycle(attribute_lifecycle) VALUES ('flush')",
+            [],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO attribute_lifecycle(attribute_lifecycle) VALUES ('prune:150')",
+        [],
+    )?;
+    ensure!(attribute_count(
+        connection,
+        "attribute_lifecycle",
+        r#"{"scope":"span","path":"/typed","value":"old"}"#
+    )? == 0);
+    ensure!(attribute_count(
+        connection,
+        "attribute_lifecycle",
+        r#"{"scope":"span","path":"/typed","value":"keep"}"#
+    )? == 1);
+    let lifecycle_rows: i64 = connection.query_row(
+        "SELECT count(*) FROM attribute_lifecycle_attribute_blooms",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(lifecycle_rows == 1);
+
+    // More candidates than one metadata-query chunk proves that public
+    // attribute filtering is not bounded by SQLite's variable limit and does
+    // not require an all-candidate Bloom working set.
+    for index in 0..257_u64 {
+        let mut span = rich_span(82_000 + index, Some(10_000 + index as i64));
+        span.status = 1;
+        span.attributes = json!({
+            "service.name":"attribute-chunks",
+            "key": if index == 256 { "target".to_owned() } else { format!("miss-{index}") },
+        });
+        connection.execute(
+            "INSERT INTO attribute_chunks(attribute_chunks) VALUES (?1)",
+            params![batch(&[span], 3)?],
+        )?;
+        connection.execute(
+            "INSERT INTO attribute_chunks(attribute_chunks) VALUES ('flush')",
+            [],
+        )?;
+    }
+    let before = integer_stats(connection, "attribute_chunks")?;
+    ensure!(attribute_count(
+        connection,
+        "attribute_chunks",
+        r#"{"scope":"span","path":"/key","value":"target"}"#,
+    )? == 1);
+    let after = integer_stats(connection, "attribute_chunks")?;
+    ensure!(stat_value(&after, "blocks")? == 257);
+    ensure!(stat_value(&after, "attribute_bloom_rows")? == 257);
+    ensure!(stat_delta(&before, &after, "query_candidate_blocks")? == 1);
+    ensure!(stat_delta(&before, &after, "query_payload_blocks_read")? == 1);
+
+    Ok((
+        semantic_rows(connection, table)?,
+        semantic_rows(connection, "attribute_lifecycle")?[0].clone(),
+    ))
+}
+
 pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     let connection = open(extension, database)?;
     connection.execute_batch(
-        "CREATE VIRTUAL TABLE row_spans USING timeless_traces;
+        r#"CREATE VIRTUAL TABLE row_spans USING timeless_traces;
          CREATE VIRTUAL TABLE batch_spans USING timeless_traces;
          CREATE VIRTUAL TABLE threshold_spans USING timeless_traces;
          CREATE VIRTUAL TABLE txn_spans USING timeless_traces;
@@ -920,9 +1156,27 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
          CREATE VIRTUAL TABLE corrupt_spans USING timeless_traces;
          CREATE VIRTUAL TABLE percentile_spans USING timeless_traces;
          CREATE VIRTUAL TABLE summary_spans USING timeless_traces;
+         CREATE VIRTUAL TABLE attribute_spans USING timeless_traces(
+           attribute_indexes='[{"scope":"span","path":"/typed"},{"scope":"span","path":"/http.method"},{"scope":"resource","path":"/debug"},{"scope":"scope","path":"/name"}]'
+         );
+         CREATE VIRTUAL TABLE attribute_lifecycle USING timeless_traces(
+           attribute_indexes='[{"scope":"span","path":"/typed"}]'
+         );
+         CREATE VIRTUAL TABLE attribute_chunks USING timeless_traces(
+           attribute_indexes='[{"scope":"span","path":"/key"}]'
+         );
+         CREATE VIRTUAL TABLE attribute_legacy USING timeless_traces;
          CREATE VIRTUAL TABLE v0_spans USING timeless_traces;
-         CREATE VIRTUAL TABLE v1_spans USING timeless_traces;",
+         CREATE VIRTUAL TABLE v1_spans USING timeless_traces;"#,
     )?;
+    for invalid in [
+        r#"CREATE VIRTUAL TABLE bad_attribute_scope USING timeless_traces(attribute_indexes='[{"scope":"event","path":"/x"}]')"#,
+        r#"CREATE VIRTUAL TABLE bad_attribute_path USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/~2"}]')"#,
+        r#"CREATE VIRTUAL TABLE duplicate_attribute_path USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/x"},{"scope":"span","path":"/x"}]')"#,
+        r#"CREATE VIRTUAL TABLE too_many_attribute_paths USING timeless_traces(attribute_indexes='[{"scope":"span","path":"/a"},{"scope":"span","path":"/b"},{"scope":"span","path":"/c"},{"scope":"span","path":"/d"},{"scope":"span","path":"/e"},{"scope":"span","path":"/f"},{"scope":"span","path":"/g"},{"scope":"span","path":"/h"},{"scope":"span","path":"/i"}]')"#,
+    ] {
+        ensure!(connection.execute(invalid, []).is_err(), "accepted {invalid}");
+    }
     let fixture = contract_fixture();
     for span in &fixture {
         insert_row(&connection, "row_spans", span)?;
@@ -976,6 +1230,22 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     }
     percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
     let expected_summary = trace_summary_contract(&connection, "summary_spans")?;
+    let (expected_attributes, expected_attribute_lifecycle) =
+        attribute_index_contract(&connection)?;
+    let mut legacy_attribute_span = rich_span(83_000, Some(30_000));
+    legacy_attribute_span.status = 1;
+    legacy_attribute_span.attributes = json!({"service.name":"attribute-legacy","key":"value"});
+    insert_row(&connection, "attribute_legacy", &legacy_attribute_span)?;
+    connection.execute(
+        "INSERT INTO attribute_legacy(attribute_legacy) VALUES ('flush')",
+        [],
+    )?;
+    connection.execute(
+        "DELETE FROM attribute_legacy_meta WHERE k='attribute_indexes'",
+        [],
+    )?;
+    connection.execute_batch("DROP TABLE attribute_legacy_attribute_blooms")?;
+    let expected_attribute_legacy = semantic_rows(&connection, "attribute_legacy")?;
     connection.execute(
         "INSERT INTO percentile_spans(percentile_spans) VALUES ('flush')",
         [],
@@ -1135,6 +1405,29 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     projection_contract(&connection, "batch_spans", &fixture, true)?;
     percentile_contract(&connection, "percentile_spans", &percentile_cases)?;
     ensure!(semantic_rows(&connection, "lifecycle_spans")? == expected_lifecycle);
+    ensure!(semantic_rows(&connection, "attribute_spans")? == expected_attributes);
+    ensure!(
+        semantic_rows(&connection, "attribute_lifecycle")?[0]
+            == expected_attribute_lifecycle
+    );
+    ensure!(attribute_count(
+        &connection,
+        "attribute_spans",
+        r#"{"scope":"span","path":"/typed","value":1}"#
+    )? == 1);
+    ensure!(semantic_rows(&connection, "attribute_legacy")? == expected_attribute_legacy);
+    ensure!(attribute_count(
+        &connection,
+        "attribute_legacy",
+        r#"{"scope":"span","path":"/key","value":"value"}"#,
+    )
+    .is_err());
+    let migrated_attribute_rows: i64 = connection.query_row(
+        "SELECT count(*) FROM attribute_legacy_attribute_blooms",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(migrated_attribute_rows == 0);
     ensure!(
         retained_trace_summary(
             &connection,
@@ -1146,7 +1439,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     ensure!(integrity == "ok");
     println!(
-        "PASS: rich row/batch fidelity, trace summaries, threshold, transactions, maintenance, exact percentiles, corruption, reopen"
+        "PASS: rich row/batch fidelity, trace summaries, bounded attribute equality, threshold, transactions, maintenance, exact percentiles, corruption, reopen"
     );
     Ok(())
 }

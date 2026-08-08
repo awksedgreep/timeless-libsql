@@ -98,6 +98,11 @@ Within data ABI 1:
 - trace duration extrema are additive private metadata: legacy blocks without
   a metadata row decode exactly, current writers publish both bounds atomically,
   and public optimize backfills them without changing the stored span payload;
+- trace attribute equality is opt-in immutable table metadata: configured
+  current writers publish fixed-size filter rows atomically, a missing legacy
+  row decodes and rechecks exactly, corrupt filter metadata fails closed, and
+  existing tables without an allowlist remain readable but reject the hidden
+  predicate;
 - transaction, rollback, flush, optimize/compact, rollup, retention, and
   authoritative batching remain extension-owned.
 

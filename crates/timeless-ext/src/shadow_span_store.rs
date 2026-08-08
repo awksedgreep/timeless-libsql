@@ -22,11 +22,21 @@
 //!     probe of the trace index joined against the block metadata —
 //!     `WHERE trace_id = x'...'` never scans anything.
 
+use std::collections::HashMap;
+
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use timeless_core::{BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanDurationBounds};
+use timeless_core::{
+    span_attribute_bloom_checksum, validate_span_attribute_bloom, BlockLoc, BlockMeta,
+    EncodedSpanBlock, SpanAttributeBloom, SpanAttributeFilter, SpanBlockStore, SpanDurationBounds,
+    SPAN_ATTRIBUTE_BLOOM_VERSION,
+};
 
 use crate::{shared, sql_ident};
+
+// Keep the per-statement bind count and Bloom-row working set independent of
+// the total candidate-block count. Two leading binds are added for scope/path.
+const ATTRIBUTE_BLOOM_QUERY_BLOCKS: usize = 256;
 
 /// Shadow-table DDL for a traces vtab named `table` (executed by
 /// xCreate; the store assumes the tables exist).
@@ -47,6 +57,7 @@ pub(crate) fn ddl(database: &str, table: &str) -> String {
     let terms = sql_ident::qualified_shadow(database, table, "terms");
     let traces = sql_ident::qualified_shadow(database, table, "trace_blocks");
     let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
+    let attributes = sql_ident::qualified_shadow(database, table, "attribute_blooms");
     let meta = sql_ident::qualified_shadow(database, table, "meta");
     format!(
         r#"
@@ -75,6 +86,15 @@ CREATE TABLE IF NOT EXISTS {durations} (
   duration_max INTEGER NOT NULL,
   CHECK(duration_min <= duration_max)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS {attributes} (
+  scope        TEXT NOT NULL,
+  path         TEXT NOT NULL,
+  block_id     INTEGER NOT NULL,
+  hash_version INTEGER NOT NULL,
+  bits         BLOB NOT NULL,
+  checksum     BLOB NOT NULL,
+  PRIMARY KEY(scope, path, block_id)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
 "#
     )
@@ -101,15 +121,38 @@ pub(crate) fn ensure_duration_bounds_table(
     ))
 }
 
+/// Add the optional fixed-size attribute filter table to legacy databases.
+/// Missing rows always mean exact decode fallback, so creating the empty table
+/// is a format-compatible schema migration.
+pub(crate) fn ensure_attribute_blooms_table(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> rusqlite::Result<()> {
+    let attributes = sql_ident::qualified_shadow(database, table, "attribute_blooms");
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {attributes} (\
+           scope TEXT NOT NULL,\
+           path TEXT NOT NULL,\
+           block_id INTEGER NOT NULL,\
+           hash_version INTEGER NOT NULL,\
+           bits BLOB NOT NULL,\
+           checksum BLOB NOT NULL,\
+           PRIMARY KEY(scope,path,block_id)\
+         ) WITHOUT ROWID"
+    ))
+}
+
 /// Statements to remove the shadow tables again (vtab xDestroy).
 pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
     let blocks = sql_ident::qualified_shadow(database, table, "blocks");
     let terms = sql_ident::qualified_shadow(database, table, "terms");
     let traces = sql_ident::qualified_shadow(database, table, "trace_blocks");
     let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
+    let attributes = sql_ident::qualified_shadow(database, table, "attribute_blooms");
     let meta = sql_ident::qualified_shadow(database, table, "meta");
     format!(
-        r#"DROP TABLE IF EXISTS {blocks}; DROP TABLE IF EXISTS {terms}; DROP TABLE IF EXISTS {traces}; DROP TABLE IF EXISTS {durations}; DROP TABLE IF EXISTS {meta};"#
+        r#"DROP TABLE IF EXISTS {blocks}; DROP TABLE IF EXISTS {terms}; DROP TABLE IF EXISTS {traces}; DROP TABLE IF EXISTS {durations}; DROP TABLE IF EXISTS {attributes}; DROP TABLE IF EXISTS {meta};"#
     )
 }
 
@@ -121,9 +164,11 @@ pub(crate) struct ShadowSpanStore {
     insert_duration_sql: String,
     insert_term_sql: String,
     insert_trace_sql: String,
+    insert_attribute_bloom_sql: String,
     read_sql: String,
     scan_sql: String,
     validate_duration_sql: String,
+    validate_attribute_rows_sql: String,
     missing_duration_sql: String,
     update_duration_sql: String,
     save_meta_sql: String,
@@ -134,12 +179,14 @@ pub(crate) struct ShadowSpanStore {
     delete_terms_prefix: String,
     delete_traces_prefix: String,
     delete_durations_prefix: String,
+    delete_attribute_blooms_prefix: String,
     /// query_terms building blocks (term count varies per query; each
     /// distinct term-count SQL string is prepared once via
     /// prepare_cached).
     query_base: String,
     term_select: String,
     terms_table: String,
+    attribute_blooms_table: String,
     /// The hero query, fully preformatted (fixed shape).
     query_trace_sql: String,
 }
@@ -150,6 +197,7 @@ impl ShadowSpanStore {
         let terms = sql_ident::qualified_shadow(database, table, "terms");
         let traces = sql_ident::qualified_shadow(database, table, "trace_blocks");
         let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
+        let attributes = sql_ident::qualified_shadow(database, table, "attribute_blooms");
         let meta = sql_ident::qualified_shadow(database, table, "meta");
         ShadowSpanStore {
             insert_block_sql: format!(
@@ -169,6 +217,11 @@ impl ShadowSpanStore {
             insert_trace_sql: format!(
                 "INSERT OR IGNORE INTO {traces} (trace_id, block_id) VALUES (?1, ?2)"
             ),
+            insert_attribute_bloom_sql: format!(
+                "INSERT INTO {attributes} \
+                 (scope,path,block_id,hash_version,bits,checksum) \
+                 VALUES (?1,?2,?3,?4,?5,?6)"
+            ),
             read_sql: format!("SELECT data FROM {blocks} WHERE id = ?1"),
             // scan() runs at every xConnect: metadata only, never blobs.
             scan_sql: format!(
@@ -180,6 +233,11 @@ impl ShadowSpanStore {
                 "SELECT d.block_id, d.duration_min, d.duration_max \
                  FROM {durations} d LEFT JOIN {blocks} b ON b.id = d.block_id \
                  WHERE b.id IS NULL OR d.duration_min > d.duration_max LIMIT 1"
+            ),
+            validate_attribute_rows_sql: format!(
+                "SELECT a.scope,a.path,a.block_id FROM {attributes} a \
+                 LEFT JOIN {blocks} b ON b.id=a.block_id \
+                 WHERE b.id IS NULL LIMIT 1"
             ),
             missing_duration_sql: format!(
                 "SELECT b.id, b.ts_min, b.ts_max, b.entry_count, b.codec \
@@ -196,6 +254,7 @@ impl ShadowSpanStore {
             delete_terms_prefix: format!("DELETE FROM {terms} WHERE block_id IN ("),
             delete_traces_prefix: format!("DELETE FROM {traces} WHERE block_id IN ("),
             delete_durations_prefix: format!("DELETE FROM {durations} WHERE block_id IN ("),
+            delete_attribute_blooms_prefix: format!("DELETE FROM {attributes} WHERE block_id IN ("),
             query_base: format!(
                 "SELECT b.id, b.ts_min, b.ts_max, b.entry_count, b.codec \
                  FROM {blocks} b LEFT JOIN {durations} d ON d.block_id = b.id \
@@ -205,6 +264,7 @@ impl ShadowSpanStore {
             ),
             term_select: format!("SELECT block_id FROM {terms} WHERE term = ?"),
             terms_table: terms.clone(),
+            attribute_blooms_table: attributes,
             // One PK probe of the trace index (WITHOUT ROWID: the probe
             // IS the b-tree walk), then metadata rows for the matching
             // blocks. ORDER BY ts_min keeps downstream merges
@@ -275,6 +335,29 @@ impl ShadowSpanStore {
                 .execute(params![&tid[..], id])
                 .map_err(|e| format!("trace-index insert failed: {e}"))?;
         }
+        let mut astmt = conn
+            .prepare_cached(&self.insert_attribute_bloom_sql)
+            .map_err(|error| format!("prepare trace attribute bloom insert failed: {error}"))?;
+        for bloom in &block.attribute_blooms {
+            validate_span_attribute_bloom(&bloom.bits)?;
+            let checksum = span_attribute_bloom_checksum(&bloom.bits);
+            astmt
+                .execute(params![
+                    bloom.index.scope().name(),
+                    bloom.index.path(),
+                    id,
+                    i64::from(SPAN_ATTRIBUTE_BLOOM_VERSION),
+                    &bloom.bits,
+                    &checksum[..],
+                ])
+                .map_err(|error| {
+                    format!(
+                        "trace attribute bloom insert for {}:{} block {id} failed: {error}",
+                        bloom.index.scope().name(),
+                        bloom.index.path()
+                    )
+                })?;
+        }
         Ok(BlockLoc { id })
     }
 
@@ -296,6 +379,11 @@ impl ShadowSpanStore {
             .map_err(|e| format!("trace-index delete failed: {e}"))?;
         conn.execute(&format!("{}{})", self.delete_durations_prefix, list), [])
             .map_err(|e| format!("duration-bound delete failed: {e}"))?;
+        conn.execute(
+            &format!("{}{})", self.delete_attribute_blooms_prefix, list),
+            [],
+        )
+        .map_err(|error| format!("trace attribute bloom delete failed: {error}"))?;
         conn.execute(&format!("{}{})", self.delete_blocks_prefix, list), [])
             .map_err(|e| format!("block delete failed: {e}"))?;
         Ok(())
@@ -457,6 +545,23 @@ impl SpanBlockStore for ShadowSpanStore {
                 "trace duration metadata is corrupt at block {block_id}: invalid duration bounds or orphaned row {minimum}..{maximum}"
             ));
         }
+        let orphan = conn
+            .prepare_cached(&self.validate_attribute_rows_sql)
+            .map_err(|error| format!("prepare trace attribute bloom validation failed: {error}"))?
+            .query_row([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .optional()
+            .map_err(|error| format!("trace attribute bloom validation failed: {error}"))?;
+        if let Some((scope, path, block_id)) = orphan {
+            return Err(format!(
+                "trace attribute bloom metadata is corrupt: orphaned {scope}:{path} row for block {block_id}"
+            ));
+        }
         let mut stmt = conn
             .prepare_cached(&self.scan_sql)
             .map_err(|e| format!("prepare block scan failed: {e}"))?;
@@ -615,6 +720,88 @@ impl SpanBlockStore for ShadowSpanStore {
             ],
             "trace query",
         )
+    }
+
+    fn filter_attribute_blocks(
+        &self,
+        filter: &SpanAttributeFilter,
+        blocks: &[(BlockLoc, BlockMeta)],
+    ) -> Result<Vec<(BlockLoc, BlockMeta)>, String> {
+        if blocks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = Self::conn()?;
+        let mut retained = Vec::with_capacity(blocks.len());
+        for chunk in blocks.chunks(ATTRIBUTE_BLOOM_QUERY_BLOCKS) {
+            let placeholders = (0..chunk.len())
+                .map(|position| format!("?{}", position + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT block_id,hash_version,bits,checksum \
+                 FROM {} WHERE scope=?1 AND path=?2 AND block_id IN ({placeholders})",
+                self.attribute_blooms_table
+            );
+            let mut binds = Vec::with_capacity(chunk.len() + 2);
+            binds.push(Value::Text(filter.index().scope().name().to_owned()));
+            binds.push(Value::Text(filter.index().path().to_owned()));
+            binds.extend(
+                chunk
+                    .iter()
+                    .map(|(location, _)| Value::Integer(location.id)),
+            );
+            let mut statement = conn
+                .prepare_cached(&sql)
+                .map_err(|error| format!("prepare trace attribute bloom query failed: {error}"))?;
+            let rows = statement
+                .query_map(params_from_iter(binds), |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        (
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                        ),
+                    ))
+                })
+                .map_err(|error| format!("trace attribute bloom query failed: {error}"))?
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(|error| format!("trace attribute bloom row failed: {error}"))?;
+
+            for (location, meta) in chunk {
+                let Some((version, bits, checksum)) = rows.get(&location.id) else {
+                    // Legacy or deliberately unindexed block: exact fallback.
+                    retained.push((*location, *meta));
+                    continue;
+                };
+                if *version != i64::from(SPAN_ATTRIBUTE_BLOOM_VERSION) {
+                    return Err(format!(
+                        "trace attribute bloom for block {} has version {version}; expected {}",
+                        location.id, SPAN_ATTRIBUTE_BLOOM_VERSION
+                    ));
+                }
+                validate_span_attribute_bloom(bits).map_err(|error| {
+                    format!(
+                        "trace attribute bloom for block {} is corrupt: {error}",
+                        location.id
+                    )
+                })?;
+                if checksum.as_slice() != span_attribute_bloom_checksum(bits).as_slice() {
+                    return Err(format!(
+                        "trace attribute bloom checksum mismatch for block {}",
+                        location.id
+                    ));
+                }
+                let bloom = SpanAttributeBloom {
+                    index: filter.index().clone(),
+                    bits: bits.clone(),
+                };
+                if bloom.might_contain(filter.scalar_json())? {
+                    retained.push((*location, *meta));
+                }
+            }
+        }
+        Ok(retained)
     }
 
     fn query_term_values(&self, prefix: &str) -> Result<Option<Vec<String>>, String> {

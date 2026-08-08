@@ -2,8 +2,8 @@
 
 Date: 2026-08-08  
 Session: 7 of the [trace query enhancement plan](2026-08-07_trace_query_enhancement_plan.md)  
-Status: in progress; this is a storage-prerequisite matrix, not a claim of
-TraceQL syntax or compatibility.
+Status: implementation complete; final measured verdict pending. This is a
+storage-prerequisite matrix, not a claim of TraceQL syntax or compatibility.
 
 ## Boundary
 
@@ -22,10 +22,10 @@ plan.
 
 | ID | future vector | extension prerequisite | higher-order Rust work | Session 7 disposition |
 |---|---|---|---|---|
-| `TQP-01` | Exact typed span-attribute scalar equality | Bounded, opt-in exact-path candidate pruning plus exact per-span recheck | Parse TraceQL attribute syntax and compose the returned span set | candidate |
-| `TQP-02` | Exact typed resource-attribute scalar equality | Same primitive with an explicit resource scope | Resolve TraceQL resource namespace and compose span/trace results | candidate |
-| `TQP-03` | Exact typed instrumentation-scope scalar equality | Same primitive with an explicit scope scope | Resolve scope namespace and compose span/trace results | candidate |
-| `TQP-04` | Missing versus JSON null versus empty string | Equality must keep all three states distinct; ordinary public JSON1 remains the existence/type surface | Define language operators and null/missing propagation | candidate contract |
+| `TQP-01` | Exact typed span-attribute scalar equality | Bounded, opt-in exact-path candidate pruning plus exact per-span recheck | Parse TraceQL attribute syntax and compose the returned span set | implemented; measured verdict pending |
+| `TQP-02` | Exact typed resource-attribute scalar equality | Same primitive with an explicit resource scope | Resolve TraceQL resource namespace and compose span/trace results | implemented; measured verdict pending |
+| `TQP-03` | Exact typed instrumentation-scope scalar equality | Same primitive with an explicit scope scope | Resolve scope namespace and compose span/trace results | implemented; measured verdict pending |
+| `TQP-04` | Missing versus JSON null versus empty string | Equality keeps all three states distinct; ordinary public JSON1 remains the existence/type surface | Define language operators and null/missing propagation | implemented; measured verdict pending |
 | `TQP-05` | Boolean `and`, `or`, and `not` over attributes | Individual positive equality candidates only | Plan intersections/unions/complements and preserve exact row semantics | library |
 | `TQP-06` | Any/root/all-span trace quantifiers | Exact span matches and existing packed trace IDs | Group by trace, identify roots, define empty/all behavior, fetch retained trace rows | library |
 | `TQP-07` | Numeric/string range or regex predicates | No equality filter can honestly accelerate these | Define typed comparison/coercion and measure before proposing separate primitives | deferred |
@@ -37,7 +37,7 @@ plan.
 
 ## Candidate gate
 
-Session 7 will prototype only one primitive shared by `TQP-01` through
+Session 7 implements only one primitive shared by `TQP-01` through
 `TQP-04`: exact typed scalar equality on an allowlisted JSON Pointer in one of
 the span, resource, or instrumentation-scope objects. The candidate is a
 fixed-size per-block probabilistic negative filter. False positives are
@@ -50,7 +50,7 @@ identifier-valued attributes can add nearly one posting row per retained span.
 The fixed-size design is being measured because it bounds this cardinality
 independently of user values.
 
-The candidate ships only if the final evidence accounts for ingest CPU,
+The implementation ships only if the final evidence accounts for ingest CPU,
 logical/physical storage, WAL/checkpoint behavior, optimize and retention,
 narrow/wide query tails and work, and RSS HWM. Otherwise the implementation is
 reverted and this matrix will record an explicit rejected disposition.

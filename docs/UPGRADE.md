@@ -155,6 +155,11 @@ After admitting a bounded test batch:
 - for upgraded traces, require `duration_unknown_blocks=0` after the planned
   optimize backfill and verify an impossible duration filter reports zero
   candidate blocks and decoded spans;
+- when a newly created trace table declares `attribute_indexes`, verify
+  `attribute_index_fields`, `attribute_bloom_rows`, and
+  `attribute_bloom_bytes`, then compare one hidden-filter result with its
+  public JSON1 control. Existing tables do not acquire an allowlist merely by
+  opening them; changing fields is a side-by-side public row/batch migration;
 - restart normally and repeat the reads cold; and
 - retain the rollback backup and old artifacts for the documented support
   window.

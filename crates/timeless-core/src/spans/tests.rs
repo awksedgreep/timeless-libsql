@@ -94,6 +94,7 @@ fn full_range_query() -> SpanQuery {
         kind: None,
         status: None,
         name: None,
+        attribute: None,
     }
 }
 
@@ -616,7 +617,7 @@ fn projected_columnar_decode_filters_before_rich_materialization() {
     let predicate_mask = SpanColumnMask::TRACE_ID.union(SpanColumnMask::NAME);
     let (projected, profile) =
         decode_span_block_projected(&bytes, predicate_mask, SpanColumnMask::ATTRIBUTES, |row| {
-            row.trace_id == &tid(1) && row.name == "keep"
+            Ok(row.trace_id == &tid(1) && row.name == "keep")
         })
         .unwrap();
     assert_eq!(projected.len(), 1);
@@ -629,7 +630,7 @@ fn projected_columnar_decode_filters_before_rich_materialization() {
 
     let (miss, miss_profile) =
         decode_span_block_projected(&bytes, predicate_mask, SpanColumnMask::ALL, |row| {
-            row.trace_id == &tid(1) && row.name == "missing"
+            Ok(row.trace_id == &tid(1) && row.name == "missing")
         })
         .unwrap();
     assert!(miss.is_empty());
@@ -640,7 +641,7 @@ fn projected_columnar_decode_filters_before_rich_materialization() {
         &bytes,
         SpanColumnMask::default(),
         SpanColumnMask::default(),
-        |_| true,
+        |_| Ok(true),
     )
     .unwrap();
     assert_eq!(count_rows.len(), entries.len());
@@ -1025,6 +1026,7 @@ fn duration_bounds_prune_known_blocks_and_legacy_blocks_decode_until_rewritten()
             data,
             terms: vec!["status:ok".into()],
             trace_ids: vec![legacy.trace_id],
+            attribute_blooms: Vec::new(),
         }])
         .unwrap();
 
@@ -1146,6 +1148,7 @@ fn optimize_backfills_full_legacy_blocks_without_rewriting_payloads() {
             data,
             terms: vec!["status:ok".into()],
             trace_ids: entries.iter().map(|entry| entry.trace_id).collect(),
+            attribute_blooms: Vec::new(),
         }])
         .unwrap();
     let engine = SpanBlockEngine::new(
@@ -1230,6 +1233,7 @@ fn duration_backfill_obeys_the_optimize_entry_budget() {
             data,
             terms: vec!["status:ok".into()],
             trace_ids: entries.iter().map(|entry| entry.trace_id).collect(),
+            attribute_blooms: Vec::new(),
         });
     }
     store.put_blocks(&blocks).unwrap();
@@ -1304,6 +1308,7 @@ fn native_discovery_includes_buffer_and_falls_back_for_legacy_operation_terms() 
                 "status:ok".into(),
             ],
             trace_ids: vec![legacy.trace_id],
+            attribute_blooms: Vec::new(),
         }])
         .unwrap();
     let engine = SpanBlockEngine::new(Box::new(store), SpanEngineConfig::default()).unwrap();

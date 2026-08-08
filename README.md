@@ -11,7 +11,9 @@ one loadable extension, three virtual tables.** Think *"FTS5 for telemetry."*
 
 CREATE VIRTUAL TABLE metrics USING timeless_metrics;
 CREATE VIRTUAL TABLE logs    USING timeless_logs(index_keys='service,path,status');
-CREATE VIRTUAL TABLE traces  USING timeless_traces;
+CREATE VIRTUAL TABLE traces  USING timeless_traces(
+  attribute_indexes='[{"scope":"span","path":"/http.method"}]'
+);
 
 INSERT INTO metrics(name, ts, value, labels)
   VALUES ('cpu_usage', 1753000000, 42.5, '{"host":"pvm1"}');
@@ -19,6 +21,8 @@ INSERT INTO metrics(metrics) VALUES ('flush');   -- FTS5-style command idiom
 
 SELECT * FROM logs   WHERE service='payments' AND level='error' AND ts > :t0;
 SELECT * FROM traces WHERE trace_id = x'4bf92f3577b34da6a3ce929d0e0e4736';
+SELECT * FROM traces WHERE attribute_filter =
+  '{"scope":"span","path":"/http.method","value":"GET"}';
 
 -- A raw Prometheus scrape body is just another blob:
 INSERT INTO metrics(metrics) VALUES (readfile('scrape.prom'));
@@ -112,7 +116,7 @@ benchmark, deferred-work, and higher-order interface verdict is in the
 |---|---|---|---|
 | `timeless_metrics` | `(name, ts, value, labels)` | **seconds** | `name` =, `ts` ranges |
 | `timeless_logs` | `(ts, level, message, metadata, …index keys)` | **milliseconds** | `level` =, `ts` ranges, every `index_keys` column =, exact `message_contains` =; optional hidden `max_work_entries` bounds examined entries |
-| `timeless_traces` | complete rich-span v2 IDs/timing, typed attributes/events/links, scope/resource schema and dropped-value fidelity | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges |
+| `timeless_traces` | complete rich-span v2 IDs/timing, typed attributes/events/links, scope/resource schema and dropped-value fidelity | **nanoseconds** | `trace_id` =, `service`/`name`/`kind`/`status` =, `start_ts` ranges, optional exact typed `attribute_filter` = for up to eight configured span/resource/scope paths |
 
 All three share the same lifecycle: inserts land in an in-memory buffer
 (queryable immediately, auto-flushed at a size threshold), `'flush'` encodes

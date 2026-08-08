@@ -31,7 +31,8 @@ use super::codec::{
     CODEC_COLUMNAR_V2, CODEC_RAW,
 };
 use super::{
-    status_name, BlockLoc, BlockMeta, EncodedSpanBlock, SpanBlockStore, SpanColumnMask,
+    build_span_attribute_blooms, status_name, BlockLoc, BlockMeta, EncodedSpanBlock,
+    SpanAttributeFilter, SpanAttributeIndex, SpanAttributeScope, SpanBlockStore, SpanColumnMask,
     SpanDecodeProfile, SpanDurationBounds, SpanEntry,
 };
 
@@ -50,6 +51,9 @@ pub struct SpanEngineConfig {
     /// boundary rule (PLAN.md "Pruning & retention"), same as logs.
     /// Default uncapped (unit-agnostic engine can't pick a default).
     pub merge_max_ts_span: i64,
+    /// Exact JSON-Pointer fields that receive fixed-size per-block negative
+    /// filters. Empty preserves the historical trace storage layout.
+    pub attribute_indexes: Vec<SpanAttributeIndex>,
 }
 
 impl Default for SpanEngineConfig {
@@ -59,6 +63,7 @@ impl Default for SpanEngineConfig {
             zstd_level: 7,
             merge_target_entries: 8192,
             merge_max_ts_span: i64::MAX,
+            attribute_indexes: Vec::new(),
         }
     }
 }
@@ -97,6 +102,8 @@ pub struct SpanQuery {
     pub status: Option<u8>,
     /// Exact operation-name match.
     pub name: Option<String>,
+    /// Optional exact typed scalar equality over one configured JSON Pointer.
+    pub attribute: Option<SpanAttributeFilter>,
 }
 
 /// Ordering guaranteed by the bounded query path. Equal timestamps use the
@@ -869,6 +876,7 @@ impl SpanBlockEngine {
                 data,
                 terms: extract_terms(run),
                 trace_ids: extract_trace_ids(run),
+                attribute_blooms: build_span_attribute_blooms(run, &self.config.attribute_indexes)?,
             });
             duration_bounds.push(span_duration_bounds(run)?);
             statuses.push(status);
@@ -1370,6 +1378,10 @@ impl SpanBlockEngine {
                 data,
                 terms,
                 trace_ids,
+                attribute_blooms: build_span_attribute_blooms(
+                    &entries,
+                    &self.config.attribute_indexes,
+                )?,
             });
             add_duration_bounds.push(span_duration_bounds(&entries)?);
             add_partitions.push(group.partition);
@@ -1983,12 +1995,16 @@ impl SpanBlockEngine {
                 });
             }
         }
-        let buffered = self
-            .buffer_lock()
-            .iter()
-            .filter(|entry| entry_matches(entry, q, duration_min, duration_max))
-            .cloned()
-            .collect();
+        let buffered = {
+            let buffer = self.buffer_lock();
+            let mut selected = Vec::new();
+            for entry in buffer.iter() {
+                if entry_matches(entry, q, duration_min, duration_max)? {
+                    selected.push(entry.clone());
+                }
+            }
+            selected
+        };
         Ok(SpanQuerySnapshot {
             blocks,
             buffered,
@@ -2005,6 +2021,20 @@ impl SpanBlockEngine {
         if q.status.is_some_and(|status| status > 2) {
             return Err(format!("invalid status {} in query", q.status.unwrap()));
         }
+        if let Some(filter) = &q.attribute {
+            if !self
+                .config
+                .attribute_indexes
+                .iter()
+                .any(|index| index == filter.index())
+            {
+                return Err(format!(
+                    "trace attribute filter {}:{} is not configured for this table",
+                    filter.index().scope().name(),
+                    filter.index().path()
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -2017,7 +2047,7 @@ impl SpanBlockEngine {
         if duration_min > duration_max {
             return Ok(Vec::new());
         }
-        match &q.trace_id {
+        let candidates = match &q.trace_id {
             Some(trace_id) => Ok(self
                 .store
                 .query_trace_with_duration_bounds(
@@ -2055,6 +2085,13 @@ impl SpanBlockEngine {
                     )
                     .map_err(|error| self.query_error(error))
             }
+        }?;
+        match &q.attribute {
+            Some(filter) => self
+                .store
+                .filter_attribute_blocks(filter, &candidates)
+                .map_err(|error| self.query_error(error)),
+            None => Ok(candidates),
         }
     }
 
@@ -2514,39 +2551,47 @@ fn span_duration_bounds(entries: &[SpanEntry]) -> Result<SpanDurationBounds, Str
 /// Exact per-span filter — the truth the block-level indexes only
 /// approximate (a block containing the trace still contains other
 /// traces' spans; a status-pure block still spans a ts range).
-fn entry_matches(e: &SpanEntry, q: &SpanQuery, duration_min: i64, duration_max: i64) -> bool {
+fn entry_matches(
+    e: &SpanEntry,
+    q: &SpanQuery,
+    duration_min: i64,
+    duration_max: i64,
+) -> Result<bool, String> {
     if e.start_ts < q.ts_min || e.start_ts > q.ts_max {
-        return false;
+        return Ok(false);
     }
     if e.duration_ns < duration_min || e.duration_ns > duration_max {
-        return false;
+        return Ok(false);
     }
     if let Some(tid) = &q.trace_id {
         if &e.trace_id != tid {
-            return false;
+            return Ok(false);
         }
     }
     if let Some(svc) = &q.service {
         if &e.service != svc {
-            return false;
+            return Ok(false);
         }
     }
     if let Some(k) = q.kind {
         if e.kind != k {
-            return false;
+            return Ok(false);
         }
     }
     if let Some(s) = q.status {
         if e.status != s {
-            return false;
+            return Ok(false);
         }
     }
     if let Some(n) = &q.name {
         if &e.name != n {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    match &q.attribute {
+        Some(filter) => filter.matches_entry(e),
+        None => Ok(true),
+    }
 }
 
 fn query_predicate_mask(query: &SpanQuery, duration_min: i64, duration_max: i64) -> SpanColumnMask {
@@ -2572,6 +2617,13 @@ fn query_predicate_mask(query: &SpanQuery, duration_min: i64, duration_max: i64)
     if duration_min != i64::MIN || duration_max != i64::MAX {
         mask = mask.union(SpanColumnMask::DURATION_NS);
     }
+    if let Some(filter) = &query.attribute {
+        mask = mask.union(match filter.index().scope() {
+            SpanAttributeScope::Span => SpanColumnMask::ATTRIBUTES,
+            SpanAttributeScope::Resource => SpanColumnMask::RESOURCE,
+            SpanAttributeScope::InstrumentationScope => SpanColumnMask::INSTRUMENTATION_SCOPE,
+        });
+    }
     mask
 }
 
@@ -2580,37 +2632,45 @@ fn predicate_row_matches(
     query: &SpanQuery,
     duration_min: i64,
     duration_max: i64,
-) -> bool {
+) -> Result<bool, String> {
     if row.start_ts < query.ts_min || row.start_ts > query.ts_max {
-        return false;
+        return Ok(false);
     }
     if row.duration_ns < duration_min || row.duration_ns > duration_max {
-        return false;
+        return Ok(false);
     }
     if query
         .trace_id
         .as_ref()
         .is_some_and(|value| row.trace_id != value)
     {
-        return false;
+        return Ok(false);
     }
     if query
         .service
         .as_deref()
         .is_some_and(|value| row.service != value)
     {
-        return false;
+        return Ok(false);
     }
     if query.kind.is_some_and(|value| row.kind != value) {
-        return false;
+        return Ok(false);
     }
     if query.status.is_some_and(|value| row.status != value) {
-        return false;
+        return Ok(false);
     }
     if query.name.as_deref().is_some_and(|value| row.name != value) {
-        return false;
+        return Ok(false);
     }
-    true
+    let Some(filter) = &query.attribute else {
+        return Ok(true);
+    };
+    let encoded = match filter.index().scope() {
+        SpanAttributeScope::Span => row.attributes,
+        SpanAttributeScope::Resource => row.resource,
+        SpanAttributeScope::InstrumentationScope => row.instrumentation_scope,
+    };
+    filter.matches_json(encoded)
 }
 
 fn compare_spans(a: &SpanEntry, b: &SpanEntry, order: SpanQueryOrder) -> CmpOrdering {
@@ -2631,6 +2691,7 @@ fn unbounded_span_query() -> SpanQuery {
         kind: None,
         status: None,
         name: None,
+        attribute: None,
     }
 }
 
