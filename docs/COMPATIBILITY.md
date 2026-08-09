@@ -66,9 +66,10 @@ These independent versions must not be conflated:
 
 | Extension | Rust server | Verdict | Reason |
 |---|---|---|---|
-| current `0.4.x` | matching current `0.4.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
-| tagged `v0.3.0` | `0.4.x` | unsupported | The tag predates `timeless_capabilities()` and the release-server query guards. |
-| `0.4.x` | tagged/pre-release `0.3.x` server | unsupported | The current extension declares a `0.4.0` server floor; an old server cannot prove it understands the current API/resource contract. |
+| current `0.5.x` | matching current `0.5.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
+| tagged `v0.3.0` | `0.5.x` | unsupported | The tag predates `timeless_capabilities()` and the release-server query guards. |
+| tagged `0.4.x` | current `0.5.x` server | unsupported | The current servers declare a `0.5.0` extension floor: a `0.4.x` extension cannot decode codec-8 blocks a `0.5.x` optimize may already have written. |
+| `0.5.x` | tagged `0.3.x`/`0.4.x` server | unsupported | The current extension declares a `0.5.0` server floor; an old server cannot prove it understands the current API/resource contract. |
 | any version with a different `data_abi` | current servers | unsupported | The server refuses before virtual-table initialization. |
 | current extension with a future-schema database | current servers | unsupported/fail closed | The server does not downgrade or mutate a future ledger. |
 | current extension loaded directly by SQLite/libSQL | no Timeless server; host-owned | supported | The host must negotiate capabilities and own maintenance, backup, concurrency, and limits. |
@@ -131,11 +132,12 @@ storage.
 ## Platform and SQLite/libSQL boundary
 
 The release-tool target inventory covers x86-64/AArch64 Linux GNU and
-x86-64/AArch64 macOS. For `v0.4.1`, all four native build, identity,
+x86-64/AArch64 macOS. For `v0.5.0`, all four native build, identity,
 install/remove, and upload jobs passed, followed by the complete outer
-checksum job. Those archives are retained as Actions artifacts until
-2026-11-06; the workflow did not create a permanent GitHub Release. Do not
-conflate a checked platform matrix with a permanent publication channel.
+checksum job, and the workflow published the archives plus `SHA256SUMS` as
+permanent `v0.5.0` GitHub Release assets (the tag→Release path first proven
+by `v0.4.2`). The [artifact guide](ARTIFACTS.md) is the canonical
+publication-status record.
 
 The extension uses SQLite's loadable-extension ABI and stores ordinary SQLite
 pages/WAL records. A host may use SQLite backup, libSQL replication, or sqld

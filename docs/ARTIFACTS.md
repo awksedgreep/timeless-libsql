@@ -9,23 +9,25 @@ reachable from `main`.
 
 ## Current publication status
 
-`v0.4.1` was tagged from `main` at
-`d14a59503d2f54f608a6d424dca3d62b31d9ce34` on 2026-08-08. GitHub Actions
-run `31273182478` built, identity-checked, install/remove-drilled, and uploaded
-all four intended Linux/macOS archives. Its checksum job downloaded the whole
-matrix, produced the complete outer `SHA256SUMS`, verified it, and uploaded it
-as a fifth artifact. The artifacts are retained by Actions until 2026-11-06.
+`v0.5.0` was tagged from `main` at
+`daabaf7d39e867be551e04f8a315f130fbe8fd27` on 2026-08-09 (UTC). GitHub
+Actions run `31285260705` built, identity-checked, install/remove-drilled,
+and uploaded all four intended Linux/macOS archives; its checksum job
+downloaded the whole matrix, produced and verified the complete outer
+`SHA256SUMS`; and the workflow published the
+[`v0.5.0` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.5.0)
+with the four archives plus `SHA256SUMS` as permanent release assets. This is
+the current download channel.
 
-That successful candidate matrix is not a permanent public download channel.
-The workflow did not create a GitHub Release, and no `v0.4.1` release entry or
-release-asset URL currently exists. Build from source or download the five
-artifacts from that authenticated workflow run while they are retained. Do
-not construct a GitHub Release URL from the examples below.
-
-For history, `v0.4.0` produced only its two Linux candidates. Both macOS jobs
-failed because the release tool used Apple's restricted system SQLite, and
-the aggregate checksum job was skipped. `v0.4.1` fixed that packaging defect
-by building the release tool with bundled SQLite.
+For history: `v0.4.2` (run `31281301520`) completed the same matrix and
+published this repository's first GitHub Release, proving the tag→Release
+path its own changelog entry describes. `v0.4.1` passed all four package jobs
+and the outer checksum gate but predates Release publication — its five
+files existed only as workflow-retained artifacts (until 2026-11-06).
+`v0.4.0` produced only its two Linux candidates: both macOS jobs failed
+because the release tool used Apple's restricted system SQLite, and the
+aggregate checksum job was skipped; `v0.4.1` fixed that packaging defect by
+building the release tool with bundled SQLite.
 
 The standalone dbhealth extension is intentionally not in this bundle. Build
 `dbhealth-ext` separately from compatible source when it is required.

@@ -1,7 +1,7 @@
 # Deferred and experimental work
 
 This document is the discovery index for work deliberately not shipped in the
-current `0.4.x` source line. It keeps future sessions from depending on old
+current `0.5.x` source line. It keeps future sessions from depending on old
 chat context or searching long implementation narratives.
 
 The owning feature matrix remains authoritative. This index does not replace
@@ -81,7 +81,7 @@ primitives, not a claim that TraceQL is implemented.
 
 | area | current state | next decision |
 |---|---|---|
-| Native release publication | `v0.4.1` passed all four native package jobs and the complete outer checksum gate after the release tool switched to bundled SQLite. The archives are retained as Actions artifacts until 2026-11-06, but no permanent GitHub Release exists. | Decide whether tag workflows should create a GitHub Release and attach the four archives plus `SHA256SUMS`, or document authenticated Actions artifacts as the intended temporary channel. |
+| Native release publication | Resolved: since `v0.4.2` the tag workflow publishes a GitHub Release after the four package jobs and the aggregate checksum gate pass; `v0.5.0` is the current published release with all four archives plus `SHA256SUMS` as permanent assets. | None — [ARTIFACTS.md](ARTIFACTS.md) stays the canonical per-tag publication record. |
 | Remaining Python benchmark utilities | The production extension/API/query/SQL/crash harnesses are Rust, but the exact remaining scripts are inventoried in [TESTING.md](../TESTING.md#tooling-migration-status). | Port one bounded harness at a time while retaining fixture, completed-work, percentile, storage, cleanup, and RSS contracts. |
 | Competitive baselines | Current evidence measures correctness, regression, SQLite controls, public storage work, and endpoint tails. It does not claim VictoriaMetrics, VictoriaLogs, or Jaeger performance parity. | Add pinned, same-fixture competitive measurements when they become a priority; do not weaken current gates in the process. |
 | Higher-order Elixir interfaces | The Rust servers own the data plane; the query release report contains the control-plane recommendations. | Inventory and redesign downstream Elixir interfaces in their own repositories and goal, without moving query/storage work back into Elixir. |

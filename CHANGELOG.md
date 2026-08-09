@@ -18,6 +18,12 @@ No changes recorded after `0.5.0`.
 
 ## [0.5.0] — 2026-08-08
 
+The tag points at `daabaf7d39e867be551e04f8a315f130fbe8fd27`. Its
+tag-triggered artifact run (`31285260705`) built, identity-checked,
+install/remove-drilled, and uploaded all four native archives, produced and
+verified the complete outer checksum set, and published the `v0.5.0` GitHub
+Release with the four archives plus `SHA256SUMS` as permanent release assets.
+
 ### Added
 
 - CLP-style template compression for rich log message columns
@@ -50,6 +56,11 @@ No changes recorded after `0.5.0`.
   guide).
 
 ## [0.4.2] — 2026-08-08
+
+The tag points at `abb3787ffba54b2c02dc2e43a6b9e2d6c371bc91`. Its
+tag-triggered artifact run (`31281301520`) passed all four native package
+jobs and the aggregate checksum gate and published this repository's first
+GitHub Release, validating the release path fixed below.
 
 ### Fixed
 
