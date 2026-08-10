@@ -28,7 +28,8 @@
 //!              INSERT shorthand: a non-NULL value is merged into the
 //!              metadata pairs.
 //! Commands:    INSERT INTO logs(logs) VALUES ('flush' | 'optimize' |
-//!              `optimize:<max_entries>` | `prune:<ts>`) — the same
+//!              `optimize:<max_entries>` | `prune:<ts>` |
+//!              `reindex:<keys>`) — the same
 //!              FTS5 idiom as metrics. The bounded optimize form lets
 //!              embedded hosts cap one maintenance turn.
 //! Read path:   flushed blocks and the in-memory buffer are merged, so
@@ -595,6 +596,26 @@ impl LogsTab {
                 .engine
                 .optimize_budgeted(max_entries)
                 .map_err(module_err)?;
+        } else if let Some(keys) = cmd.strip_prefix("reindex:") {
+            // Rewrite every block's postings against a new index_keys
+            // allowlist and persist it. Postings are written at insert time,
+            // so widening the allowlist without this makes pruning on a newly
+            // indexed key skip every block written before the change — the
+            // entries survive, but queries stop finding them.
+            //
+            // The connection keeps the allowlist it loaded at xConnect; the
+            // persisted value is what the next connect reads. Callers that
+            // need the new keys applied to *their* session reconnect after
+            // this returns.
+            let parsed = parse_index_keys_value(&self.table_name, keys.trim())
+                .map_err(|e| module_err(format!("reindex: {e}")))?;
+
+            return self
+                .shared
+                .engine
+                .reindex(&parsed)
+                .map(|rewritten| rewritten as i64)
+                .map_err(module_err);
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             // Retention: whole-block deletes by ts_max, term rows
             // removed in the same operation.
@@ -606,7 +627,7 @@ impl LogsTab {
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'optimize', \
-                 'optimize:<max_entries>', 'prune:<ts>'"
+                 'optimize:<max_entries>', 'prune:<ts>', 'reindex:<keys>'"
             )));
         }
         Ok(0)

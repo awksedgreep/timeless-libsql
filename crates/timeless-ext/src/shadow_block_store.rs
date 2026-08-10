@@ -343,6 +343,31 @@ impl BlockStore for ShadowBlockStore {
         Ok(rows)
     }
 
+    /// Rewrite one block's postings without touching its payload.
+    ///
+    /// No transaction of its own: this runs inside the vtab's update hook, so
+    /// a statement is already in progress and an explicit COMMIT here fails
+    /// with "SQL statements in progress". Atomicity comes from the caller's
+    /// enclosing host transaction, exactly as it does for put_block's
+    /// block-plus-terms insert.
+    fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {
+        let conn = Self::conn()?;
+
+        conn.execute(&format!("{}{})", self.delete_terms_prefix, loc.id), [])
+            .map_err(|e| format!("reindex term delete failed: {e}"))?;
+
+        let mut stmt = conn
+            .prepare_cached(&self.insert_term_sql)
+            .map_err(|e| format!("prepare reindex term insert failed: {e}"))?;
+
+        for term in terms {
+            stmt.execute(params![term, loc.id])
+                .map_err(|e| format!("reindex term insert ({term:?}) failed: {e}"))?;
+        }
+
+        Ok(())
+    }
+
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String> {
         let conn = Self::conn()?;
         let mut stmt = conn

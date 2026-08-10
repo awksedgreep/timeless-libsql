@@ -1102,11 +1102,18 @@ impl BlockEngine {
     /// index_keys allowlist. Deduplicated + sorted (a block-level index
     /// only cares that the term occurs at all).
     fn extract_terms(&self, entries: &[LogEntry]) -> Vec<String> {
+        self.extract_terms_with(entries, &self.config.index_keys)
+    }
+
+    /// As extract_terms, against an explicit allowlist. reindex() passes the
+    /// NEW allowlist so it can rewrite postings for blocks that were written
+    /// under the old one, without mutating the live config.
+    fn extract_terms_with(&self, entries: &[LogEntry], index_keys: &[String]) -> Vec<String> {
         let mut set = BTreeSet::new();
         for e in entries {
             set.insert(format!("level:{}", level_name(e.level)));
             for (k, v) in &e.metadata {
-                if self.config.index_keys.iter().any(|ik| ik == k) {
+                if index_keys.iter().any(|ik| ik == k) {
                     set.insert(format!("{k}:{v}"));
                 }
             }
@@ -1156,6 +1163,44 @@ impl BlockEngine {
     /// swap — new blocks + terms in, old blocks + terms out, atomically.
     ///
     /// Returns (blocks_removed, blocks_written).
+    /// Rewrite every block's postings against a new index_keys allowlist and
+    /// persist the allowlist.
+    ///
+    /// Postings are written at insert time, so a block carries postings only
+    /// for the keys indexed when it was written. Widening index_keys without
+    /// this makes pruning on a newly indexed key skip every older block: the
+    /// entries are still stored, but `query_terms` never returns their blocks,
+    /// so a search silently loses history. Narrowing is equally unsound in the
+    /// other direction — stale postings would keep pruning on a key the engine
+    /// no longer applies.
+    ///
+    /// One block is read, decoded and released per iteration, so peak memory
+    /// is one block rather than the store. The allowlist is saved only after
+    /// every block succeeds; a failure part-way leaves the persisted allowlist
+    /// unchanged, so the next connect still uses the old one and the partially
+    /// rewritten postings remain a superset of what it prunes on. Re-running
+    /// is safe and idempotent.
+    ///
+    /// Returns the number of blocks rewritten.
+    pub fn reindex(&self, index_keys: &[String]) -> Result<usize, String> {
+        let blocks = self.store.scan()?;
+        let mut rewritten = 0usize;
+
+        for (_meta, loc) in blocks {
+            let bytes = self.store.read_block(&loc)?;
+            let entries = decode_block(&bytes)?;
+            let terms = self.extract_terms_with(&entries, index_keys);
+            self.store.replace_terms(&loc, &terms)?;
+            self.store.check_cancelled()?;
+            rewritten += 1;
+        }
+
+        self.store
+            .save_meta("index_keys", index_keys.join(",").as_bytes())?;
+
+        Ok(rewritten)
+    }
+
     pub fn optimize(&self) -> Result<(usize, usize), String> {
         self.optimize_with_budget(None)
     }

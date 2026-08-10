@@ -260,6 +260,22 @@ pub trait BlockStore: Send + Sync {
         ts_max: i64,
     ) -> Result<Vec<(BlockLoc, BlockMeta)>, String>;
 
+    /// Replace one block's term rows in place, leaving its payload alone.
+    ///
+    /// Postings are written at insert time from the index_keys allowlist, so a
+    /// block carries postings only for the keys that were indexed when it was
+    /// written. Widening index_keys therefore makes pruning on a newly indexed
+    /// key skip every older block — the entries are still there, but the query
+    /// never looks at them. reindex() rewrites those postings so the allowlist
+    /// change is retroactive.
+    ///
+    /// Stores that cannot rewrite terms independently of payloads may leave
+    /// this unimplemented; reindex() then reports that it is unsupported
+    /// rather than silently leaving a store half-indexed.
+    fn replace_terms(&self, _loc: &BlockLoc, _terms: &[String]) -> Result<(), String> {
+        Err("this block store cannot replace terms in place".into())
+    }
+
     /// Small key/value config persistence (index_keys, schema version).
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String>;
     fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String>;

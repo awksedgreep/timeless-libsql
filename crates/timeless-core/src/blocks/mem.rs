@@ -66,6 +66,28 @@ impl MemBlockStore {
 }
 
 impl BlockStore for MemBlockStore {
+    /// Swap one block's postings, leaving its payload alone. Mirrors the SQL
+    /// store: reindex rewrites terms so a widened index_keys allowlist applies
+    /// to blocks written before the change.
+    fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {
+        let mut inner = self.lock();
+
+        if !inner.blocks.contains_key(&loc.id) {
+            return Err(format!("replace_terms: no block {}", loc.id));
+        }
+
+        inner.terms.retain(|_, set| {
+            set.remove(&loc.id);
+            !set.is_empty()
+        });
+
+        for term in terms {
+            inner.terms.entry(term.clone()).or_default().insert(loc.id);
+        }
+
+        Ok(())
+    }
+
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
         let mut inner = self.lock();
         Ok(Self::insert_one(&mut inner, block))

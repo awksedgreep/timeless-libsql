@@ -449,6 +449,161 @@ fn level_names_are_strict() {
 }
 
 // ---------------------------------------------------------------------------
+// reindex(): making a widened index_keys allowlist retroactive.
+//
+// Postings are written at insert time from the allowlist, so a block carries
+// postings only for the keys indexed when it was written. Widening the
+// allowlist without rewriting them makes pruning on a newly indexed key skip
+// every older block — the entries are still stored, but query_terms never
+// returns their blocks, so a search silently loses history. That is the
+// failure these tests pin.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn widening_index_keys_without_reindex_hides_older_blocks() {
+    let store = Arc::new(MemBlockStore::new());
+
+    // Written when only "service" was indexed.
+    let old = BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service"])).unwrap();
+    old.push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
+        .unwrap();
+    old.flush().unwrap();
+    drop(old);
+
+    // A later process indexes "host" too.
+    let new =
+        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service", "host"]))
+            .unwrap();
+
+    let q = LogQuery {
+        metadata_eq: vec![("host".into(), "web-1".into())],
+        ..full_range_query()
+    };
+
+    // The block has no host: posting, so pruning drops it. This is the bug:
+    // the entry exists and matches, but the query cannot see it.
+    assert!(
+        new.query(&q).unwrap().is_empty(),
+        "expected the pre-widening block to be pruned; if this now returns the \
+         entry, pruning changed and reindex may no longer be required"
+    );
+}
+
+#[test]
+fn reindex_makes_a_widened_allowlist_retroactive() {
+    let store = Arc::new(MemBlockStore::new());
+
+    let old = BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service"])).unwrap();
+    old.push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
+        .unwrap();
+    old.push(entry(20, 3, "two", &[("service", "api"), ("host", "web-2")]))
+        .unwrap();
+    old.flush().unwrap();
+    drop(old);
+
+    let new =
+        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service", "host"]))
+            .unwrap();
+
+    let keys = vec!["service".to_string(), "host".to_string()];
+    assert_eq!(new.reindex(&keys).unwrap(), 1, "one block should be rewritten");
+
+    let q = LogQuery {
+        metadata_eq: vec![("host".into(), "web-1".into())],
+        ..full_range_query()
+    };
+    let got = new.query(&q).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].message, "one");
+
+    // The other value still resolves, and the key that was always indexed is
+    // not damaged by the rewrite.
+    let q2 = LogQuery {
+        metadata_eq: vec![("host".into(), "web-2".into())],
+        ..full_range_query()
+    };
+    assert_eq!(new.query(&q2).unwrap().len(), 1);
+
+    let q3 = LogQuery {
+        metadata_eq: vec![("service".into(), "api".into())],
+        ..full_range_query()
+    };
+    assert_eq!(new.query(&q3).unwrap().len(), 2);
+}
+
+#[test]
+fn reindex_persists_the_allowlist_and_is_idempotent() {
+    let store = Arc::new(MemBlockStore::new());
+
+    let engine =
+        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service"])).unwrap();
+    engine
+        .push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
+        .unwrap();
+    engine.flush().unwrap();
+
+    let keys = vec!["service".to_string(), "host".to_string()];
+    engine.reindex(&keys).unwrap();
+
+    assert_eq!(
+        store.load_meta("index_keys").unwrap().as_deref(),
+        Some(b"service,host".as_ref()),
+        "the new allowlist must be persisted for the next connect"
+    );
+
+    // Running it again must not duplicate or drop postings.
+    engine.reindex(&keys).unwrap();
+
+    let q = LogQuery {
+        metadata_eq: vec![("host".into(), "web-1".into())],
+        ..full_range_query()
+    };
+    assert_eq!(engine.query(&q).unwrap().len(), 1);
+}
+
+#[test]
+fn reindex_narrowing_drops_stale_postings() {
+    // Narrowing is unsound in the other direction: a posting left behind for a
+    // key the engine no longer applies would keep pruning on it.
+    let store = Arc::new(MemBlockStore::new());
+
+    let engine =
+        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service", "host"]))
+            .unwrap();
+    engine
+        .push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
+        .unwrap();
+    engine.flush().unwrap();
+
+    engine.reindex(&["service".to_string()]).unwrap();
+    drop(engine);
+
+    // reindex rewrites the PERSISTED allowlist; a live engine keeps the config
+    // it was constructed with. Narrowing is therefore only coherent once the
+    // engine is rebuilt with the narrowed set — exactly what the vtab does when
+    // it reloads index_keys from _meta at connect. Until then the old config
+    // would still prune on host: postings that no longer exist, which is why
+    // the two must be changed together.
+    let reconnected =
+        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service"])).unwrap();
+
+    // host is no longer indexed, so nothing prunes on it and the entry is found
+    // by the exact per-entry filter.
+    let q = LogQuery {
+        metadata_eq: vec![("host".into(), "web-1".into())],
+        ..full_range_query()
+    };
+    assert_eq!(reconnected.query(&q).unwrap().len(), 1);
+
+    // And the key still indexed keeps pruning correctly.
+    let q2 = LogQuery {
+        metadata_eq: vec![("service".into(), "api".into())],
+        ..full_range_query()
+    };
+    assert_eq!(reconnected.query(&q2).unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
 // Round-trip: raw → optimize → query exactness
 // ---------------------------------------------------------------------------
 
@@ -518,6 +673,9 @@ fn raw_optimize_query_round_trip_is_exact() {
 struct SharedStore(Arc<MemBlockStore>);
 
 impl BlockStore for SharedStore {
+    fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {
+        self.0.replace_terms(loc, terms)
+    }
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
         self.0.put_block(block)
     }
@@ -1574,6 +1732,9 @@ fn recovery_rebuilds_index_from_scan() {
 
     struct SharedStore(Arc<MemBlockStore>);
     impl BlockStore for SharedStore {
+        fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {
+            self.0.replace_terms(loc, terms)
+        }
         fn put_block(&self, b: &EncodedBlock) -> Result<BlockLoc, String> {
             self.0.put_block(b)
         }
