@@ -926,7 +926,7 @@ fn metric_candidate_ids(
 fn run_kernel(
     db: *mut ffi::sqlite3,
     ka: &KernelArgs,
-    kernel: impl Fn(&Engine, i64) -> Result<Vec<(i64, f64)>>,
+    kernel: impl Fn(&Engine, &[i64]) -> Result<Vec<(i64, Vec<(i64, f64)>)>>,
 ) -> Result<Vec<KernelRow>> {
     let _bind = DbGuard::bind(db);
     let shared: Arc<SharedEngine<Engine>> =
@@ -937,9 +937,11 @@ fn run_kernel(
         .refresh_authoritative_state()
         .map_err(module_err)?;
 
-    // Candidate snapshot, then sequential per-series kernels — the
-    // rayon-free discipline every vtab callback must follow (see
-    // collect_metric in metrics_vtab.rs).
+    // Candidate snapshot, then ONE batched kernel call — the rayon-free
+    // discipline every vtab callback must follow (see collect_metric in
+    // metrics_vtab.rs). P4: the batch primitives pay validation, the
+    // transition guard, and the store's read_chunks round-trip once for
+    // the whole candidate set instead of once per series.
     let candidates = metric_candidates(
         &shared.engine,
         &ka.metric,
@@ -947,12 +949,28 @@ fn run_kernel(
         &ka.matchers,
         ka.series_selection,
     );
+    let sids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
+    let results = kernel(&shared.engine, &sids)?;
+    if results.len() != candidates.len() {
+        return Err(module_err(format!(
+            "{}: batch kernel returned {} series for {} candidates",
+            ka.table,
+            results.len(),
+            candidates.len()
+        )));
+    }
 
     let mut rows = Vec::new();
-    for (sid, labels) in candidates {
-        let points = kernel(&shared.engine, sid)?;
+    for ((sid, labels), (result_sid, points)) in candidates.into_iter().zip(results) {
+        if sid != result_sid {
+            return Err(module_err(format!(
+                "{}: batch kernel order mismatch (expected series {sid}, got {result_sid})",
+                ka.table
+            )));
+        }
         // Per-series absence rule (matches query_multi's omission): a
         // series with NO points on the grid emits nothing, fill or not.
+        // Labels render lazily — only for series that emit rows.
         if points.is_empty() {
             continue;
         }
@@ -1051,9 +1069,9 @@ impl KernelVTab for GridTab {
     const SERIES_ID_COL: c_int = COL_FIRST_ARG + GRID_ARGS.len() as c_int;
 
     fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<KernelRow>> {
-        run_kernel(db, ka, |engine, sid| {
+        run_kernel(db, ka, |engine, sids| {
             engine
-                .query_grid_last_by_id(sid, ka.start, ka.stop, ka.step, ka.width)
+                .query_grid_last_batch_by_id(sids, ka.start, ka.stop, ka.step, ka.width)
                 .map_err(module_err)
         })
     }
@@ -1137,9 +1155,9 @@ impl KernelVTab for WindowTab {
 
     fn run(db: *mut ffi::sqlite3, ka: &KernelArgs) -> Result<Vec<KernelRow>> {
         let op = parse_window_op(Self::MODULE, ka.agg_name.as_deref())?;
-        run_kernel(db, ka, |engine, sid| {
+        run_kernel(db, ka, |engine, sids| {
             engine
-                .query_window_op_by_id(sid, ka.start, ka.stop, ka.step, ka.width, op)
+                .query_window_op_batch_by_id(sids, ka.start, ka.stop, ka.step, ka.width, op)
                 .map_err(module_err)
         })
     }
@@ -2773,24 +2791,33 @@ impl KernelVTab for RollupTab {
                 )))
             }
         };
-        run_kernel(db, ka, |engine, sid| {
-            let buckets = engine
-                .query_rollup_by_id(sid, ka.width, ka.start, ka.stop)
-                .map_err(module_err)?;
-            Ok(buckets
-                .into_iter()
-                .map(|b| {
-                    let value = match agg {
-                        RollupAgg::Avg => b.sum / b.count as f64,
-                        RollupAgg::Sum => b.sum,
-                        RollupAgg::Min => b.min,
-                        RollupAgg::Max => b.max,
-                        RollupAgg::Count => b.count as f64,
-                        RollupAgg::Last => b.last_val,
-                    };
-                    (b.bucket_ts, value)
+        // Rollup reads stay per-series inside the batch shape: tier
+        // chunks are few (one per settled window of buckets), so the
+        // per-series statement cost the raw kernels paid does not
+        // dominate here. Revisit if a rollup-heavy vector says otherwise.
+        run_kernel(db, ka, |engine, sids| {
+            sids.iter()
+                .map(|&sid| {
+                    let buckets = engine
+                        .query_rollup_by_id(sid, ka.width, ka.start, ka.stop)
+                        .map_err(module_err)?;
+                    let points = buckets
+                        .into_iter()
+                        .map(|b| {
+                            let value = match agg {
+                                RollupAgg::Avg => b.sum / b.count as f64,
+                                RollupAgg::Sum => b.sum,
+                                RollupAgg::Min => b.min,
+                                RollupAgg::Max => b.max,
+                                RollupAgg::Count => b.count as f64,
+                                RollupAgg::Last => b.last_val,
+                            };
+                            (b.bucket_ts, value)
+                        })
+                        .collect();
+                    Ok((sid, points))
                 })
-                .collect())
+                .collect()
         })
     }
 }
