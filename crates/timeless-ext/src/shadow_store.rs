@@ -159,6 +159,7 @@ pub(crate) struct ShadowTableStore {
     save_registry_sql: String,
     load_registry_sql: String,
     load_series_sql: String,
+    load_series_since_sql: String,
     insert_series_sql: String,
     select_series_sql: String,
     migrate_series_sql: String,
@@ -180,6 +181,14 @@ pub(crate) struct ShadowTableStore {
     /// chunk-mutating call, inside the caller's transaction, so other
     /// processes observe the bump if and only if they observe the change.
     bump_chunk_gen_sql: String,
+    /// P2: (chunk_shape_gen, MAX(chunk id)) — the pure-append watermark.
+    append_watermark_sql: String,
+    /// P2: bumped ONLY by delete/replace paths. While unchanged, chunk
+    /// rowids are never reused, so `id > watermark` enumerates exactly
+    /// the appended rows.
+    bump_shape_gen_sql: String,
+    scan_since_sql: String,
+    scan_rollups_since_sql: String,
 }
 
 impl ShadowTableStore {
@@ -225,6 +234,9 @@ impl ShadowTableStore {
             ),
             load_registry_sql: format!("SELECT v FROM {meta} WHERE k = 'series_registry'"),
             load_series_sql: format!("SELECT id, name, canonical_labels FROM {series} ORDER BY id"),
+            load_series_since_sql: format!(
+                "SELECT id, name, canonical_labels FROM {series} WHERE id > ?1 ORDER BY id"
+            ),
             insert_series_sql: format!(
                 "INSERT INTO {series}(name, canonical_labels) VALUES(?1, ?2) \
                  ON CONFLICT(name, canonical_labels) DO NOTHING"
@@ -246,6 +258,23 @@ impl ShadowTableStore {
                 "INSERT INTO {meta} (k, v) VALUES ('chunk_gen', 1) \
                  ON CONFLICT(k) DO UPDATE SET v = v + 1"
             ),
+            append_watermark_sql: format!(
+                "SELECT COALESCE((SELECT v FROM {meta} WHERE k = 'chunk_shape_gen'), 0), \
+                 COALESCE((SELECT MAX(id) FROM {chunks}), 0)"
+            ),
+            bump_shape_gen_sql: format!(
+                "INSERT INTO {meta} (k, v) VALUES ('chunk_shape_gen', 1) \
+                 ON CONFLICT(k) DO UPDATE SET v = v + 1"
+            ),
+            scan_since_sql: format!(
+                "SELECT id, series_id, ts_min, ts_max, max_ts_val, point_count, \
+                 min_val, max_val, sum_val, encoding FROM {chunks} \
+                 WHERE resolution = 0 AND id > ?1"
+            ),
+            scan_rollups_since_sql: format!(
+                "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding \
+                 FROM {chunks} WHERE resolution > 0 AND id > ?1"
+            ),
         }
     }
 
@@ -258,6 +287,132 @@ impl ShadowTableStore {
             .execute([])
             .map_err(|e| format!("chunk generation bump failed: {e}"))?;
         Ok(())
+    }
+
+    /// P2: bump the shape generation inside the caller's transaction.
+    /// Called by every path that deletes or replaces chunk rows; a
+    /// missed bump would let a delta refresh trust reused rowids, so
+    /// errors propagate exactly like the chunk-generation bump.
+    fn bump_shape_generation(&self, conn: &Connection) -> Result<(), String> {
+        conn.prepare_cached(&self.bump_shape_gen_sql)
+            .map_err(|e| format!("prepare shape generation bump failed: {e}"))?
+            .execute([])
+            .map_err(|e| format!("shape generation bump failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Shared series row mapping for load_series() and
+    /// load_series_since().
+    fn load_series_rows<P: rusqlite::Params>(
+        conn: &Connection,
+        sql: &str,
+        params: P,
+    ) -> Result<Vec<StoredSeries>, String> {
+        let mut stmt = conn
+            .prepare_cached(sql)
+            .map_err(|e| format!("prepare series catalog load failed: {e}"))?;
+        let rows = stmt
+            .query_map(params, |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|e| format!("series catalog load failed: {e}"))?;
+
+        let mut series = Vec::new();
+        for row in rows {
+            let (id, name, labels) = row.map_err(|e| format!("series catalog row failed: {e}"))?;
+            series.push(StoredSeries {
+                id,
+                name,
+                labels: Self::decode_labels(&labels)
+                    .map_err(|e| format!("series {id} labels are invalid: {e}"))?,
+            });
+        }
+        Ok(series)
+    }
+
+    /// Shared raw-chunk row mapping for scan() and scan_since(): both
+    /// SELECT the identical column list, so one decoder cannot drift.
+    fn scan_chunk_rows<P: rusqlite::Params>(
+        conn: &Connection,
+        sql: &str,
+        params: P,
+    ) -> Result<Vec<StoredChunk>, String> {
+        let mut stmt = conn
+            .prepare_cached(sql)
+            .map_err(|e| format!("prepare chunk scan failed: {e}"))?;
+        let mut rows_iter = stmt
+            .query(params)
+            .map_err(|e| format!("chunk scan failed: {e}"))?;
+        let mut rows = Vec::new();
+        while let Some(r) = rows_iter
+            .next()
+            .map_err(|e| format!("chunk scan row failed: {e}"))?
+        {
+            let get_stat = |i: usize, what: &str| -> Result<f64, String> {
+                Self::stat_from_sql(
+                    r.get_ref(i)
+                        .map_err(|e| format!("chunk scan {what}: {e}"))?,
+                    what,
+                )
+            };
+            rows.push(StoredChunk {
+                series_id: r.get(1).map_err(|e| format!("chunk scan series: {e}"))?,
+                meta: ChunkMeta {
+                    min_ts: r.get(2).map_err(|e| e.to_string())?,
+                    max_ts: r.get(3).map_err(|e| e.to_string())?,
+                    max_ts_val: match r.get_ref(4).map_err(|e| e.to_string())? {
+                        rusqlite::types::ValueRef::Null => None,
+                        value => Some(Self::stat_from_sql(value, "max_ts_val")?),
+                    },
+                    point_count: r.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
+                    min_val: get_stat(6, "min_val")?,
+                    max_val: get_stat(7, "max_val")?,
+                    sum_val: get_stat(8, "sum_val")?,
+                    loc: ChunkLoc::Row {
+                        rowid: r.get(0).map_err(|e| e.to_string())?,
+                    },
+                    encoding: r.get::<_, i64>(9).map_err(|e| e.to_string())? as u8,
+                },
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Shared rollup row mapping for scan_rollups() and scan_since().
+    fn scan_rollup_rows<P: rusqlite::Params>(
+        conn: &Connection,
+        sql: &str,
+        params: P,
+    ) -> Result<Vec<StoredRollupChunk>, String> {
+        let mut stmt = conn
+            .prepare_cached(sql)
+            .map_err(|e| format!("prepare rollup scan failed: {e}"))?;
+        let rows = stmt
+            .query_map(params, |r| {
+                Ok(StoredRollupChunk {
+                    series_id: r.get(1)?,
+                    resolution: r.get(2)?,
+                    meta: ChunkMeta {
+                        min_ts: r.get(3)?,
+                        max_ts: r.get(4)?,
+                        max_ts_val: None,
+                        point_count: r.get::<_, i64>(5)? as u32,
+                        min_val: 0.0,
+                        max_val: 0.0,
+                        sum_val: 0.0,
+                        loc: ChunkLoc::Row { rowid: r.get(0)? },
+                        encoding: r.get::<_, i64>(6)? as u8,
+                    },
+                })
+            })
+            .map_err(|e| format!("rollup scan failed: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("rollup scan row failed: {e}"))?;
+        Ok(rows)
     }
 
     /// Borrow the CALLING connection for one store operation — the
@@ -454,6 +609,7 @@ impl ChunkStore for ShadowTableStore {
             let sql = format!("{}{})", self.delete_prefix, ids.join(","));
             conn.execute(&sql, [])
                 .map_err(|e| format!("compaction delete failed: {e}"))?;
+            self.bump_shape_generation(&conn)?;
         }
         self.bump_chunk_generation(&conn)?;
         Ok(locs)
@@ -575,7 +731,10 @@ impl ChunkStore for ShadowTableStore {
         let sql = format!("{}{})", self.delete_prefix, ids.join(","));
         if let Err(e) = conn.execute(&sql, []) {
             errors.push(format!("batched chunk delete failed: {e}"));
-        } else if let Err(e) = self.bump_chunk_generation(&conn) {
+        } else if let Err(e) = self
+            .bump_shape_generation(&conn)
+            .and_then(|()| self.bump_chunk_generation(&conn))
+        {
             errors.push(e);
         }
         errors
@@ -586,45 +745,7 @@ impl ChunkStore for ShadowTableStore {
     /// calls this at every xCreate/xConnect).
     fn scan(&self) -> Result<Vec<StoredChunk>, String> {
         let conn = Self::conn()?;
-        let mut stmt = conn
-            .prepare_cached(&self.scan_sql)
-            .map_err(|e| format!("prepare chunk scan failed: {e}"))?;
-        let mut rows_iter = stmt
-            .query([])
-            .map_err(|e| format!("chunk scan failed: {e}"))?;
-        let mut rows = Vec::new();
-        while let Some(r) = rows_iter
-            .next()
-            .map_err(|e| format!("chunk scan row failed: {e}"))?
-        {
-            let get_stat = |i: usize, what: &str| -> Result<f64, String> {
-                Self::stat_from_sql(
-                    r.get_ref(i)
-                        .map_err(|e| format!("chunk scan {what}: {e}"))?,
-                    what,
-                )
-            };
-            rows.push(StoredChunk {
-                series_id: r.get(1).map_err(|e| format!("chunk scan series: {e}"))?,
-                meta: ChunkMeta {
-                    min_ts: r.get(2).map_err(|e| e.to_string())?,
-                    max_ts: r.get(3).map_err(|e| e.to_string())?,
-                    max_ts_val: match r.get_ref(4).map_err(|e| e.to_string())? {
-                        rusqlite::types::ValueRef::Null => None,
-                        value => Some(Self::stat_from_sql(value, "max_ts_val")?),
-                    },
-                    point_count: r.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
-                    min_val: get_stat(6, "min_val")?,
-                    max_val: get_stat(7, "max_val")?,
-                    sum_val: get_stat(8, "sum_val")?,
-                    loc: ChunkLoc::Row {
-                        rowid: r.get(0).map_err(|e| e.to_string())?,
-                    },
-                    encoding: r.get::<_, i64>(9).map_err(|e| e.to_string())? as u8,
-                },
-            });
-        }
-        Ok(rows)
+        Self::scan_chunk_rows(&conn, &self.scan_sql, [])
     }
 
     /// F3: rollup rows live in the same `_chunks` table (resolution > 0,
@@ -661,31 +782,33 @@ impl ChunkStore for ShadowTableStore {
 
     fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
         let conn = Self::conn()?;
+        Self::scan_rollup_rows(&conn, &self.scan_rollups_sql, [])
+    }
+
+    fn append_watermark(&self) -> Result<Option<(i64, i64)>, String> {
+        let conn = Self::conn()?;
         let mut stmt = conn
-            .prepare_cached(&self.scan_rollups_sql)
-            .map_err(|e| format!("prepare rollup scan failed: {e}"))?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(StoredRollupChunk {
-                    series_id: r.get(1)?,
-                    resolution: r.get(2)?,
-                    meta: ChunkMeta {
-                        min_ts: r.get(3)?,
-                        max_ts: r.get(4)?,
-                        max_ts_val: None,
-                        point_count: r.get::<_, i64>(5)? as u32,
-                        min_val: 0.0,
-                        max_val: 0.0,
-                        sum_val: 0.0,
-                        loc: ChunkLoc::Row { rowid: r.get(0)? },
-                        encoding: r.get::<_, i64>(6)? as u8,
-                    },
-                })
-            })
-            .map_err(|e| format!("rollup scan failed: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("rollup scan row failed: {e}"))?;
-        Ok(rows)
+            .prepare_cached(&self.append_watermark_sql)
+            .map_err(|e| format!("prepare append watermark read failed: {e}"))?;
+        let wm = stmt
+            .query_row([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| format!("append watermark read failed: {e}"))?;
+        Ok(Some(wm))
+    }
+
+    fn scan_since(
+        &self,
+        after_rowid: i64,
+    ) -> Result<(Vec<StoredChunk>, Vec<StoredRollupChunk>), String> {
+        let conn = Self::conn()?;
+        let raw = Self::scan_chunk_rows(&conn, &self.scan_since_sql, [after_rowid])?;
+        let rollups = Self::scan_rollup_rows(&conn, &self.scan_rollups_since_sql, [after_rowid])?;
+        Ok((raw, rollups))
+    }
+
+    fn load_series_since(&self, after_id: i64) -> Result<Vec<StoredSeries>, String> {
+        let conn = Self::conn()?;
+        Self::load_series_rows(&conn, &self.load_series_since_sql, [after_id])
     }
 
     fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
@@ -729,30 +852,7 @@ impl ChunkStore for ShadowTableStore {
 
     fn load_series(&self) -> Result<Vec<StoredSeries>, String> {
         let conn = Self::conn()?;
-        let mut stmt = conn
-            .prepare_cached(&self.load_series_sql)
-            .map_err(|e| format!("prepare series catalog load failed: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            })
-            .map_err(|e| format!("series catalog load failed: {e}"))?;
-
-        let mut series = Vec::new();
-        for row in rows {
-            let (id, name, labels) = row.map_err(|e| format!("series catalog row failed: {e}"))?;
-            series.push(StoredSeries {
-                id,
-                name,
-                labels: Self::decode_labels(&labels)
-                    .map_err(|e| format!("series {id} labels are invalid: {e}"))?,
-            });
-        }
-        Ok(series)
+        Self::load_series_rows(&conn, &self.load_series_sql, [])
     }
 
     fn resolve_series(

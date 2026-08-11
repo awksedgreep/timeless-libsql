@@ -279,6 +279,38 @@ pub trait ChunkStore: Send + Sync {
         Ok(None)
     }
 
+    /// P2: watermark for the pure-append delta refresh —
+    /// `(chunk_shape_gen, max chunk rowid)`. `chunk_shape_gen` MUST
+    /// change on every committed mutation that removes or replaces a
+    /// chunk row (prune, compaction); it MUST NOT change on pure
+    /// appends (flush, rollup build). The rowid half is the append
+    /// cursor `scan_since` resumes from. `None` = store cannot answer;
+    /// callers keep the full-reload fallback. Both halves must ride
+    /// the same transaction snapshot as the data they describe.
+    fn append_watermark(&self) -> Result<Option<(i64, i64)>, String> {
+        Ok(None)
+    }
+
+    /// P2: enumerate chunk rows with rowid strictly greater than
+    /// `after_rowid`, split raw/rollup. Sound ONLY while the shape half
+    /// of `append_watermark` is unchanged (no deletes → no rowid
+    /// reuse). Callers must tolerate rows they already know (a
+    /// writer's own flushes advance the store past its cached
+    /// watermark), so application has to be idempotent.
+    fn scan_since(
+        &self,
+        _after_rowid: i64,
+    ) -> Result<(Vec<StoredChunk>, Vec<StoredRollupChunk>), String> {
+        Err("store does not support delta chunk scans".to_string())
+    }
+
+    /// P2: series rows with id strictly greater than `after_id`.
+    /// Committed series rows are append-only (the catalog_generation
+    /// contract), so this is always sound for authoritative stores.
+    fn load_series_since(&self, _after_id: i64) -> Result<Vec<StoredSeries>, String> {
+        Err("store does not support delta series loads".to_string())
+    }
+
     /// For Engine::info(): (total_bytes, file_or_row_count).
     fn storage_stats(&self) -> (u64, usize);
 

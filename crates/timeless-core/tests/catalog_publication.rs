@@ -113,10 +113,11 @@ fn committed_generation_skips_reload_but_external_change_does_not() {
     let state = Arc::new(CatalogState::default());
     let engine = engine(Arc::clone(&state));
 
-    // Construction recovers once; the initial refresh establishes token 0.
+    // Construction recovers once and PRIMES the token from the same
+    // snapshot (P2), so the first refresh is already a fast path.
     assert_eq!(loads(&state), (1, 1));
     engine.refresh_authoritative_state().unwrap();
-    assert_eq!(loads(&state), (2, 2));
+    assert_eq!(loads(&state), (1, 1));
 
     // Model a local SQLite transaction mutating chunk rows. xSync captures
     // token 1; xCommit publishes it alongside the already-updated engine.
@@ -127,15 +128,16 @@ fn committed_generation_skips_reload_but_external_change_does_not() {
     engine.refresh_authoritative_state().unwrap();
     assert_eq!(
         loads(&state),
-        (2, 2),
+        (1, 1),
         "a locally published generation must not reload authoritative state"
     );
 
     // A change not represented in this engine still invalidates the token and
-    // takes the full, always-correct recovery path.
+    // takes the full, always-correct recovery path (this store offers no
+    // append watermark, so no delta shortcut exists).
     state.chunk_generation.store(2, Ordering::SeqCst);
     engine.refresh_authoritative_state().unwrap();
-    assert_eq!(loads(&state), (3, 3));
+    assert_eq!(loads(&state), (2, 2));
 }
 
 #[test]
@@ -143,7 +145,7 @@ fn rolled_back_captured_generation_is_not_published() {
     let state = Arc::new(CatalogState::default());
     let engine = engine(Arc::clone(&state));
     engine.refresh_authoritative_state().unwrap();
-    assert_eq!(loads(&state), (2, 2));
+    assert_eq!(loads(&state), (1, 1), "primed token skips the redundant reload");
 
     engine.txn_begin();
     state.chunk_generation.store(1, Ordering::SeqCst);
@@ -157,7 +159,7 @@ fn rolled_back_captured_generation_is_not_published() {
     engine.refresh_authoritative_state().unwrap();
     assert_eq!(
         loads(&state),
-        (2, 2),
+        (1, 1),
         "rollback must retain the last committed token"
     );
 }
