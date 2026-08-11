@@ -703,6 +703,43 @@ SELECT labels, ts, value FROM timeless_grid(
 **Acceptance:** a charting query needs no client-side gap handling;
 every cookbook recipe is machine-verified; suites green.
 
+## Cardinality mitigation (P1-P5), agreed 2026-08-11
+
+Findings from tools/bench bench-cardinality (M5 Pro, 100 pts/series,
+tier2 ingest; full evidence in the 2026-08-11 session-log row): all
+query paths scale linearly to 100k series, reader RSS ~3.6KB/series,
+BUT a TVF-only connection rebuilds the engine on EVERY statement
+(registry holds Weak refs; eponymous TVF vtabs die at statement end) —
+416ms + ~360MB alloc churn per query at 100k. Generation-change
+refresh is also a full O(N) reload (hits replication readers per sync
+batch), cold recovery is ~416ms, and the row-TVF kernels carry a
+~4-5us/series materialization floor.
+
+- [ ] **P1** per-connection engine pinning: strong Arc deposited in a
+      per-connection pin cell on engine resolution; cleanup via a
+      per-connection scalar-function state destructor (fires at
+      sqlite3_close). Registry keeps its Weak contract; DROP machinery
+      (DROP_PINS) untouched. Acceptance: bench-cardinality unpinned
+      columns collapse to pinned; suites green.
+- [ ] **P2** incremental generation refresh: series delta via the
+      existing MAX(id) watermark (append-only); chunk index delta via
+      (max rowid, count) pure-append detection, full-rescan fallback
+      on prune/compact. Acceptance: refresh-after-flush at 100k in
+      low ms (vs ~350ms full reload); correctness suites green incl.
+      retention/compaction fallback paths.
+- [ ] **P3** registry build speed + memory diet: pre-sized maps, one
+      shared Arc<SeriesInfo> per series, interned label strings,
+      Vec postings. Target: cold recovery 2-3x faster, RSS toward
+      ~1.5KB/series at 100k.
+- [ ] **P4** row-TVF kernels on batch chunk reads + lazy labels
+      rendering (the packed-TVF primitives, reused). Target: fleet
+      grid/window at 100k from ~66ms toward ~46ms.
+- [ ] **P5** decoded-chunk LRU (bounded bytes, generation-invalidated)
+      for dashboard-refresh re-reads. Last; re-measure after P2/P4.
+
+Non-goals: flush throughput (linear, fine), full-catalog O(N) scans
+(inherent), 100-pt-chunk compression tax (use compact).
+
 ## Session log
 
 | Date | Item | State | Evidence / next step |

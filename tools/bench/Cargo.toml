@@ -39,6 +39,10 @@ path = "src/oracle.rs"
 name = "query-read"
 path = "src/bin/query_read.rs"
 
+[[bin]]
+name = "bench-cardinality"
+path = "src/bin/bench_cardinality.rs"
+
 [dependencies]
 # bundled         = compile SQLite in, ignore the system library
 # load_extension  = expose sqlite3_load_extension so we can .so-load
