@@ -443,8 +443,16 @@ impl Drop for Server {
     }
 }
 
+// glibc types setrlimit's resource as its own enum; every other libc
+// (macOS included) uses a plain int. The RLIMIT_* constants carry the
+// right type per platform, so an alias is all portability needs.
+#[cfg(target_os = "linux")]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(target_os = "linux"))]
+type RlimitResource = libc::c_int;
+
 fn apply_child_limits(limits: ChildLimits) -> io::Result<()> {
-    unsafe fn set(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()> {
+    unsafe fn set(resource: RlimitResource, value: u64) -> io::Result<()> {
         let limit = libc::rlimit {
             rlim_cur: value,
             rlim_max: value,

@@ -113,7 +113,73 @@ fn open(extension: &Path, database: &Path) -> Result<Connection> {
         connection.load_extension(extension, None::<&str>)?;
         connection.load_extension_disable()?;
     }
+    register_math_polyfill(&connection)?;
     Ok(connection)
+}
+
+/// The harness links the BUNDLED SQLite (self-contained on every
+/// platform — Apple's system build lacks the load-extension symbols
+/// entirely), and libsqlite3-sys builds it WITHOUT
+/// SQLITE_ENABLE_MATH_FUNCTIONS. The documented recipes use the
+/// standard math suite, which every distro SQLite ships; polyfill it
+/// only when the build lacks it, so the recipes stay verbatim and
+/// behave identically on every platform. NULL propagates like the
+/// native functions; domain errors surface as NaN, which SQLite
+/// stores as NULL — the same observable the native functions give.
+fn register_math_polyfill(connection: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    if connection
+        .query_row("SELECT sqrt(1.0)", [], |_| Ok(()))
+        .is_ok()
+    {
+        return Ok(());
+    }
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    let unary: &[(&str, fn(f64) -> f64)] = &[
+        ("sqrt", f64::sqrt),
+        ("ln", f64::ln),
+        ("exp", f64::exp),
+        ("ceil", f64::ceil),
+        ("ceiling", f64::ceil),
+        ("floor", f64::floor),
+        ("log", f64::log10),
+        ("log10", f64::log10),
+        ("log2", f64::log2),
+        ("sin", f64::sin),
+        ("cos", f64::cos),
+        ("tan", f64::tan),
+        ("asin", f64::asin),
+        ("acos", f64::acos),
+        ("atan", f64::atan),
+        ("sinh", f64::sinh),
+        ("cosh", f64::cosh),
+        ("tanh", f64::tanh),
+        ("asinh", f64::asinh),
+        ("acosh", f64::acosh),
+        ("atanh", f64::atanh),
+    ];
+    for &(name, f) in unary {
+        connection.create_scalar_function(name, 1, flags, move |ctx| {
+            Ok(ctx.get::<Option<f64>>(0)?.map(f))
+        })?;
+    }
+    let binary: &[(&str, fn(f64, f64) -> f64)] = &[
+        ("pow", f64::powf),
+        ("power", f64::powf),
+        ("atan2", f64::atan2),
+    ];
+    for &(name, f) in binary {
+        connection.create_scalar_function(name, 2, flags, move |ctx| {
+            Ok(
+                match (ctx.get::<Option<f64>>(0)?, ctx.get::<Option<f64>>(1)?) {
+                    (Some(a), Some(b)) => Some(f(a, b)),
+                    _ => None,
+                },
+            )
+        })?;
+    }
+    connection.create_scalar_function("pi", 0, flags, |_| Ok(std::f64::consts::PI))?;
+    Ok(())
 }
 
 fn setup(connection: &mut Connection) -> Result<()> {
