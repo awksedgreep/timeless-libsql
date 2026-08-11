@@ -30,7 +30,7 @@ fn document() -> &'static str {
             "extension_version": env!("CARGO_PKG_VERSION"),
             "data_abi": DATA_ABI,
             "sql_surface_version": 1,
-            "minimum_server_version": "0.5.0",
+            "minimum_server_version": "0.6.0",
             "build": {
                 "commit": env!("TIMELESS_BUILD_COMMIT_RESOLVED"),
                 "target": env!("TIMELESS_BUILD_TARGET"),
@@ -136,7 +136,7 @@ fn document() -> &'static str {
                 }
             },
             "sql_surfaces": {
-                "scalar_functions": ["timeless_capabilities"],
+                "scalar_functions": ["timeless_capabilities", "timeless_pins"],
                 "storage_modules": [
                     "timeless_metrics",
                     "timeless_logs",
@@ -185,12 +185,12 @@ mod tests {
             "the tagged v0.3.0 artifact predates the capability handshake"
         );
         assert!(
-            env!("CARGO_PKG_VERSION").starts_with("0.5."),
-            "the current extension must remain on the documented 0.5 compatibility line"
+            env!("CARGO_PKG_VERSION").starts_with("0.6."),
+            "the current extension must remain on the documented 0.6 compatibility line"
         );
         assert_eq!(
-            value["minimum_server_version"], "0.5.0",
-            "compatible 0.5 patch releases retain the 0.5.0 server floor"
+            value["minimum_server_version"], "0.6.0",
+            "compatible 0.6 patch releases retain the 0.6.0 server floor"
         );
         assert_eq!(value["data_abi"], 1);
         assert_eq!(value["sql_surface_version"], 1);
