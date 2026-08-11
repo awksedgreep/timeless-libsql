@@ -619,6 +619,12 @@ pub struct Engine {
     /// flush/compact/prune/new-series work. Other hosts leave it stale and
     /// retain the always-correct reload fallback.
     catalog_gen: Mutex<Option<(i64, i64)>>,
+    /// P2: the append watermark `(chunk_shape_gen, max chunk rowid)`
+    /// the last reload/delta observed. While the shape half is
+    /// unchanged, a generation mismatch is pure appends and refresh
+    /// applies only the rows past the rowid half instead of reloading
+    /// O(total series + chunks).
+    append_wm: Mutex<Option<(i64, i64)>>,
     /// F3 rollup index: (partition, resolution, min_ts, seq) → meta for
     /// every persisted rollup chunk. Separate from the raw index ON
     /// PURPOSE — every pre-F3 read path stays byte-identical. meta
@@ -811,6 +817,10 @@ impl Engine {
 
     fn catalog_gen_lock(&self) -> MutexGuard<'_, Option<(i64, i64)>> {
         self.catalog_gen.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn append_wm_lock(&self) -> MutexGuard<'_, Option<(i64, i64)>> {
+        self.append_wm.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Acquire the journal iff a transaction is active. Every mutation
@@ -1161,6 +1171,25 @@ impl Engine {
         defer_compression: bool,
     ) -> EngineResult<Self> {
         let authoritative_series = store.has_authoritative_series();
+        // P2: prime the refresh tokens BEFORE the recovery scans — read
+        // after, a commit landing between scan and prime would be
+        // skipped by the first refresh. Read before, the worst case is
+        // one redundant reload (the same stale-token rule
+        // refresh_authoritative_state documents).
+        let primed_gen = if authoritative_series {
+            store
+                .catalog_generation()
+                .map_err(|err| format!("failed to prime catalog generation: {err}"))?
+        } else {
+            None
+        };
+        let primed_wm = if authoritative_series {
+            store
+                .append_watermark()
+                .map_err(|err| format!("failed to prime append watermark: {err}"))?
+        } else {
+            None
+        };
         let stored_chunks = store
             .scan()
             .map_err(|err| format!("failed to recover chunk index: {err}"))?;
@@ -1277,7 +1306,8 @@ impl Engine {
             window_batch_query_returned_points: AtomicU64::new(0),
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
-            catalog_gen: Mutex::new(None),
+            catalog_gen: Mutex::new(primed_gen),
+            append_wm: Mutex::new(primed_wm),
             rollup_index: RwLock::new(BTreeMap::new()),
             rollup_tiers: Mutex::new(Vec::new()),
             retention_native: AtomicI64::new(0),
@@ -4367,6 +4397,28 @@ impl Engine {
             return Ok(());
         }
 
+        // P2: pure-append delta. If the shape generation is unchanged
+        // since the last reload, every change is appended rows — apply
+        // only those. Any doubt (no cached tokens, shape changed, store
+        // can't answer, or a delta-application error) falls through to
+        // the full reload, which is always correct.
+        let wm_new = self
+            .store
+            .append_watermark()
+            .map_err(|err| format!("failed to read append watermark: {err}"))?;
+        let cached_gen = *self.catalog_gen_lock();
+        let cached_wm = *self.append_wm_lock();
+        if let (Some(old_gen), Some(old_wm), Some(new_wm)) = (cached_gen, cached_wm, wm_new) {
+            if new_wm.0 == old_wm.0 {
+                match self.apply_append_delta(old_gen.0, old_wm.1, observed, new_wm) {
+                    Ok(()) => return Ok(()),
+                    // Partial application is harmless: the reload below
+                    // replaces registry and indexes wholesale.
+                    Err(_) => {}
+                }
+            }
+        }
+
         let rows = self
             .store
             .load_series()
@@ -4417,6 +4469,90 @@ impl Engine {
         *rollups = new_rollups;
         self.resolve_cache.clear();
         *self.catalog_gen_lock() = observed;
+        *self.append_wm_lock() = self
+            .store
+            .append_watermark()
+            .map_err(|err| format!("failed to refresh append watermark: {err}"))
+            // Read AFTER the reload: if a commit slipped in between, the
+            // watermark is newer than the snapshot — but so is the
+            // store's generation vs `observed`, so the next refresh
+            // reloads again and re-primes. Conservative either way.
+            .unwrap_or(None);
+        Ok(())
+    }
+
+    /// P2: apply a pure-append delta — series rows past the cached
+    /// catalog max-id, chunk/rollup rows past the cached rowid
+    /// watermark. Caller holds the transition and txn locks and has
+    /// proven the shape generation unchanged (no deletes → no rowid
+    /// reuse). Application is idempotent by ChunkLoc because a writer's
+    /// own flushes advance the store past its cached watermark: rows we
+    /// already indexed are skipped, not duplicated.
+    fn apply_append_delta(
+        &self,
+        after_series_id: i64,
+        after_rowid: i64,
+        observed: Option<(i64, i64)>,
+        new_wm: (i64, i64),
+    ) -> EngineResult<()> {
+        let new_series = self
+            .store
+            .load_series_since(after_series_id)
+            .map_err(|err| format!("failed to load series delta: {err}"))?;
+        let (raw, rollup_chunks) = self
+            .store
+            .scan_since(after_rowid)
+            .map_err(|err| format!("failed to scan chunk delta: {err}"))?;
+
+        // Same acquisition order as the full reload: index → series →
+        // rollup, under the caller's transition + txn locks.
+        let mut index = self.index_write();
+        let mut series = self.series_write();
+        let mut rollups = self.rollup_write();
+        for row in &new_series {
+            let labels: Labels = row.labels.iter().cloned().collect();
+            // insert_known is idempotent for identical rows and loud on
+            // identity conflicts — exactly the semantics a re-read
+            // series row needs.
+            series.insert_known(row.id, &row.name, &labels, false)?;
+        }
+        for chunk in raw {
+            let pk = PartitionKey {
+                series_id: chunk.series_id,
+            };
+            if series.info_for(chunk.series_id).is_none() {
+                return Err(format!(
+                    "appended chunk {:?} references unknown series {}",
+                    chunk.meta.loc, chunk.series_id
+                ));
+            }
+            let known = index
+                .range((pk, i64::MIN, u64::MIN)..)
+                .take_while(|((key, _, _), _)| key == &pk)
+                .any(|(_, meta)| meta.loc == chunk.meta.loc);
+            if known {
+                continue;
+            }
+            index.insert((pk, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
+        }
+        for chunk in rollup_chunks {
+            let pk = PartitionKey {
+                series_id: chunk.series_id,
+            };
+            let known = rollups
+                .range((pk, chunk.resolution, i64::MIN, u64::MIN)..)
+                .take_while(|((key, res, _, _), _)| key == &pk && *res == chunk.resolution)
+                .any(|(_, meta)| meta.loc == chunk.meta.loc);
+            if known {
+                continue;
+            }
+            rollups.insert(
+                (pk, chunk.resolution, chunk.meta.min_ts, self.next_chunk_seq()),
+                chunk.meta,
+            );
+        }
+        *self.catalog_gen_lock() = observed;
+        *self.append_wm_lock() = Some(new_wm);
         Ok(())
     }
 
