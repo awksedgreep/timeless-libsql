@@ -1266,8 +1266,13 @@ check_eq "packed dense window blobs mark empty grid points in the validity bitma
 batch_dense|{"host":"b"}|5457423103000000640000000000000078000000000000008C0000000000000006000000000000000000000000000025400000000000403440'
 check_eq "packed window max_work_points is inclusive" \
   "$(grep '^batch_limited|' <<<"$got")" 'batch_limited|2'
-check_eq "packed window stats expose series, chunks, decode, buffer, result, bytes, and time" \
-  "$(grep '^window_stats|' <<<"$got")" 'window_stats|3|6|6|15|3|15|1|1'
+# P4: the ROW window TVF routes through the same batch primitive as the
+# packed TVF, so this section's three row queries (sum/count/min above)
+# and three packed queries each count — the counters measure the
+# primitive's work, whoever calls it. Values are exactly double the
+# packed-only era (same three queries in each shape).
+check_eq "window batch stats count row + packed users of the primitive" \
+  "$(grep '^window_stats|' <<<"$got")" 'window_stats|6|12|12|30|6|30|1|1'
 check_eq "label filter restricts to host b" \
   "$(grep '^filtered|' <<<"$got")" \
 'filtered|{"host":"b"}|110|10.5

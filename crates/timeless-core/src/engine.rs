@@ -3495,6 +3495,30 @@ impl Engine {
         Ok(Self::grid_last_walk(&samples, start, stop, step, lookback))
     }
 
+    /// P4: grid-last for an ordered batch of series — one validation,
+    /// one batched range read (single store read_chunks round-trip),
+    /// then the same grid_last_walk per series. Results retain input
+    /// order, absent series yield empty vectors — identical semantics
+    /// to calling query_grid_last_by_id per id.
+    pub fn query_grid_last_batch_by_id(
+        &self,
+        series_ids: &[i64],
+        start: i64,
+        stop: i64,
+        step: i64,
+        lookback: i64,
+    ) -> EngineResult<Vec<(i64, Vec<(i64, f64)>)>> {
+        if Self::validate_grid_last(start, stop, step, lookback)? == 0 {
+            return Ok(series_ids.iter().map(|&sid| (sid, Vec::new())).collect());
+        }
+        let samples =
+            self.query_range_batch_by_id(series_ids, start.saturating_sub(lookback), stop)?;
+        Ok(samples
+            .into_iter()
+            .map(|(sid, s)| (sid, Self::grid_last_walk(&s, start, stop, step, lookback)))
+            .collect())
+    }
+
     /// F7: the full window vocabulary, single series, rayon-free.
     /// Validation: same grid rules as the classic aggs; op parameters
     /// are validated by the caller (the vtab's parser) AND defensively
