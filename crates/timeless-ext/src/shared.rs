@@ -544,6 +544,73 @@ pub(crate) fn pin_for_drop<E>(
     drop_pins_lock().insert(key.clone(), erased);
 }
 
+/// P1: per-CONNECTION engine pins. The process registry below holds
+/// Weak references on purpose, and eponymous TVF vtabs die with their
+/// statement — so before P1, a connection that only ever ran TVF
+/// queries (a dashboard reader) held no strong reference between
+/// statements and rebuilt the engine on EVERY query (416ms + ~360MB
+/// alloc churn at 100k series; see FEATURE_PLAN "Cardinality
+/// mitigation"). Each engine resolution now deposits one strong Arc
+/// per (connection, key), released when the connection closes.
+///
+/// Lifecycle: the outer map entry is created by [`ConnPinScope`],
+/// whose owner is the boxed state of the `timeless_pins()` scalar
+/// function registered at extension init — SQLite drops function
+/// state at sqlite3_close, so the scope's Drop clears the pins
+/// exactly when the connection goes away, with no reliance on any
+/// newer clientdata API. A connection without the anchor function
+/// (pin_engine finds no entry) simply keeps pre-P1 behavior.
+///
+/// DROP TABLE semantics are unchanged: a dropped table's instance id
+/// rotates, so a recreate builds a fresh engine under a fresh key;
+/// the stale pin holds only memory and dies with the connection.
+static CONN_PINS: LazyLock<
+    Mutex<HashMap<usize, HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn conn_pins_lock(
+) -> MutexGuard<'static, HashMap<usize, HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>>> {
+    CONN_PINS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Owner of one connection's pin set. Held as `timeless_pins()`
+/// function state; its Drop is the connection-close hook.
+pub(crate) struct ConnPinScope(usize);
+
+impl ConnPinScope {
+    pub(crate) fn new(db: *mut ffi::sqlite3) -> Self {
+        conn_pins_lock().insert(db as usize, HashMap::new());
+        ConnPinScope(db as usize)
+    }
+
+    /// Number of engines this connection currently pins — the
+    /// `timeless_pins()` return value, and the deterministic
+    /// observable the test suite asserts on.
+    pub(crate) fn count(&self) -> i64 {
+        conn_pins_lock().get(&self.0).map_or(0, |pins| pins.len() as i64)
+    }
+}
+
+impl Drop for ConnPinScope {
+    fn drop(&mut self) {
+        conn_pins_lock().remove(&self.0);
+    }
+}
+
+/// Deposit a strong reference for (connection, key). First resolution
+/// wins; later calls for the same key are no-ops, so the pin set is
+/// bounded by the number of distinct timeless tables the connection
+/// touches.
+pub(crate) fn pin_engine(
+    db: *mut ffi::sqlite3,
+    key: &RegistryKey,
+    engine: Arc<dyn Any + Send + Sync>,
+) {
+    if let Some(pins) = conn_pins_lock().get_mut(&(db as usize)) {
+        pins.entry(key.clone()).or_insert(engine);
+    }
+}
+
 /// The process-global registry. Weak values: the registry must never
 /// keep an engine alive by itself — when the last vtab instance
 /// disconnects, the engine (and its buffered, pre-durable points) is
@@ -926,6 +993,73 @@ mod tests {
         .unwrap();
         assert!(rebuilt.get());
         assert_eq!(b.engine, 8);
+        remove(&k);
+    }
+
+    #[test]
+    fn conn_pin_keeps_engine_alive_until_scope_drops() {
+        let k = RegistryKey::Private {
+            db: 0xf1a0,
+            database: b"main".to_vec(),
+            table: "m".into(),
+            instance: [1; 16],
+        };
+        let db = 0x7157_0001 as *mut ffi::sqlite3;
+        let scope = ConnPinScope::new(db);
+        assert_eq!(scope.count(), 0);
+
+        // Resolve + pin, then drop the caller's Arc — the TVF-only
+        // pattern that used to leave nothing alive between statements.
+        let a: Arc<SharedEngine<u64>> = get_or_create(&k, || Ok(7)).unwrap();
+        pin_engine(db, &k, a.clone());
+        assert_eq!(scope.count(), 1);
+        drop(a);
+
+        // The pin must keep the Weak upgradable: no rebuild.
+        let b: Arc<SharedEngine<u64>> =
+            get_or_create(&k, || panic!("pinned engine must be reused, not rebuilt")).unwrap();
+        assert_eq!(b.engine, 7);
+        // Same key re-pin is a no-op (bounded pin set).
+        pin_engine(db, &k, b.clone());
+        assert_eq!(scope.count(), 1);
+        drop(b);
+
+        // Scope drop = connection close: pins released, engine dies,
+        // next resolution rebuilds — the pre-P1 lifecycle resumes.
+        drop(scope);
+        let rebuilt = std::cell::Cell::new(false);
+        let c: Arc<SharedEngine<u64>> = get_or_create(&k, || {
+            rebuilt.set(true);
+            Ok(8)
+        })
+        .unwrap();
+        assert!(rebuilt.get(), "close must release the connection's pins");
+        assert_eq!(c.engine, 8);
+        remove(&k);
+    }
+
+    #[test]
+    fn pin_without_scope_is_a_no_op() {
+        let k = RegistryKey::Private {
+            db: 0xf1a1,
+            database: b"main".to_vec(),
+            table: "m".into(),
+            instance: [1; 16],
+        };
+        let db = 0x7157_0002 as *mut ffi::sqlite3;
+        // No ConnPinScope registered for this connection (e.g. an
+        // embedded host that skipped register_telemetry's anchor):
+        // pinning silently does nothing and pre-P1 behavior holds.
+        let a: Arc<SharedEngine<u64>> = get_or_create(&k, || Ok(1)).unwrap();
+        pin_engine(db, &k, a.clone());
+        drop(a);
+        let rebuilt = std::cell::Cell::new(false);
+        let _b: Arc<SharedEngine<u64>> = get_or_create(&k, || {
+            rebuilt.set(true);
+            Ok(2)
+        })
+        .unwrap();
+        assert!(rebuilt.get(), "no scope = no pin = rebuild");
         remove(&k);
     }
 

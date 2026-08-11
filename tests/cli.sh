@@ -2728,6 +2728,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "== section 46: P1 per-connection engine pins (TVF-only readers) =="
+# The process registry holds engines by Weak reference and eponymous
+# TVF vtabs die with their statement, so before P1 a TVF-only
+# connection rebuilt the engine on EVERY query. Each resolution now
+# pins one strong Arc per (connection, table), released at close.
+# timeless_pins() counts this connection's pins — the deterministic
+# observable (no timing assertions needed).
+P1DB="$TMP/p1_pins.db"
+sqlite3 "$P1DB" <<SQL >/dev/null
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics;
+CREATE VIRTUAL TABLE l USING timeless_logs;
+INSERT INTO m(name, ts, value) VALUES ('cpu', 10, 1.0);
+INSERT INTO l(ts, level, message) VALUES (10, 'info', 'hello');
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO l(l) VALUES ('flush');
+SQL
+got=$(sqlite3 "$P1DB" <<SQL
+.load $EXT
+SELECT 'fresh', timeless_pins();
+SELECT COUNT(*) > 0 FROM timeless_series('m');
+SELECT 'after_tvf', timeless_pins();
+SELECT COUNT(*) FROM timeless_grid('m','cpu',NULL,10,10,10,10);
+SELECT 'after_second_tvf', timeless_pins();
+SELECT COUNT(*) FROM timeless_log_count('l');
+SELECT 'after_logs_tvf', timeless_pins();
+SQL
+)
+check_eq "TVF-only connection pins each engine exactly once" \
+  "$(grep -E '^(fresh|after)' <<<"$got")" \
+'fresh|0
+after_tvf|1
+after_second_tvf|1
+after_logs_tvf|2'
+# Pins are per-connection state: a fresh process starts at zero.
+got=$(sqlite3 "$P1DB" ".load $EXT" "SELECT timeless_pins();")
+check_eq "pins do not leak across connections" "$got" "0"
+
+# ---------------------------------------------------------------------------
 echo
 if [[ "$FAILURES" -eq 0 ]]; then
   echo "ALL SECTIONS PASSED"
