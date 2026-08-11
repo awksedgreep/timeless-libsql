@@ -262,6 +262,8 @@ impl TracesTab {
             )
             .map_err(module_err)
         })?;
+        // P1: connection-lifetime pin (see shared::pin_engine).
+        shared::pin_engine(handle, &key, shared.clone());
         shared.engine.set_retention(
             shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
         );

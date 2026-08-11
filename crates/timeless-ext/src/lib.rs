@@ -106,12 +106,31 @@ pub fn register_dbhealth(db: &Connection) -> Result<()> {
 /// excludes the development-only `timeless_spike` module and the separately
 /// packaged dbhealth modules.
 pub fn register_telemetry(db: &Connection) -> Result<()> {
+    register_conn_pins(db)?;
     let log_query_reports = std::sync::Arc::new(query_report::LogQueryReportState::default());
     capabilities::register(db)?;
     metrics_vtab::register(db)?;
     logs_vtab::register(db, std::sync::Arc::clone(&log_query_reports))?;
     traces_vtab::register(db)?;
     query_tvf::register(db, log_query_reports)
+}
+
+/// P1: the per-connection engine-pin anchor. The scalar function's
+/// boxed closure owns this connection's [`shared::ConnPinScope`];
+/// SQLite drops function state at `sqlite3_close`, which is exactly
+/// the connection-close hook the pin map needs (no clientdata API, no
+/// SQLite version dependency). Calling `timeless_pins()` returns how
+/// many engines this connection currently pins — a deterministic
+/// observable for the test suite, and a handy diagnostic.
+fn register_conn_pins(db: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    let scope = shared::ConnPinScope::new(unsafe { db.handle() });
+    db.create_scalar_function(
+        "timeless_pins",
+        0,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY,
+        move |_ctx| Ok(scope.count()),
+    )
 }
 
 #[cfg(feature = "entrypoints")]

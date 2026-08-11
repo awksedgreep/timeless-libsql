@@ -345,6 +345,9 @@ impl MetricsTab {
             )
             .map_err(module_err)
         })?;
+        // P1: keep the engine alive for this connection's lifetime, so
+        // TVF-only readers stop rebuilding it every statement.
+        shared::pin_engine(handle, &key, shared.clone());
         shared.engine.set_retention(
             shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
         );
