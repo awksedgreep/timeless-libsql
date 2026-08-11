@@ -734,8 +734,14 @@ batch), cold recovery is ~416ms, and the row-TVF kernels carry a
 - [x] **P4** row-TVF kernels on batch chunk reads + lazy labels
       rendering (the packed-TVF primitives, reused). Target: fleet
       grid/window at 100k from ~66ms toward ~46ms.
-- [ ] **P5** decoded-chunk LRU (bounded bytes, generation-invalidated)
-      for dashboard-refresh re-reads. Last; re-measure after P2/P4.
+- [~] **P5** decoded-chunk LRU — DEFERRED 2026-08-11 after the
+      re-measurement this item was gated on: with P1-P4 in, the query
+      it would help most (fleet rate-all at 100k) is already 48.9ms
+      warm, and the realistic ceiling (~15-20ms) costs a bounded
+      decoded-points cache (~16MB per hot metric) plus new
+      invalidation surface. Lowest value-per-risk on the list.
+      Revisit only if a real workload (Elixir layer / actual dashboard
+      cadence) shows repeated heavy folds mattering.
 
 Non-goals: flush throughput (linear, fine), full-catalog O(N) scans
 (inherent), 100-pt-chunk compression tax (use compact).
@@ -744,6 +750,7 @@ Non-goals: flush throughput (linear, fine), full-catalog O(N) scans
 
 | Date | Item | State | Evidence / next step |
 |---|---|---|---|
+| 2026-08-11 | P5 | deferred | Re-measured after P2/P4 per the plan's own gate and deferred with the user's agreement. Cumulative P1-P4 at 100k series: repeat TVF query 332ms -> 0.07-0.2ms; refresh-after-external-flush ~350ms -> 0.5ms; cold recovery 416ms -> 175ms; reader RSS 362-414MB -> 203-235MB (~2KB/series); fleet rate-all 66ms -> 48.9ms. Cardinality-mitigation plan CLOSED (4 shipped, 1 deferred with rationale). |
 | 2026-08-11 | P4 | complete | run_kernel now takes a BATCH closure: one call per query for the whole candidate set (defensive length+order verification against the candidates snapshot), labels rendered lazily only for emitting series. WindowTab -> query_window_op_batch_by_id (existing packed primitive); GridTab -> NEW engine query_grid_last_batch_by_id (validate once, one batched range read, grid_last_walk per series - semantics identical to the per-id path by construction); RollupTab keeps per-series reads inside the batch shape (tier chunks are few; documented). One deliberate test update: the window-batch stats counters now count row + packed users of the primitive (exactly double in cli.sh's section - same three queries in each shape; comment added). Measured at 100k: rate-all 66ms -> 48.9ms (packed-TVF territory, target met); recovery/RSS/other vectors unchanged except +14MB transient peak during the heaviest batch query (221 -> 235MB final; the time-for-space trade, noted). Gate: 46-section cli.sh green incl. the section-22 plain-SQL oracle and section 30-33 fill/absence pins; workspace green (pre-existing capabilities/0.6.0 failure only). P5 (decode LRU) is gated on re-measurement - see next row. |
 | 2026-08-11 | P3 | complete | Registry diet: forward map now identity-hash -> candidate-ids verified against series_info (kills the duplicated (String, Labels) key per series - the largest per-series allocation; reuses fast_series_hash_pairs, collisions resolved never trusted); label/metric postings HashSet -> sorted Vec (binary-search insert/remove); from_stored pre-sizes; series_overview iterates series_info; resolve paths lose a per-lookup (String, Labels) clone. Measured at 100k (bench-cardinality): cold recovery 360ms -> 188ms (1.9x); reader RSS 362 -> 201MB post-recovery, 414 -> 221MB final (~3.6KB -> ~2.0KB/series, 1.8x; residual = the single owned name+labels copy, interning left as optional follow-up); all query latencies unchanged; P2 compounding visible (pin_base_vtab 292ms -> 4.6ms). Gate: 46-section cli.sh green, workspace green (pre-existing capabilities/0.6.0 failure only). P4 next. |
 | 2026-08-11 | P2 | complete | Pure-append delta refresh: store trait grows append_watermark() (chunk_shape_gen + max rowid), scan_since(), load_series_since() with full-reload defaults; shadow store bumps chunk_shape_gen ONLY on delete/replace (prune, compact) and shares one row decoder between full and delta scans; engine primes gen+watermark at construction BEFORE the recovery scans (stale-conservative; first refresh no longer redundantly reloads), delta gated on unchanged shape-gen, application idempotent by ChunkLoc (writer's own flushed rows skipped, never double-counted), any delta doubt or error falls back to full reload. Tests: p2_delta_refresh.rs scripted counting store (append -> 1 delta scan 0 full scans + queryable; shape change -> full reload; idempotence); catalog_publication.rs updated for primed tokens. Gate: 46-section cli.sh all green, workspace tests green (1 pre-existing capabilities/0.6.0 failure, fails on main). Acceptance MET: cross-process refresh-after-flush at 100k series 0.52ms vs ~350ms full reload (~670x), external point visibility verified. P3 next. |
