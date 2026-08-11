@@ -97,14 +97,21 @@ impl PartitionBuffer {
 // ═══════════════════════════════════════════════════════════════════════
 
 pub struct SeriesRegistry {
-    /// Forward: (metric, labels) → series_id
-    series_map: HashMap<(String, Labels), i64>,
-    /// Reverse: series_id → SeriesInfo
+    /// Forward: identity hash of (metric, labels) → candidate ids,
+    /// verified against series_info on lookup (P3: this replaces a
+    /// full `(String, Labels)` key per series — the single largest
+    /// per-series allocation, duplicated from series_info).
+    series_map: HashMap<u64, Vec<i64>>,
+    /// Reverse: series_id → SeriesInfo — the ONE owned copy of a
+    /// series' name and labels.
     series_info: HashMap<i64, SeriesInfo>,
-    /// Inverted label index: (label_key, label_value) → set of series_ids
-    label_index: HashMap<(String, String), HashSet<i64>>,
-    /// Metric name → set of series_ids
-    metric_index: HashMap<String, HashSet<i64>>,
+    /// Inverted label index: (label_key, label_value) → sorted postings.
+    /// P3: sorted Vec instead of HashSet — half the per-entry overhead,
+    /// same lookup shape (find_series verifies against series_info
+    /// anyway).
+    label_index: HashMap<(String, String), Vec<i64>>,
+    /// Metric name → sorted postings.
+    metric_index: HashMap<String, Vec<i64>>,
     /// Next ID
     next_id: AtomicI64,
     dirty: bool,
@@ -122,17 +129,68 @@ impl SeriesRegistry {
         }
     }
 
+    /// Identity hash for the forward map. Labels is a BTreeMap, so its
+    /// iteration order is exactly the sorted-and-deduplicated order
+    /// fast_series_hash_pairs requires.
+    fn identity_hash(metric_name: &str, labels: &Labels) -> u64 {
+        let pairs: Vec<(&str, &str)> = labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        fast_series_hash_pairs(metric_name, &pairs)
+    }
+
+    /// Exact forward lookup: hash bucket, then verify each candidate
+    /// against series_info (collisions are resolved, never trusted).
+    fn lookup(&self, metric_name: &str, labels: &Labels) -> Option<i64> {
+        let ids = self.series_map.get(&Self::identity_hash(metric_name, labels))?;
+        ids.iter().copied().find(|id| {
+            self.series_info
+                .get(id)
+                .is_some_and(|info| info.metric_name == metric_name && &info.labels == labels)
+        })
+    }
+
+    fn map_insert(&mut self, metric_name: &str, labels: &Labels, id: i64) {
+        self.series_map
+            .entry(Self::identity_hash(metric_name, labels))
+            .or_default()
+            .push(id);
+    }
+
+    fn map_remove(&mut self, metric_name: &str, labels: &Labels, id: i64) {
+        let hash = Self::identity_hash(metric_name, labels);
+        if let Some(ids) = self.series_map.get_mut(&hash) {
+            ids.retain(|&existing| existing != id);
+            if ids.is_empty() {
+                self.series_map.remove(&hash);
+            }
+        }
+    }
+
+    /// Insert into a sorted postings list, keeping order and uniqueness.
+    fn postings_insert(postings: &mut Vec<i64>, id: i64) {
+        if let Err(at) = postings.binary_search(&id) {
+            postings.insert(at, id);
+        }
+    }
+
+    fn postings_remove(postings: &mut Vec<i64>, id: i64) {
+        if let Ok(at) = postings.binary_search(&id) {
+            postings.remove(at);
+        }
+    }
+
     /// Resolve (metric_name, labels) → series_id. Creates if new.
     fn get_or_create(&mut self, metric_name: &str, labels: &Labels) -> i64 {
-        let key = (metric_name.to_string(), labels.clone());
-        if let Some(&id) = self.series_map.get(&key) {
+        if let Some(id) = self.lookup(metric_name, labels) {
             return id;
         }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         // Forward map
-        self.series_map.insert(key, id);
+        self.map_insert(metric_name, labels, id);
 
         // Reverse map
         self.series_info.insert(
@@ -144,15 +202,17 @@ impl SeriesRegistry {
         );
 
         // Label index — index every label pair + __name__
-        self.metric_index
-            .entry(metric_name.to_string())
-            .or_default()
-            .insert(id);
+        Self::postings_insert(
+            self.metric_index
+                .entry(metric_name.to_string())
+                .or_default(),
+            id,
+        );
         for (k, v) in labels {
-            self.label_index
-                .entry((k.clone(), v.clone()))
-                .or_default()
-                .insert(id);
+            Self::postings_insert(
+                self.label_index.entry((k.clone(), v.clone())).or_default(),
+                id,
+            );
         }
 
         self.dirty = true;
@@ -169,9 +229,8 @@ impl SeriesRegistry {
         if id <= 0 {
             return Err(format!("series id must be positive, got {id}"));
         }
-        let key = (metric_name.to_string(), labels.clone());
-        if let Some(existing_id) = self.series_map.get(&key) {
-            return if *existing_id == id {
+        if let Some(existing_id) = self.lookup(metric_name, labels) {
+            return if existing_id == id {
                 Ok(())
             } else {
                 Err(format!(
@@ -186,7 +245,7 @@ impl SeriesRegistry {
             ));
         }
 
-        self.series_map.insert(key, id);
+        self.map_insert(metric_name, labels, id);
         self.series_info.insert(
             id,
             SeriesInfo {
@@ -194,15 +253,19 @@ impl SeriesRegistry {
                 labels: labels.clone(),
             },
         );
-        self.metric_index
-            .entry(metric_name.to_string())
-            .or_default()
-            .insert(id);
+        Self::postings_insert(
+            self.metric_index
+                .entry(metric_name.to_string())
+                .or_default(),
+            id,
+        );
         for (key, value) in labels {
-            self.label_index
-                .entry((key.clone(), value.clone()))
-                .or_default()
-                .insert(id);
+            Self::postings_insert(
+                self.label_index
+                    .entry((key.clone(), value.clone()))
+                    .or_default(),
+                id,
+            );
         }
         let next_after_id = id
             .checked_add(1)
@@ -217,10 +280,9 @@ impl SeriesRegistry {
         let Some(info) = self.series_info.remove(&id) else {
             return;
         };
-        self.series_map
-            .remove(&(info.metric_name.clone(), info.labels.clone()));
+        self.map_remove(&info.metric_name, &info.labels, id);
         if let Some(ids) = self.metric_index.get_mut(&info.metric_name) {
-            ids.remove(&id);
+            Self::postings_remove(ids, id);
             if ids.is_empty() {
                 self.metric_index.remove(&info.metric_name);
             }
@@ -228,7 +290,7 @@ impl SeriesRegistry {
         for (key, value) in info.labels {
             let index_key = (key, value);
             if let Some(ids) = self.label_index.get_mut(&index_key) {
-                ids.remove(&id);
+                Self::postings_remove(ids, id);
                 if ids.is_empty() {
                     self.label_index.remove(&index_key);
                 }
@@ -238,6 +300,8 @@ impl SeriesRegistry {
 
     fn from_stored(rows: &[StoredSeries]) -> Result<Self, String> {
         let mut registry = Self::new();
+        registry.series_map.reserve(rows.len());
+        registry.series_info.reserve(rows.len());
         for row in rows {
             let mut labels = Labels::new();
             let mut previous_key: Option<&str> = None;
@@ -357,7 +421,7 @@ impl SeriesRegistry {
     }
 
     fn series_count(&self) -> usize {
-        self.series_map.len()
+        self.series_info.len()
     }
 
     /// Serialize for persistence (the store decides where bytes land).
@@ -1223,11 +1287,7 @@ impl Engine {
                             })?;
                             for row in &legacy_rows {
                                 let labels: Labels = row.labels.iter().cloned().collect();
-                                if registry
-                                    .series_map
-                                    .get(&(row.name.clone(), labels))
-                                    .copied()
-                                    != Some(row.id)
+                                if registry.lookup(&row.name, &labels) != Some(row.id)
                                 {
                                     return Err(format!(
                                         "legacy series {} did not migrate with its original id",
@@ -1322,10 +1382,9 @@ impl Engine {
 
     /// Resolve (metric, labels) → series_id. Fast read path, slow write path.
     fn resolve_series(&self, metric_name: &str, labels: &Labels) -> EngineResult<i64> {
-        let key = (metric_name.to_string(), labels.clone());
         let mut journal = self.txn_guard();
         let mut reg = self.series_write();
-        if let Some(&id) = reg.series_map.get(&key) {
+        if let Some(id) = reg.lookup(metric_name, labels) {
             return Ok(id);
         }
         if !self.authoritative_series {
@@ -1373,7 +1432,7 @@ impl Engine {
         {
             let reg = self.series_read();
             for (idx, (metric_name, labels)) in entries.iter().enumerate() {
-                if let Some(&id) = reg.series_map.get(&(metric_name.clone(), labels.clone())) {
+                if let Some(id) = reg.lookup(metric_name, labels) {
                     out[idx] = id;
                 } else {
                     misses.push(idx);
@@ -4592,9 +4651,10 @@ impl Engine {
 
         let reg = self.series_read();
         let mut out: Vec<SeriesOverview> = reg
-            .series_map
+            .series_info
             .iter()
-            .map(|((name, labels), &series_id)| {
+            .map(|(&series_id, info)| {
+                let (name, labels) = (&info.metric_name, &info.labels);
                 let chunks = chunk_agg.get(&series_id);
                 let buffered = buf_agg.get(&series_id);
                 let min_ts = match (chunks.map(|c| c.0), buffered.map(|b| b.1)) {
