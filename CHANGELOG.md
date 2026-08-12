@@ -10,9 +10,13 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.6.1 -->
+<!-- release-target: 0.6.2 -->
 
 ## [Unreleased]
+
+No changes recorded after `0.6.2`.
+
+## [0.6.2] — 2026-08-11
 
 ### Added
 
