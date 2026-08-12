@@ -912,6 +912,8 @@ fn trace_bucket_percentile_finalization_observes_cancellation_after_buffer_scan(
     let engine = SpanBlockEngine::new(
         Box::new(store),
         SpanEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             flush_threshold: 10_000,
             ..SpanEngineConfig::default()
         },
@@ -948,6 +950,8 @@ fn bounded_trace_query_is_exact_and_skips_older_blocks() {
     let engine = SpanBlockEngine::new(
         Box::new(MemSpanStore::new()),
         SpanEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             flush_threshold: 1000,
             ..SpanEngineConfig::default()
         },
@@ -1154,6 +1158,8 @@ fn optimize_backfills_full_legacy_blocks_without_rewriting_payloads() {
     let engine = SpanBlockEngine::new(
         Box::new(store),
         SpanEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             merge_target_entries: 4,
             ..SpanEngineConfig::default()
         },
@@ -1240,6 +1246,8 @@ fn duration_backfill_obeys_the_optimize_entry_budget() {
     let engine = SpanBlockEngine::new(
         Box::new(store),
         SpanEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             merge_target_entries: 4,
             ..SpanEngineConfig::default()
         },
@@ -1423,6 +1431,8 @@ fn merge_respects_ts_span_cap() {
     // Cap of 100 ts units; three small raw blocks at ts ~0, ~50,
     // ~1000. Blocks 1+2 fit one 100-unit span; block 3 must not join.
     let cfg = SpanEngineConfig {
+        auto_optimize_interval_flushes: 0,
+        auto_optimize_budget_entries: 32_768,
         merge_max_ts_span: 100,
         merge_target_entries: 1_000_000,
         ..SpanEngineConfig::default()
@@ -1527,6 +1537,8 @@ fn budgeted_span_optimize_bounds_calls_and_drains_oldest_raw_groups() {
     let engine = SpanBlockEngine::new(
         Box::new(MemSpanStore::new()),
         SpanEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             merge_max_ts_span: 0,
             ..SpanEngineConfig::default()
         },
@@ -1892,4 +1904,107 @@ fn released_flush_frame_still_rolls_back_with_outer_transaction() {
     engine.txn_rollback();
 
     assert_eq!(engine.stats(), (0, 0, 1));
+}
+
+// ---------------------------------------------------------------------------
+// Auto-optimize — the spans twin of the blocks tests: flush-only hosts
+// must still end up with compressed blocks.
+// ---------------------------------------------------------------------------
+
+fn auto_config(interval: usize, budget: usize) -> SpanEngineConfig {
+    SpanEngineConfig {
+        auto_optimize_interval_flushes: interval,
+        auto_optimize_budget_entries: budget,
+        ..SpanEngineConfig::default()
+    }
+}
+
+#[test]
+fn auto_optimize_compresses_after_interval_flushes_without_manual_call() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), auto_config(3, 32_768)).unwrap();
+    for i in 0..200u8 {
+        engine
+            .push(span(
+                i % 7,
+                i,
+                None,
+                "op",
+                "api",
+                1,
+                (i % 3) as u8,
+                1_000 + i as i64,
+                &[],
+            ))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    let (_, raw_after_first, _) = engine.stats();
+    assert!(raw_after_first > 0, "first flush leaves raw blocks");
+
+    engine.flush().unwrap();
+    engine.flush().unwrap();
+
+    let (blocks, raw_blocks, _) = engine.stats();
+    assert!(blocks > 0);
+    assert_eq!(
+        raw_blocks, 0,
+        "interval-th flush call must compress the raw backlog by itself"
+    );
+}
+
+#[test]
+fn auto_optimize_triggers_immediately_when_raw_backlog_reaches_budget() {
+    let engine =
+        SpanBlockEngine::new(Box::new(MemSpanStore::new()), auto_config(1_000, 100)).unwrap();
+    for i in 0..150u8 {
+        engine
+            .push(span(
+                i % 7,
+                i,
+                None,
+                "op",
+                "api",
+                1,
+                0,
+                1_000 + i as i64,
+                &[],
+            ))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    let (_, raw_blocks, _) = engine.stats();
+    assert_eq!(
+        raw_blocks, 0,
+        "a raw backlog at the budget compresses on the same flush, not interval-later"
+    );
+}
+
+#[test]
+fn auto_optimize_zero_interval_disables() {
+    let engine = SpanBlockEngine::new(Box::new(MemSpanStore::new()), auto_config(0, 100)).unwrap();
+    for i in 0..200u8 {
+        engine
+            .push(span(
+                i % 7,
+                i,
+                None,
+                "op",
+                "api",
+                1,
+                0,
+                1_000 + i as i64,
+                &[],
+            ))
+            .unwrap();
+    }
+    for _ in 0..40 {
+        engine.flush().unwrap();
+    }
+    let (blocks, raw_blocks, _) = engine.stats();
+    assert_eq!(
+        raw_blocks, blocks,
+        "disabled auto-optimize never compresses"
+    );
+    assert!(raw_blocks > 0);
 }

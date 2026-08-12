@@ -80,6 +80,8 @@ fn engine_with(trigrams: bool, reads: Arc<AtomicUsize>) -> BlockEngine {
             reads,
         }),
         BlockEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             flush_threshold: 1_000_000,
             message_trigrams: trigrams,
             ..Default::default()

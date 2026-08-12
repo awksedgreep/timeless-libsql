@@ -14,7 +14,20 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-No changes recorded after `0.5.0`.
+### Added
+
+- Auto-optimize in the logs and traces block engines: every 30th flush
+  call (including empty heartbeat flushes) consults the exact optimize
+  planner and runs one budgeted pass (32,768 entries) when it finds
+  actionable work; a raw backlog at or past the budget triggers the pass
+  on the same flush instead of waiting out the interval. An extension has
+  no timer of its own, so maintenance now rides the one call every host
+  already makes on a heartbeat — previously a host that only ever issued
+  `flush` (the embedded Elixir engines) accumulated raw blocks forever,
+  paying full-size storage and raw-scan query costs until retention
+  deleted the data uncompressed. Hosts that schedule `optimize`
+  externally (the API services) are unaffected beyond finding an emptier
+  backlog. Engine-level opt-out: `auto_optimize_interval_flushes: 0`.
 
 ## [0.5.0] — 2026-08-08
 

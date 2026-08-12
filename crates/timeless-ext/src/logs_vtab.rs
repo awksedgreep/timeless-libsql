@@ -76,6 +76,13 @@ pub(crate) fn register(db: &Connection, query_reports: Arc<LogQueryReportState>)
 const FLUSH_THRESHOLD: usize = 8192; // buffered entries before auto-flush
 const ZSTD_LEVEL: i32 = 7;
 pub(crate) const MERGE_TARGET_ENTRIES: usize = 8192;
+/// Auto-optimize riding the flush path (the embedded Elixir engines send
+/// 'flush' on a 1s heartbeat but never 'optimize' — compression must not
+/// depend on the host knowing to schedule it). 30 flushes ≈ the API
+/// services' 30s optimize cadence; the budget bounds each pause and doubles
+/// as the raw-backlog size that triggers a pass immediately.
+const AUTO_OPTIMIZE_INTERVAL_FLUSHES: usize = 30;
+const AUTO_OPTIMIZE_BUDGET_ENTRIES: usize = 32_768;
 /// HARD CAP on merged-block ts span: 1 hour in the table's declared unit.
 /// PLAN.md "Pruning & retention": merge
 /// compaction must never produce blocks straddling retention
@@ -262,6 +269,8 @@ impl LogsTab {
                     merge_max_ts_span: timestamp_unit.hour,
                     message_trigrams,
                     index_keys,
+                    auto_optimize_interval_flushes: AUTO_OPTIMIZE_INTERVAL_FLUSHES,
+                    auto_optimize_budget_entries: AUTO_OPTIMIZE_BUDGET_ENTRIES,
                 },
             )
             .map_err(module_err)
@@ -418,6 +427,8 @@ impl LogsTab {
                     merge_max_ts_span: timestamp_unit.hour,
                     message_trigrams,
                     index_keys: index_keys_for_engine,
+                    auto_optimize_interval_flushes: AUTO_OPTIMIZE_INTERVAL_FLUSHES,
+                    auto_optimize_budget_entries: AUTO_OPTIMIZE_BUDGET_ENTRIES,
                 },
             )
             .map_err(module_err)

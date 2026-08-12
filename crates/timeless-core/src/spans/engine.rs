@@ -22,7 +22,7 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
@@ -54,6 +54,14 @@ pub struct SpanEngineConfig {
     /// Exact JSON-Pointer fields that receive fixed-size per-block negative
     /// filters. Empty preserves the historical trace storage layout.
     pub attribute_indexes: Vec<SpanAttributeIndex>,
+    /// Run a budgeted optimize from inside flush() every this many flush
+    /// calls (when the exact planner reports actionable work). 0 disables.
+    /// Same rationale as BlockEngineConfig: the extension has no timer, so
+    /// maintenance rides the flush heartbeat every host already provides.
+    pub auto_optimize_interval_flushes: usize,
+    /// Span budget per auto-optimize pass, and the raw-backlog size that
+    /// triggers a pass immediately instead of waiting out the interval.
+    pub auto_optimize_budget_entries: usize,
 }
 
 impl Default for SpanEngineConfig {
@@ -64,6 +72,8 @@ impl Default for SpanEngineConfig {
             merge_target_entries: 8192,
             merge_max_ts_span: i64::MAX,
             attribute_indexes: Vec::new(),
+            auto_optimize_interval_flushes: 30,
+            auto_optimize_budget_entries: 32_768,
         }
     }
 }
@@ -515,6 +525,8 @@ pub struct SpanBlockEngine {
     retention_native: AtomicI64,
     /// Last retention cutoff applied (advance guard); i64::MIN = never.
     retention_floor: AtomicI64,
+    /// Flush calls since the last auto-optimize backlog check.
+    flushes_since_auto_optimize: AtomicUsize,
     query_profile: SpanQueryProfile,
     optimize_profile: SpanOptimizeProfile,
 }
@@ -564,6 +576,7 @@ impl SpanBlockEngine {
             txn: Mutex::new(TxnJournal::default()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
+            flushes_since_auto_optimize: AtomicUsize::new(0),
             query_profile: SpanQueryProfile::default(),
             optimize_profile: SpanOptimizeProfile::default(),
         })
@@ -831,7 +844,43 @@ impl SpanBlockEngine {
     pub fn flush(&self) -> Result<usize, String> {
         let out = self.flush_inner()?;
         self.apply_retention()?;
+        self.maybe_auto_optimize()?;
         Ok(out)
+    }
+
+    /// Auto-optimize riding the flush path — the spans twin of
+    /// BlockEngine::maybe_auto_optimize: every interval-th flush call
+    /// (including empty heartbeat flushes) consults the exact planner and
+    /// runs one budgeted pass if it found actionable work; a raw backlog
+    /// at or past the budget triggers immediately.
+    fn maybe_auto_optimize(&self) -> Result<(), String> {
+        let interval = self.config.auto_optimize_interval_flushes;
+        if interval == 0 {
+            return Ok(());
+        }
+        let budget = self.config.auto_optimize_budget_entries;
+        let calls = self
+            .flushes_since_auto_optimize
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        if calls < interval {
+            let raw_entries: u64 = self
+                .index_lock()
+                .iter()
+                .filter(|entry| entry.meta.codec == CODEC_RAW)
+                .map(|entry| entry.meta.entry_count as u64)
+                .sum();
+            if raw_entries < budget as u64 {
+                return Ok(());
+            }
+        }
+        self.flushes_since_auto_optimize.store(0, Ordering::Relaxed);
+        let backlog = self.optimize_backlog();
+        if backlog.raw_blocks == 0 && backlog.merge_ready_groups == 0 {
+            return Ok(());
+        }
+        self.optimize_budgeted(budget)?;
+        Ok(())
     }
 
     fn flush_inner(&self) -> Result<usize, String> {

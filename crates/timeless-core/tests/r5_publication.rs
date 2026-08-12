@@ -528,6 +528,8 @@ fn logs_query_cannot_miss_buffer_during_flush() {
         BlockEngine::new(
             Box::new(store),
             BlockEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..BlockEngineConfig::default()
             },
@@ -569,6 +571,8 @@ fn traces_query_cannot_miss_buffer_during_flush() {
         SpanBlockEngine::new(
             Box::new(store),
             SpanEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..SpanEngineConfig::default()
             },
@@ -610,6 +614,8 @@ fn logs_query_cannot_read_deleted_location_during_optimize() {
         BlockEngine::new(
             Box::new(store),
             BlockEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..BlockEngineConfig::default()
             },
@@ -678,6 +684,8 @@ fn logs_flush_can_publish_after_query_snapshot_before_materialization() {
         BlockEngine::new(
             Box::new(MemBlockStore::new()),
             BlockEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..BlockEngineConfig::default()
             },
@@ -724,6 +732,8 @@ fn logs_optimize_can_publish_after_query_snapshot_before_materialization() {
         BlockEngine::new(
             Box::new(MemBlockStore::new()),
             BlockEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..BlockEngineConfig::default()
             },
@@ -773,6 +783,8 @@ fn logs_stable_store_streams_locations_without_owning_all_payloads() {
                 inner: MemBlockStore::new(),
             }),
             BlockEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..BlockEngineConfig::default()
             },
@@ -860,6 +872,8 @@ fn traces_flush_can_publish_after_query_snapshot_before_materialization() {
         SpanBlockEngine::new(
             Box::new(MemSpanStore::new()),
             SpanEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..SpanEngineConfig::default()
             },
@@ -909,6 +923,8 @@ fn traces_optimize_can_publish_after_query_snapshot_before_materialization() {
         SpanBlockEngine::new(
             Box::new(MemSpanStore::new()),
             SpanEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..SpanEngineConfig::default()
             },
@@ -997,6 +1013,8 @@ fn traces_stable_store_streams_locations_with_bounded_payload_memory() {
                 inner: MemSpanStore::new(),
             }),
             SpanEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..SpanEngineConfig::default()
             },
@@ -1056,6 +1074,8 @@ fn traces_query_cannot_read_deleted_location_during_optimize() {
         SpanBlockEngine::new(
             Box::new(store),
             SpanEngineConfig {
+                auto_optimize_interval_flushes: 0,
+                auto_optimize_budget_entries: 32_768,
                 flush_threshold: 1000,
                 ..SpanEngineConfig::default()
             },

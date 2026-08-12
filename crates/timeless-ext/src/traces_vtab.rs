@@ -89,6 +89,11 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
 const FLUSH_THRESHOLD: usize = 8192; // buffered spans before auto-flush
 const ZSTD_LEVEL: i32 = 7;
 pub(crate) const MERGE_TARGET_ENTRIES: usize = 8192;
+/// Auto-optimize riding the flush path — same rationale and cadence as
+/// logs_vtab: hosts only guarantee a flush heartbeat, never an optimize
+/// schedule, so compression must not depend on one.
+const AUTO_OPTIMIZE_INTERVAL_FLUSHES: usize = 30;
+const AUTO_OPTIMIZE_BUDGET_ENTRIES: usize = 32_768;
 /// HARD CAP on merged-block ts span: 1 hour in NANOSECONDS (this vtab
 /// documents start_ts as unix ns). Same retention-boundary rule as the
 /// logs vtab (which passes 1h in ms) — the engine is unit-agnostic, the
@@ -258,6 +263,8 @@ impl TracesTab {
                     merge_target_entries: MERGE_TARGET_ENTRIES,
                     merge_max_ts_span: MERGE_MAX_TS_SPAN,
                     attribute_indexes,
+                    auto_optimize_interval_flushes: AUTO_OPTIMIZE_INTERVAL_FLUSHES,
+                    auto_optimize_budget_entries: AUTO_OPTIMIZE_BUDGET_ENTRIES,
                 },
             )
             .map_err(module_err)
@@ -370,6 +377,8 @@ impl TracesTab {
                     merge_target_entries: MERGE_TARGET_ENTRIES,
                     merge_max_ts_span: MERGE_MAX_TS_SPAN,
                     attribute_indexes,
+                    auto_optimize_interval_flushes: AUTO_OPTIMIZE_INTERVAL_FLUSHES,
+                    auto_optimize_budget_entries: AUTO_OPTIMIZE_BUDGET_ENTRIES,
                 },
             )
             .map_err(module_err)

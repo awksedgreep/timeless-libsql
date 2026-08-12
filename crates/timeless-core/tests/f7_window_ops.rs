@@ -227,6 +227,8 @@ fn trace_duration_percentiles_match_naive() {
     let engine = SpanBlockEngine::new(
         Box::new(MemSpanStore::new()),
         SpanEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             flush_threshold: 1_000_000,
             ..Default::default()
         },

@@ -142,6 +142,8 @@ fn block_engine_retention() {
     let engine = BlockEngine::new(
         Box::new(MemBlockStore::new()),
         BlockEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             flush_threshold: 100_000,
             ..Default::default()
         },

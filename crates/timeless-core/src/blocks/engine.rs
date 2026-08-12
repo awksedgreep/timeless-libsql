@@ -13,7 +13,7 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,20 @@ pub struct BlockEngineConfig {
     /// low-cardinality keys belong here — indexing identifier-like
     /// values (request ids...) would bloat the term table past the data.
     pub index_keys: Vec<String>,
+    /// Run a budgeted optimize from inside flush() every this many flush
+    /// calls (when the exact planner reports actionable work). 0 disables
+    /// auto-optimize. An extension has no timer of its own, so maintenance
+    /// must ride a host call — and flush is the one call every host already
+    /// makes on a heartbeat. Hosts that schedule optimize externally (the
+    /// API services) just find an emptier backlog. 30 matches the services'
+    /// 30s optimize cadence against the embedded engines' 1s flush timers.
+    pub auto_optimize_interval_flushes: usize,
+    /// Entry budget for each auto-optimize pass — and the raw-backlog size
+    /// that triggers a pass immediately, without waiting out the interval.
+    /// Bounds the pause a flush caller can absorb; under sustained ingest
+    /// the immediate trigger keeps raw debt near this bound instead of
+    /// letting it grow interval-wide.
+    pub auto_optimize_budget_entries: usize,
 }
 
 impl Default for BlockEngineConfig {
@@ -66,6 +80,8 @@ impl Default for BlockEngineConfig {
             merge_max_ts_span: i64::MAX,
             message_trigrams: false,
             index_keys: Vec::new(),
+            auto_optimize_interval_flushes: 30,
+            auto_optimize_budget_entries: 32_768,
         }
     }
 }
@@ -576,6 +592,8 @@ pub struct BlockEngine {
     retention_native: AtomicI64,
     /// Last retention cutoff applied (advance guard); i64::MIN = never.
     retention_floor: AtomicI64,
+    /// Flush calls since the last auto-optimize backlog check.
+    flushes_since_auto_optimize: AtomicUsize,
     profile: BlockEngineProfile,
 }
 
@@ -628,6 +646,7 @@ impl BlockEngine {
             txn: Mutex::new(TxnJournal::default()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
+            flushes_since_auto_optimize: AtomicUsize::new(0),
             profile: BlockEngineProfile::default(),
         })
     }
@@ -944,7 +963,46 @@ impl BlockEngine {
                 .flush_total_ns
                 .fetch_add(elapsed_ns(started), Ordering::Relaxed);
         }
+        self.maybe_auto_optimize()?;
         Ok(out)
+    }
+
+    /// Auto-optimize, riding the flush path (see
+    /// BlockEngineConfig::auto_optimize_interval_flushes). Every interval-th
+    /// flush call — including empty heartbeat flushes, so an idle store
+    /// still drains its debt — consults the exact planner and runs one
+    /// budgeted pass if it found actionable work. A raw backlog at or past
+    /// the budget triggers immediately instead of waiting out the interval.
+    fn maybe_auto_optimize(&self) -> Result<(), String> {
+        let interval = self.config.auto_optimize_interval_flushes;
+        if interval == 0 {
+            return Ok(());
+        }
+        let budget = self.config.auto_optimize_budget_entries;
+        let calls = self
+            .flushes_since_auto_optimize
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        if calls < interval {
+            // Cheap urgency probe between interval checks: raw entry count
+            // from index metadata only (no planning).
+            let raw_entries: u64 = self
+                .index_lock()
+                .iter()
+                .filter(|entry| is_raw_codec(entry.meta.codec))
+                .map(|entry| entry.meta.entry_count as u64)
+                .sum();
+            if raw_entries < budget as u64 {
+                return Ok(());
+            }
+        }
+        self.flushes_since_auto_optimize.store(0, Ordering::Relaxed);
+        let backlog = self.optimize_backlog();
+        if backlog.raw_blocks == 0 && backlog.merge_ready_groups == 0 {
+            return Ok(());
+        }
+        self.optimize_budgeted(budget)?;
+        Ok(())
     }
 
     fn flush_inner(&self) -> Result<usize, String> {

@@ -26,6 +26,8 @@ fn log_engine() -> BlockEngine {
     BlockEngine::new(
         Box::new(MemBlockStore::new()),
         BlockEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             flush_threshold: 1_000_000,
             index_keys: vec!["service".into()],
             ..Default::default()
@@ -135,6 +137,8 @@ fn trace_bucket_stats_match_naive() {
     let engine = SpanBlockEngine::new(
         Box::new(MemSpanStore::new()),
         SpanEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             flush_threshold: 1_000_000,
             ..Default::default()
         },

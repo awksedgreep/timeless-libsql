@@ -158,6 +158,8 @@ fn template_codec_wins_on_templated_messages_and_falls_back_on_noise() {
 
 fn config(index_keys: &[&str]) -> BlockEngineConfig {
     BlockEngineConfig {
+        auto_optimize_interval_flushes: 0,
+        auto_optimize_budget_entries: 32_768,
         index_keys: index_keys.iter().map(|s| s.to_string()).collect(),
         ..BlockEngineConfig::default()
     }
@@ -465,15 +467,22 @@ fn widening_index_keys_without_reindex_hides_older_blocks() {
 
     // Written when only "service" was indexed.
     let old = BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service"])).unwrap();
-    old.push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
-        .unwrap();
+    old.push(entry(
+        10,
+        3,
+        "one",
+        &[("service", "api"), ("host", "web-1")],
+    ))
+    .unwrap();
     old.flush().unwrap();
     drop(old);
 
     // A later process indexes "host" too.
-    let new =
-        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service", "host"]))
-            .unwrap();
+    let new = BlockEngine::new(
+        Box::new(SharedStore(store.clone())),
+        config(&["service", "host"]),
+    )
+    .unwrap();
 
     let q = LogQuery {
         metadata_eq: vec![("host".into(), "web-1".into())],
@@ -494,19 +503,35 @@ fn reindex_makes_a_widened_allowlist_retroactive() {
     let store = Arc::new(MemBlockStore::new());
 
     let old = BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service"])).unwrap();
-    old.push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
-        .unwrap();
-    old.push(entry(20, 3, "two", &[("service", "api"), ("host", "web-2")]))
-        .unwrap();
+    old.push(entry(
+        10,
+        3,
+        "one",
+        &[("service", "api"), ("host", "web-1")],
+    ))
+    .unwrap();
+    old.push(entry(
+        20,
+        3,
+        "two",
+        &[("service", "api"), ("host", "web-2")],
+    ))
+    .unwrap();
     old.flush().unwrap();
     drop(old);
 
-    let new =
-        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service", "host"]))
-            .unwrap();
+    let new = BlockEngine::new(
+        Box::new(SharedStore(store.clone())),
+        config(&["service", "host"]),
+    )
+    .unwrap();
 
     let keys = vec!["service".to_string(), "host".to_string()];
-    assert_eq!(new.reindex(&keys).unwrap(), 1, "one block should be rewritten");
+    assert_eq!(
+        new.reindex(&keys).unwrap(),
+        1,
+        "one block should be rewritten"
+    );
 
     let q = LogQuery {
         metadata_eq: vec![("host".into(), "web-1".into())],
@@ -538,7 +563,12 @@ fn reindex_persists_the_allowlist_and_is_idempotent() {
     let engine =
         BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service"])).unwrap();
     engine
-        .push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
+        .push(entry(
+            10,
+            3,
+            "one",
+            &[("service", "api"), ("host", "web-1")],
+        ))
         .unwrap();
     engine.flush().unwrap();
 
@@ -567,11 +597,18 @@ fn reindex_narrowing_drops_stale_postings() {
     // key the engine no longer applies would keep pruning on it.
     let store = Arc::new(MemBlockStore::new());
 
-    let engine =
-        BlockEngine::new(Box::new(SharedStore(store.clone())), config(&["service", "host"]))
-            .unwrap();
+    let engine = BlockEngine::new(
+        Box::new(SharedStore(store.clone())),
+        config(&["service", "host"]),
+    )
+    .unwrap();
     engine
-        .push(entry(10, 3, "one", &[("service", "api"), ("host", "web-1")]))
+        .push(entry(
+            10,
+            3,
+            "one",
+            &[("service", "api"), ("host", "web-1")],
+        ))
         .unwrap();
     engine.flush().unwrap();
 
@@ -875,6 +912,8 @@ fn native_count_uses_metadata_when_proven_and_decodes_only_when_needed() {
     let engine = BlockEngine::new(
         Box::new(store),
         BlockEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             message_trigrams: true,
             ..config(&["service"])
         },
@@ -989,6 +1028,8 @@ fn exact_contains_is_case_insensitive_and_safe_for_bounded_queries() {
     let engine = BlockEngine::new(
         Box::new(MemBlockStore::new()),
         BlockEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             message_trigrams: true,
             ..config(&[])
         },
@@ -1366,6 +1407,8 @@ fn merge_respects_ts_span_cap() {
     // Blocks 1+2 fit inside one 100-unit span, block 3 must NOT merge
     // with them (0..=1009 would straddle a retention boundary).
     let cfg = BlockEngineConfig {
+        auto_optimize_interval_flushes: 0,
+        auto_optimize_budget_entries: 32_768,
         merge_max_ts_span: 100,
         merge_target_entries: 1_000_000, // entry count never the limiter here
         ..config(&[])
@@ -1482,6 +1525,8 @@ fn budgeted_optimize_bounds_each_call_and_drains_oldest_raw_groups() {
     let engine = BlockEngine::new(
         Box::new(MemBlockStore::new()),
         BlockEngineConfig {
+            auto_optimize_interval_flushes: 0,
+            auto_optimize_budget_entries: 32_768,
             merge_max_ts_span: 0,
             ..config(&[])
         },
@@ -2185,4 +2230,79 @@ fn request_query_report_is_exact_and_does_not_require_profile_deltas() {
     assert!(report.payload_bytes_read > 0);
     assert_eq!(report.payload_bytes_read, report.snapshot_payload_bytes);
     assert!(!report.stable_location_snapshot);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-optimize: compression must happen for hosts that only ever flush.
+// The embedded Elixir engines send 'flush' on a heartbeat and never
+// 'optimize' — a store that stays raw until someone remembers to schedule
+// maintenance is the bug these tests pin down.
+// ---------------------------------------------------------------------------
+
+fn auto_config(interval: usize, budget: usize) -> BlockEngineConfig {
+    BlockEngineConfig {
+        auto_optimize_interval_flushes: interval,
+        auto_optimize_budget_entries: budget,
+        ..BlockEngineConfig::default()
+    }
+}
+
+#[test]
+fn auto_optimize_compresses_after_interval_flushes_without_manual_call() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), auto_config(3, 32_768)).unwrap();
+    for i in 0..200i64 {
+        engine
+            .push(entry(1_000 + i, (i % 4) as u8, &format!("m {i}"), &[]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    let (_, raw_after_first, _) = engine.stats();
+    assert!(raw_after_first > 0, "first flush leaves raw blocks");
+
+    // Empty heartbeat flushes — the only signal an embedded host sends.
+    engine.flush().unwrap();
+    engine.flush().unwrap();
+
+    let (blocks, raw_blocks, _) = engine.stats();
+    assert!(blocks > 0);
+    assert_eq!(
+        raw_blocks, 0,
+        "interval-th flush call must compress the raw backlog by itself"
+    );
+}
+
+#[test]
+fn auto_optimize_triggers_immediately_when_raw_backlog_reaches_budget() {
+    // Interval far out of reach: only the budget-sized backlog can trigger.
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), auto_config(1_000, 100)).unwrap();
+    for i in 0..150i64 {
+        engine
+            .push(entry(1_000 + i, 1, &format!("m {i}"), &[]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    let (_, raw_blocks, _) = engine.stats();
+    assert_eq!(
+        raw_blocks, 0,
+        "a raw backlog at the budget compresses on the same flush, not interval-later"
+    );
+}
+
+#[test]
+fn auto_optimize_zero_interval_disables() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), auto_config(0, 100)).unwrap();
+    for i in 0..200i64 {
+        engine
+            .push(entry(1_000 + i, 1, &format!("m {i}"), &[]))
+            .unwrap();
+    }
+    for _ in 0..40 {
+        engine.flush().unwrap();
+    }
+    let (blocks, raw_blocks, _) = engine.stats();
+    assert_eq!(
+        raw_blocks, blocks,
+        "disabled auto-optimize never compresses"
+    );
+    assert!(raw_blocks > 0);
 }
