@@ -62,6 +62,104 @@ pub struct ScrapeTargetSetReport {
     pub targets: Vec<ScrapeTargetReport>,
 }
 
+// -- Response views ---------------------------------------------------------
+//
+// GET /api/v1/scrape/targets serializes THESE, never the storage types.
+// ScrapeAuth carries stored bearer tokens and basic-auth passwords; returning
+// it whole let any read-scoped caller (or, with auth disabled, anyone who can
+// reach the port) exfiltrate every target's credentials. The views report
+// whether credentials are configured without disclosing them. The storage and
+// PUT types stay untouched — their Serialize is used for round-trips, and a
+// blanket #[serde(skip_serializing)] there would silently drop credentials on
+// write.
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScrapeAuthView {
+    pub bearer_configured: bool,
+    /// Usernames are identifiers, not secrets; passwords never appear.
+    pub username: Option<String>,
+    pub password_configured: bool,
+}
+
+impl From<&ScrapeAuth> for ScrapeAuthView {
+    fn from(auth: &ScrapeAuth) -> Self {
+        Self {
+            bearer_configured: auth.bearer.as_deref().is_some_and(|b| !b.is_empty()),
+            username: auth.username.clone(),
+            password_configured: auth.password.as_deref().is_some_and(|p| !p.is_empty()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScrapeTargetView {
+    pub id: i64,
+    pub job_name: String,
+    pub scheme: String,
+    pub address: String,
+    pub metrics_path: String,
+    pub scrape_interval_secs: u64,
+    pub scrape_timeout_secs: u64,
+    pub labels: BTreeMap<String, String>,
+    pub auth: Option<ScrapeAuthView>,
+    pub enabled: bool,
+}
+
+impl From<&ScrapeTarget> for ScrapeTargetView {
+    fn from(target: &ScrapeTarget) -> Self {
+        Self {
+            id: target.id,
+            job_name: target.job_name.clone(),
+            scheme: target.scheme.clone(),
+            address: target.address.clone(),
+            metrics_path: target.metrics_path.clone(),
+            scrape_interval_secs: target.scrape_interval_secs,
+            scrape_timeout_secs: target.scrape_timeout_secs,
+            labels: target.labels.clone(),
+            auth: target.auth.as_ref().map(ScrapeAuthView::from),
+            enabled: target.enabled,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScrapeTargetReportView {
+    pub target: ScrapeTargetView,
+    pub health: String,
+    pub last_scrape_unix: Option<u64>,
+    pub last_duration_ms: Option<u64>,
+    pub last_error: Option<String>,
+    pub samples_scraped: Option<u64>,
+}
+
+impl From<&ScrapeTargetReport> for ScrapeTargetReportView {
+    fn from(report: &ScrapeTargetReport) -> Self {
+        Self {
+            target: ScrapeTargetView::from(&report.target),
+            health: report.health.clone(),
+            last_scrape_unix: report.last_scrape_unix,
+            last_duration_ms: report.last_duration_ms,
+            last_error: report.last_error.clone(),
+            samples_scraped: report.samples_scraped,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ScrapeTargetSetReportView {
+    pub version: u64,
+    pub targets: Vec<ScrapeTargetReportView>,
+}
+
+impl From<&ScrapeTargetSetReport> for ScrapeTargetSetReportView {
+    fn from(report: &ScrapeTargetSetReport) -> Self {
+        Self {
+            version: report.version,
+            targets: report.targets.iter().map(ScrapeTargetReportView::from).collect(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ScrapeState {
     version: u64,
@@ -424,6 +522,40 @@ mod tests {
                 b"# HELP up test\nup{job=\"x\",cluster=\"prod\\\\east\"} 1\nready{cluster=\"prod\\\\east\",job=\"new\"} 2\n\n"
             )
         );
+    }
+
+    #[test]
+    fn get_view_never_discloses_credentials() {
+        let report = ScrapeTargetSetReport {
+            version: 3,
+            targets: vec![ScrapeTargetReport {
+                target: ScrapeTarget {
+                    id: 1,
+                    job_name: "demo".into(),
+                    scheme: "https".into(),
+                    address: "localhost:9090".into(),
+                    metrics_path: "/metrics".into(),
+                    scrape_interval_secs: 15,
+                    scrape_timeout_secs: 10,
+                    auth: Some(ScrapeAuth {
+                        bearer: Some("SECRET-BEARER-TOKEN".into()),
+                        username: Some("scraper".into()),
+                        password: Some("SECRET-PASSWORD".into()),
+                    }),
+                    ..Default::default()
+                },
+                health: "up".into(),
+                ..Default::default()
+            }],
+        };
+        let body = serde_json::to_string(&ScrapeTargetSetReportView::from(&report)).unwrap();
+        assert!(!body.contains("SECRET-BEARER-TOKEN"), "bearer leaked: {body}");
+        assert!(!body.contains("SECRET-PASSWORD"), "password leaked: {body}");
+        assert!(body.contains("\"bearer_configured\":true"));
+        assert!(body.contains("\"password_configured\":true"));
+        assert!(body.contains("\"username\":\"scraper\""));
+        // The operational signal survives redaction.
+        assert!(body.contains("\"address\":\"localhost:9090\""));
     }
 
     #[test]

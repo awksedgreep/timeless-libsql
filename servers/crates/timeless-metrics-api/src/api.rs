@@ -290,7 +290,14 @@ async fn import_prometheus(State(storage): State<Storage>, body: Bytes) -> Respo
 }
 
 async fn scrape_targets(State(storage): State<Storage>) -> Response {
-    (StatusCode::OK, Json(storage.scrape_targets().await)).into_response()
+    // Serialize the redacted view, never the storage types: the stored
+    // ScrapeAuth carries bearer tokens and passwords (see scrape.rs views).
+    let report = storage.scrape_targets().await;
+    (
+        StatusCode::OK,
+        Json(crate::scrape::ScrapeTargetSetReportView::from(&report)),
+    )
+        .into_response()
 }
 
 async fn replace_scrape_targets(
