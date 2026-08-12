@@ -10,9 +10,21 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.6.4 -->
+<!-- release-target: 0.7.0 -->
 
 ## [Unreleased]
+
+No changes recorded after `0.7.0`.
+
+## [0.7.0] — 2026-08-12
+
+This minor selects a new compatibility line because a documented public
+surface changed intentionally: the signal server binaries no longer require
+authentication by default (AUTH_OPT_IN_PLAN.md, implemented in full). Per
+the pre-1.0 policy the pairing floors move with the line — the 0.7.0
+extension floors servers at 0.7.0 and the 0.7.0 servers floor extensions at
+0.7.0. Storage data ABI 1 and all batch/frame formats are unchanged; reading
+older databases is unaffected.
 
 ### Changed
 

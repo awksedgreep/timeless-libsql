@@ -70,6 +70,7 @@ are checked against the packager source:
 | `bin/timeless-metrics-api` | Signal-specific metrics HTTP/API owner. |
 | `bin/timeless-logs-api` | Signal-specific logs HTTP/API owner. |
 | `bin/timeless-traces-api` | Signal-specific traces HTTP/API owner. |
+| `bin/timeless-authctl` | Key generation, policy scaffolding, and token minting for opt-in auth. |
 | `lib/libtimeless_ext.so` or `lib/libtimeless_ext.dylib` | Loadable production telemetry extension for the archive platform. |
 | `install.sh` | Checksum-, identity-, and native-target-verifying installer. |
 | `uninstall.sh` | Ownership-aware binary/artifact remover that preserves data. |

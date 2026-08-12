@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DATA_SCHEMA_VERSION: i64 = 1;
 pub const REQUIRED_EXTENSION_DATA_ABI: u64 = 1;
-pub const MINIMUM_EXTENSION_VERSION: &str = "0.6.0";
+pub const MINIMUM_EXTENSION_VERSION: &str = "0.7.0";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -638,12 +638,12 @@ mod tests {
             "the tagged v0.3.0 artifact predates the release server handshake"
         );
         assert!(
-            env!("CARGO_PKG_VERSION").starts_with("0.6."),
-            "the current servers must remain on the documented 0.6 compatibility line"
+            env!("CARGO_PKG_VERSION").starts_with("0.7."),
+            "the current servers must remain on the documented 0.7 compatibility line"
         );
         assert_eq!(
-            MINIMUM_EXTENSION_VERSION, "0.6.0",
-            "compatible 0.6 patch releases retain the 0.6.0 extension floor"
+            MINIMUM_EXTENSION_VERSION, "0.7.0",
+            "compatible 0.7 patch releases retain the 0.7.0 extension floor"
         );
     }
 

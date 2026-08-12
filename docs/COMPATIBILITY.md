@@ -15,14 +15,14 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.6.4` | Current extension/core/dbhealth source line. |
-| `server_workspace` | `0.6.4` | Current metrics/logs/traces server source line. |
+| `extension_workspace` | `0.7.0` | Current extension/core/dbhealth source line. |
+| `server_workspace` | `0.7.0` | Current metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
-| `extension_minimum_server` | `0.6.0` | Oldest server accepted by the current extension document. |
+| `extension_minimum_server` | `0.7.0` | Oldest server accepted by the current extension document. |
 | `server_data_schema` | `1` | Additive `_timeless_schema_migrations` ledger generation. |
 | `server_required_data_abi` | `1` | Data ABI required by all current signal servers. |
-| `server_minimum_extension` | `0.6.0` | Oldest extension semantic version considered by current servers. |
+| `server_minimum_extension` | `0.7.0` | Oldest extension semantic version considered by current servers. |
 
 <!-- public-compatibility-versions:end -->
 
@@ -62,7 +62,7 @@ These independent versions must not be conflated:
   not a private replacement storage engine.
 - PromQL/MetricsQL/LogsQL matrix rows identify language compatibility.
 
-### Behavior changes on the 0.6 line
+### Behavior changes on the 0.7 line
 
 - Signal server binaries start with authentication **disabled** unless
   `TIMELESS_AUTH_MODE=required` is set explicitly. A binary upgraded across
