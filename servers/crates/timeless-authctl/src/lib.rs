@@ -198,6 +198,23 @@ pub fn mint(
     signal: &str,
     ttl_seconds: i64,
 ) -> Result<String, String> {
+    let now = unix_now()?;
+    let jti = format!("authctl-{now}-{}", std::process::id());
+    mint_at(key_path, policy_path, subject, signal, ttl_seconds, now, &jti)
+}
+
+/// The deterministic core of `mint`: fixed issue time and token id. Exists
+/// for the cross-implementation conformance fixture, where the exact token
+/// bytes are pinned; production callers use `mint`.
+pub fn mint_at(
+    key_path: &Path,
+    policy_path: &Path,
+    subject: &str,
+    signal: &str,
+    ttl_seconds: i64,
+    issued_at: i64,
+    jti: &str,
+) -> Result<String, String> {
     if ttl_seconds <= 0 {
         return Err("token ttl must be positive".into());
     }
@@ -235,19 +252,18 @@ pub fn mint(
             "ttl {ttl_seconds}s exceeds the policy's max_token_seconds {max_token_seconds}s"
         ));
     }
-    let now = unix_now()?;
     let mut claims = Map::new();
     claims.insert("iss".into(), json!(field("issuer")?));
     claims.insert("aud".into(), json!(field("audience")?));
     claims.insert("sub".into(), json!(subject));
-    claims.insert("jti".into(), json!(format!("authctl-{now}-{}", std::process::id())));
+    claims.insert("jti".into(), json!(jti));
     claims.insert("tenant".into(), json!(field("tenant")?));
     claims.insert("signal".into(), json!(signal));
     claims.insert("scopes".into(), scopes);
     claims.insert("auth_version".into(), json!(auth_version));
-    claims.insert("iat".into(), json!(now));
-    claims.insert("nbf".into(), json!(now));
-    claims.insert("exp".into(), json!(now + ttl_seconds));
+    claims.insert("iat".into(), json!(issued_at));
+    claims.insert("nbf".into(), json!(issued_at));
+    claims.insert("exp".into(), json!(issued_at + ttl_seconds));
     if let Some(limits) = subject_policy
         .get("maximum_limits")
         .or_else(|| policy.get("maximum_limits"))

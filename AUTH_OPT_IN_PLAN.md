@@ -1,8 +1,9 @@
 # Auth opt-in plan
 
 Status: implemented 2026-08-12 (S1, S2, S3, Part 1, Part 2, §6.1, §6.2,
-S4, §9 doc sweeps, §8 Elixir alignment — the full §11 order). §6.3
-cross-implementation conformance fixture remains recorded follow-up.
+S4, §9 doc sweeps, §8 Elixir alignment — the full §11 order; §6.3
+conformance fixture landed 2026-08-12:
+servers/crates/timeless-api-common/tests/conformance/).
 Originally written against `timeless_stack` `3bb0894`.
 
 This document specifies making the three Rust signal servers start **wide open

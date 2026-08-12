@@ -20,5 +20,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "signal", "sync", "time"] }
 
 [dev-dependencies]
+timeless-authctl = { path = "../timeless-authctl" }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

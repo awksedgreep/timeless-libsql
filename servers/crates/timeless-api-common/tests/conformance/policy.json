@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "issuer": "timeless-conformance",
+  "audience": "timeless-metrics",
+  "tenant": "default",
+  "max_token_seconds": 4000000000,
+  "subjects": {
+    "conformance": {
+      "scopes": [
+        "metrics:read",
+        "metrics:write",
+        "metrics:stats",
+        "metrics:maintenance"
+      ]
+    }
+  },
+  "keys": [
+    {
+      "kid": "ea4a6c63e29c520a",
+      "public_key": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+      "not_before": 0,
+      "expires_at": 5000000000
+    }
+  ]
+}
