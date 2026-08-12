@@ -99,6 +99,7 @@ The following table is machine-checked against the Rust registration source.
 | SQL symbol | Kind | Artifact or embedding call | Purpose |
 |---|---|---|---|
 | `timeless_capabilities` | scalar | telemetry | Machine-readable build, ABI, batching, format, and SQL-surface handshake. |
+| `timeless_pins` | scalar | telemetry | Count of engines pinned by this connection (P1 diagnostics; deterministic test observable). |
 | `timeless_metrics` | stored virtual-table module | telemetry | Compressed float metric series. |
 | `timeless_logs` | stored virtual-table module | telemetry | Compressed rich logs with exact severity and typed metadata. |
 | `timeless_traces` | stored virtual-table module | telemetry | Compressed rich spans with trace and term indexes. |

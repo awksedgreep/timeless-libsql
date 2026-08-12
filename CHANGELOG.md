@@ -10,13 +10,24 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.6.3 -->
+<!-- release-target: 0.6.4 -->
 
 ## [Unreleased]
 
-No changes recorded after `0.6.3`.
+No changes recorded after `0.6.4`.
 
-## [0.6.3] — 2026-08-11
+## [0.6.4] — 2026-08-11
+
+The `v0.6.3` tag records source only: its artifact run failed on every
+platform because the version bump shipped without refreshed lockfiles and
+the release builds use `--locked` (the v0.4.0 precedent — the bad tag
+stays, the fix is the next patch). This release is that source plus the
+lockfile refresh and the documentation the contract gate flagged:
+`docs/COMPATIBILITY.md` pairing keys had been left at the 0.5 line through
+three 0.6 releases, and `timeless_pins` was registered without an inventory
+row. `docs/RELEASING.md` now records the full pre-tag checklist.
+
+### Fixed (as unreleased `0.6.3`)
 
 ### Fixed
 

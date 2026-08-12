@@ -5,3 +5,4 @@
 - Before starting, inspect the current branch and working tree. Do not hide, overwrite, relocate, or silently absorb existing changes.
 - Finish every task by reconciling the canonical checkout: merge or fast-forward completed feature work into `main`, remove the temporary branch when safe, switch back to `main`, and leave the working tree clean. If existing user work makes that impossible, stop and explain it explicitly.
 - Cut releases only from `main`. Push `main` before the tag, make the tag point at the released `main` commit, verify the release and its artifacts, and leave this checkout clean on `main`.
+- Before ANY release tag, complete the full pre-tag checklist in `docs/RELEASING.md` — both cargo workspaces, the shell suites, the query oracles, and the dispatched CI gates, all run AFTER the version bump. The root workspace's cargo suite alone is a fraction of this repo's verification surface.
