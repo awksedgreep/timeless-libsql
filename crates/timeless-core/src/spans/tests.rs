@@ -2008,3 +2008,45 @@ fn auto_optimize_zero_interval_disables() {
     );
     assert!(raw_blocks > 0);
 }
+
+#[test]
+fn compression_totals_persist_across_reopen_and_accumulate() {
+    let shared = Arc::new(MemSpanStore::new());
+    let spy = |s: &Arc<MemSpanStore>| SpyStore {
+        inner: Arc::clone(s),
+        reads: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        put_terms: Arc::new(Mutex::new(Vec::new())),
+        replace_terms: Arc::new(Mutex::new(Vec::new())),
+    };
+    let engine = SpanBlockEngine::new(Box::new(spy(&shared)), auto_config(0, 100)).unwrap();
+    for i in 0..100u8 {
+        engine
+            .push(span(
+                i % 7,
+                i,
+                None,
+                "op",
+                "api",
+                1,
+                0,
+                1_000 + i as i64,
+                &[],
+            ))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    let (in1, out1) = engine.load_compression_totals().unwrap();
+    assert!(
+        in1 > 0 && out1 > 0,
+        "optimize records raw->compressed bytes"
+    );
+
+    engine.optimize().unwrap();
+    assert_eq!(engine.load_compression_totals().unwrap(), (in1, out1));
+
+    drop(engine);
+    let reopened = SpanBlockEngine::new(Box::new(spy(&shared)), auto_config(0, 100)).unwrap();
+    assert_eq!(reopened.load_compression_totals().unwrap(), (in1, out1));
+}

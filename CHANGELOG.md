@@ -14,7 +14,18 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-No changes recorded after `0.6.1`.
+### Added
+
+- Durable compression totals: each optimize pass persists cumulative
+  raw-bytes-in / compressed-bytes-out in the store's `_meta`, in the same
+  host transaction as the block swap (raw-compression phase only — merge
+  passes re-read compressed input and would distort the ratio).
+  `timeless_stats` exports them as `compression_input_bytes_total` /
+  `compression_output_bytes_total` for logs and traces, and the signal
+  servers expose matching fields. The process-local `optimize_raw_*`
+  profile counters reset on restart, so a compression-ratio display backed
+  by them read "pending" on a fully compressed store after every restart.
+  Pre-upgrade stores start counting from their next optimize.
 
 ## [0.6.1] — 2026-08-11
 

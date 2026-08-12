@@ -4659,6 +4659,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 let profile = shared.engine.profile();
                 let optimize_backlog = shared.engine.optimize_backlog();
+                let compression_totals = shared
+                    .engine
+                    .load_compression_totals()
+                    .map_err(module_err)?;
                 let gate = shared.write_gate.profile();
                 let storage = log_storage_summary(&database, &table)?;
                 let timestamp_unit = {
@@ -4894,6 +4898,14 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(profile.optimize_raw_output_bytes as i64),
                     ),
                     (
+                        "compression_input_bytes_total",
+                        Value::Integer(compression_totals.0 as i64),
+                    ),
+                    (
+                        "compression_output_bytes_total",
+                        Value::Integer(compression_totals.1 as i64),
+                    ),
+                    (
                         "optimize_raw_total_ns",
                         Value::Integer(profile.optimize_raw_total_ns as i64),
                     ),
@@ -4985,6 +4997,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let query = shared.engine.query_profile();
                 let optimize = shared.engine.optimize_profile();
                 let optimize_backlog = shared.engine.optimize_backlog();
+                let compression_totals = shared
+                    .engine
+                    .load_compression_totals()
+                    .map_err(module_err)?;
                 let gate = shared.write_gate.profile();
                 let storage = trace_storage_summary(&database, &table)?;
                 let attribute_index_fields = shared.engine.config().attribute_indexes.len();
@@ -5204,6 +5220,14 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "optimize_raw_output_bytes",
                         Value::Integer(optimize.optimize_raw_output_bytes as i64),
+                    ),
+                    (
+                        "compression_input_bytes_total",
+                        Value::Integer(compression_totals.0 as i64),
+                    ),
+                    (
+                        "compression_output_bytes_total",
+                        Value::Integer(compression_totals.1 as i64),
                     ),
                     (
                         "optimize_raw_total_ns",

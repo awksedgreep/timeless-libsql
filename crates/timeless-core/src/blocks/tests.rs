@@ -2306,3 +2306,43 @@ fn auto_optimize_zero_interval_disables() {
     );
     assert!(raw_blocks > 0);
 }
+
+#[test]
+fn compression_totals_persist_across_reopen_and_accumulate() {
+    let shared = Arc::new(MemBlockStore::new());
+    let engine = BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&[])).unwrap();
+    for i in 0..100i64 {
+        engine
+            .push(entry(1_000 + i, 1, &format!("m {i}"), &[]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    let (in1, out1) = engine.load_compression_totals().unwrap();
+    assert!(
+        in1 > 0 && out1 > 0,
+        "optimize records raw->compressed bytes"
+    );
+
+    // A second optimize with nothing raw must not move the totals (merge
+    // phases and no-ops are excluded — only raw compression counts).
+    engine.optimize().unwrap();
+    assert_eq!(engine.load_compression_totals().unwrap(), (in1, out1));
+
+    for i in 0..100i64 {
+        engine
+            .push(entry(9_000 + i, 1, &format!("n {i}"), &[]))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    let (in2, out2) = engine.load_compression_totals().unwrap();
+    assert!(in2 > in1 && out2 > out1, "totals accumulate");
+
+    // The totals live in the store, not the process: a fresh engine over
+    // the same store reads them back.
+    drop(engine);
+    let reopened =
+        BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&[])).unwrap();
+    assert_eq!(reopened.load_compression_totals().unwrap(), (in2, out2));
+}

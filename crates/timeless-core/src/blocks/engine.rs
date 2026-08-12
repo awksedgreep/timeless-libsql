@@ -1706,7 +1706,41 @@ impl BlockEngine {
                 }
             })?;
         drop(j);
+        self.persist_compression_totals(outcome.raw_input_bytes, outcome.raw_output_bytes)?;
         Ok(outcome)
+    }
+
+    /// Lifetime raw->compressed byte totals, persisted in _meta inside the
+    /// same host transaction as the optimize swap. The in-memory profile
+    /// counters are process-local by design (work attribution); a
+    /// compression-RATIO display backed by them read "pending" on a fully
+    /// compressed store after every restart. Merge-phase bytes are excluded:
+    /// re-reading already-compressed input would inflate the denominator
+    /// without compressing anything new.
+    fn persist_compression_totals(&self, raw_in: u64, raw_out: u64) -> Result<(), String> {
+        if raw_in == 0 {
+            return Ok(());
+        }
+        let (input_total, output_total) = self.load_compression_totals()?;
+        let value = format!(
+            "{} {}",
+            input_total.saturating_add(raw_in),
+            output_total.saturating_add(raw_out)
+        );
+        self.store.save_meta("compression_totals", value.as_bytes())
+    }
+
+    /// Parse the persisted "in out" pair; absent or malformed reads as zero
+    /// (a pre-upgrade store simply starts counting from its next optimize).
+    pub fn load_compression_totals(&self) -> Result<(u64, u64), String> {
+        let Some(bytes) = self.store.load_meta("compression_totals")? else {
+            return Ok((0, 0));
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let mut parts = text.split_ascii_whitespace();
+        let input = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let output = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        Ok((input, output))
     }
 
     /// Retention: delete every block whose ts_max < cutoff (whole-block
