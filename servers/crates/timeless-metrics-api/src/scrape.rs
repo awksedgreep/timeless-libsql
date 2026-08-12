@@ -257,7 +257,25 @@ impl ScrapeController {
 
 async fn scrape_loop(storage: Storage, controller: ScrapeController, target: ScrapeTarget) {
     let interval = Duration::from_secs(target.scrape_interval_secs.clamp(1, MAX_INTERVAL_SECS));
+    // Resolve and validate before the first request, then pin the connection
+    // to the validated address for the life of this loop: a DNS answer that
+    // later flips to metadata/link-local space (rebinding) never reaches the
+    // socket. A target-set replace rebuilds the loop and re-resolves.
+    let pinned = match resolve_validated(&target.address, &target.scheme).await {
+        Ok(addrs) => addrs,
+        Err(error) => {
+            controller
+                .update_report(target.id, |report| {
+                    report.health = "down".into();
+                    report.last_error = Some(error);
+                })
+                .await;
+            return;
+        }
+    };
+    let (host, _) = split_address(&target.address, &target.scheme);
     let client = match reqwest::Client::builder()
+        .resolve_to_addrs(&host, &pinned)
         .timeout(Duration::from_secs(
             target.scrape_timeout_secs.clamp(1, MAX_TIMEOUT_SECS),
         ))
@@ -449,6 +467,98 @@ fn has_label(labels: &[u8], key: &str) -> bool {
     })
 }
 
+// -- Scrape address safety --------------------------------------------------
+//
+// A scrape target makes this server issue outbound HTTP(S) requests with
+// caller-chosen credentials attached and the response readable back through
+// metrics queries — an SSRF primitive if the address space is unrestricted.
+// Link-local (which includes cloud instance metadata at 169.254.169.254) and
+// unspecified addresses are denied unconditionally, at PUT time for literal
+// IPs and again at scrape time for every resolved address. RFC1918/private
+// addresses stay allowed: scraping private infrastructure is the normal case.
+
+fn deny_reason(ip: std::net::IpAddr) -> Option<&'static str> {
+    use std::net::IpAddr;
+    let ip = match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        v4 => v4,
+    };
+    match ip {
+        IpAddr::V4(v4) if v4.is_link_local() => Some("link-local (instance metadata) address"),
+        IpAddr::V4(v4) if v4.is_unspecified() => Some("unspecified address"),
+        IpAddr::V4(v4) if v4.is_broadcast() => Some("broadcast address"),
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => {
+            Some("link-local (instance metadata) address")
+        }
+        IpAddr::V6(v6) if v6.is_unspecified() => Some("unspecified address"),
+        _ => None,
+    }
+}
+
+/// Splits a target `address` ("host:port", "[v6]:port", bare host) into
+/// (host, port), defaulting the port from the scheme.
+fn split_address(address: &str, scheme: &str) -> (String, u16) {
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    if let Some(rest) = address.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            let port = tail
+                .strip_prefix(':')
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(default_port);
+            return (host.to_owned(), port);
+        }
+    }
+    match address.rsplit_once(':') {
+        // A second ':' means an unbracketed IPv6 literal, not host:port.
+        Some((host, port)) if !host.contains(':') => match port.parse() {
+            Ok(port) => (host.to_owned(), port),
+            Err(_) => (address.to_owned(), default_port),
+        },
+        _ => (address.to_owned(), default_port),
+    }
+}
+
+fn validate_address(address: &str, scheme: &str) -> Result<(), String> {
+    let (host, _port) = split_address(address, scheme);
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if let Some(reason) = deny_reason(ip) {
+            return Err(format!("scrape address {address:?} is a {reason}"));
+        }
+    }
+    Ok(())
+}
+
+/// Scrape-time resolution: returns addresses that pass `deny_reason`,
+/// erroring if the host resolves only to denied space. The caller pins the
+/// connection to a returned address, so a DNS answer that changes after this
+/// check (rebinding) cannot redirect the request.
+async fn resolve_validated(
+    address: &str,
+    scheme: &str,
+) -> Result<Vec<std::net::SocketAddr>, String> {
+    let (host, port) = split_address(address, scheme);
+    let resolved: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|error| format!("resolve scrape address {address:?}: {error}"))?
+        .collect();
+    if resolved.is_empty() {
+        return Err(format!("scrape address {address:?} resolved to nothing"));
+    }
+    let allowed: Vec<std::net::SocketAddr> = resolved
+        .iter()
+        .copied()
+        .filter(|addr| deny_reason(addr.ip()).is_none())
+        .collect();
+    if allowed.is_empty() {
+        let reason = deny_reason(resolved[0].ip()).unwrap_or("denied address");
+        return Err(format!("scrape address {address:?} resolves to a {reason}"));
+    }
+    Ok(allowed)
+}
+
 fn validate_set(set: &ScrapeTargetSet) -> Result<(), String> {
     if set.targets.len() > MAX_TARGETS {
         return Err(format!("scrape target count exceeds {MAX_TARGETS}"));
@@ -461,6 +571,7 @@ fn validate_set(set: &ScrapeTargetSet) -> Result<(), String> {
         if !ids.insert(target.id) {
             return Err(format!("duplicate scrape target id {}", target.id));
         }
+        validate_address(&target.address, &target.scheme)?;
         if target.scrape_interval_secs == 0 || target.scrape_interval_secs > MAX_INTERVAL_SECS {
             return Err(format!("scrape target {} has invalid interval", target.id));
         }
@@ -556,6 +667,47 @@ mod tests {
         assert!(body.contains("\"username\":\"scraper\""));
         // The operational signal survives redaction.
         assert!(body.contains("\"address\":\"localhost:9090\""));
+    }
+
+    #[test]
+    fn denies_metadata_and_link_local_scrape_addresses() {
+        for bad in [
+            "169.254.169.254",
+            "169.254.169.254:80",
+            "[fe80::1]:9100",
+            "0.0.0.0:9100",
+            "[::]:9100",
+            "[::ffff:169.254.169.254]:80",
+        ] {
+            assert!(
+                validate_address(bad, "http").is_err(),
+                "{bad} must be denied"
+            );
+        }
+        for good in [
+            "localhost:9090",
+            "127.0.0.1:9090",
+            "10.0.0.5:9100",
+            "192.168.1.20:9100",
+            "prometheus.internal:9090",
+            "[2001:db8::1]:9100",
+        ] {
+            assert!(
+                validate_address(good, "http").is_ok(),
+                "{good} must be allowed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolution_rejects_hosts_landing_in_denied_space() {
+        // Literal denied IP resolves to itself and must be rejected even
+        // though lookup_host succeeds.
+        assert!(resolve_validated("169.254.169.254:80", "http")
+            .await
+            .is_err());
+        // Loopback resolves and passes.
+        assert!(resolve_validated("127.0.0.1:9090", "http").await.is_ok());
     }
 
     #[test]
