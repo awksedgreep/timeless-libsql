@@ -28,6 +28,9 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   deleted the data uncompressed. Hosts that schedule `optimize`
   externally (the API services) are unaffected beyond finding an emptier
   backlog. Engine-level opt-out: `auto_optimize_interval_flushes: 0`.
+- `timeless_stats('traces')` now exports `compressed_blocks`, `raw_bytes`,
+  and `compressed_bytes` (additive), matching the keys the logs stats
+  already had — embedded hosts read these to display compression state.
 
 ## [0.5.0] — 2026-08-08
 

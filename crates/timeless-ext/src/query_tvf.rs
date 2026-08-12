@@ -4393,6 +4393,7 @@ struct LogStorageSummary {
 
 struct TraceStorageSummary {
     bytes_on_disk: i64,
+    raw_bytes: i64,
     optimize_source_entries: i64,
     optimize_source_bytes: i64,
     duration_bounded_blocks: i64,
@@ -4429,6 +4430,7 @@ fn trace_storage_summary(database: &str, table: &str) -> Result<TraceStorageSumm
     let durations = crate::sql_ident::qualified_shadow(database, table, "duration_bounds");
     let sql = format!(
         "SELECT COALESCE(SUM(length(b.data)), 0),
+                COALESCE(SUM(CASE WHEN b.codec = 1 THEN length(b.data) ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN b.codec = 1 OR b.entry_count < {TRACE_MERGE_TARGET_ENTRIES}
                                   THEN b.entry_count ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN b.codec = 1 OR b.entry_count < {TRACE_MERGE_TARGET_ENTRIES}
@@ -4440,10 +4442,11 @@ fn trace_storage_summary(database: &str, table: &str) -> Result<TraceStorageSumm
     conn.query_row(&sql, [], |row| {
         Ok(TraceStorageSummary {
             bytes_on_disk: row.get(0)?,
-            optimize_source_entries: row.get(1)?,
-            optimize_source_bytes: row.get(2)?,
-            duration_bounded_blocks: row.get(3)?,
-            duration_unknown_blocks: row.get(4)?,
+            raw_bytes: row.get(1)?,
+            optimize_source_entries: row.get(2)?,
+            optimize_source_bytes: row.get(3)?,
+            duration_bounded_blocks: row.get(4)?,
+            duration_unknown_blocks: row.get(5)?,
         })
     })
 }
@@ -4990,6 +4993,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 rows.extend([
                     ("blocks", Value::Integer(blocks as i64)),
                     ("raw_blocks", Value::Integer(raw_blocks as i64)),
+                    (
+                        "compressed_blocks",
+                        Value::Integer(blocks.saturating_sub(raw_blocks) as i64),
+                    ),
                     ("buffered_spans", Value::Integer(buffered as i64)),
                     ("disk_spans", Value::Integer(disk_spans as i64)),
                     (
@@ -4997,6 +5004,11 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(disk_spans.saturating_add(counted_buffered) as i64),
                     ),
                     ("bytes_on_disk", Value::Integer(storage.bytes_on_disk)),
+                    ("raw_bytes", Value::Integer(storage.raw_bytes)),
+                    (
+                        "compressed_bytes",
+                        Value::Integer(storage.bytes_on_disk.saturating_sub(storage.raw_bytes)),
+                    ),
                     (
                         "duration_bounded_blocks",
                         Value::Integer(storage.duration_bounded_blocks),

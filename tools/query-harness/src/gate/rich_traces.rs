@@ -1155,7 +1155,11 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
     // attribute filtering is not bounded by SQLite's variable limit and does
     // not require an all-candidate Bloom working set.
     for index in 0..257_u64 {
-        let mut span = rich_span(82_000 + index, Some(10_000 + index as i64));
+        // 2h apart: past the engine's 1h merge_max_ts_span cap, so auto-
+        // optimize (which rides these per-span flushes) can compress the
+        // blocks but never merge them — this test's premise is 257 DISTINCT
+        // candidate blocks at query time.
+        let mut span = rich_span(82_000 + index, Some(10_000 + index as i64 * 7_200_000_000_000));
         span.status = 1;
         span.attributes = json!({
             "service.name":"attribute-chunks",
