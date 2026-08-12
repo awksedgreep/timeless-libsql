@@ -168,7 +168,6 @@ impl TraceServer {
         let stderr = stdout.try_clone()?;
         let child = Command::new(binary)
             .args([extension.as_os_str(), database.as_os_str(), bind.as_ref()])
-            .env("TIMELESS_AUTH_MODE", "disabled")
             .env("TIMELESS_TRACES_RETENTION_SECS", "0")
             .env("TIMELESS_TRACES_FLUSH_INTERVAL_SECS", "3600")
             .env("TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS", "3600")

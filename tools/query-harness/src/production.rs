@@ -325,7 +325,7 @@ impl Server {
     }
 
     fn environment(&self) -> Vec<(&'static str, &'static str)> {
-        let mut values = vec![("TIMELESS_AUTH_MODE", "disabled")];
+        let mut values = Vec::new();
         if self.short_maintenance {
             match self.signal {
                 Signal::Metrics => values.extend([
@@ -1550,7 +1550,7 @@ fn expect_start_failure(
 }
 
 fn invalid_storage_probes(client: &Client, state: &SignalState, root: &Path) -> Result<()> {
-    let source = root.join(format!("probe-source-{}.db", state.signal.name()));
+    let source = root.join("backups").join(format!("probe-source-{}.db", state.signal.name()));
     require_status(
         http_request(
             client,

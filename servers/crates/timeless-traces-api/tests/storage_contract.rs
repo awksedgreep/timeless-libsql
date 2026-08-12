@@ -500,7 +500,6 @@ fn spawn_server(extension: &Path, database: &Path) -> (std::process::Child, std:
     let address = probe.local_addr().unwrap();
     drop(probe);
     let child = Command::new(env!("CARGO_BIN_EXE_timeless-traces-api"))
-        .env("TIMELESS_AUTH_MODE", "disabled")
         .arg(extension)
         .arg(database)
         .arg(address.to_string())

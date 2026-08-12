@@ -1182,7 +1182,6 @@ fn metrics_evidence(context: &SignalEvidence<'_>, series: usize, points: usize) 
         context.extension,
         &context.directory.join("metrics.db"),
         &[
-            ("TIMELESS_AUTH_MODE", "disabled"),
             ("TIMELESS_METRICS_FLUSH_INTERVAL_SECS", "3600"),
             ("TIMELESS_METRICS_COMPACT_INTERVAL_SECS", "3600"),
             ("TIMELESS_METRICS_RETENTION_INTERVAL_SECS", "3600"),
@@ -1421,7 +1420,6 @@ fn logs_evidence(context: &SignalEvidence<'_>, entries: usize) -> Result<Value> 
         context.extension,
         &context.directory.join("logs.db"),
         &[
-            ("TIMELESS_AUTH_MODE", "disabled"),
             ("TIMELESS_LOGS_FLUSH_INTERVAL_SECS", "3600"),
             ("TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS", "3600"),
         ],

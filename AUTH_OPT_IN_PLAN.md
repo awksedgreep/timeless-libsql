@@ -1,7 +1,9 @@
 # Auth opt-in plan
 
-Status: proposal, no code changed. Written against the current
-`timeless-libsql` working tree and `timeless_stack` `3bb0894`.
+Status: implemented 2026-08-12 (S1, S2, S3, Part 1, Part 2, §6.1, §6.2,
+S4, §9 doc sweeps, §8 Elixir alignment — the full §11 order). §6.3
+cross-implementation conformance fixture remains recorded follow-up.
+Originally written against `timeless_stack` `3bb0894`.
 
 This document specifies making the three Rust signal servers start **wide open
 by default**, making authentication **opt-in at every level**, giving Rust and
