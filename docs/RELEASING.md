@@ -29,8 +29,12 @@ than the exact tree being tagged verifies nothing.
    locally):
    `cargo test --manifest-path tools/query-harness/Cargo.toml --locked`,
    then `-- contracts` and `-- oracle validate`.
-7. **CI gates**: push `main`, then dispatch `production-gate.yml` and
-   `query-contracts.yml` (`gh workflow run ...`) and wait for green.
+7. **Everything above runs locally, in one pass, without pausing between
+   steps.** The dispatchable CI workflows re-run the same binaries on
+   slower shared runners and have produced false failures from timing
+   flakes; they earn their keep on changes that skipped the local stack,
+   not as a ritual after ones that ran it. CI's unique job is the
+   four-platform artifact build, and the tag triggers that automatically.
 8. **Changelog**: a dated section for the release under the versioning
    policy at the top of `CHANGELOG.md`; update the `release-target` comment.
 
