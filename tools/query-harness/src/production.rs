@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{SecondsFormat, Utc};
@@ -22,10 +22,35 @@ use serde_json::{json, Map, Number, Value};
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
-const BASE_SECONDS: u64 = 1_785_628_800;
+/// Fixture timestamps are offsets from the most recent UTC midnight, NOT a
+/// constant. The original constant base (2026-08-02) was a time bomb: the
+/// metrics server prunes raw data at `now - 7 days` of wall-clock time, so
+/// exactly seven days after the constant was written the gate started
+/// failing everywhere ("overlap snapshot outside admission window") with no
+/// code change — the fixture's points were simply aging out of retention
+/// mid-run. A midnight-aligned dynamic base keeps rollup-granule alignment
+/// and per-run determinism while the data stays at most 24h old.
+fn base_seconds() -> u64 {
+    use std::sync::OnceLock;
+    static BASE: OnceLock<u64> = OnceLock::new();
+    *BASE.get_or_init(|| {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time precedes Unix epoch")
+            .as_secs();
+        now / 86_400 * 86_400
+    })
+}
+
 const ORDINALS_PER_SECOND: u64 = 256;
-const BASE_MILLISECONDS: u64 = BASE_SECONDS * 1_000;
-const BASE_NANOSECONDS: u64 = BASE_SECONDS * 1_000_000_000;
+
+fn base_milliseconds() -> u64 {
+    base_seconds() * 1_000
+}
+
+fn base_nanoseconds() -> u64 {
+    base_seconds() * 1_000_000_000
+}
 const MIN_RELEASE_SECONDS_PER_SIGNAL: f64 = 2.0 * 60.0 * 60.0;
 const RELEASE_AGGREGATE_SIGNAL_HOURS: f64 = 8.0;
 const DEFAULT_RELEASE_SECONDS: f64 = RELEASE_AGGREGATE_SIGNAL_HOURS * 60.0 * 60.0 / 3.0;
@@ -645,7 +670,7 @@ fn metrics_body(start: u64, count: usize) -> Vec<u8> {
     for ordinal in start..start + count as u64 {
         grouped[ordinal as usize % 4].push((
             ordinal as f64 + 0.5,
-            BASE_MILLISECONDS + ordinal * 1_000 / ORDINALS_PER_SECOND,
+            base_milliseconds() + ordinal * 1_000 / ORDINALS_PER_SECOND,
         ));
     }
     let mut output = String::new();
@@ -674,7 +699,7 @@ fn logs_body(start: u64, count: usize) -> Vec<u8> {
     for ordinal in start..start + count as u64 {
         output.push_str(
             &serde_json::to_string(&json!({
-                "_time": BASE_SECONDS + ordinal / ORDINALS_PER_SECOND,
+                "_time": base_seconds() + ordinal / ORDINALS_PER_SECOND,
                 "_msg": format!("release-gate-{ordinal}"),
                 "level": levels[ordinal as usize % levels.len()],
                 "service": "release-gate",
@@ -697,7 +722,7 @@ fn traces_body(start: u64, count: usize) -> Vec<u8> {
         .map(|ordinal| {
             let trace_number = ordinal / 4 + 1;
             let root_ordinal = ordinal / 4 * 4;
-            let start_ns = BASE_NANOSECONDS + ordinal * 1_000_000_000 / ORDINALS_PER_SECOND;
+            let start_ns = base_nanoseconds() + ordinal * 1_000_000_000 / ORDINALS_PER_SECOND;
             json!({
                 "traceId": format!("{trace_number:032x}"),
                 "spanId": format!("{:016x}", ordinal + 1),
@@ -816,8 +841,8 @@ fn result_rows(result: &HttpResult) -> Result<u64> {
 
 fn metrics_query(client: &Client, state: &SignalState, shape: &str) -> Result<(f64, u64, u64)> {
     let newest = state.data()?.next_ordinal.saturating_sub(1);
-    let newest_seconds = BASE_SECONDS + newest / ORDINALS_PER_SECOND;
-    let from_seconds = BASE_SECONDS.max(newest_seconds.saturating_sub(300));
+    let newest_seconds = base_seconds() + newest / ORDINALS_PER_SECOND;
+    let from_seconds = base_seconds().max(newest_seconds.saturating_sub(300));
     let path = match shape {
         "exact_latest" => "/api/v1/query?metric=release_gate_metric&host=host-0".to_owned(),
         "narrow_range" => format!(
@@ -825,7 +850,7 @@ fn metrics_query(client: &Client, state: &SignalState, shape: &str) -> Result<(f
         ),
         "wide_range" => format!(
             "/api/v1/query_range?metric=release_gate_metric&from={}&to={newest_seconds}&step=10&aggregate=avg",
-            BASE_SECONDS.max(newest_seconds.saturating_sub(60))
+            base_seconds().max(newest_seconds.saturating_sub(60))
         ),
         "scalar_avg" => format!(
             "/api/v1/query_range?metric=release_gate_metric&host=host-1&from={from_seconds}&to={newest_seconds}&step=300&aggregate=avg"
@@ -857,13 +882,13 @@ fn metrics_query(client: &Client, state: &SignalState, shape: &str) -> Result<(f
 
 fn logs_query(client: &Client, state: &SignalState, shape: &str) -> Result<(f64, u64, u64)> {
     let newest = state.data()?.next_ordinal.saturating_sub(1);
-    let newest_seconds = BASE_SECONDS + newest / ORDINALS_PER_SECOND;
+    let newest_seconds = base_seconds() + newest / ORDINALS_PER_SECOND;
     let (method, path, body, headers) = match shape {
         "exact" => (Method::GET, "/select/logsql/query?message=release-gate-0&limit=1&order=asc".to_owned(), None, vec![]),
         "narrow" => (Method::GET, "/select/logsql/query?level=error&service=release-gate&limit=100&order=desc".to_owned(), None, vec![]),
         "wide" => (Method::GET, format!(
             "/select/logsql/query?service=release-gate&limit=1000&order=desc&start={}&end={newest_seconds}",
-            BASE_SECONDS.max(newest_seconds.saturating_sub(4_000))
+            base_seconds().max(newest_seconds.saturating_sub(4_000))
         ), None, vec![]),
         "scalar_count" => (Method::POST, "/select/logsql/query".to_owned(), Some(b"query=level%3Aerror+%7C+stats+count%28*%29".to_vec()), vec![("content-type", "application/x-www-form-urlencoded")]),
         "discovery" => (Method::GET, "/select/logsql/field_values?field=host&service=release-gate&limit=10".to_owned(), None, vec![]),
@@ -951,8 +976,9 @@ fn query_once(client: &Client, state: &SignalState, shape: &str) -> Result<()> {
 fn semantic_oracle(client: &Client, target: Target) -> Result<()> {
     match target.signal {
         Signal::Metrics => {
+            let base = base_seconds();
             let path = format!(
-                "/api/v1/export?metric=release_gate_metric&host=host-0&from={BASE_SECONDS}&to={BASE_SECONDS}"
+                "/api/v1/export?metric=release_gate_metric&host=host-0&from={base}&to={base}"
             );
             let result = require_status(
                 http_request(
@@ -981,7 +1007,7 @@ fn semantic_oracle(client: &Client, target: Target) -> Result<()> {
                 .and_then(Value::as_array);
             let has_value = values.is_some_and(|values| values.contains(&json!(0.5)));
             let has_timestamp =
-                timestamps.is_some_and(|values| values.contains(&json!(BASE_MILLISECONDS)));
+                timestamps.is_some_and(|values| values.contains(&json!(base_milliseconds())));
             if rows.len() != 1
                 || !has_value
                 || !has_timestamp

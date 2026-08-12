@@ -27,6 +27,13 @@ lockfile refresh and the documentation the contract gate flagged:
 three 0.6 releases, and `timeless_pins` was registered without an inventory
 row. `docs/RELEASING.md` now records the full pre-tag checklist.
 
+Also defuses a time bomb in the production fault gate: fixture timestamps
+were offsets from a hardcoded 2026-08-02 base while the metrics server
+prunes at wall-clock now minus 7 days, so from 2026-08-09 the gate failed
+everywhere with "overlap snapshot outside admission window" on any commit —
+including tags that had passed it before. The base is now the most recent
+UTC midnight (alignment and determinism preserved; data at most 24h old).
+
 ### Fixed (as unreleased `0.6.3`)
 
 ### Fixed
