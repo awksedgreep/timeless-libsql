@@ -62,7 +62,7 @@ if [ ! -d "$destination" ]; then
   mv "$staging" "$destination"
 fi
 
-for binary in timeless-metrics-api timeless-logs-api timeless-traces-api; do
+for binary in timeless-metrics-api timeless-logs-api timeless-traces-api timeless-authctl; do
   identity=$("$destination/bin/$binary" --version)
   case "$identity" in
     *"\"commit\":\"$commit\""*"\"target\":\"$target\""*) ;;

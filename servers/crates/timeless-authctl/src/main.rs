@@ -34,6 +34,21 @@ fn fail(error: String) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        // The release tool identity-checks every bundled binary with
+        // --version and expects the same JSON shape the servers emit.
+        Some("--version") if args.len() == 1 => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "name": "timeless-authctl",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "commit": env!("TIMELESS_BUILD_COMMIT_RESOLVED"),
+                    "target": env!("TIMELESS_BUILD_TARGET"),
+                    "profile": env!("TIMELESS_BUILD_PROFILE")
+                })
+            );
+            ExitCode::SUCCESS
+        }
         Some("keygen") => {
             let Some(out) = flag(&args, "--out") else {
                 return usage();

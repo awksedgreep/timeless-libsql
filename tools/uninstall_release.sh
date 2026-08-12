@@ -30,7 +30,7 @@ remove_owned_link() {
   fi
 }
 
-for binary in timeless-metrics-api timeless-logs-api timeless-traces-api; do
+for binary in timeless-metrics-api timeless-logs-api timeless-traces-api timeless-authctl; do
   remove_owned_link "$prefix/bin/$binary" "$destination/bin/$binary"
 done
 for extension in "$destination"/lib/libtimeless_ext.*; do

@@ -147,6 +147,7 @@ copies the complete bundle into the immutable directory:
 ```
 
 It then atomically points `<prefix>/bin/timeless-{metrics,logs,traces}-api`,
+`<prefix>/bin/timeless-authctl`,
 the platform extension link under `<prefix>/lib`, and
 `<prefix>/telemetry-data-plane/CURRENT` at that directory. The default prefix
 is `/opt/timeless`; pass an explicit writable prefix for an unprivileged

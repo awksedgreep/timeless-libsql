@@ -10,13 +10,23 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.7.0 -->
+<!-- release-target: 0.7.1 -->
 
 ## [Unreleased]
 
-No changes recorded after `0.7.0`.
+No changes recorded after `0.7.1`.
 
-## [0.7.0] — 2026-08-12
+## [0.7.1] — 2026-08-12
+
+The `v0.7.0` tag records source only: its artifact run failed the release
+tool's binary identity check because `timeless-authctl` — newly added to
+the bundle inventory — did not implement the `--version` JSON contract the
+other binaries speak (the v0.4.0/v0.6.3 precedent: the bad tag stays, the
+fix is the next patch). authctl now emits the same identity document, built
+from the same build-script env, and the packaging step is exercised locally
+before tagging.
+
+## [0.7.0] — 2026-08-12 (source-only tag)
 
 This minor selects a new compatibility line because a documented public
 surface changed intentionally: the signal server binaries no longer require
