@@ -9,6 +9,7 @@ mod logsql;
 mod pipeline;
 mod storage;
 mod syslog;
+mod tail;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

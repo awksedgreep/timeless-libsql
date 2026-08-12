@@ -40,6 +40,7 @@ pub fn router_with_limits(storage: Storage, limits: LogsQueryLimits) -> Router {
         .route("/select/logsql/query", get(query_get).post(query_post))
         .route("/select/logsql/field_values", get(field_values))
         .route("/select/logsql/stats", get(stats))
+        .route("/select/logsql/tail", get(tail_get).post(tail_post))
         .route("/api/v1/flush", get(flush))
         .route("/api/v1/backup", post(backup))
         .fallback(unsupported)
@@ -233,6 +234,107 @@ async fn field_values(
 struct QueryForm {
     query: Option<String>,
     allow_partial_response: Option<String>,
+}
+
+// -- Live tail (VictoriaLogs-compatible /select/logsql/tail) ----------------
+//
+// One filter expression, no pipelines: the subscription's predicate is the
+// COMPLETE parsed expression (parse_tail_filter), matched in-memory against
+// every admitted entry by the storage tail hub. Query-backed lists resolve
+// ONCE at subscribe time — the stream reflects the subquery as of
+// subscription, VictoriaLogs' stored-filter semantics. Slow consumers drop
+// entries (counted in stats) rather than backpressuring ingest.
+
+async fn tail_get(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<LogsQueryLimits>,
+    form: Result<Query<QueryForm>, QueryRejection>,
+) -> Response<Body> {
+    let Ok(Query(form)) = form else {
+        return logsql_error(LogsqlError {
+            kind: LogsqlErrorKind::Malformed,
+            message: "invalid tail query parameters".into(),
+        });
+    };
+    tail(storage, limits, form).await
+}
+
+async fn tail_post(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<LogsQueryLimits>,
+    Form(form): Form<QueryForm>,
+) -> Response<Body> {
+    tail(storage, limits, form).await
+}
+
+async fn tail(storage: Storage, limits: LogsQueryLimits, form: QueryForm) -> Response<Body> {
+    let Some(query) = form.query else {
+        return logsql_error(LogsqlError {
+            kind: LogsqlErrorKind::Malformed,
+            message: "LogsQL query parameter is required".into(),
+        });
+    };
+    let mut predicate = match logsql::parse_tail_filter(&query, storage.timestamp_unit()) {
+        Ok(predicate) => predicate,
+        Err(error) => return logsql_error(error),
+    };
+    let mut resolution = QueryBackedResolution {
+        remaining_work_rows: limits.max_work_rows,
+        remaining_state_bytes: limits.max_response_bytes,
+        values: BTreeMap::new(),
+        limits,
+    };
+    if let Err(error) =
+        resolve_query_backed_predicate(&storage, &mut predicate, &mut resolution).await
+    {
+        return server_error(error);
+    }
+    let predicate = match predicate {
+        crate::LogPredicate::True => None,
+        predicate => Some(predicate),
+    };
+    let subscription = storage.tail_hub().subscribe(predicate);
+    let id = crate::tail::TailHub::subscription_id(&subscription);
+    // Heartbeat newlines keep idle connections alive through proxies; a full
+    // buffer skips the beat rather than blocking, and a gone subscriber ends
+    // the task.
+    if let Some(heartbeat) = storage.tail_hub().heartbeat_sender(id) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                if heartbeat.is_closed() {
+                    break;
+                }
+                let _ = heartbeat.try_send("\n".to_owned());
+            }
+        });
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(TailStream { subscription }))
+        .expect("tail response builds")
+}
+
+/// Dropping the stream (client disconnect) drops the subscription, which
+/// unsubscribes from the hub.
+struct TailStream {
+    subscription: crate::tail::TailSubscription,
+}
+
+impl futures_core::Stream for TailStream {
+    type Item = Result<axum::body::Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.subscription
+            .receiver
+            .poll_recv(cx)
+            .map(|line| line.map(|line| Ok(axum::body::Bytes::from(line))))
+    }
 }
 
 struct QueryBackedResolution {

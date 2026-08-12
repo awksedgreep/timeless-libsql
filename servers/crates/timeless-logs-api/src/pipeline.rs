@@ -10795,7 +10795,7 @@ fn insert_path(
     Ok(())
 }
 
-fn predicate_matches(
+pub(crate) fn predicate_matches(
     predicate: &LogPredicate,
     row: &Value,
     timestamp_unit: TimestampUnit,

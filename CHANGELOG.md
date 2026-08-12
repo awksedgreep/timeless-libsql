@@ -14,7 +14,16 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-No changes recorded after `0.7.1`.
+### Added
+
+- Live tail for logs: `GET/POST /select/logsql/tail` streams admitted
+  entries as NDJSON, filtered by one LogsQL filter expression (the full
+  filter vocabulary — `host:x`, boolean combinations, query-backed lists
+  resolved once at subscribe). VictoriaLogs-compatible endpoint shape.
+  Fan-out is in-memory from the ingest admission path; slow consumers drop
+  entries rather than backpressuring ingest, with
+  `tail_active_subscribers` / `tail_entries_sent` / `tail_entries_dropped`
+  exposed in stats. The extension is untouched — this is server-only.
 
 ## [0.7.1] — 2026-08-12
 

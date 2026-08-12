@@ -19336,3 +19336,169 @@ fn make_lines(start: usize, count: usize) -> String {
     }
     body
 }
+
+// -- Live tail (/select/logsql/tail) ----------------------------------------
+//
+// The streaming twin of the query surface: admitted entries fan out to
+// subscribers through the storage tail hub, filtered by a complete LogsQL
+// filter expression. These tests read the response body incrementally —
+// the stream never ends on its own, so each assertion reads exactly the
+// frames it expects.
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn tail_streams_matching_entries_and_respects_filters() {
+    use http_body_util::BodyExt;
+
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage =
+        Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    let app = router(storage.clone());
+
+    // Subscribe to error-level entries from host cmts-01 only.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/select/logsql/tail?query=level:error%20AND%20host:cmts-01")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let mut body = response.into_body();
+
+    // Matching and non-matching entries in one batch.
+    let ingest = app
+        .clone()
+        .oneshot(ingest_request(
+            concat!(
+                r#"{"_msg":"link flap","level":"error","host":"cmts-01"}"#,
+                "\n",
+                r#"{"_msg":"routine sync","level":"info","host":"cmts-01"}"#,
+                "\n",
+                r#"{"_msg":"other host error","level":"error","host":"cmts-02"}"#,
+                "\n",
+            )
+            .to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert!(ingest.status().is_success());
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+        .await
+        .expect("a tail frame arrives")
+        .expect("stream stays open")
+        .expect("frame is not an error");
+    let line = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
+    assert!(line.contains("link flap"), "{line}");
+    assert!(line.contains("\"host\":\"cmts-01\""), "{line}");
+    assert!(line.ends_with('\n'));
+
+    // The non-matching entries were filtered, so the next ingest's match is
+    // the very next frame.
+    let ingest = app
+        .clone()
+        .oneshot(ingest_request(
+            concat!(
+                r#"{"_msg":"second flap","level":"error","host":"cmts-01"}"#,
+                "\n"
+            )
+            .to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert!(ingest.status().is_success());
+    let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+        .await
+        .expect("a tail frame arrives")
+        .expect("stream stays open")
+        .expect("frame is not an error");
+    let line = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
+    assert!(line.contains("second flap"), "{line}");
+    assert!(!line.contains("routine sync"));
+    assert!(!line.contains("cmts-02"));
+
+    // Stats surface the subscription; dropping the body unsubscribes.
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.tail_active_subscribers, 1);
+    assert_eq!(stats.tail_entries_sent, 2);
+    drop(body);
+    for _ in 0..100 {
+        if storage.stats().await.unwrap().tail_active_subscribers == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(storage.stats().await.unwrap().tail_active_subscribers, 0);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn tail_rejects_pipelines_and_drops_for_slow_consumers() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage =
+        Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    let app = router(storage.clone());
+
+    // Pipelines are the query surface's business, not tail's.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/select/logsql/tail?query=*%20|%20stats%20count()")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // A subscriber that never reads: fill its buffer past capacity and the
+    // overflow is dropped and counted — ingest never blocks.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/select/logsql/tail?query=*")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body();
+
+    let mut lines = String::new();
+    for index in 0..1_200 {
+        lines.push_str(&format!("{{\"_msg\":\"burst {index}\"}}\n"));
+    }
+    let ingest = app.clone().oneshot(ingest_request(lines)).await.unwrap();
+    assert!(ingest.status().is_success());
+
+    let stats = storage.stats().await.unwrap();
+    assert!(
+        stats.tail_entries_dropped > 0,
+        "overflow must drop, got {stats:?}"
+    );
+    assert!(stats.tail_entries_sent > 0);
+    drop(body);
+    storage.shutdown().await.unwrap();
+}

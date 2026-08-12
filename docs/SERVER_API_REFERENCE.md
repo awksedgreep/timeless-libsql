@@ -85,6 +85,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `logs` | `GET, POST` | `/select/logsql/query` | `logs:read` | Native parameter query on GET; LogsQL compatibility grammar on POST. |
 | `logs` | `GET` | `/select/logsql/field_values` | `logs:read` | Bounded discovery for `service`, `host`, `path`, or `status`. |
 | `logs` | `GET` | `/select/logsql/stats` | `logs:stats` | Complete serialized `StorageStats`. |
+| `logs` | `GET, POST` | `/select/logsql/tail` | `logs:read` | Live tail: streams admitted entries matching one LogsQL filter expression as NDJSON; pipelines are rejected; slow consumers drop (counted in stats). |
 | `logs` | `GET` | `/api/v1/flush` | `logs:maintenance` | Ordered writer completion and extension durability barrier. |
 | `logs` | `POST` | `/api/v1/backup` | `logs:maintenance` | Flush, optimize, checkpoint, and verified SQLite backup. |
 | `traces` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |

@@ -6115,6 +6115,26 @@ pub fn parse_at(
     parse_with_context(query, &mut context)
 }
 
+/// The live-tail filter parser: one filter expression, no pipelines, the
+/// COMPLETE predicate retained (the logical path only copies pushdown
+/// conjuncts into the spec; tail matching needs the whole expression).
+pub(crate) fn parse_tail_filter(
+    query: &str,
+    timestamp_unit: TimestampUnit,
+) -> Result<LogPredicate, LogsqlError> {
+    let mut context = ParseContext {
+        timestamp_unit,
+        query_now: now(timestamp_unit),
+        inherited_time_offset_ns: 0,
+        inherited_global_filter: None,
+        query_backed_depth: 0,
+        query_backed_lists: 0,
+        common_case_values: 0,
+        common_case_state_bytes: 0,
+    };
+    parse_global_filter_value(query, &mut context)
+}
+
 fn parse_with_context(query: &str, context: &mut ParseContext) -> Result<LogsqlPlan, LogsqlError> {
     parse_with_context_mode(query, context, ParseMode::Query)
 }

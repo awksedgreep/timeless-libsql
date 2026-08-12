@@ -871,6 +871,9 @@ pub struct StorageStats {
     pub api_query_ns: i64,
     pub api_query_in_flight: i64,
     pub api_query_cancelled: i64,
+    pub tail_active_subscribers: i64,
+    pub tail_entries_sent: i64,
+    pub tail_entries_dropped: i64,
     pub api_query_errors: i64,
     pub api_query_result_rows: i64,
     pub api_query_response_bytes: i64,
@@ -1047,6 +1050,7 @@ struct StorageInner {
     timestamp_unit: TimestampUnit,
     database_path: PathBuf,
     queue_capacity: usize,
+    tail: Arc<crate::tail::TailHub>,
 }
 
 #[derive(Clone)]
@@ -1153,6 +1157,7 @@ impl Storage {
             timestamp_unit,
             database_path,
             queue_capacity: queue_batches,
+            tail: crate::tail::TailHub::new(),
         })))
     }
 
@@ -1182,8 +1187,16 @@ impl Storage {
             profile.admitted_batches = profile.admitted_batches.saturating_add(1);
             profile.admitted_entries = profile.admitted_entries.saturating_add(count as u64);
         }
+        // Live tail sees exactly what was admitted, published before the
+        // entries move into the writer command. An idle hub costs one
+        // atomic load.
+        self.0.tail.publish(&entries, self.0.timestamp_unit);
         permit.send(WriteCommand::Ingest(entries));
         Ok(count)
+    }
+
+    pub(crate) fn tail_hub(&self) -> Arc<crate::tail::TailHub> {
+        Arc::clone(&self.0.tail)
     }
 
     pub fn record_parse(&self, duration: Duration) {
@@ -1479,6 +1492,10 @@ impl Storage {
         stats.api_query_count = profile.query_count as i64;
         stats.api_query_ns = profile.query_ns as i64;
         stats.api_query_in_flight = profile.query_in_flight as i64;
+        let (tail_active, tail_sent, tail_dropped) = self.0.tail.stats();
+        stats.tail_active_subscribers = tail_active as i64;
+        stats.tail_entries_sent = tail_sent as i64;
+        stats.tail_entries_dropped = tail_dropped as i64;
         stats.api_query_cancelled = profile.query_cancelled as i64;
         stats.api_query_errors = profile.query_errors as i64;
         stats.api_query_result_rows = profile.query_result_rows as i64;
@@ -3698,6 +3715,9 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         api_query_ns: 0,
         api_query_in_flight: 0,
         api_query_cancelled: 0,
+        tail_active_subscribers: 0,
+        tail_entries_sent: 0,
+        tail_entries_dropped: 0,
         api_query_errors: 0,
         api_query_result_rows: 0,
         api_query_response_bytes: 0,

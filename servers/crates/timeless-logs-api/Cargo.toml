@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 axum = "0.8"
+futures-core = "0.3"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
@@ -21,5 +22,6 @@ timeless-api-common = { path = "../timeless-api-common" }
 xxhash-rust = { version = "0.8", features = ["std", "xxh64"] }
 
 [dev-dependencies]
+http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
