@@ -22,13 +22,14 @@ historical-query surface for TimelessTracesDashboard.
 cargo build -p timeless-ext
 timeless_traces_dir="$(mktemp -d)"
 trap 'rm -rf -- "$timeless_traces_dir"' EXIT
-TIMELESS_AUTH_MODE=disabled cargo run --manifest-path servers/Cargo.toml -p timeless-traces-api -- \
+cargo run --manifest-path servers/Cargo.toml -p timeless-traces-api -- \
   target/debug/libtimeless_ext.so "$timeless_traces_dir/traces.db"
 ```
 
-`TIMELESS_AUTH_MODE=disabled` is only for an isolated local benchmark. A
-production deployment omits it and supplies `TIMELESS_AUTH_POLICY_FILE` and
-`TIMELESS_TENANT` through its supervisor or control plane.
+Authentication is off by default. To harden a deployment, opt in with
+`TIMELESS_AUTH_MODE=required`, `TIMELESS_AUTH_POLICY_FILE`, and
+`TIMELESS_TENANT`; non-loopback binding additionally requires
+`TIMELESS_ALLOW_NON_LOOPBACK=1` in a separately secured deployment.
 
 The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 

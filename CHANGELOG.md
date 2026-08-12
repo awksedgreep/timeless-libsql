@@ -14,7 +14,31 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-No changes recorded after `0.6.4`.
+### Changed
+
+- The three signal server binaries now start with authentication **disabled**
+  by default, matching the library `Config::default()` and every comparable
+  telemetry server. Set `TIMELESS_AUTH_MODE=required` with
+  `TIMELESS_AUTH_POLICY_FILE` to enable token verification. Previously an
+  unset `TIMELESS_AUTH_MODE` required a policy file and the binary exited
+  with code 2 without one. **Operators who relied on the previous default
+  must now set `TIMELESS_AUTH_MODE=required` explicitly.** Deployments that
+  already set it explicitly — including every `timeless_stack` deployment —
+  are unaffected.
+- `/ready` and `/health` no longer require a token, so container and load
+  balancer probes work without minted credentials. `/live` was already
+  exempt.
+
+### Fixed
+
+- `GET /api/v1/scrape/targets` no longer returns stored scrape bearer tokens
+  or basic-auth passwords. The response reports whether credentials are
+  configured without disclosing them.
+- Scrape targets can no longer be pointed at link-local addresses (including
+  cloud instance metadata), and scrape connections are pinned to their
+  validated resolved addresses, closing a server-side request forgery path.
+- Backup destinations are confined to a backup root (`TIMELESS_BACKUP_DIR`,
+  defaulting to `backups/` beside the database file).
 
 ## [0.6.4] — 2026-08-11
 

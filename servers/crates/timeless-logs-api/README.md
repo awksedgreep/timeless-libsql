@@ -75,15 +75,15 @@ cargo build --release --manifest-path servers/Cargo.toml \
 
 timeless_logs_dir="$(mktemp -d)"
 trap 'rm -rf -- "$timeless_logs_dir"' EXIT
-TIMELESS_AUTH_MODE=disabled \
+\
   servers/target/release/timeless-logs-api \
   target/release/libtimeless_ext.so \
   "$timeless_logs_dir/logs.db" \
   127.0.0.1:19429
 ```
 
-Use `.dylib` on macOS. Disabled authentication is only for an isolated local
-run. A production launch supplies `TIMELESS_AUTH_POLICY_FILE` and
+Use `.dylib` on macOS. Authentication is off by default. To harden a deployment, opt in with
+`TIMELESS_AUTH_MODE=required`, `TIMELESS_AUTH_POLICY_FILE`, and
 `TIMELESS_TENANT`; non-loopback binding additionally requires
 `TIMELESS_ALLOW_NON_LOOPBACK=1` in a separately secured deployment.
 

@@ -64,19 +64,26 @@ impl AuthConfig {
         }
     }
 
-    pub fn required_from_env(signal: &str) -> Result<Self, String> {
+    /// Reads the opt-in auth configuration for `signal`.
+    ///
+    /// Auth is disabled unless `TIMELESS_AUTH_MODE=required` is set
+    /// explicitly. This matches the library `Config::default()` and every
+    /// comparable telemetry server. Enabling auth requires
+    /// `TIMELESS_AUTH_POLICY_FILE`.
+    pub fn from_env(signal: &str) -> Result<Self, String> {
         match std::env::var("TIMELESS_AUTH_MODE") {
+            Err(std::env::VarError::NotPresent) => return Ok(Self::disabled()),
             Ok(mode) if mode == "disabled" => return Ok(Self::disabled()),
-            Ok(mode) if mode != "required" => {
+            Ok(mode) if mode == "required" => {}
+            Ok(mode) => {
                 return Err(format!(
                     "TIMELESS_AUTH_MODE must be required or disabled, got {mode:?}"
                 ))
             }
-            Ok(_) | Err(std::env::VarError::NotPresent) => {}
             Err(error) => return Err(format!("read TIMELESS_AUTH_MODE: {error}")),
         }
         let policy = std::env::var("TIMELESS_AUTH_POLICY_FILE").map_err(|_| {
-            "TIMELESS_AUTH_POLICY_FILE is required unless TIMELESS_AUTH_MODE=disabled".to_owned()
+            "TIMELESS_AUTH_POLICY_FILE is required when TIMELESS_AUTH_MODE=required".to_owned()
         })?;
         let tenant = std::env::var("TIMELESS_TENANT").unwrap_or_else(|_| "default".to_owned());
         let config = Self::enforced(signal, tenant, policy);
@@ -285,7 +292,12 @@ async fn authorize(State(config): State<AuthConfig>, request: Request, next: Nex
     let Some(verifier) = config.verifier else {
         return next.run(request).await;
     };
-    if request.uri().path() == "/live" {
+    // Exact-match exemptions (not prefix/suffix, so not spoofable): probes
+    // from Kubernetes, load balancers, and Docker HEALTHCHECK must work
+    // without minted credentials. Signal stats stay behind <signal>:stats —
+    // they expose series cardinality and storage internals.
+    const UNAUTHENTICATED_PATHS: [&str; 3] = ["/live", "/ready", "/health"];
+    if UNAUTHENTICATED_PATHS.contains(&request.uri().path()) {
         return next.run(request).await;
     }
     let scope = required_scope(&verifier.signal, request.method(), request.uri().path());
@@ -685,6 +697,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn from_env_defaults_open_and_opt_in_still_fails_closed() {
+        // All env cases in one test: parallel tests sharing process env race.
+        std::env::remove_var("TIMELESS_AUTH_MODE");
+        std::env::remove_var("TIMELESS_AUTH_POLICY_FILE");
+        let config = AuthConfig::from_env("metrics").unwrap();
+        assert!(config.verifier.is_none(), "unset env must mean disabled");
+
+        std::env::set_var("TIMELESS_AUTH_MODE", "disabled");
+        assert!(AuthConfig::from_env("metrics").unwrap().verifier.is_none());
+
+        std::env::set_var("TIMELESS_AUTH_MODE", "garbage");
+        let error = AuthConfig::from_env("metrics").unwrap_err();
+        assert!(error.contains("must be required or disabled"), "{error}");
+
+        std::env::set_var("TIMELESS_AUTH_MODE", "required");
+        std::env::remove_var("TIMELESS_AUTH_POLICY_FILE");
+        let error = AuthConfig::from_env("metrics").unwrap_err();
+        assert!(
+            error.contains("TIMELESS_AUTH_POLICY_FILE is required when"),
+            "{error}"
+        );
+
+        std::env::set_var("TIMELESS_AUTH_POLICY_FILE", "/nonexistent/policy.json");
+        assert!(
+            AuthConfig::from_env("metrics").is_err(),
+            "a bad policy file must fail closed before the listener binds"
+        );
+
+        std::env::remove_var("TIMELESS_AUTH_MODE");
+        std::env::remove_var("TIMELESS_AUTH_POLICY_FILE");
+    }
+
+    #[test]
     fn backup_is_a_maintenance_operation_for_every_signal() {
         for signal in ["metrics", "logs", "traces"] {
             assert_eq!(
@@ -725,9 +770,13 @@ mod tests {
         );
 
         assert_eq!(request(&app, "/live", None).await.0, StatusCode::OK);
+        // Probe endpoints are exempt even with auth enforced.
+        assert_eq!(request(&app, "/ready", None).await.0, StatusCode::OK);
+        // A data route without credentials still fails closed — the
+        // exemption did not widen.
         assert_case(
             &app,
-            "/ready",
+            "/api/v1/query",
             None,
             StatusCode::UNAUTHORIZED,
             "missing_credentials",

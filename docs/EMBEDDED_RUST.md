@@ -1,5 +1,7 @@
 # Embedded Rust guide
 
+The embedded path has no HTTP surface and therefore no authentication —
+there is nothing to configure or disable.
 `timeless-ext` can register the production metrics, logs, traces, and query
 modules directly on a `rusqlite::Connection`. This path runs entirely inside
 the application process: it starts no HTTP server, BEAM process, NIF, or

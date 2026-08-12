@@ -308,8 +308,10 @@ timeless-<signal>-api <libtimeless_ext.so> <database> [listen-address]
 | `timeless-logs-api` | `127.0.0.1:19429` | NDJSON rich-log ingest, LogsQL query and field discovery |
 | `timeless-traces-api` | `127.0.0.1:19449` | OTLP JSON/protobuf/gzip ingest, Jaeger discovery/search, native rich-span reads |
 
-Release binaries require authentication unless
-`TIMELESS_AUTH_MODE=disabled` is explicitly set. Non-loopback binding is
+Release binaries start open — no authentication and no configuration —
+matching the library `Config::default()` and comparable telemetry servers.
+Set `TIMELESS_AUTH_MODE=required` with `TIMELESS_AUTH_POLICY_FILE` to enable
+token verification. Non-loopback binding is
 rejected unless `TIMELESS_ALLOW_NON_LOOPBACK=1` is explicitly set for a
 separately secured deployment. TCP is the implemented transport; this release
 does not claim a Unix-socket listener.

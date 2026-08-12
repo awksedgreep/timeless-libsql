@@ -85,9 +85,23 @@ Also record:
 - current row/series/time-range counts obtained through public tables/TVFs;
 - artifact checksums and the deployed configuration/policy files.
 
+## Auth default change — read before upgrading the servers
+
+Signal server binaries now start with authentication **disabled** unless
+`TIMELESS_AUTH_MODE=required` is set explicitly. Before this line, an unset
+`TIMELESS_AUTH_MODE` demanded a policy file and refused to start without one,
+so any deployment that ran at all either set `required` (still enforced,
+nothing changes — this includes every `timeless_stack` deployment) or set
+`disabled` (already open, nothing changes). The deployment that must act is
+one that *relied on the refusal-to-start as a safety net*: after upgrading,
+such a binary starts open instead of failing. If you want token verification,
+set `TIMELESS_AUTH_MODE=required` with `TIMELESS_AUTH_POLICY_FILE` — one
+line, and the enforcement is exactly as before.
+
 ## 2. Drain and create the rollback point
 
-For a Rust signal server, stop producers, call its authenticated flush route,
+For a Rust signal server, stop producers, call its flush route
+(authenticated only if you enabled auth),
 then use its verified backup route while it still owns the database. The
 backup operation flushes, performs signal maintenance, requires a complete
 WAL checkpoint, uses SQLite's online-backup API, validates the result, fsyncs,
@@ -147,8 +161,9 @@ parity.
 4. Let the writer preflight the extension and database, initialize/connect the
    public virtual table, and add the idempotent schema-ledger v1 row when the
    database is pre-ledger schema 0.
-5. Require `/live`, authenticated `/ready`, and signal stats to report the
-   expected build, data ABI, table, queue, and storage state.
+5. Require `/live`, `/ready` (unauthenticated probe endpoints), and signal
+   stats (authenticated when auth is enabled) to report the expected build,
+   data ABI, table, queue, and storage state.
 6. Resume producers only after readiness succeeds.
 7. Repeat for each independently owned signal database/process.
 

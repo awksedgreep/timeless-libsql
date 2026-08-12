@@ -63,10 +63,14 @@ TCP defaults are loopback-only:
 | logs | `127.0.0.1:19429` |
 | traces | `127.0.0.1:19449` |
 
+Auth: **disabled** unless `TIMELESS_AUTH_MODE=required` — a fresh binary
+starts open with zero configuration, like comparable telemetry servers.
+
 All three expose `/live`, `/ready`, `/health`, and signal-specific stats. A
 SIGINT or SIGTERM stops admission, drains accepted HTTP work, stops maintenance,
 flushes through the public extension command, closes/reaps SQLite workers, and
-releases the owner lease. Authentication and production limits are added in
-the current release servers. Startup capability/schema fencing occurs before
+releases the owner lease. Optional authentication and production limits are
+available in the current release servers (opt-in via
+`TIMELESS_AUTH_MODE=required`). Startup capability/schema fencing occurs before
 listener binding; coordinated backup and complete WAL checkpointing use the
 sole writer connection.

@@ -62,6 +62,14 @@ These independent versions must not be conflated:
   not a private replacement storage engine.
 - PromQL/MetricsQL/LogsQL matrix rows identify language compatibility.
 
+### Behavior changes on the 0.6 line
+
+- Signal server binaries start with authentication **disabled** unless
+  `TIMELESS_AUTH_MODE=required` is set explicitly. A binary upgraded across
+  this boundary stops requiring auth unless that variable is set; see the
+  [upgrade guide](UPGRADE.md) warning. Deployments that set the mode
+  explicitly (either value) are unaffected.
+
 ## Supported artifact pairings
 
 | Extension | Rust server | Verdict | Reason |

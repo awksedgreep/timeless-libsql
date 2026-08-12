@@ -38,10 +38,11 @@ who has separately secured a container or host network may set
 `TIMELESS_ALLOW_NON_LOOPBACK=1` and pass a non-loopback address. There is no
 Unix-socket listener in this release.
 
-The binary entry points require authentication unless
-`TIMELESS_AUTH_MODE=disabled` is set explicitly. The library `Config`
-defaults use disabled auth only so Rust tests and embedded callers can build a
-configuration programmatically; that is not the release-binary default.
+Authentication is opt-in at every level, and the library and binaries agree:
+`Config::default()` and an unconfigured binary both start open. Set
+`TIMELESS_AUTH_MODE=required` with `TIMELESS_AUTH_POLICY_FILE` to enable
+token verification; a bad policy still fails closed before the listener
+binds.
 
 ## Complete route inventory
 
@@ -49,6 +50,9 @@ The following marked inventory is checked against every production Axum
 `.route(...)` registration, including its exact method set.
 
 <!-- public-server-routes:start -->
+
+The "Required scope" column applies **only when auth is enabled**
+(`TIMELESS_AUTH_MODE=required`); an open server enforces no scopes.
 
 | Signal | Methods | Path | Required scope | Contract |
 |---|---|---|---|---|
@@ -242,8 +246,8 @@ integers and an invalid value stops startup with status 2.
 | Variable | Applies to | Default | Meaning and constraints |
 |---|---|---:|---|
 | `TIMELESS_ALLOW_NON_LOOPBACK` | all | unset | Only `1`, `true`, or `TRUE` permits an explicitly supplied non-loopback TCP listener. |
-| `TIMELESS_AUTH_MODE` | all | `required` | `required` or `disabled`; disabling must be explicit. |
-| `TIMELESS_AUTH_POLICY_FILE` | all | none | Required readable policy-v1 JSON path when auth is required. |
+| `TIMELESS_AUTH_MODE` | all | `disabled` | Set `required` to enable token verification; auth is opt-in. |
+| `TIMELESS_AUTH_POLICY_FILE` | all | none | Readable policy-v1 JSON path; required when `TIMELESS_AUTH_MODE=required`. |
 | `TIMELESS_TENANT` | all | `default` | Exact tenant required in both policy and token. |
 | `TIMELESS_BACKUP_DIR` | all | `backups/` beside the database file | Directory backups are confined to; destinations that canonicalize outside it are rejected. Relative destinations resolve inside it. |
 | `TIMELESS_METRICS_READER_CONNECTIONS` | metrics | `2` | Independent bounded SQLite readers. |
@@ -280,8 +284,11 @@ health/readiness build identity.
 
 ## Authentication and admission
 
-Except for `/live`, every route requires an exact `Authorization: Bearer
-<token>` when auth is enabled. Tokens are compact JWS/JWT values signed with
+Authentication is **opt-in**: servers start open, and verification engages
+only under `TIMELESS_AUTH_MODE=required` with a policy file. When enabled,
+every route except the probe endpoints `/live`, `/ready`, and `/health`
+(exact-match exemptions, so container and load-balancer probes need no
+credentials) requires an exact `Authorization: Bearer <token>`. Tokens are compact JWS/JWT values signed with
 Ed25519 (`alg=EdDSA`); `typ`, if present, must be `JWT`. The policy contains
 base64url-no-padding 32-byte public keys. Rust validates tokens but never
 issues them.

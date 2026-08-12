@@ -43,7 +43,7 @@ async fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let auth = match AuthConfig::required_from_env("metrics") {
+    let auth = match AuthConfig::from_env("metrics") {
         Ok(auth) => auth,
         Err(error) => return usage_error(error),
     };

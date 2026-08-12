@@ -43,7 +43,7 @@ async fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let auth = match AuthConfig::required_from_env("logs") {
+    let auth = match AuthConfig::from_env("logs") {
         Ok(auth) => auth,
         Err(error) => {
             eprintln!("{error}");
