@@ -29,6 +29,20 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   balancer probes work without minted credentials. `/live` was already
   exempt.
 
+### Added
+
+- `timeless-authctl`: Ed25519 keygen, policy scaffolding, and token minting,
+  so enabling auth no longer requires implementing a JWS signer or running
+  the Elixir control plane. A round-trip test pins the minted tokens to the
+  servers' verifier.
+- `ClaimLimits` and the optional policy fields now have defaults, so a
+  policy file need only state the limits it wants to lower; tokens may omit
+  the `limits` block entirely.
+- `TIMELESS_ADMIN_KEY`: when set, the administrative routes (scrape target
+  management, backup, flush, optimize) additionally require it, independent
+  of `TIMELESS_AUTH_MODE` — ingest and query stay open while administration
+  closes, following the VictoriaMetrics authKey precedent.
+
 ### Fixed
 
 - `GET /api/v1/scrape/targets` no longer returns stored scrape bearer tokens

@@ -4,6 +4,7 @@ members = [
   "crates/timeless-metrics-api",
   "crates/timeless-logs-api",
   "crates/timeless-traces-api",
+  "crates/timeless-authctl",
 ]
 resolver = "2"
 

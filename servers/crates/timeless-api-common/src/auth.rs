@@ -26,6 +26,13 @@ pub const RESULT_ROWS_HEADER: &str = "x-timeless-result-rows";
 #[derive(Clone)]
 pub struct AuthConfig {
     verifier: Option<Arc<AuthVerifier>>,
+    /// S4 (VictoriaMetrics -deleteAuthKey precedent): when set,
+    /// administrative routes additionally require this key — header
+    /// `x-timeless-admin-key` or query parameter `admin_key` — independent
+    /// of whether token auth is enabled. Unset means open, consistent with
+    /// the default-open posture. Defence in depth, not the fix for the
+    /// S1-S3 defects, which are closed on their merits.
+    admin_key: Option<Arc<str>>,
 }
 
 impl fmt::Debug for AuthConfig {
@@ -44,7 +51,17 @@ impl fmt::Debug for AuthConfig {
 
 impl AuthConfig {
     pub fn disabled() -> Self {
-        Self { verifier: None }
+        Self {
+            verifier: None,
+            admin_key: admin_key_from_env(),
+        }
+    }
+
+    /// Replace the admin key (library callers; the binaries inherit
+    /// `TIMELESS_ADMIN_KEY` through the constructors).
+    pub fn with_admin_key(mut self, key: Option<String>) -> Self {
+        self.admin_key = key.map(Into::into);
+        self
     }
 
     pub fn enforced(
@@ -61,6 +78,7 @@ impl AuthConfig {
                 admission: Mutex::new(HashMap::new()),
                 admission_notify: Notify::new(),
             })),
+            admin_key: admin_key_from_env(),
         }
     }
 
@@ -103,6 +121,7 @@ impl AuthConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ClaimLimits {
     pub max_request_bytes: usize,
     pub max_decompressed_bytes: usize,
@@ -111,6 +130,26 @@ pub struct ClaimLimits {
     pub max_request_ms: u64,
     pub max_concurrent_requests: usize,
     pub max_queue_ms: u64,
+}
+
+/// Defaults match the documented shipped maxima (SERVER_API_REFERENCE.md
+/// limits table). They remove the transcription burden from hand-authored
+/// policy files — the largest single contributor to it — not the
+/// enforcement: containment still applies unchanged, a claim may lower but
+/// never raise a configured maximum, and nothing may exceed the server's
+/// hard caps.
+impl Default for ClaimLimits {
+    fn default() -> Self {
+        Self {
+            max_request_bytes: 10 * 1024 * 1024,
+            max_decompressed_bytes: 10 * 1024 * 1024,
+            max_response_bytes: 16 * 1024 * 1024,
+            max_query_rows: 100_000,
+            max_request_ms: 30_000,
+            max_concurrent_requests: 64,
+            max_queue_ms: 1_000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -137,6 +176,11 @@ struct TokenClaims {
     iat: i64,
     nbf: i64,
     exp: i64,
+    // Omitted limits mean "no lowering requested": the shipped defaults,
+    // which policy containment then clamps exactly as explicit values would
+    // be. Lets minimal minters (authctl against a scaffolded policy) omit
+    // the block entirely.
+    #[serde(default)]
     limits: ClaimLimits,
 }
 
@@ -154,8 +198,11 @@ struct PolicyFile {
     issuer: String,
     audience: String,
     tenant: String,
+    #[serde(default)]
     minimum_auth_version: u64,
+    #[serde(default = "default_max_token_seconds")]
     max_token_seconds: i64,
+    #[serde(default)]
     maximum_limits: ClaimLimits,
     subjects: HashMap<String, SubjectPolicy>,
     keys: Vec<PolicyKey>,
@@ -163,10 +210,16 @@ struct PolicyFile {
     revoked_jtis: HashSet<String>,
 }
 
+fn default_max_token_seconds() -> i64 {
+    3_600
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct SubjectPolicy {
+    #[serde(default)]
     auth_version: u64,
     scopes: HashSet<String>,
+    #[serde(default)]
     maximum_limits: ClaimLimits,
     #[serde(default = "default_enabled")]
     enabled: bool,
@@ -281,14 +334,60 @@ impl AuthError {
 }
 
 pub fn protect_router(router: Router, config: AuthConfig) -> Router {
-    if config.verifier.is_none() {
+    // The layer engages when either mechanism is configured: token auth,
+    // the admin key, or both. A fully-open config skips the middleware.
+    if config.verifier.is_none() && config.admin_key.is_none() {
         router
     } else {
         router.layer(middleware::from_fn_with_state(config, authorize))
     }
 }
 
+fn admin_key_from_env() -> Option<Arc<str>> {
+    match std::env::var("TIMELESS_ADMIN_KEY") {
+        Ok(key) if !key.is_empty() => Some(key.into()),
+        _ => None,
+    }
+}
+
+/// Administrative routes the optional admin key gates: target management,
+/// backup, and maintenance commands. Exact matches only.
+fn is_admin_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/scrape/targets" | "/api/v1/backup" | "/api/v1/flush" | "/api/v1/optimize"
+    )
+}
+
+fn admin_key_matches(request: &Request, expected: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let presented = request
+        .headers()
+        .get("x-timeless-admin-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| {
+            request.uri().query().and_then(|query| {
+                query.split('&').find_map(|pair| {
+                    pair.strip_prefix("admin_key=").map(str::to_owned)
+                })
+            })
+        });
+    match presented {
+        Some(presented) => presented.as_bytes().ct_eq(expected.as_bytes()).into(),
+        None => false,
+    }
+}
+
 async fn authorize(State(config): State<AuthConfig>, request: Request, next: Next) -> Response {
+    // The admin-key gate runs before — and independent of — token auth, so
+    // an operator can leave ingest and query open while closing
+    // administration, without standing up policy and token machinery.
+    if let Some(expected) = config.admin_key.as_deref() {
+        if is_admin_path(request.uri().path()) && !admin_key_matches(&request, expected) {
+            return AuthError::unauthorized("missing_admin_key").response();
+        }
+    }
     let Some(verifier) = config.verifier else {
         return next.run(request).await;
     };
@@ -727,6 +826,123 @@ mod tests {
 
         std::env::remove_var("TIMELESS_AUTH_MODE");
         std::env::remove_var("TIMELESS_AUTH_POLICY_FILE");
+    }
+
+    #[tokio::test]
+    async fn admin_key_gates_admin_routes_independent_of_auth_mode() {
+        let config = AuthConfig::disabled().with_admin_key(Some("sesame".into()));
+        let app = protect_router(
+            Router::new()
+                .route("/api/v1/query", get(|| async { "read" }))
+                .route("/api/v1/backup", post(|| async { "backup" }))
+                .route("/api/v1/flush", post(|| async { "flush" })),
+            config,
+        );
+        let send = |path: &'static str, method: &'static str, key: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let mut builder = axum::http::Request::builder().uri(path).method(method);
+                if let Some(key) = key {
+                    builder = builder.header("x-timeless-admin-key", key);
+                }
+                app.oneshot(builder.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        // Data routes stay open; admin routes demand the key.
+        assert_eq!(send("/api/v1/query", "GET", None).await, StatusCode::OK);
+        assert_eq!(
+            send("/api/v1/backup", "POST", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send("/api/v1/flush", "POST", Some("wrong")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send("/api/v1/backup", "POST", Some("sesame")).await,
+            StatusCode::OK
+        );
+
+        // Query-parameter form works too.
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/flush?admin_key=sesame")
+                    .method("POST")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Without a configured key the same routes are open.
+        let open = protect_router(
+            Router::new().route("/api/v1/backup", post(|| async { "backup" })),
+            AuthConfig::disabled().with_admin_key(None),
+        );
+        let response = open
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/backup")
+                    .method("POST")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn minimal_policy_loads_with_default_limits() {
+        let minimal = serde_json::json!({
+            "version": 1,
+            "issuer": "iss",
+            "audience": "aud",
+            "tenant": "default",
+            "subjects": {
+                "reader": { "scopes": ["metrics:read"] }
+            },
+            "keys": [{
+                "kid": "k1",
+                "public_key": URL_SAFE_NO_PAD.encode([0u8; 32]),
+                "not_before": 0,
+                "expires_at": 4_102_444_800i64
+            }]
+        });
+        let policy: PolicyFile = serde_json::from_value(minimal).unwrap();
+        assert_eq!(policy.max_token_seconds, 3_600);
+        assert_eq!(policy.minimum_auth_version, 0);
+        assert_eq!(policy.maximum_limits, ClaimLimits::default());
+        let subject = &policy.subjects["reader"];
+        assert_eq!(subject.maximum_limits, ClaimLimits::default());
+        assert_eq!(subject.auth_version, 0);
+        assert!(subject.enabled);
+        assert_eq!(policy.maximum_limits.max_request_bytes, 10 * 1024 * 1024);
+        validate_policy(&policy, "metrics", "default").unwrap();
+
+        // Structurally-empty policies still fail validation.
+        let empty: PolicyFile = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "issuer": "",
+            "audience": "aud",
+            "tenant": "default",
+            "subjects": { "reader": { "scopes": ["metrics:read"] } },
+            "keys": [{
+                "kid": "k1",
+                "public_key": URL_SAFE_NO_PAD.encode([0u8; 32]),
+                "not_before": 0,
+                "expires_at": 4_102_444_800i64
+            }]
+        }))
+        .unwrap();
+        assert!(validate_policy(&empty, "metrics", "default").is_err());
     }
 
     #[test]

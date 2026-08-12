@@ -1,0 +1,26 @@
+[package]
+name = "timeless-authctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Key generation, policy scaffolding, and token minting for opt-in Timeless server auth"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "timeless-authctl"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = "2"
+getrandom = "0.2"
+serde_json = "1"
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
+timeless-api-common = { path = "../timeless-api-common" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }

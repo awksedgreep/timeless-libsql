@@ -250,6 +250,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_AUTH_POLICY_FILE` | all | none | Readable policy-v1 JSON path; required when `TIMELESS_AUTH_MODE=required`. |
 | `TIMELESS_TENANT` | all | `default` | Exact tenant required in both policy and token. |
 | `TIMELESS_BACKUP_DIR` | all | `backups/` beside the database file | Directory backups are confined to; destinations that canonicalize outside it are rejected. Relative destinations resolve inside it. |
+| `TIMELESS_ADMIN_KEY` | all | unset | When set, `/api/v1/scrape/targets`, `/api/v1/backup`, `/api/v1/flush`, and `/api/v1/optimize` additionally require it (header `x-timeless-admin-key` or query `admin_key`), independent of `TIMELESS_AUTH_MODE`. Unset means open. |
 | `TIMELESS_METRICS_READER_CONNECTIONS` | metrics | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_METRICS_COMMAND_QUEUE_BATCHES` | metrics | `256` | Writer-command queue capacity in admitted request batches. |
 | `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |
@@ -285,7 +286,25 @@ health/readiness build identity.
 ## Authentication and admission
 
 Authentication is **opt-in**: servers start open, and verification engages
-only under `TIMELESS_AUTH_MODE=required` with a policy file. When enabled,
+only under `TIMELESS_AUTH_MODE=required` with a policy file.
+
+Enabling it takes four commands — no Elixir control plane required:
+
+```bash
+timeless-authctl keygen --out ./auth
+timeless-authctl policy init --signal metrics --key "$(cat ./auth/timeless-auth.pub)" \
+    --out ./auth/policy.json
+TIMELESS_AUTH_MODE=required TIMELESS_AUTH_POLICY_FILE=./auth/policy.json ./timeless-metrics-api &
+curl -H "Authorization: Bearer $(timeless-authctl token mint --key ./auth/timeless-auth.key \
+    --policy ./auth/policy.json --subject default --signal metrics --ttl 1h)" \
+    http://127.0.0.1:19439/api/v1/status
+```
+
+`timeless-authctl policy add-subject` narrows scopes per caller, and
+`timeless-authctl token inspect` decodes a token without verifying it. For
+operators who want ingest and query open but administration closed without
+any token machinery, `TIMELESS_ADMIN_KEY` independently gates the
+administrative routes (see the environment table). When enabled,
 every route except the probe endpoints `/live`, `/ready`, and `/health`
 (exact-match exemptions, so container and load-balancer probes need no
 credentials) requires an exact `Authorization: Bearer <token>`. Tokens are compact JWS/JWT values signed with

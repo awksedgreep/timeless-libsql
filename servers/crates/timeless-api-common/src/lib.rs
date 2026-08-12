@@ -603,17 +603,17 @@ mod tests {
         // Outside the root: rejected, nothing written.
         let outside = dir.path().join("stolen.db");
         let error =
-            create_verified_backup(&conn, &outside, "test", checkpoint.clone()).unwrap_err();
+            create_verified_backup(&conn, &outside, "test", checkpoint).unwrap_err();
         assert!(error.contains("outside the backup directory"), "{error}");
         assert!(!outside.exists());
 
         // Absolute path inside the default root: accepted.
         let inside = dir.path().join("backups").join("good.db");
-        create_verified_backup(&conn, &inside, "test", checkpoint.clone()).unwrap();
+        create_verified_backup(&conn, &inside, "test", checkpoint).unwrap();
         assert!(inside.exists());
 
         // Relative destination resolves inside the root.
-        create_verified_backup(&conn, Path::new("relative.db"), "test", checkpoint.clone())
+        create_verified_backup(&conn, Path::new("relative.db"), "test", checkpoint)
             .unwrap();
         assert!(dir.path().join("backups").join("relative.db").exists());
 
