@@ -10,11 +10,26 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.6.2 -->
+<!-- release-target: 0.6.3 -->
 
 ## [Unreleased]
 
-No changes recorded after `0.6.2`.
+No changes recorded after `0.6.3`.
+
+## [0.6.3] — 2026-08-11
+
+### Fixed
+
+- Compression totals now credit merge passes on the output side
+  (`out += merge_out - merge_in`, input unchanged). The 0.6.2 accounting
+  excluded merges entirely, freezing the reported ratio at the first-pass
+  compression of trickle-sized blocks — low-traffic stores displayed ~1.3x
+  while their data sat at its true (order-of-magnitude better) density.
+  The output total now tracks the current compressed footprint, so the
+  ratio converges to the store's real figure as merges consolidate blocks.
+  Transition note: merging blocks compressed before 0.6.2 subtracts bytes
+  never added; a saturating floor bounds the skew and retention ages the
+  affected blocks out.
 
 ## [0.6.2] — 2026-08-11
 

@@ -2308,7 +2308,7 @@ fn auto_optimize_zero_interval_disables() {
 }
 
 #[test]
-fn compression_totals_persist_across_reopen_and_accumulate() {
+fn compression_totals_persist_across_reopen_and_credit_merges() {
     let shared = Arc::new(MemBlockStore::new());
     let engine = BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&[])).unwrap();
     for i in 0..100i64 {
@@ -2324,25 +2324,45 @@ fn compression_totals_persist_across_reopen_and_accumulate() {
         "optimize records raw->compressed bytes"
     );
 
-    // A second optimize with nothing raw must not move the totals (merge
-    // phases and no-ops are excluded — only raw compression counts).
+    // A no-op optimize (one lone small block, nothing raw) moves nothing.
     engine.optimize().unwrap();
     assert_eq!(engine.load_compression_totals().unwrap(), (in1, out1));
 
+    // Second batch compresses raw AND may merge the two small compressed
+    // blocks: the input side grows by exactly the raw bytes; the output
+    // side is credited for the merge shrink rather than freezing at the
+    // tiny-block first-pass footprint.
     for i in 0..100i64 {
         engine
-            .push(entry(9_000 + i, 1, &format!("n {i}"), &[]))
+            .push(entry(2_000 + i, 1, &format!("n {i}"), &[]))
             .unwrap();
     }
     engine.flush().unwrap();
     engine.optimize().unwrap();
     let (in2, out2) = engine.load_compression_totals().unwrap();
-    assert!(in2 > in1 && out2 > out1, "totals accumulate");
+    assert!(in2 > in1, "input side accumulates raw bytes only");
 
-    // The totals live in the store, not the process: a fresh engine over
-    // the same store reads them back.
+    // Force the merge tier (both compressed blocks are far below the
+    // target): output must now reflect the merged footprint — the sum of
+    // current compressed block bytes, not the pre-merge total.
+    engine.optimize().unwrap();
+    let (in3, out3) = engine.load_compression_totals().unwrap();
+    assert_eq!(in3, in2, "merges never touch the input side");
+    let on_disk: u64 = shared
+        .scan()
+        .unwrap()
+        .iter()
+        .map(|(_, loc)| shared.read_block(loc).unwrap().len() as u64)
+        .sum();
+    assert_eq!(
+        out3, on_disk,
+        "output side tracks the current compressed footprint"
+    );
+    assert!(out3 <= out2, "merge shrink is credited, never penalized");
+
+    // Durable: a fresh engine over the same store reads the totals back.
     drop(engine);
     let reopened =
         BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&[])).unwrap();
-    assert_eq!(reopened.load_compression_totals().unwrap(), (in2, out2));
+    assert_eq!(reopened.load_compression_totals().unwrap(), (in3, out3));
 }

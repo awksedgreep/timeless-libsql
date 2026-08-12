@@ -1503,23 +1503,36 @@ impl SpanBlockEngine {
             },
         )?;
         drop(j);
-        self.persist_compression_totals(outcome.raw_input_bytes, outcome.raw_output_bytes)?;
+        self.persist_compression_totals(
+            outcome.raw_input_bytes,
+            outcome.raw_output_bytes,
+            outcome.merge_input_bytes,
+            outcome.merge_output_bytes,
+        )?;
         Ok(outcome)
     }
 
     /// Lifetime raw->compressed byte totals in _meta — the spans twin of
-    /// BlockEngine::persist_compression_totals (see there for why the
-    /// process-local profile counters cannot back a ratio display and why
-    /// merge-phase bytes are excluded).
-    fn persist_compression_totals(&self, raw_in: u64, raw_out: u64) -> Result<(), String> {
-        if raw_in == 0 {
+    /// BlockEngine::persist_compression_totals (see there for the full
+    /// accounting rationale).
+    fn persist_compression_totals(
+        &self,
+        raw_in: u64,
+        raw_out: u64,
+        merge_in: u64,
+        merge_out: u64,
+    ) -> Result<(), String> {
+        if raw_in == 0 && merge_in == 0 {
             return Ok(());
         }
         let (input_total, output_total) = self.load_compression_totals()?;
         let value = format!(
             "{} {}",
             input_total.saturating_add(raw_in),
-            output_total.saturating_add(raw_out)
+            output_total
+                .saturating_add(raw_out)
+                .saturating_add(merge_out)
+                .saturating_sub(merge_in)
         );
         self.store.save_meta("compression_totals", value.as_bytes())
     }

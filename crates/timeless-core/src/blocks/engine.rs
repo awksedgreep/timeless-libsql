@@ -1706,7 +1706,12 @@ impl BlockEngine {
                 }
             })?;
         drop(j);
-        self.persist_compression_totals(outcome.raw_input_bytes, outcome.raw_output_bytes)?;
+        self.persist_compression_totals(
+            outcome.raw_input_bytes,
+            outcome.raw_output_bytes,
+            outcome.merge_input_bytes,
+            outcome.merge_output_bytes,
+        )?;
         Ok(outcome)
     }
 
@@ -1714,18 +1719,36 @@ impl BlockEngine {
     /// same host transaction as the optimize swap. The in-memory profile
     /// counters are process-local by design (work attribution); a
     /// compression-RATIO display backed by them read "pending" on a fully
-    /// compressed store after every restart. Merge-phase bytes are excluded:
-    /// re-reading already-compressed input would inflate the denominator
-    /// without compressing anything new.
-    fn persist_compression_totals(&self, raw_in: u64, raw_out: u64) -> Result<(), String> {
-        if raw_in == 0 {
+    /// compressed store after every restart.
+    ///
+    /// Accounting: raw phases add to both sides. Merge phases adjust the
+    /// OUTPUT side only (out += merge_out - merge_in) — the logical bytes a
+    /// merged block represents are unchanged, but its footprint shrinks, and
+    /// crediting that is what lets the ratio converge to the store's true
+    /// figure. Excluding merges (the first design) froze the ratio at the
+    /// first-pass compression of trickle-sized blocks, permanently
+    /// underselling low-traffic stores. Merges of blocks compressed before
+    /// this counter existed subtract bytes that were never added; the
+    /// saturating floor bounds that transition-window skew, and retention
+    /// ages the affected blocks out.
+    fn persist_compression_totals(
+        &self,
+        raw_in: u64,
+        raw_out: u64,
+        merge_in: u64,
+        merge_out: u64,
+    ) -> Result<(), String> {
+        if raw_in == 0 && merge_in == 0 {
             return Ok(());
         }
         let (input_total, output_total) = self.load_compression_totals()?;
         let value = format!(
             "{} {}",
             input_total.saturating_add(raw_in),
-            output_total.saturating_add(raw_out)
+            output_total
+                .saturating_add(raw_out)
+                .saturating_add(merge_out)
+                .saturating_sub(merge_in)
         );
         self.store.save_meta("compression_totals", value.as_bytes())
     }
