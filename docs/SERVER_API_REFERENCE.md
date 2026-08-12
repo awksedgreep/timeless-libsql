@@ -286,7 +286,10 @@ health/readiness build identity.
 ## Authentication and admission
 
 Authentication is **opt-in**: servers start open, and verification engages
-only under `TIMELESS_AUTH_MODE=required` with a policy file.
+only under `TIMELESS_AUTH_MODE=required` with a policy file. For running the
+binaries standalone — including non-loopback binding and sharing a database
+with an embedding application — see
+[Running standalone](../servers/README.md#running-standalone-no-control-plane-no-elixir).
 
 Enabling it takes four commands — no Elixir control plane required:
 

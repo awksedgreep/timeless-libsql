@@ -66,6 +66,46 @@ TCP defaults are loopback-only:
 Auth: **disabled** unless `TIMELESS_AUTH_MODE=required` — a fresh binary
 starts open with zero configuration, like comparable telemetry servers.
 
+## Running standalone (no control plane, no Elixir)
+
+Each binary takes the extension, the database, and an optional listen
+address as positional arguments:
+
+```bash
+./timeless-metrics-api ./libtimeless_ext.so ./metrics.db            # loopback default
+TIMELESS_ALLOW_NON_LOOPBACK=1 \
+  ./timeless-metrics-api ./libtimeless_ext.so ./metrics.db 0.0.0.0:19439
+```
+
+Non-loopback binding always requires the explicit
+`TIMELESS_ALLOW_NON_LOOPBACK=1` — inside a container, where `0.0.0.0` is the
+only address reachable from the host, both go together and the container's
+port publishing decides actual exposure. On a bare host the alternative is
+keeping the loopback default behind a reverse proxy. Either way, the moment
+a server becomes network-reachable is the moment to consider
+`TIMELESS_AUTH_MODE=required` or `TIMELESS_ADMIN_KEY` (see the
+[API reference](../docs/SERVER_API_REFERENCE.md)).
+
+### Sharing a database with the extension
+
+The servers load the same `libtimeless_ext` and speak the same on-disk
+format as an application embedding the extension directly — but every
+database has exactly **one writing owner**, enforced by a lease that fails
+loudly on a second writer. The supported topologies:
+
+1. **The server owns the database.** Applications ingest and query over
+   HTTP. The default topology, and the reason the binaries exist.
+2. **The application owns the database** through the embedded extension.
+   There is no HTTP surface; start a server against that file only after
+   the application has stopped writing (the lease enforces this).
+3. **Split reads.** The server owns writes; other processes open the same
+   file read-only and query through the extension directly. WAL gives them
+   safe snapshot reads, minus the server's not-yet-flushed buffer
+   (typically the last few seconds).
+
+What is not supported is two writers on one file — the lease refuses, by
+design, before either can corrupt the other.
+
 All three expose `/live`, `/ready`, `/health`, and signal-specific stats. A
 SIGINT or SIGTERM stops admission, drains accepted HTTP work, stops maintenance,
 flushes through the public extension command, closes/reaps SQLite workers, and
