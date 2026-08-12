@@ -10,9 +10,18 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.5.0 -->
+<!-- release-target: 0.6.1 -->
 
 ## [Unreleased]
+
+No changes recorded after `0.6.1`.
+
+## [0.6.1] — 2026-08-11
+
+Both workspaces move to the 0.6 compatibility line together: the v0.6.0
+extension tag had left the signal servers on 0.5.0, and the capability
+baseline moved extension-side only. Servers now version 0.6.1 and floor
+extensions at 0.6.0; the extension keeps its 0.6.0 server floor.
 
 ### Added
 
