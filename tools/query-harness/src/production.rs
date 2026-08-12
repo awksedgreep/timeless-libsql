@@ -2338,7 +2338,9 @@ mod tests {
         let metrics = String::from_utf8(metrics_body(0, 64)).unwrap();
         assert_eq!(metrics.lines().count(), 4);
         assert!(metrics.contains("release_gate_metric"));
-        assert!(metrics.contains("1785628800000"));
+        // The base is dynamic (most recent UTC midnight — see base_seconds);
+        // ordinal 0 must land exactly on it.
+        assert!(metrics.contains(&base_milliseconds().to_string()));
 
         let logs = String::from_utf8(logs_body(0, 64)).unwrap();
         assert_eq!(logs.lines().count(), 64);
