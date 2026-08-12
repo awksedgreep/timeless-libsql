@@ -3,7 +3,8 @@
   "binaries": [
     "timeless-metrics-api",
     "timeless-logs-api",
-    "timeless-traces-api"
+    "timeless-traces-api",
+    "timeless-authctl"
   ],
   "targets": [
     {
