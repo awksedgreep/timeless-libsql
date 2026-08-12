@@ -63,7 +63,7 @@ async fn release_backup_preserves_exact_logs_and_refuses_overwrite() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
     let temp = tempfile::tempdir().unwrap();
-    let backup = temp.path().join("backup-logs.db");
+    let backup = temp.path().join("backups/backup-logs.db");
     let storage =
         Storage::start(temp.path().join("logs.db"), extension.clone().into(), 1, 8).unwrap();
     let app = router(storage.clone());

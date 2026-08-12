@@ -80,6 +80,37 @@ pub fn checkpoint_wal(conn: &Connection, signal: &str) -> Result<CheckpointRepor
 /// established writer connection is the sole storage owner. The final path is
 /// published without overwrite only after page-copy, integrity, schema, and
 /// fsync checks succeed.
+/// The directory backups are confined to: `TIMELESS_BACKUP_DIR` when set,
+/// otherwise `backups/` beside the database file. Confinement is what keeps
+/// `POST /api/v1/backup` from being a write-anywhere primitive: without it a
+/// caller can repeatedly stage full database copies under chosen names
+/// anywhere the server process can write. Correct for authenticated callers
+/// too, so it applies regardless of auth mode.
+pub fn backup_root(conn: &Connection) -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("TIMELESS_BACKUP_DIR") {
+        if dir.is_empty() {
+            return Err("TIMELESS_BACKUP_DIR must not be empty".into());
+        }
+        return Ok(PathBuf::from(dir));
+    }
+    let main_db: String = conn
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("resolve main database path: {error}"))?;
+    if main_db.is_empty() {
+        return Err("backup requires a file-backed database".into());
+    }
+    let db_path = PathBuf::from(main_db);
+    let parent = db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| "database path has no parent directory".to_string())?;
+    Ok(parent.join("backups"))
+}
+
 pub fn create_verified_backup(
     conn: &Connection,
     destination: &Path,
@@ -87,12 +118,25 @@ pub fn create_verified_backup(
     checkpoint: CheckpointReport,
 ) -> Result<BackupReport, String> {
     let started = Instant::now();
-    if !destination.is_absolute() {
-        return Err("backup destination must be an absolute path".into());
-    }
     if destination.file_name().is_none() {
         return Err("backup destination must name a file".into());
     }
+    let root = backup_root(conn)?;
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("create backup directory {}: {error}", root.display()))?;
+    let canonical_root = root.canonicalize().map_err(|error| {
+        format!(
+            "backup directory must be accessible {}: {error}",
+            root.display()
+        )
+    })?;
+    // Relative destinations resolve inside the root; absolute destinations
+    // must already canonicalize inside it.
+    let destination: PathBuf = if destination.is_absolute() {
+        destination.to_path_buf()
+    } else {
+        canonical_root.join(destination)
+    };
     if destination.exists() {
         return Err(format!(
             "backup destination already exists; refusing to overwrite {}",
@@ -102,6 +146,8 @@ pub fn create_verified_backup(
     let parent = destination
         .parent()
         .ok_or_else(|| "backup destination has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create backup directory {}: {error}", parent.display()))?;
     let canonical_parent = parent.canonicalize().map_err(|error| {
         format!(
             "backup parent directory must already exist and be accessible {}: {error}",
@@ -112,6 +158,14 @@ pub fn create_verified_backup(
         return Err(format!(
             "backup parent is not a directory: {}",
             parent.display()
+        ));
+    }
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(format!(
+            "backup destination {} is outside the backup directory {} \
+             (set TIMELESS_BACKUP_DIR to relocate it)",
+            destination.display(),
+            canonical_root.display()
         ));
     }
     let name = destination
@@ -527,6 +581,50 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn backups_are_confined_to_the_backup_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("signal.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _timeless_schema_migrations(
+               signal TEXT NOT NULL, version INTEGER NOT NULL,
+               applied_at_unix INTEGER NOT NULL, server_version TEXT NOT NULL,
+               extension_version TEXT NOT NULL, extension_data_abi INTEGER NOT NULL,
+               PRIMARY KEY(signal, version));
+             INSERT INTO _timeless_schema_migrations VALUES
+               ('test', 1, 0, 'test', 'test', 1);
+             CREATE TABLE t(x); INSERT INTO t VALUES (1);",
+        )
+        .unwrap();
+        let checkpoint = checkpoint_wal(&conn, "test").unwrap();
+
+        // Outside the root: rejected, nothing written.
+        let outside = dir.path().join("stolen.db");
+        let error =
+            create_verified_backup(&conn, &outside, "test", checkpoint.clone()).unwrap_err();
+        assert!(error.contains("outside the backup directory"), "{error}");
+        assert!(!outside.exists());
+
+        // Absolute path inside the default root: accepted.
+        let inside = dir.path().join("backups").join("good.db");
+        create_verified_backup(&conn, &inside, "test", checkpoint.clone()).unwrap();
+        assert!(inside.exists());
+
+        // Relative destination resolves inside the root.
+        create_verified_backup(&conn, Path::new("relative.db"), "test", checkpoint.clone())
+            .unwrap();
+        assert!(dir.path().join("backups").join("relative.db").exists());
+
+        // Traversal out of the root: rejected.
+        let sneaky = dir.path().join("backups").join("../escape.db");
+        let error =
+            create_verified_backup(&conn, &sneaky, "test", checkpoint).unwrap_err();
+        assert!(error.contains("outside the backup directory"), "{error}");
+        assert!(!dir.path().join("escape.db").exists());
+    }
+
     use super::*;
     use std::sync::Mutex;
 

@@ -16,7 +16,7 @@ async fn release_backup_is_ordered_verified_no_clobber_and_cold_reopenable() {
     let extension = extension_path();
     let directory = TempDir::new().unwrap();
     let database = directory.path().join("metrics.db");
-    let backup = directory.path().join("backup-metrics.db");
+    let backup = directory.path().join("backups/backup-metrics.db");
     let storage = Storage::start(database, extension.clone(), 1, 8, DEFAULT_RAW_RETENTION).unwrap();
     storage
         .submit_named_batch(named_batch(3, 1_700_000_000), 3)

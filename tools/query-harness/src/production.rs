@@ -1388,7 +1388,9 @@ fn backup_overlap_probe(
     events: &mut Vec<Value>,
     elapsed: f64,
 ) -> Result<()> {
-    let destination = root.join(format!(
+    // Backups are confined to <database dir>/backups by default (S3); the
+    // gate exercises the confined path rather than overriding it.
+    let destination = root.join("backups").join(format!(
         "overlap-{}-{}.db",
         state.signal.name(),
         events.len()

@@ -155,7 +155,7 @@ fn direct_sql_mixed_batches_optimize_rollback_and_reopen_preserve_v2() {
 async fn release_backup_preserves_rich_spans_and_is_no_clobber() {
     let extension = required_extension();
     let directory = TempDir::new().unwrap();
-    let backup = directory.path().join("backup-traces.db");
+    let backup = directory.path().join("backups/backup-traces.db");
     let storage = Storage::start(
         directory.path().join("traces.db"),
         extension.clone(),

@@ -245,6 +245,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_AUTH_MODE` | all | `required` | `required` or `disabled`; disabling must be explicit. |
 | `TIMELESS_AUTH_POLICY_FILE` | all | none | Required readable policy-v1 JSON path when auth is required. |
 | `TIMELESS_TENANT` | all | `default` | Exact tenant required in both policy and token. |
+| `TIMELESS_BACKUP_DIR` | all | `backups/` beside the database file | Directory backups are confined to; destinations that canonicalize outside it are rejected. Relative destinations resolve inside it. |
 | `TIMELESS_METRICS_READER_CONNECTIONS` | metrics | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_METRICS_COMMAND_QUEUE_BATCHES` | metrics | `256` | Writer-command queue capacity in admitted request batches. |
 | `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |
