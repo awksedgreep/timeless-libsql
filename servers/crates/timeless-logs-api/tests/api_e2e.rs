@@ -19835,3 +19835,86 @@ async fn trigram_default_drops_unopted_postings_and_opt_out_is_supported() {
         assert_eq!(hits, 1);
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn logsql_phrase_filters_ride_the_clp_pushdown() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    // A work cap far below the store size: without the phrase pushdown,
+    // any LogsQL word/phrase filter decodes the whole window and trips
+    // this cap (the issue #2 failure shape). With the pushdown, CLP
+    // proves absence and charges only candidate rows.
+    let app = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_work_rows: 500,
+            ..LogsQueryLimits::default()
+        },
+    );
+
+    let mut body = String::new();
+    for i in 0..3000 {
+        let msg = if i % 30 == 0 {
+            format!(
+                "Provisioning realm {} unknown to server 10.9.{}.1",
+                i,
+                i % 200
+            )
+        } else {
+            format!(
+                "DHCP NAK - MAC:00:1a:{:02x} on port {}",
+                i % 256,
+                8000 + (i % 100)
+            )
+        };
+        body.push_str(&format!(
+            "{{\"_time\":\"2027-01-01T{:02}:{:02}:{:02}Z\",\"_msg\":\"{msg}\",\"level\":\"warning\",\"host\":\"cmts1\"}}\n",
+            i / 3600, (i / 60) % 60, i % 60,
+        ));
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/insert/jsonline")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Absent phrase, whole window: must SUCCEED under the tiny cap.
+    let rows = pipeline_rows(&app, r#""PACKETCABLE-ZZZNOPE" | stats count() as total"#).await;
+    assert_eq!(rows, vec![serde_json::json!({"total": 3000 - 3000})]);
+
+    // Absent single word: same path.
+    let rows = pipeline_rows(&app, r#"zzznope | stats count() as total"#).await;
+    assert_eq!(rows[0]["total"], serde_json::json!(0));
+
+    // Present but template-selective phrase: only the Provisioning
+    // template's rows are decode candidates (100 of 3000), so the query
+    // succeeds under the cap with exact results.
+    let rows = pipeline_rows(&app, r#""Provisioning realm" | stats count() as total"#).await;
+    assert_eq!(rows[0]["total"], serde_json::json!(100));
+    let rows = pipeline_rows(&app, r#"Provisioning | stats count() as total"#).await;
+    assert_eq!(rows[0]["total"], serde_json::json!(100));
+
+    // Unselective phrase still trips the cap honestly: candidates are
+    // the real work.
+    let response = app
+        .clone()
+        .oneshot(logsql_request(r#""DHCP NAK" | stats count() as total"#))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    storage.shutdown().await.unwrap();
+}

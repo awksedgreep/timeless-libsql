@@ -2349,6 +2349,26 @@ fn query_parts(spec: &QuerySpec) -> Result<(String, Vec<SqlValue>), String> {
     if let Some(message) = &spec.message {
         clauses.push("message_contains = ?");
         values.push(SqlValue::Text(message.clone()));
+    } else if let Some(phrase) = spec.message_phrase.as_deref().filter(|p| !p.is_empty()) {
+        // A word-bounded phrase match implies substring containment, so
+        // the phrase rides the message_contains pushdown as a PRUNING
+        // SUPERSET: the extension's CLP-dictionary gate and candidate-row
+        // work accounting engage, and the exact word-boundary semantics
+        // stay with the API-side postfilter. Without this, every LogsQL
+        // word/phrase filter decodes the full window (the issue #2
+        // failure shape) no matter what the storage layer can prove.
+        clauses.push("message_contains = ?");
+        values.push(SqlValue::Text(phrase.to_owned()));
+    } else if let Some(needle) = spec
+        .predicate
+        .as_ref()
+        .and_then(predicate_containment_needle)
+    {
+        // Same superset trick for the API-side predicate tree: any
+        // message literal the top-level conjunction REQUIRES is a sound
+        // containment pushdown; the predicate itself still runs exactly.
+        clauses.push("message_contains = ?");
+        values.push(SqlValue::Text(needle.to_owned()));
     }
     if let Some(ts_min) = spec.ts_min {
         clauses.push("ts >= ?");
@@ -2697,6 +2717,36 @@ fn query_count_with_postfilters(
 
 fn has_api_postfilter(spec: &QuerySpec) -> bool {
     spec.message_phrase.is_some() || !spec.metadata_exact.is_empty() || spec.predicate.is_some()
+}
+
+/// The longest message literal every match must CONTAIN, derived from
+/// the predicate's top-level conjunctive structure. Word, Phrase,
+/// Prefix, and Substring nodes on the message field all imply substring
+/// containment of their literal (case-insensitive containment is a
+/// superset of every variant's semantics, case-sensitive or not);
+/// Or/Not/other nodes contribute nothing — conservative by design.
+/// This is a pruning aid only: the exact predicate still runs.
+fn predicate_containment_needle(predicate: &LogPredicate) -> Option<&str> {
+    fn literal(node: &LogPredicate) -> Option<&str> {
+        match node {
+            LogPredicate::Word { field, value, .. }
+            | LogPredicate::Phrase { field, value, .. }
+            | LogPredicate::Prefix { field, value, .. }
+            | LogPredicate::Substring { field, value, .. }
+                if matches!(field, LogField::Message) && !value.is_empty() =>
+            {
+                Some(value.as_str())
+            }
+            _ => None,
+        }
+    }
+    match predicate {
+        LogPredicate::And(nodes) => nodes
+            .iter()
+            .filter_map(literal)
+            .max_by_key(|value| value.len()),
+        node => literal(node),
+    }
 }
 
 fn api_postfilters_match(

@@ -564,10 +564,10 @@ pub fn block_message_feasible(bytes: &[u8], needle: &str) -> Result<bool, String
         ));
     }
     let codec = r.u8("codec")?;
-    if codec != CODEC_RICH_TEMPLATE {
+    if !known_codec(codec) {
         return Ok(true);
     }
-    let _n = r.u32("entry_count")?;
+    let n = r.u32("entry_count")? as usize;
     let _ts_min = r.i64("ts_min")?;
     let _ts_max = r.i64("ts_max")?;
     let lens = [
@@ -579,7 +579,32 @@ pub fn block_message_feasible(bytes: &[u8], needle: &str) -> Result<bool, String
     let _ts = r.take(lens[0], COLUMN_NAMES[0])?;
     let _lvl = r.take(lens[1], COLUMN_NAMES[1])?;
     let msg = r.take(lens[2], COLUMN_NAMES[2])?;
-    template::column_may_contain(msg, needle)
+    if codec == CODEC_RICH_TEMPLATE {
+        return template::column_may_contain(msg, needle);
+    }
+    // Non-template codecs have no dictionaries, but their message column
+    // is self-contained: every message's bytes are contiguous inside it,
+    // so a case-insensitive scan of the decoded column proves absence
+    // for the whole block without touching timestamps, levels, or the
+    // (expensive) metadata column. False positives across message
+    // boundaries just fall through to a full decode — sound either way.
+    let needle_bytes = needle.as_bytes();
+    let contains = |text: &[u8]| {
+        text.windows(needle_bytes.len())
+            .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+    };
+    match codec {
+        // Raw codecs: the column IS the length-prefixed concatenation.
+        CODEC_RAW | CODEC_RICH_RAW => Ok(contains(msg)),
+        // Codec 2: same concatenation behind plain zstd.
+        CODEC_ZSTD => Ok(contains(&zstd_decompress(msg, "message column")?)),
+        // Codecs 4/5/7: the typed string column.
+        CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR => {
+            let messages = decode_str(msg, n)?;
+            Ok(messages.iter().any(|message| contains(message.as_bytes())))
+        }
+        _ => Ok(true),
+    }
 }
 
 fn decode_block_legacy(codec: u8, n: usize, stored: Vec<&[u8]>) -> Result<Vec<LogEntry>, String> {

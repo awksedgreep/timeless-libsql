@@ -1416,6 +1416,16 @@ impl BlockEngine {
     }
 
     fn plan_optimize(&self, candidates: &[IndexEntry]) -> Vec<OptimizeGroup> {
+        // Data-time high-water mark across ALL blocks (not just merge
+        // candidates): a window that ended a full merge span before this
+        // is CLOSED — no further arrivals are expected there, so its
+        // stragglers may coalesce below the open-window fill rules.
+        let store_newest = self
+            .index_lock()
+            .iter()
+            .map(|entry| entry.meta.ts_max)
+            .max()
+            .unwrap_or(i64::MIN);
         let mut raw_buckets: [Vec<IndexEntry>; 5] = Default::default();
         let mut compressed_buckets: [Vec<IndexEntry>; 5] = Default::default();
         for entry in candidates {
@@ -1435,6 +1445,7 @@ impl BlockEngine {
             groups.extend(self.plan_compressed_groups(
                 std::mem::take(&mut compressed_buckets[bucket]),
                 partition,
+                store_newest,
             ));
         }
         // Compress raw backlog before spending a bounded call on optional
@@ -1506,6 +1517,7 @@ impl BlockEngine {
         &self,
         mut entries: Vec<IndexEntry>,
         partition: Option<u8>,
+        store_newest: i64,
     ) -> Vec<OptimizeGroup> {
         entries.sort_by_key(|entry| (entry.meta.ts_min, entry.meta.ts_max));
         let mut groups = Vec::new();
@@ -1520,7 +1532,12 @@ impl BlockEngine {
                     self.config.merge_max_ts_span,
                 );
             if !fits {
-                self.plan_compressed_segment(std::mem::take(&mut segment), partition, &mut groups);
+                self.plan_compressed_segment(
+                    std::mem::take(&mut segment),
+                    partition,
+                    store_newest,
+                    &mut groups,
+                );
             }
             if segment.is_empty() {
                 segment_min = entry.meta.ts_min;
@@ -1531,7 +1548,7 @@ impl BlockEngine {
             }
             segment.push(entry);
         }
-        self.plan_compressed_segment(segment, partition, &mut groups);
+        self.plan_compressed_segment(segment, partition, store_newest, &mut groups);
         groups
     }
 
@@ -1539,8 +1556,24 @@ impl BlockEngine {
         &self,
         mut entries: Vec<IndexEntry>,
         partition: Option<u8>,
+        store_newest: i64,
         groups: &mut Vec<OptimizeGroup>,
     ) {
+        // CLOSED segment: its window ended at least one full merge span
+        // before the store's newest data. Low-volume level partitions
+        // (a few hundred warnings per hour against a 4,096-entry fill
+        // floor) otherwise strand their trickle blocks in every closed
+        // hour FOREVER — the production signature is thousands of
+        // ~20-entry blocks that never converge. Once closed, the
+        // anti-amplification rules protect nothing: there is no tail to
+        // keep appending to, so stragglers coalesce unconditionally.
+        let closed = entries
+            .iter()
+            .map(|entry| entry.meta.ts_max)
+            .max()
+            .is_some_and(|segment_max| {
+                segment_max <= store_newest.saturating_sub(self.config.merge_max_ts_span)
+            });
         entries.sort_by_key(|entry| (entry.meta.entry_count, entry.meta.ts_min, entry.meta.ts_max));
         let mut current = Vec::new();
         let mut current_entries = 0usize;
@@ -1556,41 +1589,49 @@ impl BlockEngine {
         for entry in entries {
             let count = entry.meta.entry_count as usize;
             if !current.is_empty() && current_entries.saturating_add(count) > merge_limit {
-                self.push_compressed_group(std::mem::take(&mut current), partition, groups);
+                self.push_compressed_group(std::mem::take(&mut current), partition, closed, groups);
                 current_entries = 0;
             }
             current_entries = current_entries.saturating_add(count);
             current.push(entry);
         }
-        self.push_compressed_group(current, partition, groups);
+        self.push_compressed_group(current, partition, closed, groups);
     }
 
     fn push_compressed_group(
         &self,
         sources: Vec<IndexEntry>,
         partition: Option<u8>,
+        closed: bool,
         groups: &mut Vec<OptimizeGroup>,
     ) {
         if sources.len() < 2 {
             return;
         }
-        let entries = sources
-            .iter()
-            .map(|entry| entry.meta.entry_count as usize)
-            .sum::<usize>();
-        let largest = sources
-            .iter()
-            .map(|entry| entry.meta.entry_count as usize)
-            .max()
-            .unwrap_or(0);
-        let minimum_fill = self.config.merge_target_entries.div_ceil(2);
-        if entries >= minimum_fill && entries >= largest.saturating_mul(2) {
-            groups.push(OptimizeGroup {
-                sources,
-                partition,
-                kind: OptimizeKind::CompressedMerge,
-            });
+        // Open windows keep the amplification guards: a merged block must
+        // be at least half-full AND at least double its largest source,
+        // or repeated tail-appends rewrite the same data endlessly.
+        // Closed windows coalesce unconditionally — final compaction.
+        if !closed {
+            let entries = sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as usize)
+                .sum::<usize>();
+            let largest = sources
+                .iter()
+                .map(|entry| entry.meta.entry_count as usize)
+                .max()
+                .unwrap_or(0);
+            let minimum_fill = self.config.merge_target_entries.div_ceil(2);
+            if entries < minimum_fill || entries < largest.saturating_mul(2) {
+                return;
+            }
         }
+        groups.push(OptimizeGroup {
+            sources,
+            partition,
+            kind: OptimizeKind::CompressedMerge,
+        });
     }
 
     fn merged_span_fits(

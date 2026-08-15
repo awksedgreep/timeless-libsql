@@ -2615,3 +2615,118 @@ fn unopted_stores_shed_trigram_postings_at_optimize() {
     // Explicit purge (the message_index:none path) is idempotent.
     assert_eq!(unopted.purge_trigram_postings().unwrap(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Closed-window final compaction: low-volume cohorts that can never reach
+// the open-window fill floor coalesce once their window is closed
+// (production signature: thousands of ~20-entry level-partition blocks
+// stranded forever beside healthy 8k blocks).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_windows_coalesce_underfilled_stragglers() {
+    let engine = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            merge_max_ts_span: 1_000,
+            ..config(&[])
+        },
+    )
+    .unwrap();
+
+    // Three separate tiny compressed blocks in window A (ts 0..30).
+    for round in 0..3i64 {
+        for i in 0..4i64 {
+            engine
+                .push(entry(round * 10 + i, 1, &format!("w{round} e{i}"), &[]))
+                .unwrap();
+        }
+        engine.flush().unwrap();
+        engine.optimize().unwrap();
+    }
+    let (blocks_open, _, _) = engine.stats();
+    assert!(
+        blocks_open >= 3,
+        "open-window tinies must stay deferred (got {blocks_open} blocks)"
+    );
+
+    // Window B data arrives; window A is now closed and its stragglers
+    // coalesce into one block.
+    engine.push(entry(50_000, 1, "window B", &[])).unwrap();
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    let window_a_blocks = engine
+        .query(&LogQuery {
+            ts_max: 1_000,
+            ..full_range_query()
+        })
+        .unwrap();
+    assert_eq!(window_a_blocks.len(), 12, "window A entries intact");
+    let (blocks_after, raw_after, _) = engine.stats();
+    assert_eq!(raw_after, 0);
+    assert_eq!(
+        blocks_after, 2,
+        "expected one coalesced window-A block plus the window-B block"
+    );
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 13);
+}
+
+#[test]
+fn legacy_codec_feasibility_gate_is_sound_across_codecs() {
+    use super::codec::block_message_feasible;
+    let plain: Vec<LogEntry> = (0..64)
+        .map(|i| {
+            entry(
+                i,
+                1,
+                &format!("lease {i} renewed for 10.0.0.{i}"),
+                &[("service", "dhcp")],
+            )
+        })
+        .collect();
+    let rich: Vec<LogEntry> = plain
+        .iter()
+        .map(|e| LogEntry {
+            severity: Some("info".into()),
+            metadata_json: Some("{\"service\":\"dhcp\"}".into()),
+            ..e.clone()
+        })
+        .collect();
+    for (codec, entries) in [
+        (CODEC_RAW, &plain),
+        (CODEC_ZSTD, &plain),
+        (CODEC_COLUMNAR, &plain),
+        (CODEC_COLUMNAR_V2, &plain),
+        (CODEC_RICH_RAW, &rich),
+        (CODEC_RICH_COLUMNAR, &rich),
+        (CODEC_RICH_TEMPLATE, &rich),
+    ] {
+        let (bytes, meta) = encode_block(entries, codec, 3).unwrap();
+        // No false negatives: every substring of every message feasible.
+        for e in entries.iter().take(8) {
+            for start in 0..e.message.len().min(20) {
+                for end in (start + 1)..=e.message.len() {
+                    let needle = &e.message[start..end];
+                    assert!(
+                        block_message_feasible(&bytes, needle).unwrap(),
+                        "codec {} (wrote {}): false negative for {needle:?}",
+                        codec,
+                        meta.codec
+                    );
+                    let upper = needle.to_uppercase();
+                    assert!(
+                        block_message_feasible(&bytes, &upper).unwrap(),
+                        "codec {}: false negative for {upper:?}",
+                        codec
+                    );
+                }
+            }
+        }
+        // Absence is provable on every codec now.
+        assert!(
+            !block_message_feasible(&bytes, "zzz-absent-needle").unwrap(),
+            "codec {} must prove absence",
+            codec
+        );
+    }
+}
