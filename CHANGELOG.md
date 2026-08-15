@@ -10,11 +10,42 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.7.3 -->
+<!-- release-target: 0.7.4 -->
 
 ## [Unreleased]
 
-No changes recorded after `0.7.3`.
+No changes recorded after `0.7.4`.
+
+## [0.7.4] — 2026-08-15
+
+Deploy verification of v0.7.3 on production caught the CLP pruning work
+landing one layer too low for LogsQL, plus a long-standing merge-planner
+flaw the investigation surfaced. Same-day patch, verified against a
+production backup before tagging.
+
+### Fixed
+
+- LogsQL word/phrase filters now reach the storage layer: a word-bounded
+  match implies substring containment, so the phrase (or the longest
+  message literal a predicate's top-level conjunction requires) rides
+  the `message_contains` pushdown as a pruning superset while the exact
+  word-boundary postfilter keeps its semantics. Previously every LogsQL
+  text filter decoded the full window regardless of storage-layer
+  pruning — the issue #2 failure shape at a different layer.
+- Closed-window final compaction: low-volume level partitions could
+  never reach the merge fill floor, stranding trickle blocks in every
+  closed hour forever (a production store had 7,655 stranded ~20-entry
+  blocks, growing ~2,400/day). A window that ended a full merge span
+  before the store's newest data now coalesces unconditionally; open
+  windows keep the anti-amplification guards. The production store
+  converged 8,030 -> 709 blocks in two optimize passes.
+- `message_contains` absence is now provable on every codec: non-template
+  blocks scan their self-contained message column alone (no timestamp,
+  level, or metadata work), so absent needles prune codec-1/2/4/5/6/7
+  blocks too. On the production backup with the default 100k work cap:
+  a 6-day absent-needle query went from erroring to 0 entries decoded in
+  436ms with all 709 blocks pruned, and decoded work now equals matched
+  rows for real needles.
 
 ## [0.7.3] — 2026-08-15
 

@@ -15,8 +15,8 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.7.3` | Current extension/core/dbhealth source line. |
-| `server_workspace` | `0.7.3` | Current metrics/logs/traces server source line. |
+| `extension_workspace` | `0.7.4` | Current extension/core/dbhealth source line. |
+| `server_workspace` | `0.7.4` | Current metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
 | `extension_minimum_server` | `0.7.0` | Oldest server accepted by the current extension document. |
