@@ -67,6 +67,13 @@ impl MemBlockStore {
 
 impl BlockStore for MemBlockStore {
     /// Swap one block's postings, leaving its payload alone. Mirrors the SQL
+    fn purge_term_prefix(&self, prefix: &str) -> Result<u64, String> {
+        let mut inner = self.lock();
+        let before = inner.terms.len();
+        inner.terms.retain(|term, _| !term.starts_with(prefix));
+        Ok((before - inner.terms.len()) as u64)
+    }
+
     /// store: reindex rewrites terms so a widened index_keys allowlist applies
     /// to blocks written before the change.
     fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {

@@ -641,6 +641,38 @@ impl LogsTab {
                 .parse()
                 .map_err(|_| module_err(format!("prune: expected 'prune:<ts>', got {cmd:?}")))?;
             self.shared.engine.prune(ts).map_err(module_err)?;
+        } else if let Some(value) = cmd.strip_prefix("message_index:") {
+            // Opt out of (or back into) the F6 trigram message index.
+            // 'none' persists the choice and drops every tg: posting now;
+            // 'trigram' persists the opt-in — postings for existing
+            // blocks backfill via 'reindex:<keys>' after reconnect, and
+            // new blocks index from the next connect on (a live
+            // connection keeps the setting it loaded).
+            match value.trim() {
+                "none" => {
+                    self.shared
+                        .engine
+                        .save_message_index_meta("none")
+                        .map_err(module_err)?;
+                    let removed = self
+                        .shared
+                        .engine
+                        .purge_trigram_postings()
+                        .map_err(module_err)?;
+                    return Ok(removed as i64);
+                }
+                "trigram" => {
+                    self.shared
+                        .engine
+                        .save_message_index_meta("trigram")
+                        .map_err(module_err)?;
+                }
+                other => {
+                    return Err(module_err(format!(
+                        "message_index: expected 'none' or 'trigram', got {other:?}"
+                    )));
+                }
+            }
         } else if let Some(value) = cmd.strip_prefix("retention:") {
             // Change the retention window on a live store — same value
             // grammar as the CREATE arg (<n>[s|m|h|d]). Persisted for
@@ -656,7 +688,7 @@ impl LogsTab {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'optimize', \
                  'optimize:<max_entries>', 'prune:<ts>', 'reindex:<keys>', \
-                 'retention:<n[s|m|h|d]>'"
+                 'retention:<n[s|m|h|d]>', 'message_index:<none|trigram>'"
             )));
         }
         Ok(0)

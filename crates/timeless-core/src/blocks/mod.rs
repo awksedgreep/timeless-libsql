@@ -276,6 +276,14 @@ pub trait BlockStore: Send + Sync {
         Err("this block store cannot replace terms in place".into())
     }
 
+    /// Delete every posting whose term starts with `prefix`, returning how
+    /// many rows went. Used to shed the F6 trigram index (`tg:` postings)
+    /// from stores that never opted in — or opted back out. The default
+    /// no-op keeps read-only stores honest: nothing to purge, nothing done.
+    fn purge_term_prefix(&self, _prefix: &str) -> Result<u64, String> {
+        Ok(0)
+    }
+
     /// Small key/value config persistence (index_keys, schema version).
     fn save_meta(&self, key: &str, value: &[u8]) -> Result<(), String>;
     fn load_meta(&self, key: &str) -> Result<Option<Vec<u8>>, String>;

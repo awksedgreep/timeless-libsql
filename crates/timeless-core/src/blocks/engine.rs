@@ -600,6 +600,9 @@ pub struct BlockEngine {
     retention_floor: AtomicI64,
     /// Flush calls since the last auto-optimize backlog check.
     flushes_since_auto_optimize: AtomicUsize,
+    /// One-shot guard for the trigram-posting purge on stores that did
+    /// not opt into `message_index='trigram'` (see optimize()).
+    trigram_purge_checked: AtomicBool,
     profile: BlockEngineProfile,
 }
 
@@ -653,6 +656,7 @@ impl BlockEngine {
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
             flushes_since_auto_optimize: AtomicUsize::new(0),
+            trigram_purge_checked: AtomicBool::new(false),
             profile: BlockEngineProfile::default(),
         })
     }
@@ -1269,6 +1273,34 @@ impl BlockEngine {
         self.optimize_with_budget(None)
     }
 
+    /// The default upgrade path for the F6 trigram index: a store whose
+    /// engine was built WITHOUT the trigram opt-in sheds any `tg:`
+    /// postings at its first maintenance boundary. Opted-in stores are
+    /// never touched, and the check costs one atomic load after the
+    /// first call. Explicit opt-out goes through the same purge via the
+    /// `message_index:none` command.
+    fn maybe_purge_unopted_trigrams(&self) -> Result<(), String> {
+        if self.config.message_trigrams || self.trigram_purge_checked.swap(true, Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        self.store.purge_term_prefix("tg:")?;
+        Ok(())
+    }
+
+    /// Persist the `message_index` choice for future connects (live
+    /// connections keep the setting they loaded — same contract as
+    /// reindex()).
+    pub fn save_message_index_meta(&self, value: &str) -> Result<(), String> {
+        self.store.save_meta("message_index", value.as_bytes())
+    }
+
+    /// Drop every trigram posting now — the `message_index:none` path.
+    pub fn purge_trigram_postings(&self) -> Result<u64, String> {
+        self.trigram_purge_checked.store(true, Ordering::Relaxed);
+        self.store.purge_term_prefix("tg:")
+    }
+
     /// Incremental optimize. The entry budget limits source entries rewritten
     /// by one call; a single group (raw groups up to merge_target_entries,
     /// compressed tiers up to 125% of that target, or a pre-existing
@@ -1284,6 +1316,7 @@ impl BlockEngine {
     }
 
     fn optimize_with_budget(&self, max_entries: Option<usize>) -> Result<(usize, usize), String> {
+        self.maybe_purge_unopted_trigrams()?;
         let started = Instant::now();
         let out = self.optimize_inner(max_entries)?;
         self.apply_retention()?;

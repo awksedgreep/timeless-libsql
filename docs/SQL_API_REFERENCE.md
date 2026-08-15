@@ -226,9 +226,14 @@ distinctions. Writes are append-only. Commands are `flush`, `optimize`,
 `optimize:<positive max source entries>`, `prune:<timestamp>`,
 `reindex:<keys>` (rewrite every block's postings against a new `index_keys`
 allowlist and persist it — connections opened before the command keep their
-old allowlist until they reconnect), and `retention:<n>[s|m|h|d]` (persist a
+old allowlist until they reconnect), `retention:<n>[s|m|h|d]` (persist a
 new retention window and apply it to the live engine; enforcement happens at
-the next flush/optimize boundary). A bounded optimize may finish one merge
+the next flush/optimize boundary), and `message_index:<none|trigram>`
+(persist the trigram opt-in or opt-out; `none` drops every `tg:` posting
+immediately, `trigram` takes effect for new blocks at the next connect and
+backfills existing blocks via `reindex:<keys>`). The default path needs no
+command: a store without the trigram opt-in sheds any `tg:` postings at its
+first optimize. A bounded optimize may finish one merge
 cohort beyond the requested entry budget so it always makes progress. The
 authoritative ingest buffer is 8,192 entries.
 

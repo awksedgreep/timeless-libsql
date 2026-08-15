@@ -19748,3 +19748,90 @@ async fn store_policy_creates_reindexes_and_retunes_without_sql() {
     );
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn trigram_default_drops_unopted_postings_and_opt_out_is_supported() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("logs.db");
+    let open = || {
+        let conn = Connection::open(&db).unwrap();
+        unsafe {
+            conn.load_extension_enable().unwrap();
+            conn.load_extension(&extension, None::<&str>).unwrap();
+        }
+        conn
+    };
+    let tg_rows = |conn: &Connection| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM logs_terms WHERE term >= 'tg:' AND term < 'tg;'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    // Opted-in store: postings written and KEPT across maintenance.
+    {
+        let conn = open();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE logs USING timeless_logs(
+               index_keys='service', timestamp_unit='us', message_index='trigram');",
+        )
+        .unwrap();
+        for i in 0..64 {
+            conn.execute(
+                "INSERT INTO logs (ts, level, message, metadata) VALUES (?1, 'info', ?2, NULL)",
+                rusqlite::params![1_800_000_000_000_000i64 + i, format!("lease {i} renewed")],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO logs(logs) VALUES ('flush')", [])
+            .unwrap();
+        conn.execute("INSERT INTO logs(logs) VALUES ('optimize')", [])
+            .unwrap();
+        assert!(tg_rows(&conn) > 0, "opt-in store must write tg: postings");
+
+        // Explicit opt-out: postings drop immediately, choice persists.
+        conn.execute("INSERT INTO logs(logs) VALUES ('message_index:none')", [])
+            .unwrap();
+        assert_eq!(tg_rows(&conn), 0, "opt-out must drop tg: postings");
+        let meta: String = conn
+            .query_row(
+                "SELECT CAST(v AS TEXT) FROM logs_meta WHERE k = 'message_index'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(meta, "none");
+    }
+
+    // Reopened WITHOUT the opt-in: queries stay correct, and any stray
+    // tg: posting (the un-opted upgrade scenario) is shed at the first
+    // optimize by default.
+    {
+        let conn = open();
+        conn.execute(
+            "INSERT INTO logs_terms (term, block_id) VALUES ('tg:00aabb', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO logs(logs) VALUES ('optimize')", [])
+            .unwrap();
+        assert_eq!(
+            tg_rows(&conn),
+            0,
+            "un-opted store must shed stray tg: postings at optimize"
+        );
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM logs WHERE message_contains = 'lease 7 '",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1);
+    }
+}

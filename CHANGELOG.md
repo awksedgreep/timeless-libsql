@@ -10,9 +10,13 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.7.2 -->
+<!-- release-target: 0.7.3 -->
 
 ## [Unreleased]
+
+No changes recorded after `0.7.3`.
+
+## [0.7.3] — 2026-08-15
 
 ### Added
 
@@ -44,6 +48,13 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Changed
 
+- Trigram message-index upgrade path: a store that did NOT opt into
+  `message_index='trigram'` sheds any `tg:` postings automatically at its
+  first optimize after upgrade — opt-in is the only way to carry the
+  index's storage cost. Opted-in stores are untouched and now compose
+  with CLP-dictionary pruning. New command `message_index:<none|trigram>`
+  makes the opt-out (immediate posting drop, ~27% of index weight on
+  measured corpora) and re-opt-in explicit.
 - `message_contains` queries prove absence and skip decode work using the
   CLP dictionaries codec-8 blocks already store. Block-level: a needle
   that cannot occur in a block (template text is digit-free; every

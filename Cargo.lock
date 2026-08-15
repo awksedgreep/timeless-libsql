@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "dbhealth-ext"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "rusqlite",
  "timeless-ext",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-codec"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "pco",
  "zstd",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "dashmap",
  "pco",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-ext"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "regex",
  "rusqlite",

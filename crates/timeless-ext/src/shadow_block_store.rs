@@ -85,6 +85,7 @@ pub(crate) struct ShadowBlockStore {
     /// list (ids are i64s we produced ourselves — injection-safe).
     delete_blocks_prefix: String,
     delete_terms_prefix: String,
+    purge_term_prefix_sql: String,
     /// query_terms building blocks (the term count varies per query, so
     /// the final SQL is assembled per call; prepare_cached keyed by the
     /// SQL string means each distinct term-count is prepared once).
@@ -115,6 +116,7 @@ impl ShadowBlockStore {
             load_meta_sql: format!("SELECT v FROM {meta} WHERE k = ?1"),
             delete_blocks_prefix: format!("DELETE FROM {blocks} WHERE id IN ("),
             delete_terms_prefix: format!("DELETE FROM {terms} WHERE block_id IN ("),
+            purge_term_prefix_sql: format!("DELETE FROM {terms} WHERE term >= ?1 AND term < ?2"),
             // Selects the meta columns alongside the id: query_terms
             // returns (loc, meta) pairs so callers never re-read rows
             // this query already visited (Session 5 friction fix).
@@ -350,6 +352,28 @@ impl BlockStore for ShadowBlockStore {
     /// with "SQL statements in progress". Atomicity comes from the caller's
     /// enclosing host transaction, exactly as it does for put_block's
     /// block-plus-terms insert.
+    fn purge_term_prefix(&self, prefix: &str) -> Result<u64, String> {
+        if prefix.is_empty() {
+            return Err("purge_term_prefix: empty prefix".into());
+        }
+        // Exact byte-range prefix match: [prefix, prefix-with-last-byte-
+        // incremented). Precise and case-sensitive where LIKE is not, and
+        // the WITHOUT ROWID (term, block_id) key makes it a range delete.
+        let mut upper = prefix.as_bytes().to_vec();
+        let last = upper.last_mut().expect("checked non-empty");
+        if *last == u8::MAX {
+            return Err("purge_term_prefix: prefix ends in 0xff".into());
+        }
+        *last += 1;
+        let upper = String::from_utf8(upper)
+            .map_err(|_| "purge_term_prefix: prefix bound is not UTF-8".to_string())?;
+        let conn = Self::conn()?;
+        let removed = conn
+            .execute(&self.purge_term_prefix_sql, params![prefix, upper])
+            .map_err(|e| format!("term purge ({prefix:?}) failed: {e}"))?;
+        Ok(removed as u64)
+    }
+
     fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {
         let conn = Self::conn()?;
 

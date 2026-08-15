@@ -713,6 +713,9 @@ impl BlockStore for SharedStore {
     fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {
         self.0.replace_terms(loc, terms)
     }
+    fn purge_term_prefix(&self, prefix: &str) -> Result<u64, String> {
+        self.0.purge_term_prefix(prefix)
+    }
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
         self.0.put_block(block)
     }
@@ -2544,4 +2547,71 @@ fn clp_row_skipping_decodes_only_feasible_templates() {
     // field_values through the filtered path.
     let values = engine.field_values(&q, "host", 10).unwrap();
     assert_eq!(values, vec!["cmts1".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// F6 trigram upgrade path: stores that did not opt into the message
+// index shed tg: postings at their first maintenance boundary; opted-in
+// stores are never touched.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unopted_stores_shed_trigram_postings_at_optimize() {
+    let store = Arc::new(MemBlockStore::new());
+    let opted = BlockEngine::new(
+        Box::new(SharedStore(Arc::clone(&store))),
+        BlockEngineConfig {
+            message_trigrams: true,
+            ..config(&["service"])
+        },
+    )
+    .unwrap();
+    for i in 0..64i64 {
+        opted
+            .push(entry(
+                i,
+                1,
+                &format!("lease {i} renewed"),
+                &[("service", "dhcp")],
+            ))
+            .unwrap();
+    }
+    opted.flush().unwrap();
+    let has_tg_marker = |store: &Arc<MemBlockStore>| {
+        !store
+            .query_terms(&["tg:".to_string()], i64::MIN, i64::MAX)
+            .unwrap()
+            .is_empty()
+    };
+    assert!(has_tg_marker(&store), "opt-in flush writes tg: postings");
+
+    // Opted-in engine: optimize keeps the index.
+    opted.optimize().unwrap();
+    assert!(has_tg_marker(&store), "opt-in store must keep its index");
+    drop(opted);
+
+    // The same store reopened WITHOUT the opt-in (the upgrade-default
+    // scenario): first optimize purges every tg: posting; entries and
+    // queries are untouched.
+    let unopted = BlockEngine::new(
+        Box::new(SharedStore(Arc::clone(&store))),
+        config(&["service"]),
+    )
+    .unwrap();
+    unopted.optimize().unwrap();
+    assert!(
+        !has_tg_marker(&store),
+        "un-opted store must shed tg: postings at the first optimize"
+    );
+    let rows = unopted
+        .query(&LogQuery {
+            message_contains: Some("lease 7 ".into()),
+            ..full_range_query()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(unopted.query(&full_range_query()).unwrap().len(), 64);
+
+    // Explicit purge (the message_index:none path) is idempotent.
+    assert_eq!(unopted.purge_trigram_postings().unwrap(), 0);
 }
