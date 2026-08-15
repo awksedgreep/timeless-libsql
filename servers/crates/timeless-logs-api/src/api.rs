@@ -15,7 +15,10 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
+use timeless_api_common::{
+    build_info, server_build_identity, BackupRequest, Exposition, PROMETHEUS_CONTENT_TYPE,
+    RESULT_ROWS_HEADER,
+};
 
 use crate::logsql::{self, LogsqlError, LogsqlErrorKind, LogsqlOutput, LogsqlPlan};
 use crate::pipeline::{self, PipelineLimits};
@@ -36,6 +39,7 @@ pub fn router_with_limits(storage: Storage, limits: LogsQueryLimits) -> Router {
         .route("/live", get(liveness))
         .route("/ready", get(health))
         .route("/health", get(health))
+        .route("/metrics", get(self_metrics))
         .route("/insert/jsonline", post(ingest))
         .route("/select/logsql/query", get(query_get).post(query_post))
         .route("/select/logsql/field_values", get(field_values))
@@ -79,6 +83,142 @@ async fn health(State(storage): State<Storage>) -> impl IntoResponse {
             })),
         )
             .into_response(),
+        Err(error) => server_error(error),
+    }
+}
+
+/// Prometheus self-metrics: the `/health` operational stats in text
+/// exposition format, on the plane's own port (the VictoriaMetrics-
+/// family convention).
+async fn self_metrics(State(storage): State<Storage>) -> impl IntoResponse {
+    if !storage.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "# timeless-logs-api: shutting_down\n",
+        )
+            .into_response();
+    }
+    match storage.stats().await {
+        Ok(stats) => {
+            let mut x = Exposition::new();
+            build_info(&mut x, "logs");
+            x.counter(
+                "timeless_logs_admitted_entries_total",
+                "Log entries admitted into the write path.",
+                stats.admitted_entries,
+            );
+            x.counter(
+                "timeless_logs_completed_entries_total",
+                "Log entries durably written.",
+                stats.completed_entries,
+            );
+            x.counter(
+                "timeless_logs_admitted_batches_total",
+                "Batches admitted into the write path.",
+                stats.admitted_batches,
+            );
+            x.counter(
+                "timeless_logs_completed_batches_total",
+                "Batches durably written.",
+                stats.completed_batches,
+            );
+            x.counter(
+                "timeless_logs_tail_entries_sent_total",
+                "Entries delivered to live-tail subscribers.",
+                stats.tail_entries_sent,
+            );
+            x.counter(
+                "timeless_logs_tail_entries_dropped_total",
+                "Entries dropped for slow live-tail subscribers.",
+                stats.tail_entries_dropped,
+            );
+            x.gauge(
+                "timeless_logs_entries",
+                "Log entries resident in storage.",
+                stats.total_entries,
+            );
+            x.gauge(
+                "timeless_logs_blocks",
+                "Storage blocks (raw plus compressed).",
+                stats.total_blocks,
+            );
+            x.gauge(
+                "timeless_logs_raw_blocks",
+                "Blocks awaiting compression.",
+                stats.raw_blocks,
+            );
+            x.gauge(
+                "timeless_logs_raw_bytes",
+                "Bytes in blocks awaiting compression.",
+                stats.raw_bytes,
+            );
+            x.gauge(
+                "timeless_logs_compressed_blocks",
+                "Compressed storage blocks.",
+                stats.compressed_blocks,
+            );
+            x.gauge(
+                "timeless_logs_compressed_bytes",
+                "Bytes in compressed storage blocks.",
+                stats.compressed_bytes,
+            );
+            x.gauge(
+                "timeless_logs_disk_size_bytes",
+                "Block payload bytes on disk.",
+                stats.disk_size,
+            );
+            x.gauge(
+                "timeless_logs_index_size_bytes",
+                "Term index bytes on disk.",
+                stats.index_size,
+            );
+            x.gauge(
+                "timeless_logs_buffered_entries",
+                "Entries buffered in memory ahead of flush.",
+                stats.buffered_entries,
+            );
+            x.gauge(
+                "timeless_logs_queued_batches",
+                "Batches waiting in the write queue.",
+                stats.queued_batches,
+            );
+            x.gauge(
+                "timeless_logs_queued_entries",
+                "Entries waiting in the write queue.",
+                stats.queued_entries,
+            );
+            x.gauge(
+                "timeless_logs_oldest_queued_ms",
+                "Age of the oldest queued batch in milliseconds.",
+                stats.oldest_queued_ms,
+            );
+            x.gauge(
+                "timeless_logs_tail_active_subscribers",
+                "Live-tail subscribers currently connected.",
+                stats.tail_active_subscribers,
+            );
+            x.gauge(
+                "timeless_logs_database_file_bytes",
+                "Main SQLite database file size.",
+                stats.database_file_bytes.min(i64::MAX as u64) as i64,
+            );
+            x.gauge(
+                "timeless_logs_wal_bytes",
+                "SQLite write-ahead log size.",
+                stats.database_wal_bytes.min(i64::MAX as u64) as i64,
+            );
+            x.gauge(
+                "timeless_logs_freelist_bytes",
+                "Reusable free pages inside the database file.",
+                stats.freelist_bytes,
+            );
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+                x.finish(),
+            )
+                .into_response()
+        }
         Err(error) => server_error(error),
     }
 }

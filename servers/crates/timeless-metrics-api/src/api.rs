@@ -7,7 +7,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use serde_json::json;
-use timeless_api_common::{server_build_identity, BackupRequest, RESULT_ROWS_HEADER};
+use timeless_api_common::{
+    build_info, server_build_identity, BackupRequest, Exposition, PROMETHEUS_CONTENT_TYPE,
+    RESULT_ROWS_HEADER,
+};
 
 use crate::query::{self, Params, ReadRequest};
 use crate::{victoria, PromQueryLimits, ScrapeTargetSet, Storage};
@@ -26,6 +29,7 @@ pub fn router_with_limits(storage: Storage, limits: PromQueryLimits) -> Router {
         .route("/live", get(liveness))
         .route("/ready", get(health))
         .route("/health", get(health))
+        .route("/metrics", get(self_metrics))
         .route("/select/metrics/stats", get(stats))
         .route("/api/v1/flush", post(flush))
         .route("/api/v1/backup", post(backup))
@@ -355,6 +359,139 @@ async fn health(State(storage): State<Storage>) -> Response {
 async fn stats(State(storage): State<Storage>) -> Response {
     match storage.stats().await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(error) => server_error(error),
+    }
+}
+
+/// Prometheus self-metrics: the `/health` operational stats in text
+/// exposition format, on the plane's own port (the VictoriaMetrics-
+/// family convention), so any Prometheus-compatible scraper picks the
+/// plane up with zero adapter code.
+async fn self_metrics(State(storage): State<Storage>) -> Response {
+    if !storage.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "# timeless-metrics-api: shutting_down\n",
+        )
+            .into_response();
+    }
+    match storage.stats().await {
+        Ok(stats) => {
+            let clamp = |value: u64| value.min(i64::MAX as u64) as i64;
+            let mut x = Exposition::new();
+            build_info(&mut x, "metrics");
+            x.counter(
+                "timeless_metrics_admitted_points_total",
+                "Points admitted into the write path.",
+                clamp(stats.admitted_points),
+            );
+            x.counter(
+                "timeless_metrics_completed_points_total",
+                "Points durably written.",
+                clamp(stats.completed_points),
+            );
+            x.counter(
+                "timeless_metrics_failed_points_total",
+                "Points in failed batches.",
+                clamp(stats.failed_points),
+            );
+            x.counter(
+                "timeless_metrics_admitted_batches_total",
+                "Batches admitted into the write path.",
+                clamp(stats.admitted_batches),
+            );
+            x.counter(
+                "timeless_metrics_completed_batches_total",
+                "Batches durably written.",
+                clamp(stats.completed_batches),
+            );
+            x.counter(
+                "timeless_metrics_failed_batches_total",
+                "Batches that failed to write.",
+                clamp(stats.failed_batches),
+            );
+            x.counter(
+                "timeless_metrics_import_errors_total",
+                "Import requests rejected as unparseable.",
+                clamp(stats.import_errors),
+            );
+            x.gauge(
+                "timeless_metrics_series",
+                "Distinct series tracked.",
+                stats.series,
+            );
+            x.gauge(
+                "timeless_metrics_disk_points",
+                "Points resident in storage.",
+                stats.disk_points,
+            );
+            x.gauge(
+                "timeless_metrics_buffered_points",
+                "Points buffered in memory ahead of flush.",
+                stats.buffered_points,
+            );
+            x.gauge(
+                "timeless_metrics_raw_tier_chunks",
+                "Chunks in the raw retention tier.",
+                stats.raw_tier_chunks,
+            );
+            x.gauge(
+                "timeless_metrics_rollup_chunks",
+                "Chunks in rollup tiers.",
+                stats.rollup_chunks,
+            );
+            x.gauge(
+                "timeless_metrics_storage_bytes",
+                "Bytes of chunk payload on disk.",
+                stats.bytes_on_disk,
+            );
+            x.gauge(
+                "timeless_metrics_queued_batches",
+                "Batches waiting in the write queue.",
+                clamp(stats.queued_batches),
+            );
+            x.gauge(
+                "timeless_metrics_queued_points",
+                "Points waiting in the write queue.",
+                clamp(stats.queued_points),
+            );
+            x.gauge(
+                "timeless_metrics_in_flight_batches",
+                "Batches currently being written.",
+                clamp(stats.in_flight_batches),
+            );
+            x.gauge(
+                "timeless_metrics_in_flight_points",
+                "Points currently being written.",
+                clamp(stats.in_flight_points),
+            );
+            x.gauge(
+                "timeless_metrics_oldest_queued_ms",
+                "Age of the oldest queued batch in milliseconds.",
+                clamp(stats.oldest_queued_ms),
+            );
+            x.gauge(
+                "timeless_metrics_database_file_bytes",
+                "Main SQLite database file size.",
+                clamp(stats.database_file_bytes),
+            );
+            x.gauge(
+                "timeless_metrics_wal_bytes",
+                "SQLite write-ahead log size.",
+                clamp(stats.database_wal_bytes),
+            );
+            x.gauge(
+                "timeless_metrics_freelist_bytes",
+                "Reusable free pages inside the database file.",
+                stats.freelist_bytes,
+            );
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+                x.finish(),
+            )
+                .into_response()
+        }
         Err(error) => server_error(error),
     }
 }

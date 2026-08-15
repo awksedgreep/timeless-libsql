@@ -66,10 +66,7 @@ impl TailHub {
         })
     }
 
-    pub(crate) fn subscribe(
-        self: &Arc<Self>,
-        predicate: Option<LogPredicate>,
-    ) -> TailSubscription {
+    pub(crate) fn subscribe(self: &Arc<Self>, predicate: Option<LogPredicate>) -> TailSubscription {
         let (sender, receiver) = mpsc::channel(SUBSCRIBER_BUFFER);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut subscribers = self.subscribers.lock().expect("tail hub lock");

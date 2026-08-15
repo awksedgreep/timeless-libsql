@@ -155,7 +155,11 @@ impl From<&ScrapeTargetSetReport> for ScrapeTargetSetReportView {
     fn from(report: &ScrapeTargetSetReport) -> Self {
         Self {
             version: report.version,
-            targets: report.targets.iter().map(ScrapeTargetReportView::from).collect(),
+            targets: report
+                .targets
+                .iter()
+                .map(ScrapeTargetReportView::from)
+                .collect(),
         }
     }
 }
@@ -660,7 +664,10 @@ mod tests {
             }],
         };
         let body = serde_json::to_string(&ScrapeTargetSetReportView::from(&report)).unwrap();
-        assert!(!body.contains("SECRET-BEARER-TOKEN"), "bearer leaked: {body}");
+        assert!(
+            !body.contains("SECRET-BEARER-TOKEN"),
+            "bearer leaked: {body}"
+        );
         assert!(!body.contains("SECRET-PASSWORD"), "password leaked: {body}");
         assert!(body.contains("\"bearer_configured\":true"));
         assert!(body.contains("\"password_configured\":true"));

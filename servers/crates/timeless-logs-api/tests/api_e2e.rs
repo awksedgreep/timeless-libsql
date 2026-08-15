@@ -19353,8 +19353,7 @@ async fn tail_streams_matching_entries_and_respects_filters() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
     let temp = tempfile::tempdir().unwrap();
-    let storage =
-        Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    let storage = Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
     let app = router(storage.clone());
 
     // Subscribe to error-level entries from host cmts-01 only.
@@ -19452,8 +19451,7 @@ async fn tail_rejects_pipelines_and_drops_for_slow_consumers() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
     let temp = tempfile::tempdir().unwrap();
-    let storage =
-        Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    let storage = Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
     let app = router(storage.clone());
 
     // Pipelines are the query surface's business, not tail's.
@@ -19500,5 +19498,72 @@ async fn tail_rejects_pipelines_and_drops_for_slow_consumers() {
     );
     assert!(stats.tail_entries_sent > 0);
     drop(body);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn self_metrics_exposes_prometheus_families() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    let app = router(storage.clone());
+
+    let response = app
+        .clone()
+        .oneshot(ingest_request(make_lines(0, 100)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(
+        text.contains("timeless_build_info{name=\"timeless-logs-api\",version=\""),
+        "missing build info: {text}"
+    );
+    let admitted = text
+        .lines()
+        .find_map(|line| line.strip_prefix("timeless_logs_admitted_entries_total "))
+        .expect("admitted counter present");
+    assert!(
+        admitted.parse::<i64>().unwrap() >= 100,
+        "admitted={admitted}"
+    );
+    for family in [
+        "# TYPE timeless_logs_admitted_entries_total counter",
+        "# TYPE timeless_logs_completed_entries_total counter",
+        "# TYPE timeless_logs_tail_entries_dropped_total counter",
+        "# TYPE timeless_logs_entries gauge",
+        "# TYPE timeless_logs_blocks gauge",
+        "# TYPE timeless_logs_compressed_bytes gauge",
+        "# TYPE timeless_logs_disk_size_bytes gauge",
+        "# TYPE timeless_logs_wal_bytes gauge",
+        "# TYPE timeless_logs_oldest_queued_ms gauge",
+        "# TYPE timeless_logs_tail_active_subscribers gauge",
+    ] {
+        assert!(text.contains(family), "missing {family} in:\n{text}");
+    }
+
     storage.shutdown().await.unwrap();
 }

@@ -59,6 +59,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `metrics` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |
 | `metrics` | `GET` | `/ready` | `metrics:stats` | Readiness plus build, storage, queue, rollup, and file accounting. |
 | `metrics` | `GET` | `/health` | `metrics:stats` | Alias of `/ready`. |
+| `metrics` | `GET` | `/metrics` | none | Prometheus text exposition of the plane's own operational stats plus `timeless_build_info`; unauthenticated like the probe endpoints. |
 | `metrics` | `GET` | `/select/metrics/stats` | `metrics:stats` | Complete serialized `StorageStats`. |
 | `metrics` | `POST` | `/api/v1/flush` | `metrics:maintenance` | Ordered writer completion, extension flush, and durability barrier. |
 | `metrics` | `POST` | `/api/v1/backup` | `metrics:maintenance` | Flush, compact/roll up, checkpoint, and verified SQLite backup. |
@@ -81,6 +82,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `logs` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |
 | `logs` | `GET` | `/ready` | `logs:stats` | Readiness plus build, storage, and queue accounting. |
 | `logs` | `GET` | `/health` | `logs:stats` | Alias of `/ready`. |
+| `logs` | `GET` | `/metrics` | none | Prometheus text exposition of the plane's own operational stats plus `timeless_build_info`; unauthenticated like the probe endpoints. |
 | `logs` | `POST` | `/insert/jsonline` | `logs:write` | NDJSON ingestion into one public rich-log batch per request. |
 | `logs` | `GET, POST` | `/select/logsql/query` | `logs:read` | Native parameter query on GET; LogsQL compatibility grammar on POST. |
 | `logs` | `GET` | `/select/logsql/field_values` | `logs:read` | Bounded discovery for `service`, `host`, `path`, or `status`. |
@@ -91,6 +93,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `traces` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |
 | `traces` | `GET` | `/ready` | `traces:stats` | Readiness plus build, negotiated rich-span capability, and queue watermarks. |
 | `traces` | `GET` | `/health` | `traces:stats` | Alias of `/ready`. |
+| `traces` | `GET` | `/metrics` | none | Prometheus text exposition of the plane's own operational stats plus `timeless_build_info`; unauthenticated like the probe endpoints. |
 | `traces` | `GET` | `/select/traces/stats` | `traces:stats` | Complete serialized `StorageStats`. |
 | `traces` | `GET` | `/select/jaeger/api/services` | `traces:read` | Sorted Jaeger service discovery. |
 | `traces` | `GET` | `/select/jaeger/api/services/{service}/operations` | `traces:read` | Sorted operations for one service. |
@@ -309,8 +312,9 @@ curl -H "Authorization: Bearer $(timeless-authctl token mint --key ./auth/timele
 operators who want ingest and query open but administration closed without
 any token machinery, `TIMELESS_ADMIN_KEY` independently gates the
 administrative routes (see the environment table). When enabled,
-every route except the probe endpoints `/live`, `/ready`, and `/health`
-(exact-match exemptions, so container and load-balancer probes need no
+every route except the probe endpoints `/live`, `/ready`, and `/health`,
+and the `/metrics` self-metrics endpoint (exact-match exemptions, so
+container probes, load balancers, and Prometheus scrapers need no
 credentials) requires an exact `Authorization: Bearer <token>`. Tokens are compact JWS/JWT values signed with
 Ed25519 (`alg=EdDSA`); `typ`, if present, must be `JWT`. The policy contains
 base64url-no-padding 32-byte public keys. Rust validates tokens but never

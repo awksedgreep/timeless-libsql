@@ -928,3 +928,55 @@ fn file_size(path: &Path) -> u64 {
         .map(|metadata| metadata.len())
         .unwrap_or(0)
 }
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn self_metrics_exposes_prometheus_families() {
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("traces.db"),
+        extension,
+        1,
+        8,
+        Some(DEFAULT_RETENTION),
+    )
+    .unwrap();
+    let app = router(storage.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("timeless_build_info{name=\"timeless-traces-api\",version=\""),
+        "missing build info: {text}"
+    );
+    for family in [
+        "# TYPE timeless_traces_admitted_spans_total counter",
+        "# TYPE timeless_traces_rejected_requests_total counter",
+        "# TYPE timeless_traces_admitted_bytes_total counter",
+        "# TYPE timeless_traces_spans gauge",
+        "# TYPE timeless_traces_disk_size_bytes gauge",
+        "# TYPE timeless_traces_oldest_queued_ms gauge",
+    ] {
+        assert!(text.contains(family), "missing {family} in:\n{text}");
+    }
+    storage.shutdown().await.unwrap();
+}

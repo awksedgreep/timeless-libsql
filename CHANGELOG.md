@@ -14,7 +14,34 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-No changes recorded after `0.7.2`.
+### Added
+
+- Prometheus self-metrics: `GET /metrics` on each data plane's own port
+  serves the `/health` operational stats in text exposition format
+  (version 0.0.4) — counters with `_total` suffixes, gauges for storage,
+  queue, and file accounting, and a `timeless_build_info` info-metric
+  carrying the plane's build identity (name, version, commit, target,
+  profile) so version drift between environments is visible on any
+  Prometheus-compatible dashboard. The endpoint is exempt from
+  authentication exactly like the probe endpoints; it exposes the same
+  data `/health` already serves unauthenticated. New stat surface only —
+  no new instrumentation.
+
+### Changed
+
+- `message_contains` queries prove absence and skip decode work using the
+  CLP dictionaries codec-8 blocks already store. Block-level: a needle
+  that cannot occur in a block (template text is digit-free; every
+  variable carries a digit; token-confined needles like IPs and hex ids
+  resolve as full literals against the Str-variable dictionary) skips the
+  block entirely. Sub-block: rows whose template provably cannot render a
+  matching message advance the decode cursors without materializing
+  strings, and rich metadata parses only for rows that actually match.
+  `max_work_entries` now charges the rows actually decoded, so
+  wide-window selective queries succeed under budgets far smaller than
+  the window. Measured on a 2.1M-entry production corpus: every needle
+  class 3–12x faster, zero storage cost. New `timeless_stats` keys:
+  `query_clp_pruned_blocks`, `query_clp_skipped_rows`.
 
 ## [0.7.2] — 2026-08-12
 

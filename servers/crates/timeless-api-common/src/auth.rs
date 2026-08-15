@@ -368,9 +368,9 @@ fn admin_key_matches(request: &Request, expected: &str) -> bool {
         .map(str::to_owned)
         .or_else(|| {
             request.uri().query().and_then(|query| {
-                query.split('&').find_map(|pair| {
-                    pair.strip_prefix("admin_key=").map(str::to_owned)
-                })
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("admin_key=").map(str::to_owned))
             })
         });
     match presented {
@@ -393,9 +393,11 @@ async fn authorize(State(config): State<AuthConfig>, request: Request, next: Nex
     };
     // Exact-match exemptions (not prefix/suffix, so not spoofable): probes
     // from Kubernetes, load balancers, and Docker HEALTHCHECK must work
-    // without minted credentials. Signal stats stay behind <signal>:stats —
-    // they expose series cardinality and storage internals.
-    const UNAUTHENTICATED_PATHS: [&str; 3] = ["/live", "/ready", "/health"];
+    // without minted credentials, and Prometheus scrapers read /metrics —
+    // which exposes the same operational stats /health already serves
+    // unauthenticated. Signal stats stay behind <signal>:stats — they
+    // expose series cardinality and storage internals.
+    const UNAUTHENTICATED_PATHS: [&str; 4] = ["/live", "/ready", "/health", "/metrics"];
     if UNAUTHENTICATED_PATHS.contains(&request.uri().path()) {
         return next.run(request).await;
     }
@@ -487,7 +489,13 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, AuthError> {
 }
 
 fn required_scope(signal: &str, method: &Method, path: &str) -> String {
-    let operation = if path == "/ready" || path == "/health" || path.ends_with("/stats") {
+    // "/metrics" is exempted above; classified here anyway so the scope
+    // stays sensible if the exemption list ever changes.
+    let operation = if path == "/ready"
+        || path == "/health"
+        || path == "/metrics"
+        || path.ends_with("/stats")
+    {
         "stats"
     } else if path.ends_with("/flush") || path.ends_with("/optimize") || path.ends_with("/backup") {
         "maintenance"

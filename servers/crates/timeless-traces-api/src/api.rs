@@ -9,7 +9,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 use timeless_api_common::{
-    server_build_identity, BackupRequest, VerifiedClaims, RESULT_ROWS_HEADER,
+    build_info, server_build_identity, BackupRequest, Exposition, VerifiedClaims,
+    PROMETHEUS_CONTENT_TYPE, RESULT_ROWS_HEADER,
 };
 
 use crate::otlp;
@@ -23,6 +24,7 @@ pub fn router(storage: Storage) -> Router {
         .route("/live", get(liveness))
         .route("/ready", get(readiness))
         .route("/health", get(readiness))
+        .route("/metrics", get(self_metrics))
         .route("/select/traces/stats", get(stats))
         .route("/select/jaeger/api/services", get(services))
         .route(
@@ -93,6 +95,123 @@ async fn readiness(State(storage): State<Storage>) -> Response {
             })),
         )
             .into_response(),
+        Err(error) => server_error(StatusCode::SERVICE_UNAVAILABLE, error),
+    }
+}
+
+/// Prometheus self-metrics: the `/health` operational stats in text
+/// exposition format, on the plane's own port (the VictoriaMetrics-
+/// family convention).
+async fn self_metrics(State(storage): State<Storage>) -> Response {
+    if !storage.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "# timeless-traces-api: shutting_down\n",
+        )
+            .into_response();
+    }
+    match storage.stats().await {
+        Ok(stats) => {
+            let clamp = |value: u64| value.min(i64::MAX as u64) as i64;
+            let mut x = Exposition::new();
+            build_info(&mut x, "traces");
+            x.counter(
+                "timeless_traces_admitted_spans_total",
+                "Spans admitted into the write path.",
+                clamp(stats.admitted_spans),
+            );
+            x.counter(
+                "timeless_traces_completed_spans_total",
+                "Spans durably written.",
+                clamp(stats.completed_spans),
+            );
+            x.counter(
+                "timeless_traces_failed_spans_total",
+                "Spans in failed requests.",
+                clamp(stats.failed_spans),
+            );
+            x.counter(
+                "timeless_traces_admitted_requests_total",
+                "Ingest requests admitted into the write path.",
+                clamp(stats.admitted_requests),
+            );
+            x.counter(
+                "timeless_traces_completed_requests_total",
+                "Ingest requests durably written.",
+                clamp(stats.completed_requests),
+            );
+            x.counter(
+                "timeless_traces_failed_requests_total",
+                "Ingest requests that failed to write.",
+                clamp(stats.failed_requests),
+            );
+            x.counter(
+                "timeless_traces_rejected_requests_total",
+                "Ingest requests rejected before admission.",
+                clamp(stats.api_rejected_requests),
+            );
+            x.counter(
+                "timeless_traces_admitted_bytes_total",
+                "Request body bytes admitted into the write path.",
+                clamp(stats.admitted_body_bytes),
+            );
+            x.gauge(
+                "timeless_traces_spans",
+                "Spans resident in storage.",
+                stats.total_spans,
+            );
+            x.gauge(
+                "timeless_traces_blocks",
+                "Storage blocks (raw plus compressed).",
+                stats.blocks,
+            );
+            x.gauge(
+                "timeless_traces_disk_size_bytes",
+                "Block payload bytes on disk.",
+                stats.bytes_on_disk,
+            );
+            x.gauge(
+                "timeless_traces_index_size_bytes",
+                "SQLite index bytes on disk.",
+                stats.sqlite_index_bytes,
+            );
+            x.gauge(
+                "timeless_traces_buffered_spans",
+                "Spans buffered in memory ahead of flush.",
+                stats.buffered_spans,
+            );
+            x.gauge(
+                "timeless_traces_queued_requests",
+                "Ingest requests waiting in the write queue.",
+                clamp(stats.queued_requests),
+            );
+            x.gauge(
+                "timeless_traces_queued_spans",
+                "Spans waiting in the write queue.",
+                clamp(stats.queued_spans),
+            );
+            x.gauge(
+                "timeless_traces_in_flight_requests",
+                "Ingest requests currently being written.",
+                clamp(stats.in_flight_requests),
+            );
+            x.gauge(
+                "timeless_traces_in_flight_spans",
+                "Spans currently being written.",
+                clamp(stats.in_flight_spans),
+            );
+            x.gauge(
+                "timeless_traces_oldest_queued_ms",
+                "Age of the oldest queued request in milliseconds.",
+                clamp(stats.oldest_queued_ms),
+            );
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
+                x.finish(),
+            )
+                .into_response()
+        }
         Err(error) => server_error(StatusCode::SERVICE_UNAVAILABLE, error),
     }
 }

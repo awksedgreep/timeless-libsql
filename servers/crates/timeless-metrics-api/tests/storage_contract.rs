@@ -15464,3 +15464,65 @@ fn named_series_batch(name: &str, points: &[(i64, f64)]) -> Vec<u8> {
     }
     blob
 }
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn self_metrics_exposes_prometheus_families() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("metrics.db"),
+        extension,
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    storage
+        .submit_named_batch(named_batch(3, 1_700_000_000), 3)
+        .await
+        .unwrap();
+    let app = router(storage.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("timeless_build_info{name=\"timeless-metrics-api\",version=\""),
+        "missing build info: {text}"
+    );
+    let admitted = text
+        .lines()
+        .find_map(|line| line.strip_prefix("timeless_metrics_admitted_points_total "))
+        .expect("admitted counter present");
+    assert!(admitted.parse::<i64>().unwrap() >= 3, "admitted={admitted}");
+    for family in [
+        "# TYPE timeless_metrics_admitted_points_total counter",
+        "# TYPE timeless_metrics_completed_points_total counter",
+        "# TYPE timeless_metrics_import_errors_total counter",
+        "# TYPE timeless_metrics_series gauge",
+        "# TYPE timeless_metrics_database_file_bytes gauge",
+        "# TYPE timeless_metrics_wal_bytes gauge",
+        "# TYPE timeless_metrics_oldest_queued_ms gauge",
+    ] {
+        assert!(text.contains(family), "missing {family} in:\n{text}");
+    }
+    storage.shutdown().await.unwrap();
+}

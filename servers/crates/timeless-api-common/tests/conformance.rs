@@ -34,12 +34,10 @@ fn fixture(name: &str) -> String {
 }
 
 async fn assert_token_verifies(token: &str) {
-    let config = AuthConfig::enforced(
-        "metrics",
-        "default",
-        format!("{FIXTURE}/policy.json"),
-    );
-    config.preflight().expect("fixture policy must pass preflight");
+    let config = AuthConfig::enforced("metrics", "default", format!("{FIXTURE}/policy.json"));
+    config
+        .preflight()
+        .expect("fixture policy must pass preflight");
     let app = protect_router(
         Router::new()
             .route("/api/v1/query", get(|| async { "read" }))

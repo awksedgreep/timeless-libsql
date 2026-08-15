@@ -6,8 +6,10 @@
 //! lifecycle.
 
 mod auth;
+mod prometheus;
 
 pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims, RESULT_ROWS_HEADER};
+pub use prometheus::{build_info, Exposition, PROMETHEUS_CONTENT_TYPE};
 
 use std::fs::{File, OpenOptions};
 use std::future::Future;
@@ -602,8 +604,7 @@ mod tests {
 
         // Outside the root: rejected, nothing written.
         let outside = dir.path().join("stolen.db");
-        let error =
-            create_verified_backup(&conn, &outside, "test", checkpoint).unwrap_err();
+        let error = create_verified_backup(&conn, &outside, "test", checkpoint).unwrap_err();
         assert!(error.contains("outside the backup directory"), "{error}");
         assert!(!outside.exists());
 
@@ -613,14 +614,12 @@ mod tests {
         assert!(inside.exists());
 
         // Relative destination resolves inside the root.
-        create_verified_backup(&conn, Path::new("relative.db"), "test", checkpoint)
-            .unwrap();
+        create_verified_backup(&conn, Path::new("relative.db"), "test", checkpoint).unwrap();
         assert!(dir.path().join("backups").join("relative.db").exists());
 
         // Traversal out of the root: rejected.
         let sneaky = dir.path().join("backups").join("../escape.db");
-        let error =
-            create_verified_backup(&conn, &sneaky, "test", checkpoint).unwrap_err();
+        let error = create_verified_backup(&conn, &sneaky, "test", checkpoint).unwrap_err();
         assert!(error.contains("outside the backup directory"), "{error}");
         assert!(!dir.path().join("escape.db").exists());
     }
