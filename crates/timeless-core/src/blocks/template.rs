@@ -437,6 +437,68 @@ pub fn encode_template_str(msgs: &[&str], zstd_level: i32) -> Result<Vec<u8>, St
     })
 }
 
+/// One (template, slot) variable group's extent in its typed stream:
+/// Num groups index into the widths/values columns, Str groups into
+/// the string column.
+struct Group {
+    kind: VarKind,
+    start: usize,
+    len: usize,
+}
+
+/// Rebuild group extents: count each (template, slot)'s occurrences in
+/// message order, then assign stream offsets in sorted group order —
+/// the exact inverse of the encoder's BTreeMap walk. Returns the dense
+/// per-template base table (group of (id, slot) sits at base[id] +
+/// slot — no hashing in per-variable hot loops) plus the groups in
+/// that order.
+fn group_layout(
+    ids: &[i64],
+    kinds_by_id: &[Vec<VarKind>],
+    num_n: usize,
+    str_n: usize,
+) -> Result<(Vec<usize>, Vec<Group>), String> {
+    let mut sizes: BTreeMap<(i64, u32), usize> = BTreeMap::new();
+    for &id in ids {
+        for slot in 0..kinds_by_id[id as usize].len() {
+            *sizes.entry((id, slot as u32)).or_default() += 1;
+        }
+    }
+    let mut base: Vec<usize> = vec![usize::MAX; kinds_by_id.len()];
+    let mut groups: Vec<Group> = Vec::with_capacity(sizes.len());
+    let (mut num_off, mut str_off) = (0usize, 0usize);
+    for (&(id, slot), &count) in &sizes {
+        if base[id as usize] == usize::MAX {
+            base[id as usize] = groups.len();
+        }
+        let kind = kinds_by_id[id as usize][slot as usize];
+        let start = match kind {
+            VarKind::Num => {
+                let start = num_off;
+                num_off += count;
+                start
+            }
+            VarKind::Str => {
+                let start = str_off;
+                str_off += count;
+                start
+            }
+        };
+        debug_assert_eq!(groups.len(), base[id as usize] + slot as usize);
+        groups.push(Group {
+            kind,
+            start,
+            len: count,
+        });
+    }
+    if num_off != num_n || str_off != str_n {
+        return Err(format!(
+            "template column: slot totals ({num_off} num, {str_off} str) disagree with header ({num_n}, {str_n})"
+        ));
+    }
+    Ok((base, groups))
+}
+
 /// Decode a template-encoded message column back to exactly `n`
 /// messages, bit-exact. Validates everything it reads — corrupt input
 /// is an error naming the field, never a panic.
@@ -486,43 +548,8 @@ pub fn decode_template_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String
         }
     }
 
-    // Rebuild group extents: count each (template, slot)'s occurrences
-    // in message order, then assign stream offsets in sorted group
-    // order — the exact inverse of the encoder's BTreeMap walk.
-    let mut sizes: BTreeMap<(i64, u32), usize> = BTreeMap::new();
-    for &id in &ids {
-        for slot in 0..kinds_by_id[id as usize].len() {
-            *sizes.entry((id, slot as u32)).or_default() += 1;
-        }
-    }
-    // Dense cursor table: `sizes` iterates sorted by (id, slot) and a
-    // template's slots are all present whenever the template occurs, so
-    // group g of template `id`, slot `s` sits at base[id] + s — no
-    // hashing in the per-variable hot loop below.
-    let mut base: Vec<usize> = vec![usize::MAX; dict_n];
-    let mut cursors: Vec<usize> = Vec::with_capacity(sizes.len());
-    let (mut num_off, mut str_off) = (0usize, 0usize);
-    for (&(id, slot), &count) in &sizes {
-        if base[id as usize] == usize::MAX {
-            base[id as usize] = cursors.len();
-        }
-        match kinds_by_id[id as usize][slot as usize] {
-            VarKind::Num => {
-                cursors.push(num_off);
-                num_off += count;
-            }
-            VarKind::Str => {
-                cursors.push(str_off);
-                str_off += count;
-            }
-        }
-        debug_assert_eq!(cursors.len() - 1, base[id as usize] + slot as usize);
-    }
-    if num_off != num_n || str_off != str_n {
-        return Err(format!(
-            "template column: slot totals ({num_off} num, {str_off} str) disagree with header ({num_n}, {str_n})"
-        ));
-    }
+    let (base, groups) = group_layout(&ids, &kinds_by_id, num_n, str_n)?;
+    let mut cursors: Vec<usize> = groups.iter().map(|g| g.start).collect();
 
     let mut out = Vec::with_capacity(n);
     let mut widths_m: Vec<u8> = Vec::new();
@@ -685,10 +712,9 @@ fn fragment_feasible(frag: &str, segments: &[String], strs: &[&str]) -> bool {
     // Valid prefix cuts: i = 0 (no variable on the left) or frag[..i]
     // is the digit-free tail of some Str variable.
     let cut_is: Vec<usize> = std::iter::once(0)
-        .chain(
-            (1..=frag.len())
-                .filter(|&i| frag.is_char_boundary(i) && strs.iter().any(|v| ends_with_ci(v, &frag[..i]))),
-        )
+        .chain((1..=frag.len()).filter(|&i| {
+            frag.is_char_boundary(i) && strs.iter().any(|v| ends_with_ci(v, &frag[..i]))
+        }))
         .collect();
     let cut_js: Vec<usize> = (0..frag.len())
         .filter(|&j| frag.is_char_boundary(j) && strs.iter().any(|v| starts_with_ci(v, &frag[j..])))
@@ -822,6 +848,261 @@ pub fn column_may_contain(bytes: &[u8], needle: &str) -> Result<bool, String> {
         }
     }
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Sub-block row skipping (issue #2, phase 2)
+//
+// Block-level feasibility answers "could ANY message here contain the
+// needle". This section answers it PER TEMPLATE, with each template's
+// own variable groups (a message rendered from template t draws its
+// variables exclusively from t's (template, slot) groups, so
+// group-local checks are sound and strictly tighter than block-level
+// ones). Rows of infeasible templates advance the decode cursors
+// without materializing a single string; candidate rows detokenize and
+// are kept only when the rendered message actually contains the
+// needle. Query work becomes proportional to candidate rows, not
+// window size.
+// ---------------------------------------------------------------------------
+
+/// The needle split once, reused across every template's check.
+struct NeedleParts<'a> {
+    /// Maximal digit-free fragments.
+    fragments: Vec<&'a str>,
+    /// Maximal digit runs bounded by non-digits on both sides.
+    inner_runs: Vec<&'a str>,
+    /// All token bytes, at least one digit, at least one non-digit:
+    /// can never span a token boundary, so in whole-token mode it must
+    /// sit inside one Str variable.
+    token_confined_mixed: bool,
+}
+
+fn needle_parts(needle: &str) -> NeedleParts<'_> {
+    let nb = needle.as_bytes();
+    let mut fragments = Vec::new();
+    let mut inner_runs = Vec::new();
+    let mut i = 0;
+    while i < nb.len() {
+        let start = i;
+        if nb[i].is_ascii_digit() {
+            while i < nb.len() && nb[i].is_ascii_digit() {
+                i += 1;
+            }
+            if start > 0 && i < nb.len() {
+                inner_runs.push(&needle[start..i]);
+            }
+        } else {
+            while i < nb.len() && !nb[i].is_ascii_digit() {
+                i += 1;
+            }
+            fragments.push(&needle[start..i]);
+        }
+    }
+    NeedleParts {
+        fragments,
+        inner_runs,
+        token_confined_mixed: !nb.is_empty()
+            && nb.iter().all(|&b| is_token_byte(b))
+            && nb.iter().any(u8::is_ascii_digit)
+            && nb.iter().any(|b| !b.is_ascii_digit()),
+    }
+}
+
+/// The block-level feasibility rules, template-locally: `segments` are
+/// THIS template's placeholder-free runs, `t_strs`/`t_nums` its own
+/// groups' variables. `false` proves no message of this template can
+/// contain the needle.
+fn template_feasible(
+    needle: &str,
+    parts: &NeedleParts,
+    whole_token_mode: bool,
+    segments: &[String],
+    t_strs: &[&str],
+    t_nums: &[(u8, i64)],
+) -> bool {
+    if whole_token_mode && parts.token_confined_mixed {
+        return t_strs.iter().any(|v| contains_ci(v, needle));
+    }
+    for frag in &parts.fragments {
+        if !fragment_feasible(frag, segments, t_strs) {
+            return false;
+        }
+    }
+    for run in &parts.inner_runs {
+        let num_ok = run.len() <= 19
+            && run.parse::<i64>().ok().is_some_and(|v| {
+                t_nums
+                    .iter()
+                    .any(|&(w, val)| w as usize == run.len() && val == v)
+            });
+        if !num_ok && !t_strs.iter().any(|s| has_maximal_digit_run(s, run)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The rows of a filtered column decode: message-order indices plus
+/// the rendered messages that matched, and how many rows had to be
+/// detokenized to find them (the decode work actually done).
+pub(crate) struct FilteredMessages {
+    pub(crate) rows: Vec<(usize, String)>,
+    pub(crate) candidate_rows: u64,
+}
+
+/// Decode ONLY the messages that contain `needle` (ASCII,
+/// case-insensitive substring — the engine's `message_contains`
+/// semantics). The needle must be non-empty ASCII; callers gate.
+///
+/// Correctness contract, enforced by the equivalence tests: the result
+/// is EXACTLY `decode_template_str(..)` filtered to matching rows,
+/// with original row indices.
+pub(crate) fn decode_template_str_filtered(
+    bytes: &[u8],
+    n: usize,
+    needle: &str,
+) -> Result<FilteredMessages, String> {
+    if needle.is_empty() || !needle.is_ascii() {
+        return Err("template column: filtered decode requires a non-empty ASCII needle".into());
+    }
+    let mut r = Reader::new(bytes);
+    let mode = r.u8("template column mode")?;
+    let dict_n = r.u32("template dict count")? as usize;
+    let num_n = r.u32("template num-var count")? as usize;
+    let str_n = r.u32("template str-var count")? as usize;
+    let lens = [
+        r.u32("template ids length")? as usize,
+        r.u32("template dict length")? as usize,
+        r.u32("template widths length")? as usize,
+        r.u32("template values length")? as usize,
+        r.u32("template strings length")? as usize,
+    ];
+    let names = [
+        "template ids column",
+        "template dict column",
+        "template widths column",
+        "template values column",
+        "template strings column",
+    ];
+    let mut stored: Vec<&[u8]> = Vec::with_capacity(5);
+    for (i, len) in lens.iter().enumerate() {
+        stored.push(r.take(*len, names[i])?);
+    }
+    if r.remaining() != 0 {
+        return Err(format!(
+            "template column: {} trailing byte(s) after last sub-column",
+            r.remaining()
+        ));
+    }
+
+    let ids = decode_i64(stored[0], n)?;
+    let dict = decode_str(stored[1], dict_n)?;
+    let widths = decode_u8(stored[2], num_n)?;
+    let values = decode_i64(stored[3], num_n)?;
+    let strs = decode_str(stored[4], str_n)?;
+
+    let kinds_by_id: Vec<Vec<VarKind>> = dict.iter().map(|t| slot_kinds(t)).collect();
+    for (i, &id) in ids.iter().enumerate() {
+        if id < 0 || id as usize >= dict_n {
+            return Err(format!(
+                "template column: entry {i} references template {id} of {dict_n}"
+            ));
+        }
+    }
+    let (base, groups) = group_layout(&ids, &kinds_by_id, num_n, str_n)?;
+
+    let parts = needle_parts(needle);
+    let whole_token_mode = mode == 1;
+    let mut segments: Vec<String> = Vec::new();
+    let feasible: Vec<bool> = (0..dict_n)
+        .map(|t| {
+            let kinds = &kinds_by_id[t];
+            segments.clear();
+            template_segments(&dict[t], &mut segments);
+            if kinds.is_empty() {
+                // Variable-free template: the message IS the template
+                // text (there are no groups, so base[t] is unset).
+                return template_feasible(needle, &parts, whole_token_mode, &segments, &[], &[]);
+            }
+            // A slotted template that never occurs has no groups and no
+            // rows that could consult this entry.
+            if base[t] == usize::MAX {
+                return false;
+            }
+            let mut t_strs: Vec<&str> = Vec::new();
+            let mut t_nums: Vec<(u8, i64)> = Vec::new();
+            for slot in 0..kinds.len() {
+                let g = &groups[base[t] + slot];
+                match g.kind {
+                    VarKind::Str => {
+                        t_strs.extend(strs[g.start..g.start + g.len].iter().map(String::as_str))
+                    }
+                    VarKind::Num => t_nums.extend(
+                        widths[g.start..g.start + g.len]
+                            .iter()
+                            .copied()
+                            .zip(values[g.start..g.start + g.len].iter().copied()),
+                    ),
+                }
+            }
+            t_strs.sort_unstable();
+            t_strs.dedup();
+            template_feasible(
+                needle,
+                &parts,
+                whole_token_mode,
+                &segments,
+                &t_strs,
+                &t_nums,
+            )
+        })
+        .collect();
+
+    let mut cursors: Vec<usize> = groups.iter().map(|g| g.start).collect();
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    let mut candidate_rows = 0u64;
+    let mut widths_m: Vec<u8> = Vec::new();
+    let mut vals_m: Vec<i64> = Vec::new();
+    let mut strs_m: Vec<&str> = Vec::new();
+    for (row, &id) in ids.iter().enumerate() {
+        let t = id as usize;
+        let kinds = &kinds_by_id[t];
+        if !feasible[t] {
+            // Skip: advance this row's group cursors, build nothing.
+            for slot in 0..kinds.len() {
+                let c = cursors
+                    .get_mut(base[t] + slot)
+                    .ok_or("template column: missing group cursor")?;
+                *c += 1;
+            }
+            continue;
+        }
+        candidate_rows += 1;
+        widths_m.clear();
+        vals_m.clear();
+        strs_m.clear();
+        for (slot, kind) in kinds.iter().enumerate() {
+            let c = cursors
+                .get_mut(base[t] + slot)
+                .ok_or("template column: missing group cursor")?;
+            match kind {
+                VarKind::Num => {
+                    widths_m.push(widths[*c]);
+                    vals_m.push(values[*c]);
+                }
+                VarKind::Str => strs_m.push(strs[*c].as_str()),
+            }
+            *c += 1;
+        }
+        let message = detokenize(&dict[t], &widths_m, &vals_m, &strs_m)?;
+        if contains_ci(&message, needle) {
+            rows.push((row, message));
+        }
+    }
+    Ok(FilteredMessages {
+        rows,
+        candidate_rows,
+    })
 }
 
 #[cfg(test)]
@@ -1059,9 +1340,9 @@ mod tests {
         let msgs = ["session abc42def opened", "session abc42def closed"];
         let enc = encode_template_str(&msgs, 3).unwrap();
         for needle in [
-            "session abc",   // template + var prefix
-            "def opened",    // var suffix + template
-            "n abc42def o",  // template + whole var + template
+            "session abc",  // template + var prefix
+            "def opened",   // var suffix + template
+            "n abc42def o", // template + whole var + template
             "SESSION ABC42DEF CLOSED",
         ] {
             assert!(
@@ -1134,6 +1415,138 @@ mod tests {
         assert!(checked_absent > 50, "only {checked_absent} pruned needles");
     }
 
+    /// Filtered decode must be EXACTLY full decode + filter: same rows,
+    /// same indices, same rendered strings.
+    fn assert_filtered_equivalence(msgs: &[&str], needles: &[&str]) {
+        let enc = encode_template_str(msgs, 3).unwrap();
+        let full = decode_template_str(&enc, msgs.len()).unwrap();
+        for needle in needles {
+            if needle.is_empty() || !needle.is_ascii() {
+                continue;
+            }
+            let expected: Vec<(usize, String)> = full
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| oracle_contains(m, needle))
+                .map(|(i, m)| (i, m.clone()))
+                .collect();
+            let filtered = decode_template_str_filtered(&enc, msgs.len(), needle).unwrap();
+            assert_eq!(
+                filtered.rows, expected,
+                "filtered decode diverged for needle {needle:?}"
+            );
+            assert!(filtered.candidate_rows <= msgs.len() as u64);
+        }
+    }
+
+    #[test]
+    fn filtered_decode_equals_full_decode_filter() {
+        assert_filtered_equivalence(
+            TRICKY,
+            &[
+                "user",
+                "USER",
+                "logged",
+                "10.0.0.5",
+                "0.5",
+                "42",
+                "no digits",
+                "absent-x",
+                "blk_-3544583377289625738",
+                "Baz.java:123",
+                "é 42",
+            ],
+        );
+        // Two message families sharing a block: per-template skipping
+        // must not disturb the group-cursor walk for kept rows.
+        let msgs: Vec<String> = (0..512)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("alpha request {} from 10.1.{}.9 done", i, i % 128)
+                } else {
+                    format!("beta lease {} renewed after {}s", 9000 + i, i % 300)
+                }
+            })
+            .collect();
+        let refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        assert_filtered_equivalence(
+            &refs,
+            &[
+                "alpha",
+                "beta",
+                "renewed",
+                "ALPHA REQUEST",
+                "10.1.44.9",
+                "absent",
+            ],
+        );
+        // And skipping must actually happen: "alpha" rows are half the
+        // block, so candidates must be well under n.
+        let enc = encode_template_str(&refs, 3).unwrap();
+        let filtered = decode_template_str_filtered(&enc, refs.len(), "alpha").unwrap();
+        assert_eq!(filtered.rows.len(), 256);
+        assert!(
+            filtered.candidate_rows < 512,
+            "expected per-template skipping, candidates={}",
+            filtered.candidate_rows
+        );
+    }
+
+    #[test]
+    fn filtered_decode_fuzz_equivalence() {
+        let mut state = 0x853c49e6748fea9bu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let words = ["lease", "offer", "nak", "renew", "expire", "bind", "probe"];
+        let mut msgs: Vec<String> = Vec::new();
+        for _ in 0..400 {
+            let w1 = words[(next() as usize) % words.len()];
+            let w2 = words[(next() as usize) % words.len()];
+            msgs.push(format!(
+                "{w1} {w2} id {} at 172.{}.{}.{} tag {:x}",
+                next() % 10000,
+                next() % 32,
+                next() % 256,
+                next() % 256,
+                next() % 0xfffff
+            ));
+        }
+        let refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        let enc = encode_template_str(&refs, 3).unwrap();
+        let full = decode_template_str(&enc, refs.len()).unwrap();
+        for _ in 0..600 {
+            let src = &full[(next() as usize) % full.len()];
+            let len = src.len();
+            let a = (next() as usize) % len;
+            let b = (a + 1 + (next() as usize) % (len - a)).min(len);
+            let mut needle = src[a..b].to_string();
+            if next() % 2 == 0 {
+                let idx = (next() as usize) % needle.len();
+                let mut bytes = needle.into_bytes();
+                bytes[idx] = b'a' + (next() % 26) as u8;
+                needle = String::from_utf8(bytes).unwrap_or_default();
+            }
+            if needle.is_empty() {
+                continue;
+            }
+            let expected: Vec<(usize, String)> = full
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| oracle_contains(m, &needle))
+                .map(|(i, m)| (i, m.clone()))
+                .collect();
+            let filtered = decode_template_str_filtered(&enc, refs.len(), &needle).unwrap();
+            assert_eq!(
+                filtered.rows, expected,
+                "fuzz divergence for needle {needle:?}"
+            );
+        }
+    }
+
     #[test]
     fn corrupt_input_errors_not_panics() {
         let msgs = ["a 1", "b 2", "c 3"];
@@ -1143,6 +1556,7 @@ mod tests {
         for cut in 0..enc.len() {
             let _ = decode_template_str(&enc[..cut], msgs.len());
             let _ = column_may_contain(&enc[..cut], "a 1");
+            let _ = decode_template_str_filtered(&enc[..cut], msgs.len(), "a 1");
         }
         // Wrong n.
         assert!(decode_template_str(&enc, 4).is_err());

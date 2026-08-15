@@ -18,9 +18,8 @@ use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use super::codec::{
-    block_message_feasible, decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR_V2, CODEC_RAW,
-    CODEC_RICH_COLUMNAR,
-    CODEC_RICH_RAW, CODEC_RICH_TEMPLATE,
+    block_message_feasible, decode_block, decode_block_filtered, encode_block, is_raw_codec,
+    CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_RICH_TEMPLATE,
 };
 use super::{
     canonical_severity, level_from_name, level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock,
@@ -116,6 +115,7 @@ pub struct BlockEngineProfileSnapshot {
     pub query_candidate_blocks: u64,
     pub query_decoded_entries: u64,
     pub query_clp_pruned_blocks: u64,
+    pub query_clp_skipped_rows: u64,
     pub query_matched_entries: u64,
     pub query_returned_entries: u64,
     pub query_bounded_count: u64,
@@ -215,6 +215,7 @@ struct BlockEngineProfile {
     query_candidate_blocks: AtomicU64,
     query_decoded_entries: AtomicU64,
     query_clp_pruned_blocks: AtomicU64,
+    query_clp_skipped_rows: AtomicU64,
     query_matched_entries: AtomicU64,
     query_returned_entries: AtomicU64,
     query_bounded_count: AtomicU64,
@@ -277,6 +278,7 @@ impl BlockEngineProfile {
             query_candidate_blocks: load(&self.query_candidate_blocks),
             query_decoded_entries: load(&self.query_decoded_entries),
             query_clp_pruned_blocks: load(&self.query_clp_pruned_blocks),
+            query_clp_skipped_rows: load(&self.query_clp_skipped_rows),
             query_matched_entries: load(&self.query_matched_entries),
             query_returned_entries: load(&self.query_returned_entries),
             query_bounded_count: load(&self.query_bounded_count),
@@ -1984,6 +1986,7 @@ impl BlockEngine {
         let mut matched_entries = 0u64;
         let mut blocks_skipped_by_bound = 0u64;
         let mut clp_pruned_blocks = 0u64;
+        let mut clp_skipped_rows = 0u64;
         let mut work_entries = snapshot.buffered_entries_considered;
         Self::enforce_query_work_limit(work_entries, max_work_entries)?;
         let mut out: Vec<LogEntry>;
@@ -2049,15 +2052,46 @@ impl BlockEngine {
                     }
                     _ => return Err("invalid log query block snapshot".into()),
                 };
-                // CLP-dictionary gate (issue #2): a proven-absent needle
-                // skips the block before decode, and a pruned block never
-                // counts against max_work_entries — the guard bounds
-                // decode work, and none happens here.
-                if let Some(needle) = q.message_contains.as_deref() {
+                // CLP-dictionary path (issue #2): a proven-absent needle
+                // skips the block before decode; otherwise the filtered
+                // decode materializes only candidate rows. Work charged
+                // to max_work_entries is the decode work actually done —
+                // zero for pruned blocks, candidate rows for the rest.
+                if let Some(needle) = q
+                    .message_contains
+                    .as_deref()
+                    .filter(|needle| !needle.is_empty())
+                {
                     if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
                         clp_pruned_blocks = clp_pruned_blocks.saturating_add(1);
                         continue;
                     }
+                    let filtered = decode_block_filtered(&bytes, needle)?;
+                    clp_skipped_rows = clp_skipped_rows.saturating_add(
+                        (filtered.total_rows as u64).saturating_sub(filtered.candidate_rows),
+                    );
+                    work_entries = work_entries.saturating_add(filtered.candidate_rows as usize);
+                    Self::enforce_query_work_limit(work_entries, max_work_entries)?;
+                    self.store.check_cancelled()?;
+                    decoded_entries = decoded_entries.saturating_add(filtered.candidate_rows);
+                    for (row, entry) in filtered.rows {
+                        if entry_matches(&entry, q) {
+                            matched_entries = matched_entries.saturating_add(1);
+                            Self::retain_bounded(
+                                &mut heap,
+                                BoundedEntry {
+                                    entry,
+                                    sequence: QuerySequence {
+                                        source: block.sequence,
+                                        row,
+                                    },
+                                    order,
+                                },
+                                capacity,
+                            );
+                        }
+                    }
+                    continue;
                 }
                 work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
                 Self::enforce_query_work_limit(work_entries, max_work_entries)?;
@@ -2114,11 +2148,30 @@ impl BlockEngine {
                     }
                     _ => return Err("invalid log query block snapshot".into()),
                 };
-                if let Some(needle) = q.message_contains.as_deref() {
+                if let Some(needle) = q
+                    .message_contains
+                    .as_deref()
+                    .filter(|needle| !needle.is_empty())
+                {
                     if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
                         clp_pruned_blocks = clp_pruned_blocks.saturating_add(1);
                         continue;
                     }
+                    let filtered = decode_block_filtered(&bytes, needle)?;
+                    clp_skipped_rows = clp_skipped_rows.saturating_add(
+                        (filtered.total_rows as u64).saturating_sub(filtered.candidate_rows),
+                    );
+                    work_entries = work_entries.saturating_add(filtered.candidate_rows as usize);
+                    Self::enforce_query_work_limit(work_entries, max_work_entries)?;
+                    self.store.check_cancelled()?;
+                    decoded_entries = decoded_entries.saturating_add(filtered.candidate_rows);
+                    for (_row, entry) in filtered.rows {
+                        if entry_matches(&entry, q) {
+                            matched_entries = matched_entries.saturating_add(1);
+                            out.push(entry);
+                        }
+                    }
+                    continue;
                 }
                 work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
                 Self::enforce_query_work_limit(work_entries, max_work_entries)?;
@@ -2206,6 +2259,9 @@ impl BlockEngine {
         self.profile
             .query_clp_pruned_blocks
             .fetch_add(clp_pruned_blocks, Ordering::Relaxed);
+        self.profile
+            .query_clp_skipped_rows
+            .fetch_add(clp_skipped_rows, Ordering::Relaxed);
         self.profile
             .query_matched_entries
             .fetch_add(matched_entries, Ordering::Relaxed);
@@ -2321,13 +2377,33 @@ impl BlockEngine {
                 (None, Some(location)) => self.store.read_block(&location)?,
                 _ => return Err("invalid log field-values block snapshot".into()),
             };
-            if let Some(needle) = q.message_contains.as_deref() {
+            if let Some(needle) = q
+                .message_contains
+                .as_deref()
+                .filter(|needle| !needle.is_empty())
+            {
                 if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
                     self.profile
                         .query_clp_pruned_blocks
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
+                let filtered = decode_block_filtered(&bytes, needle)?;
+                self.profile.query_clp_skipped_rows.fetch_add(
+                    (filtered.total_rows as u64).saturating_sub(filtered.candidate_rows),
+                    Ordering::Relaxed,
+                );
+                work_entries = work_entries.saturating_add(filtered.candidate_rows as usize);
+                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
+                self.store.check_cancelled()?;
+                for (_row, entry) in filtered.rows {
+                    if entry_matches(&entry, q) {
+                        if let Some(value) = entry.meta_value(key) {
+                            Self::retain_field_value(&mut values, value, max_values);
+                        }
+                    }
+                }
+                continue;
             }
             work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
             Self::enforce_query_work_limit(work_entries, max_work_entries)?;
@@ -2451,13 +2527,35 @@ impl BlockEngine {
                 }
                 _ => return Err("invalid log count block snapshot".into()),
             };
-            if let Some(needle) = q.message_contains.as_deref() {
+            if let Some(needle) = q
+                .message_contains
+                .as_deref()
+                .filter(|needle| !needle.is_empty())
+            {
                 if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
                     self.profile
                         .query_clp_pruned_blocks
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
+                let filtered = decode_block_filtered(&bytes, needle)?;
+                self.profile.query_clp_skipped_rows.fetch_add(
+                    (filtered.total_rows as u64).saturating_sub(filtered.candidate_rows),
+                    Ordering::Relaxed,
+                );
+                work_entries = work_entries.saturating_add(filtered.candidate_rows as usize);
+                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
+                self.store.check_cancelled()?;
+                decoded_blocks = decoded_blocks.saturating_add(1);
+                decoded_entries = decoded_entries.saturating_add(filtered.candidate_rows);
+                total = total.saturating_add(
+                    filtered
+                        .rows
+                        .iter()
+                        .filter(|(_, entry)| entry_matches(entry, q))
+                        .count() as u64,
+                );
+                continue;
             }
             work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
             Self::enforce_query_work_limit(work_entries, max_work_entries)?;

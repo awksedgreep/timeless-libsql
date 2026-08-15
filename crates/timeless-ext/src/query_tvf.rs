@@ -4798,6 +4798,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(profile.query_clp_pruned_blocks as i64),
                     ),
                     (
+                        "query_clp_skipped_rows",
+                        Value::Integer(profile.query_clp_skipped_rows as i64),
+                    ),
+                    (
                         "query_matched_entries",
                         Value::Integer(profile.query_matched_entries as i64),
                     ),

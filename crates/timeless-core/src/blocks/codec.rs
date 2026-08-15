@@ -396,6 +396,154 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     decode_block_legacy(codec, n, stored)
 }
 
+/// A block decoded through a `message_contains` filter: only rows whose
+/// message contains the needle (case-insensitive) are materialized, with
+/// their message-order indices. `candidate_rows` is the number of rows
+/// that had to be detokenized to find them — the decode work actually
+/// performed, which is what query work accounting should charge.
+pub struct FilteredBlockRows {
+    pub rows: Vec<(usize, LogEntry)>,
+    pub total_rows: usize,
+    pub candidate_rows: u64,
+}
+
+/// The engine's `message_contains` semantics (ASCII fast path, Unicode
+/// lowercase fallback) — the filter `decode_block_filtered` applies.
+fn message_contains_ci(message: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.is_ascii() {
+        let needle = needle.as_bytes();
+        return message
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle));
+    }
+    message.to_lowercase().contains(&needle.to_lowercase())
+}
+
+/// Decode only the rows whose message contains `needle` (issue #2,
+/// sub-block row skipping). Codec-8 blocks skip rows per template —
+/// infeasible templates advance cursors without building strings, and
+/// the (expensive) rich metadata parse runs only for rows that actually
+/// match. Every other codec decodes fully and filters, so the result is
+/// identical across codecs: exactly `decode_block` filtered to matching
+/// rows, with original indices.
+pub fn decode_block_filtered(bytes: &[u8], needle: &str) -> Result<FilteredBlockRows, String> {
+    let full_fallback = |bytes: &[u8]| -> Result<FilteredBlockRows, String> {
+        let entries = decode_block(bytes)?;
+        let total_rows = entries.len();
+        let rows: Vec<(usize, LogEntry)> = entries
+            .into_iter()
+            .enumerate()
+            .filter(|(_, e)| message_contains_ci(&e.message, needle))
+            .collect();
+        Ok(FilteredBlockRows {
+            rows,
+            total_rows,
+            candidate_rows: total_rows as u64,
+        })
+    };
+    if needle.is_empty() || !needle.is_ascii() {
+        return full_fallback(bytes);
+    }
+    let mut r = Reader::new(bytes);
+    let version = r.u8("format version")?;
+    if version != FORMAT_VERSION {
+        return Err(format!(
+            "block: unsupported format version {version} (this build speaks {FORMAT_VERSION})"
+        ));
+    }
+    let codec = r.u8("codec")?;
+    if codec != CODEC_RICH_TEMPLATE {
+        return full_fallback(bytes);
+    }
+    let n = r.u32("entry_count")? as usize;
+    let _ts_min = r.i64("ts_min")?;
+    let _ts_max = r.i64("ts_max")?;
+    let lens = [
+        r.u32("ts column length")? as usize,
+        r.u32("level column length")? as usize,
+        r.u32("message column length")? as usize,
+        r.u32("metadata column length")? as usize,
+    ];
+    let mut stored: Vec<&[u8]> = Vec::with_capacity(4);
+    for (i, len) in lens.iter().enumerate() {
+        stored.push(r.take(*len, COLUMN_NAMES[i])?);
+    }
+    if r.remaining() != 0 {
+        return Err(format!(
+            "block: {} trailing byte(s) after last column (corrupt header?)",
+            r.remaining()
+        ));
+    }
+
+    let filtered = template::decode_template_str_filtered(stored[2], n, needle)?;
+    if filtered.rows.is_empty() {
+        // Nothing matched: no reason to touch the other columns.
+        return Ok(FilteredBlockRows {
+            rows: Vec::new(),
+            total_rows: n,
+            candidate_rows: filtered.candidate_rows,
+        });
+    }
+
+    let timestamps = decode_i64(stored[0], n)?;
+    let levels = decode_u8(stored[1], n)?;
+    for (i, &lvl) in levels.iter().enumerate() {
+        if lvl > 3 {
+            return Err(format!("block: entry {i} has invalid level byte {lvl}"));
+        }
+    }
+    // Rich metadata walk: length prefixes let skipped rows advance in
+    // O(1) — no UTF-8 validation, no JSON parse, no canonicalization.
+    let raw = zstd_decompress(stored[3], "rich metadata column")?;
+    let mut reader = Reader::new(&raw);
+    let mut keep = filtered.rows.into_iter().peekable();
+    let mut rows: Vec<(usize, LogEntry)> = Vec::new();
+    for index in 0..n {
+        let severity_len = reader.u16("severity length")? as usize;
+        if keep.peek().is_some_and(|(row, _)| *row == index) {
+            let severity = std::str::from_utf8(reader.take(severity_len, "severity bytes")?)
+                .map_err(|_| format!("block: entry {index}: severity is not valid UTF-8"))?
+                .to_owned();
+            super::canonical_severity(&severity)
+                .map_err(|error| format!("block: entry {index}: {error}"))?;
+            let json_len = reader.u32("metadata JSON length")? as usize;
+            let json = std::str::from_utf8(reader.take(json_len, "metadata JSON bytes")?)
+                .map_err(|_| format!("block: entry {index}: metadata JSON is not UTF-8"))?;
+            let metadata_json = canonical_metadata_json(json)
+                .map_err(|error| format!("block: entry {index}: {error}"))?;
+            let metadata = metadata_pairs_from_json(&metadata_json)?;
+            let (row, message) = keep.next().expect("peeked row present");
+            rows.push((
+                row,
+                LogEntry {
+                    ts: timestamps[index],
+                    level: levels[index],
+                    severity: Some(severity),
+                    message,
+                    metadata,
+                    metadata_json: Some(metadata_json),
+                },
+            ));
+        } else {
+            reader.take(severity_len, "severity bytes")?;
+            let json_len = reader.u32("metadata JSON length")? as usize;
+            reader.take(json_len, "metadata JSON bytes")?;
+        }
+    }
+    if reader.remaining() != 0 {
+        return Err("block: trailing bytes in rich metadata column".into());
+    }
+    Ok(FilteredBlockRows {
+        rows,
+        total_rows: n,
+        candidate_rows: filtered.candidate_rows,
+    })
+}
+
 /// Sound pre-decode gate for `message_contains` (issue #2): can this
 /// block possibly hold a message containing `needle` (case-insensitive
 /// substring)? Only codec-8 blocks carry the CLP dictionaries the

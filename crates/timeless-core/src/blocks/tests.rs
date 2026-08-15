@@ -2457,3 +2457,91 @@ fn clp_dictionary_pruning_skips_infeasible_blocks() {
     };
     assert_eq!(engine.count(&broad).unwrap(), 2048);
 }
+
+#[test]
+fn clp_row_skipping_decodes_only_feasible_templates() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    let rich_entry = |ts: i64, message: String| LogEntry {
+        ts,
+        level: 1,
+        severity: Some("info".into()),
+        message,
+        metadata: vec![("host".into(), "cmts1".into())],
+        metadata_json: Some("{\"host\":\"cmts1\"}".into()),
+    };
+    // Two template families in the same blocks: only one can render
+    // "Provisioning", so its rows are the only decode candidates.
+    for i in 0..2048i64 {
+        let message = if i % 2 == 0 {
+            format!(
+                "DHCP NAK - MAC:00:1a:2b:{:02x} on port {}",
+                i % 256,
+                8000 + i
+            )
+        } else {
+            format!(
+                "Provisioning Realm {} unknown to server 10.9.{}.1",
+                i,
+                i % 200
+            )
+        };
+        engine
+            .push(rich_entry(1_785_600_000_000_000 + i, message))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+
+    // Full-corpus ground truth via the unfiltered scan.
+    let all = engine
+        .query_after_snapshot(&full_range_query(), || {})
+        .unwrap();
+    let expected: Vec<&LogEntry> = all
+        .iter()
+        .filter(|e| e.message.to_ascii_lowercase().contains("provisioning"))
+        .collect();
+    assert_eq!(expected.len(), 1024);
+
+    let q = LogQuery {
+        message_contains: Some("provisioning".into()),
+        ..full_range_query()
+    };
+    let before = engine.profile();
+    let rows = engine.query_after_snapshot(&q, || {}).unwrap();
+    let after = engine.profile();
+    assert_eq!(rows.len(), 1024);
+    // Full entry equality: message, severity, metadata, metadata_json
+    // must all round-trip identically through the filtered path.
+    for (got, want) in rows.iter().zip(expected.iter()) {
+        assert_eq!(&got, want);
+    }
+    assert!(
+        after.query_clp_skipped_rows > before.query_clp_skipped_rows,
+        "expected per-template row skipping"
+    );
+    assert!(
+        after.query_decoded_entries - before.query_decoded_entries < 2048,
+        "candidates must be fewer than the window: {}",
+        after.query_decoded_entries - before.query_decoded_entries
+    );
+
+    // Issue #2 acceptance, phase 2: a budget smaller than the window
+    // but larger than the candidate set must succeed.
+    let rows = engine
+        .query_ordered_with_work_limit_after_snapshot(
+            &q,
+            LogQueryOrder::Asc,
+            None,
+            Some(1500),
+            || {},
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1024);
+
+    // Native count agrees with the row query.
+    assert_eq!(engine.count(&q).unwrap(), 1024);
+
+    // field_values through the filtered path.
+    let values = engine.field_values(&q, "host", 10).unwrap();
+    assert_eq!(values, vec!["cmts1".to_string()]);
+}
