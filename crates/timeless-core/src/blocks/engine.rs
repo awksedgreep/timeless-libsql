@@ -18,7 +18,8 @@ use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use super::codec::{
-    decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR,
+    block_message_feasible, decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR_V2, CODEC_RAW,
+    CODEC_RICH_COLUMNAR,
     CODEC_RICH_RAW, CODEC_RICH_TEMPLATE,
 };
 use super::{
@@ -114,6 +115,7 @@ pub struct BlockEngineProfileSnapshot {
     pub query_payload_bytes_read: u64,
     pub query_candidate_blocks: u64,
     pub query_decoded_entries: u64,
+    pub query_clp_pruned_blocks: u64,
     pub query_matched_entries: u64,
     pub query_returned_entries: u64,
     pub query_bounded_count: u64,
@@ -212,6 +214,7 @@ struct BlockEngineProfile {
     query_payload_bytes_read: AtomicU64,
     query_candidate_blocks: AtomicU64,
     query_decoded_entries: AtomicU64,
+    query_clp_pruned_blocks: AtomicU64,
     query_matched_entries: AtomicU64,
     query_returned_entries: AtomicU64,
     query_bounded_count: AtomicU64,
@@ -273,6 +276,7 @@ impl BlockEngineProfile {
             query_payload_bytes_read: load(&self.query_payload_bytes_read),
             query_candidate_blocks: load(&self.query_candidate_blocks),
             query_decoded_entries: load(&self.query_decoded_entries),
+            query_clp_pruned_blocks: load(&self.query_clp_pruned_blocks),
             query_matched_entries: load(&self.query_matched_entries),
             query_returned_entries: load(&self.query_returned_entries),
             query_bounded_count: load(&self.query_bounded_count),
@@ -1979,6 +1983,7 @@ impl BlockEngine {
         let mut decoded_entries = 0u64;
         let mut matched_entries = 0u64;
         let mut blocks_skipped_by_bound = 0u64;
+        let mut clp_pruned_blocks = 0u64;
         let mut work_entries = snapshot.buffered_entries_considered;
         Self::enforce_query_work_limit(work_entries, max_work_entries)?;
         let mut out: Vec<LogEntry>;
@@ -2035,9 +2040,6 @@ impl BlockEngine {
                 }
 
                 self.store.check_cancelled()?;
-                work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
-                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
-
                 let bytes = match (block.payload, block.location) {
                     (Some(bytes), None) => bytes,
                     (None, Some(loc)) => {
@@ -2047,6 +2049,18 @@ impl BlockEngine {
                     }
                     _ => return Err("invalid log query block snapshot".into()),
                 };
+                // CLP-dictionary gate (issue #2): a proven-absent needle
+                // skips the block before decode, and a pruned block never
+                // counts against max_work_entries — the guard bounds
+                // decode work, and none happens here.
+                if let Some(needle) = q.message_contains.as_deref() {
+                    if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
+                        clp_pruned_blocks = clp_pruned_blocks.saturating_add(1);
+                        continue;
+                    }
+                }
+                work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
                 let entries = decode_block(&bytes)?;
                 self.store.check_cancelled()?;
                 decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
@@ -2091,8 +2105,6 @@ impl BlockEngine {
             out = Vec::new();
             for block in blocks {
                 self.store.check_cancelled()?;
-                work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
-                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
                 let bytes = match (block.payload, block.location) {
                     (Some(bytes), None) => bytes,
                     (None, Some(loc)) => {
@@ -2102,6 +2114,14 @@ impl BlockEngine {
                     }
                     _ => return Err("invalid log query block snapshot".into()),
                 };
+                if let Some(needle) = q.message_contains.as_deref() {
+                    if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
+                        clp_pruned_blocks = clp_pruned_blocks.saturating_add(1);
+                        continue;
+                    }
+                }
+                work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+                Self::enforce_query_work_limit(work_entries, max_work_entries)?;
                 let entries = decode_block(&bytes)?;
                 self.store.check_cancelled()?;
                 decoded_entries = decoded_entries.saturating_add(entries.len() as u64);
@@ -2183,6 +2203,9 @@ impl BlockEngine {
         self.profile
             .query_decoded_entries
             .fetch_add(decoded_entries, Ordering::Relaxed);
+        self.profile
+            .query_clp_pruned_blocks
+            .fetch_add(clp_pruned_blocks, Ordering::Relaxed);
         self.profile
             .query_matched_entries
             .fetch_add(matched_entries, Ordering::Relaxed);
@@ -2293,13 +2316,21 @@ impl BlockEngine {
 
         for block in snapshot.blocks {
             self.store.check_cancelled()?;
-            work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
-            Self::enforce_query_work_limit(work_entries, max_work_entries)?;
             let bytes = match (block.payload, block.location) {
                 (Some(bytes), None) => bytes,
                 (None, Some(location)) => self.store.read_block(&location)?,
                 _ => return Err("invalid log field-values block snapshot".into()),
             };
+            if let Some(needle) = q.message_contains.as_deref() {
+                if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
+                    self.profile
+                        .query_clp_pruned_blocks
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            }
+            work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+            Self::enforce_query_work_limit(work_entries, max_work_entries)?;
             let entries = decode_block(&bytes)?;
             self.store.check_cancelled()?;
             for entry in entries {
@@ -2411,9 +2442,6 @@ impl BlockEngine {
                 continue;
             }
 
-            work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
-            Self::enforce_query_work_limit(work_entries, max_work_entries)?;
-
             let bytes = match (block.payload, block.location) {
                 (Some(bytes), None) => bytes,
                 (None, Some(loc)) => {
@@ -2423,6 +2451,16 @@ impl BlockEngine {
                 }
                 _ => return Err("invalid log count block snapshot".into()),
             };
+            if let Some(needle) = q.message_contains.as_deref() {
+                if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
+                    self.profile
+                        .query_clp_pruned_blocks
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            }
+            work_entries = work_entries.saturating_add(block.meta.entry_count as usize);
+            Self::enforce_query_work_limit(work_entries, max_work_entries)?;
             let entries = decode_block(&bytes)?;
             self.store.check_cancelled()?;
             decoded_blocks = decoded_blocks.saturating_add(1);

@@ -2366,3 +2366,94 @@ fn compression_totals_persist_across_reopen_and_credit_merges() {
         BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&[])).unwrap();
     assert_eq!(reopened.load_compression_totals().unwrap(), (in3, out3));
 }
+
+// ---------------------------------------------------------------------------
+// CLP-dictionary pruning (issue #2): message_contains on codec-8 blocks
+// proves absence from the template/variable dictionaries without decoding,
+// and pruned blocks do not count against max_work_entries.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clp_dictionary_pruning_skips_infeasible_blocks() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+    let rich_entry = |ts: i64, message: String| LogEntry {
+        ts,
+        level: 1,
+        severity: Some("info".into()),
+        message,
+        metadata: vec![("service".into(), "dhcp".into())],
+        metadata_json: Some("{\"service\":\"dhcp\"}".into()),
+    };
+    // Templated CMTS-style lines: codec 8 wins these blocks.
+    for i in 0..2048i64 {
+        engine
+            .push(rich_entry(
+                1_785_600_000_000_000 + i,
+                format!(
+                    "DHCP NAK - MAC:00:1a:2b:{:02x} lease 10.0.{}.{} expired after {}s",
+                    i % 256,
+                    i % 256,
+                    (i * 7) % 256,
+                    30 + i % 900
+                ),
+            ))
+            .unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    assert!(engine.stats().0 >= 1);
+
+    // Absent needle: every block is pruned from the dictionaries alone —
+    // zero entries decoded, zero rows returned.
+    let before = engine.profile();
+    let absent = LogQuery {
+        message_contains: Some("PROVISIONING FAILURE".into()),
+        ..full_range_query()
+    };
+    let got = engine.query_after_snapshot(&absent, || {}).unwrap();
+    assert!(got.is_empty());
+    let after = engine.profile();
+    assert!(
+        after.query_clp_pruned_blocks > before.query_clp_pruned_blocks,
+        "expected CLP pruning to fire"
+    );
+    assert_eq!(
+        after.query_decoded_entries, before.query_decoded_entries,
+        "absent needle must decode nothing"
+    );
+
+    // The issue #2 acceptance shape: an absent needle under a work budget
+    // far smaller than the store must SUCCEED, because pruned blocks are
+    // never decoded and therefore never charged.
+    let got = engine
+        .query_ordered_with_work_limit_after_snapshot(
+            &absent,
+            LogQueryOrder::Desc,
+            Some(10),
+            Some(100),
+            || {},
+        )
+        .unwrap();
+    assert!(got.is_empty());
+
+    // Native count agrees and prunes too.
+    let count_before = engine.profile();
+    assert_eq!(engine.count(&absent).unwrap(), 0);
+    let count_after = engine.profile();
+    assert!(count_after.query_clp_pruned_blocks > count_before.query_clp_pruned_blocks);
+
+    // Present needles still return exact results, any case.
+    let present = LogQuery {
+        message_contains: Some("lease 10.0.3.21 EXPIRED".into()),
+        ..full_range_query()
+    };
+    // i ≡ 3 (mod 256) renders "10.0.3.21": 8 hits across 2048 entries.
+    let rows = engine.query_after_snapshot(&present, || {}).unwrap();
+    assert_eq!(rows.len(), 8);
+    assert_eq!(engine.count(&present).unwrap(), 8);
+    let broad = LogQuery {
+        message_contains: Some("dhcp nak".into()),
+        ..full_range_query()
+    };
+    assert_eq!(engine.count(&broad).unwrap(), 2048);
+}

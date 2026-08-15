@@ -393,6 +393,48 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     }
 
     // ── Codecs 1/2 — the Session 5 decode path, byte-for-byte ────────
+    decode_block_legacy(codec, n, stored)
+}
+
+/// Sound pre-decode gate for `message_contains` (issue #2): can this
+/// block possibly hold a message containing `needle` (case-insensitive
+/// substring)? Only codec-8 blocks carry the CLP dictionaries the
+/// proof needs — every other codec answers `true` (decode and filter,
+/// exactly as before). `Ok(false)` is a proof of absence for the whole
+/// block; `Err` means the payload didn't parse, and callers should
+/// fall through to `decode_block` so corruption is reported by the
+/// path that owns that responsibility.
+pub fn block_message_feasible(bytes: &[u8], needle: &str) -> Result<bool, String> {
+    if needle.is_empty() || !needle.is_ascii() {
+        return Ok(true);
+    }
+    let mut r = Reader::new(bytes);
+    let version = r.u8("format version")?;
+    if version != FORMAT_VERSION {
+        return Err(format!(
+            "block: unsupported format version {version} (this build speaks {FORMAT_VERSION})"
+        ));
+    }
+    let codec = r.u8("codec")?;
+    if codec != CODEC_RICH_TEMPLATE {
+        return Ok(true);
+    }
+    let _n = r.u32("entry_count")?;
+    let _ts_min = r.i64("ts_min")?;
+    let _ts_max = r.i64("ts_max")?;
+    let lens = [
+        r.u32("ts column length")? as usize,
+        r.u32("level column length")? as usize,
+        r.u32("message column length")? as usize,
+        r.u32("metadata column length")? as usize,
+    ];
+    let _ts = r.take(lens[0], COLUMN_NAMES[0])?;
+    let _lvl = r.take(lens[1], COLUMN_NAMES[1])?;
+    let msg = r.take(lens[2], COLUMN_NAMES[2])?;
+    template::column_may_contain(msg, needle)
+}
+
+fn decode_block_legacy(codec: u8, n: usize, stored: Vec<&[u8]>) -> Result<Vec<LogEntry>, String> {
     // Decompress columns for codec 2. `Cow`-style: raw columns borrow,
     // zstd columns own — a Vec<u8> per column either way keeps it simple
     // (blocks are a few hundred KB at most).

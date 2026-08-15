@@ -552,6 +552,278 @@ pub fn decode_template_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// CLP-dictionary feasibility (issue #2)
+//
+// A template column already contains everything needed to prove a
+// substring ABSENT from every message in the block, without decoding a
+// single entry: the template dictionary holds all static text, and the
+// variable columns hold everything else. The proof rests on one
+// structural invariant of the tokenizer: TEMPLATE TEXT NEVER CONTAINS
+// AN ASCII DIGIT (every digit ends up inside a variable) and EVERY
+// VARIABLE CONTAINS AT LEAST ONE DIGIT (only digit-bearing tokens
+// become variables).
+//
+// Consequences for a needle split at its ASCII digit runs:
+//   - a digit-free needle fragment can overlap AT MOST a digit-free
+//     suffix of one Str variable, then contiguous template text, then a
+//     digit-free prefix of another Str variable — any variable strictly
+//     inside the fragment's span would contribute a digit;
+//   - an inner digit run of the needle (bounded by non-digits) is a
+//     maximal digit run of the message, so it must equal either a Num
+//     variable's rendering (value zero-padded to width) or a maximal
+//     digit run inside a Str variable.
+//
+// The check is deliberately one-sided: `false` is a PROOF the needle
+// matches nothing in the block; `true` just means "decode and look".
+// Anything uncertain (non-ASCII needles, empty needles, pathological
+// lengths, unknown layouts) answers `true`.
+// ---------------------------------------------------------------------------
+
+/// Fragments longer than this skip the split search and answer
+/// feasible — the split search is quadratic in fragment length and a
+/// needle this long is not a realistic interactive filter.
+const FEASIBILITY_MAX_FRAGMENT: usize = 256;
+
+/// ASCII-case-insensitive `haystack.contains(needle)`, mirroring the
+/// engine's `message_contains_case_insensitive` ASCII fast path.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(n.len())
+        .any(|w| w.eq_ignore_ascii_case(n))
+}
+
+fn ends_with_ci(haystack: &str, suffix: &str) -> bool {
+    let (h, s) = (haystack.as_bytes(), suffix.as_bytes());
+    h.len() >= s.len() && h[h.len() - s.len()..].eq_ignore_ascii_case(s)
+}
+
+fn starts_with_ci(haystack: &str, prefix: &str) -> bool {
+    let (h, p) = (haystack.as_bytes(), prefix.as_bytes());
+    h.len() >= p.len() && h[..p.len()].eq_ignore_ascii_case(p)
+}
+
+/// The placeholder-free text runs of a template, doubled sentinels
+/// unescaped back to the literal byte. These are exactly the maximal
+/// contiguous stretches of rendered text that come from the template.
+fn template_segments(template: &str, out: &mut Vec<String>) {
+    let bytes = template.as_bytes();
+    let mut seg = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == SENTINEL {
+            match bytes.get(i + 1) {
+                Some(&SENTINEL) => {
+                    seg.push(SENTINEL as char);
+                    i += 2;
+                }
+                Some(&KIND_NUM) | Some(&KIND_STR) => {
+                    if !seg.is_empty() {
+                        out.push(std::mem::take(&mut seg));
+                    }
+                    i += 2;
+                }
+                _ => {
+                    // Dangling sentinel: keep it as text — permissive.
+                    seg.push(SENTINEL as char);
+                    i += 1;
+                }
+            }
+        } else {
+            let ch_len = utf8_char_len(bytes[i]);
+            let end = (i + ch_len).min(bytes.len());
+            seg.push_str(&template[i..end]);
+            i = end;
+        }
+    }
+    if !seg.is_empty() {
+        out.push(seg);
+    }
+}
+
+/// `run` occurs in `text` as a MAXIMAL ASCII digit run (non-digit or
+/// string boundary on both sides). Digits have no case, so this is an
+/// exact byte search.
+fn has_maximal_digit_run(text: &str, run: &str) -> bool {
+    let t = text.as_bytes();
+    let r = run.as_bytes();
+    if t.len() < r.len() {
+        return false;
+    }
+    for start in 0..=t.len() - r.len() {
+        if &t[start..start + r.len()] != r {
+            continue;
+        }
+        let left_ok = start == 0 || !t[start - 1].is_ascii_digit();
+        let right_ok = start + r.len() == t.len() || !t[start + r.len()].is_ascii_digit();
+        if left_ok && right_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// One digit-free fragment of the needle against the block's
+/// dictionaries: feasible iff the fragment fits wholly inside one Str
+/// variable, or splits as (suffix of a Str variable) + (substring of
+/// one template segment) + (prefix of a Str variable), any part empty.
+fn fragment_feasible(frag: &str, segments: &[String], strs: &[&str]) -> bool {
+    if frag.is_empty() {
+        return true;
+    }
+    if frag.len() > FEASIBILITY_MAX_FRAGMENT {
+        return true;
+    }
+    if strs.iter().any(|v| contains_ci(v, frag)) {
+        return true;
+    }
+    // Valid prefix cuts: i = 0 (no variable on the left) or frag[..i]
+    // is the digit-free tail of some Str variable.
+    let cut_is: Vec<usize> = std::iter::once(0)
+        .chain(
+            (1..=frag.len())
+                .filter(|&i| frag.is_char_boundary(i) && strs.iter().any(|v| ends_with_ci(v, &frag[..i]))),
+        )
+        .collect();
+    let cut_js: Vec<usize> = (0..frag.len())
+        .filter(|&j| frag.is_char_boundary(j) && strs.iter().any(|v| starts_with_ci(v, &frag[j..])))
+        .chain(std::iter::once(frag.len()))
+        .collect();
+    for &i in &cut_is {
+        for &j in cut_js.iter().filter(|&&j| j >= i) {
+            let middle = &frag[i..j];
+            if middle.is_empty() || segments.iter().any(|s| contains_ci(s, middle)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Can `needle` (engine `message_contains` semantics: case-insensitive
+/// substring) possibly occur in any message of this template-encoded
+/// column? Decodes only the dictionary and variable columns — never
+/// the per-message id column, never a full message.
+///
+/// `Ok(false)` is a proof of absence. `Ok(true)` means "cannot rule it
+/// out". `Err` means the column bytes did not parse — callers should
+/// fall through to a full decode, which will report the corruption.
+pub fn column_may_contain(bytes: &[u8], needle: &str) -> Result<bool, String> {
+    if needle.is_empty() || !needle.is_ascii() {
+        return Ok(true);
+    }
+    let mut r = Reader::new(bytes);
+    let mode = r.u8("template column mode")?;
+    let dict_n = r.u32("template dict count")? as usize;
+    let num_n = r.u32("template num-var count")? as usize;
+    let str_n = r.u32("template str-var count")? as usize;
+    let lens = [
+        r.u32("template ids length")? as usize,
+        r.u32("template dict length")? as usize,
+        r.u32("template widths length")? as usize,
+        r.u32("template values length")? as usize,
+        r.u32("template strings length")? as usize,
+    ];
+    let _ids = r.take(lens[0], "template ids column")?;
+    let dict_bytes = r.take(lens[1], "template dict column")?;
+    let widths_bytes = r.take(lens[2], "template widths column")?;
+    let values_bytes = r.take(lens[3], "template values column")?;
+    let strs_bytes = r.take(lens[4], "template strings column")?;
+
+    let dict = decode_str(dict_bytes, dict_n)?;
+    let strs_owned = decode_str(strs_bytes, str_n)?;
+    // Duplicate variable values are common (the same id repeats across
+    // entries); the searches below only need the distinct set.
+    let strs: Vec<&str> = {
+        let mut set: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(strs_owned.len());
+        strs_owned.iter().for_each(|s| {
+            set.insert(s.as_str());
+        });
+        set.into_iter().collect()
+    };
+    let mut segments: Vec<String> = Vec::new();
+    for t in &dict {
+        template_segments(t, &mut segments);
+    }
+
+    // Token-confined needle, whole-token mode: the strongest rule this
+    // structure admits. Every byte of the needle is a token byte, so a
+    // match can never span a token boundary — it lives inside ONE token
+    // of some message. That token contains a digit (the needle has
+    // one), so in whole-token mode it became a variable; and it also
+    // contains a non-digit token byte (the needle has one), so it is a
+    // Str variable, never a Num rendering. The needle keeps its FULL
+    // literal selectivity — `10.52.89.122` is looked up as itself, not
+    // as four independent digit runs.
+    let nb = needle.as_bytes();
+    if mode == 1
+        && nb.iter().all(|&b| is_token_byte(b))
+        && nb.iter().any(u8::is_ascii_digit)
+        && nb.iter().any(|b| !b.is_ascii_digit())
+    {
+        return Ok(strs.iter().any(|v| contains_ci(v, needle)));
+    }
+
+    // Inner digit runs need the num columns; decode them once, up
+    // front, so corruption surfaces as Err (decode-and-report), never
+    // as a false proof of absence.
+    let has_inner_run = {
+        let first_non_digit = nb.iter().position(|b| !b.is_ascii_digit());
+        let last_non_digit = nb.iter().rposition(|b| !b.is_ascii_digit());
+        match (first_non_digit, last_non_digit) {
+            (Some(first), Some(last)) => nb[first..=last].iter().any(u8::is_ascii_digit),
+            _ => false,
+        }
+    };
+    let num_pairs: std::collections::HashSet<(u8, i64)> = if has_inner_run {
+        let widths = decode_u8(widths_bytes, num_n)?;
+        let values = decode_i64(values_bytes, num_n)?;
+        widths.iter().copied().zip(values).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    // Every fragment and every inner digit run must be explainable.
+    let mut i = 0;
+    while i < nb.len() {
+        if nb[i].is_ascii_digit() {
+            let start = i;
+            while i < nb.len() && nb[i].is_ascii_digit() {
+                i += 1;
+            }
+            // Only INNER runs are maximal runs of the message; edge
+            // runs may continue past the needle boundary.
+            if start == 0 || i == nb.len() {
+                continue;
+            }
+            let run = &needle[start..i];
+            let num_ok = run.len() <= 19
+                && run
+                    .parse::<i64>()
+                    .ok()
+                    .is_some_and(|v| num_pairs.contains(&(run.len() as u8, v)));
+            if !num_ok && !strs.iter().any(|s| has_maximal_digit_run(s, run)) {
+                return Ok(false);
+            }
+        } else {
+            let start = i;
+            while i < nb.len() && !nb[i].is_ascii_digit() {
+                i += 1;
+            }
+            if !fragment_feasible(&needle[start..i], &segments, &strs) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,13 +960,189 @@ mod tests {
         column_roundtrip(&refs);
     }
 
+    // ── CLP-dictionary feasibility ───────────────────────────────────
+
+    /// Case-insensitive contains, mirroring the engine's matcher — the
+    /// oracle the feasibility check must never contradict.
+    fn oracle_contains(message: &str, needle: &str) -> bool {
+        let n = needle.as_bytes();
+        needle.is_empty()
+            || message
+                .as_bytes()
+                .windows(n.len())
+                .any(|w| w.eq_ignore_ascii_case(n))
+    }
+
+    /// Every substring of every encoded message must stay feasible —
+    /// a false negative here is a wrong query result in production.
+    fn assert_no_false_negatives(msgs: &[&str]) {
+        let enc = encode_template_str(msgs, 3).unwrap();
+        for m in msgs {
+            let len = m.len();
+            for start in 0..len {
+                if !m.is_char_boundary(start) {
+                    continue;
+                }
+                for end in start + 1..=len {
+                    if !m.is_char_boundary(end) {
+                        continue;
+                    }
+                    let needle = &m[start..end];
+                    assert!(
+                        column_may_contain(&enc, needle).unwrap(),
+                        "false negative: needle {needle:?} from message {m:?}"
+                    );
+                    let upper = needle.to_uppercase();
+                    if upper.is_ascii() {
+                        assert!(
+                            column_may_contain(&enc, &upper).unwrap(),
+                            "false negative (case): needle {upper:?} from message {m:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn feasibility_no_false_negatives_tricky_corpus() {
+        assert_no_false_negatives(TRICKY);
+    }
+
+    #[test]
+    fn feasibility_no_false_negatives_templated_corpus() {
+        let msgs: Vec<String> = (0..64)
+            .map(|i| {
+                format!(
+                    "user {} logged in from 10.0.{}.{} in {}ms via 0xdead{:04x}",
+                    1000 + i,
+                    i % 256,
+                    (i * 7) % 256,
+                    i % 900,
+                    i
+                )
+            })
+            .collect();
+        let refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        assert_no_false_negatives(&refs);
+    }
+
+    #[test]
+    fn feasibility_prunes_absent_needles() {
+        let msgs: Vec<String> = (0..256)
+            .map(|i| format!("DHCP NAK - MAC:00:1a:{:02x} on port {}", i, 8000 + i))
+            .collect();
+        let refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        let enc = encode_template_str(&refs, 3).unwrap();
+        // Absent word.
+        assert!(!column_may_contain(&enc, "PROVISIONING").unwrap());
+        // Present words, any case.
+        assert!(column_may_contain(&enc, "dhcp nak").unwrap());
+        // Inner digit run absent as a maximal run everywhere: ports are
+        // 8000..8255, so 9999 appears nowhere.
+        assert!(!column_may_contain(&enc, "port 9999 ").unwrap());
+        // Present inner run.
+        assert!(column_may_contain(&enc, "port 8017 ").unwrap());
+        // A run that only occurs as a NON-maximal run must not match:
+        // "port 801 " needs digit-boundary 801, but every 801 is
+        // followed by another digit.
+        assert!(!column_may_contain(&enc, "port 801 ").unwrap());
+        // Edge digit runs stay permissive (may continue past the
+        // needle), so a pure-digit needle never prunes.
+        assert!(column_may_contain(&enc, "99999").unwrap());
+    }
+
+    #[test]
+    fn feasibility_handles_seam_spanning_needles() {
+        // Whole-token mode: "abc42def" is one Str variable. Needles
+        // spanning template↔variable seams must stay feasible.
+        let msgs = ["session abc42def opened", "session abc42def closed"];
+        let enc = encode_template_str(&msgs, 3).unwrap();
+        for needle in [
+            "session abc",   // template + var prefix
+            "def opened",    // var suffix + template
+            "n abc42def o",  // template + whole var + template
+            "SESSION ABC42DEF CLOSED",
+        ] {
+            assert!(
+                column_may_contain(&enc, needle).unwrap(),
+                "seam needle {needle:?} must stay feasible"
+            );
+        }
+        assert!(!column_may_contain(&enc, "session xyz").unwrap());
+    }
+
+    #[test]
+    fn feasibility_fuzz_against_decode_oracle() {
+        // Seeded xorshift corpus + needles: wherever the check says
+        // "absent", the decoded messages must agree.
+        let mut state = 0x2545f4914f6cdd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let words = [
+            "connect", "refused", "timeout", "retry", "lease", "offer", "expired", "renewed",
+        ];
+        let mut msgs: Vec<String> = Vec::new();
+        for _ in 0..512 {
+            let w1 = words[(next() as usize) % words.len()];
+            let w2 = words[(next() as usize) % words.len()];
+            msgs.push(format!(
+                "{w1} {w2} id {} from 10.{}.{}.{} tok {:x}",
+                next() % 100000,
+                next() % 256,
+                next() % 256,
+                next() % 256,
+                next() % 0xffffff
+            ));
+        }
+        let refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        let enc = encode_template_str(&refs, 3).unwrap();
+        let decoded = decode_template_str(&enc, refs.len()).unwrap();
+
+        let mut checked_absent = 0u32;
+        for _ in 0..2000 {
+            // Mix of real substrings and perturbed ones.
+            let src = &decoded[(next() as usize) % decoded.len()];
+            let len = src.len();
+            let a = (next() as usize) % len;
+            let b = (a + 1 + (next() as usize) % (len - a)).min(len);
+            let mut needle = src[a..b].to_string();
+            if next() % 2 == 0 {
+                // Perturb: flip a byte to make absence likely.
+                let idx = (next() as usize) % needle.len();
+                let mut bytes = needle.into_bytes();
+                bytes[idx] = b'a' + (next() % 26) as u8;
+                needle = String::from_utf8(bytes).unwrap_or_default();
+            }
+            if needle.is_empty() || !needle.is_ascii() {
+                continue;
+            }
+            let feasible = column_may_contain(&enc, &needle).unwrap();
+            let truly_present = decoded.iter().any(|m| oracle_contains(m, &needle));
+            if truly_present {
+                assert!(feasible, "false negative for needle {needle:?}");
+            }
+            if !feasible {
+                checked_absent += 1;
+            }
+        }
+        // The fuzz must actually exercise pruning, not vacuously pass.
+        assert!(checked_absent > 50, "only {checked_absent} pruned needles");
+    }
+
     #[test]
     fn corrupt_input_errors_not_panics() {
         let msgs = ["a 1", "b 2", "c 3"];
         let enc = encode_template_str(&msgs, 3).unwrap();
-        // Truncations at every length must error, never panic.
+        // Truncations at every length must error, never panic — for the
+        // decoder AND the feasibility check.
         for cut in 0..enc.len() {
             let _ = decode_template_str(&enc[..cut], msgs.len());
+            let _ = column_may_contain(&enc[..cut], "a 1");
         }
         // Wrong n.
         assert!(decode_template_str(&enc, 4).is_err());
