@@ -1079,6 +1079,24 @@ impl Storage {
         queue_batches: usize,
         timestamp_unit: TimestampUnit,
     ) -> Result<Self, String> {
+        Self::start_with_policy(
+            database_path,
+            extension_path,
+            reader_connections,
+            queue_batches,
+            timestamp_unit,
+            StorePolicy::default(),
+        )
+    }
+
+    pub fn start_with_policy(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        timestamp_unit: TimestampUnit,
+        policy: StorePolicy,
+    ) -> Result<Self, String> {
         if reader_connections == 0 {
             return Err("reader_connections must be positive".into());
         }
@@ -1094,6 +1112,7 @@ impl Storage {
             })?;
         }
         let lease = acquire_database_lease(&database_path, "logs")?;
+        apply_store_policy(&database_path, &extension_path, timestamp_unit, &policy)?;
         let (writer_tx, writer_rx) = mpsc::channel(queue_batches);
         let (ready_tx, ready_rx) = std_mpsc::channel();
         let profile = Arc::new(StdMutex::new(QueueProfile::default()));
@@ -1922,6 +1941,144 @@ fn reader_main(
     Ok(())
 }
 
+/// The indexed-metadata allowlist new stores are created with when no
+/// policy overrides it.
+const DEFAULT_INDEX_KEYS: &str = "service,path,status,host";
+
+/// Store-policy knobs applied before the connection pool opens — the
+/// no-SQL-migrations configuration surface for the two persisted store
+/// properties operators actually change: the indexed-metadata allowlist
+/// and the retention window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StorePolicy {
+    /// Comma-separated metadata keys to index (`TIMELESS_LOGS_INDEX_KEYS`).
+    /// New stores are created with these; an existing store whose
+    /// persisted allowlist differs is reindexed at startup (every block's
+    /// postings rewritten — startup takes proportionally longer that one
+    /// time).
+    pub index_keys: Option<String>,
+    /// Retention window (`TIMELESS_LOGS_RETENTION`, `<n>[s|m|h|d]`).
+    /// Applied to new and existing stores alike; enforcement happens at
+    /// flush/optimize boundaries as before.
+    pub retention: Option<String>,
+}
+
+/// Apply a [`StorePolicy`] on a throwaway connection BEFORE the pool
+/// opens. The scope matters: `reindex` persists the new allowlist but a
+/// live engine keeps the keys it was built with, so the policy engine
+/// must be gone before the pool's first connection builds the engine
+/// the servers will actually use.
+fn apply_store_policy(
+    path: &Path,
+    extension: &Path,
+    timestamp_unit: TimestampUnit,
+    policy: &StorePolicy,
+) -> Result<(), String> {
+    if policy.index_keys.is_none() && policy.retention.is_none() {
+        return Ok(());
+    }
+    if let Some(retention) = policy.retention.as_deref() {
+        // The extension grammar treats a bare number as NATIVE timestamp
+        // ticks — a silent footgun for an environment knob. Operators
+        // must state the unit.
+        if !retention.ends_with(['s', 'm', 'h', 'd']) {
+            return Err(format!(
+                "TIMELESS_LOGS_RETENTION must carry a unit suffix (<n>[s|m|h|d]), got {retention:?}"
+            ));
+        }
+    }
+    let conn = open_connection(path, extension, None).or_else(|_| {
+        // A brand-new database has no schema ledger yet; fall back to a
+        // bare extension-loaded connection for creation.
+        open_bare_connection(path, extension)
+    })?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'logs'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .map_err(|e| format!("probe logs table: {e}"))?;
+    if !exists {
+        let keys = policy.index_keys.as_deref().unwrap_or(DEFAULT_INDEX_KEYS);
+        let retention_arg = policy
+            .retention
+            .as_deref()
+            .map(|value| format!(", retention='{}'", value.replace('\'', "")))
+            .unwrap_or_default();
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA auto_vacuum = INCREMENTAL;
+             CREATE VIRTUAL TABLE logs USING timeless_logs(
+               index_keys='{}', timestamp_unit='{}'{retention_arg});",
+            keys.replace('\'', ""),
+            timestamp_unit.sql_name()
+        ))
+        .map_err(|e| format!("create logs store with policy: {e}"))?;
+        return Ok(());
+    }
+    if let Some(keys) = policy.index_keys.as_deref() {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT value FROM timeless_stats('logs') WHERE key = 'index_keys'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("read persisted index_keys: {e}"))?;
+        let stored = stored.unwrap_or_default();
+        let normalize = |list: &str| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        if normalize(&stored) != normalize(keys) {
+            eprintln!(
+                "timeless-logs-api: index_keys policy changed ({stored:?} -> {keys:?}); \
+                 reindexing every block before startup"
+            );
+            conn.execute(
+                &format!(
+                    "INSERT INTO logs(logs) VALUES ('reindex:{}')",
+                    keys.replace('\'', "")
+                ),
+                [],
+            )
+            .map_err(|e| format!("reindex logs store: {e}"))?;
+        }
+    }
+    if let Some(retention) = policy.retention.as_deref() {
+        conn.execute(
+            &format!(
+                "INSERT INTO logs(logs) VALUES ('retention:{}')",
+                retention.replace('\'', "")
+            ),
+            [],
+        )
+        .map_err(|e| format!("set logs retention: {e}"))?;
+    }
+    Ok(())
+}
+
+fn open_bare_connection(path: &Path, extension: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    unsafe {
+        conn.load_extension_enable()
+            .map_err(|e| format!("enable extension loading: {e}"))?;
+        conn.load_extension(extension, None::<&str>)
+            .map_err(|e| format!("load {}: {e}", extension.display()))?;
+    }
+    conn.load_extension_disable()
+        .map_err(|e| format!("disable extension loading: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("set busy timeout: {e}"))?;
+    Ok(conn)
+}
+
 fn open_connection(
     path: &Path,
     extension: &Path,
@@ -1956,7 +2113,7 @@ fn open_connection(
              PRAGMA synchronous = NORMAL;
              PRAGMA auto_vacuum = INCREMENTAL;
              CREATE VIRTUAL TABLE IF NOT EXISTS logs USING timeless_logs(
-               index_keys='service,path,status,host', timestamp_unit='{}');",
+               index_keys='{DEFAULT_INDEX_KEYS}', timestamp_unit='{}');",
             timestamp_unit.sql_name()
         ))
         .map_err(|e| format!("initialize logs database: {e}"))?;

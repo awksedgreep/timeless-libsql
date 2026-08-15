@@ -42,8 +42,11 @@ pub(crate) fn load_meta_text(
     key: &str,
 ) -> Result<Option<String>, String> {
     let meta = sql_ident::qualified_shadow(database, table, "meta");
+    // Meta values arrive through two writers: CREATE-time args store
+    // TEXT, engine-side persistence (reindex, retention command) stores
+    // the same UTF-8 bytes as BLOB. Read either representation.
     conn.query_row(
-        &format!("SELECT v FROM {meta} WHERE k = ?1"),
+        &format!("SELECT CAST(v AS TEXT) FROM {meta} WHERE k = ?1"),
         rusqlite::params![key],
         |row| row.get::<_, String>(0),
     )

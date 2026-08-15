@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
-use timeless_logs_api::{run, Config, LogsQueryLimits};
+use timeless_logs_api::{run, Config, LogsQueryLimits, StorePolicy};
 
 const USAGE: &str = "usage: timeless-logs-api <libtimeless_ext.so> <database> [listen-address]";
 
@@ -132,6 +132,10 @@ async fn main() -> ExitCode {
         optimize_interval,
         logs_query_limits,
         auth,
+        store_policy: StorePolicy {
+            index_keys: optional_env("TIMELESS_LOGS_INDEX_KEYS"),
+            retention: optional_env("TIMELESS_LOGS_RETENTION"),
+        },
         ..defaults
     };
     match run(config).await {
@@ -146,6 +150,13 @@ async fn main() -> ExitCode {
 fn usage_error(error: String) -> ExitCode {
     eprintln!("{error}");
     ExitCode::from(2)
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn positive_usize_from_env(name: &str, default: usize) -> Result<usize, String> {

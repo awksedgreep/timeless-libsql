@@ -477,7 +477,27 @@ fn parse_stats_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
             "expected LogsQL stats pipe, not {command:?}"
         )));
     }
-    let rest = segment["stats".len()..].trim();
+    let mut rest = segment["stats".len()..].trim();
+    if rest.is_empty() {
+        return Err(LogsqlError::malformed(
+            "LogsQL stats requires at least one function",
+        ));
+    }
+    // Optional VictoriaLogs grouping: `stats by (a, b) ...` (canonical)
+    // or `stats (a, b) ...` (the bare form running_stats also accepts —
+    // unambiguous because every stats function has a name before its
+    // parenthesis).
+    let mut group_by = Vec::new();
+    if starts_format_keyword(rest, "by") {
+        let tail = rest["by".len()..].trim_start();
+        let (fields, after) = parse_running_stats_group(tail, "stats")?;
+        group_by = fields;
+        rest = after;
+    } else if rest.starts_with('(') {
+        let (fields, after) = parse_running_stats_group(rest, "stats")?;
+        group_by = fields;
+        rest = after;
+    }
     if rest.is_empty() {
         return Err(LogsqlError::malformed(
             "LogsQL stats requires at least one function",
@@ -487,6 +507,19 @@ fn parse_stats_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
         .into_iter()
         .map(|expression| parse_stats_expression(expression.trim()))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut group_names = std::collections::BTreeSet::new();
+    for field in &group_by {
+        let PipelineField::Exact { name, .. } = field else {
+            return Err(LogsqlError::malformed(
+                "LogsQL stats group requires exact fields",
+            ));
+        };
+        if !group_names.insert(name.clone()) {
+            return Err(LogsqlError::malformed(format!(
+                "duplicate LogsQL stats group field {name:?}"
+            )));
+        }
+    }
     let mut aliases = std::collections::BTreeSet::new();
     for expression in &expressions {
         if !aliases.insert(expression.alias.clone()) {
@@ -495,8 +528,17 @@ fn parse_stats_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
                 expression.alias
             )));
         }
+        if group_names.contains(&expression.alias) {
+            return Err(LogsqlError::malformed(format!(
+                "LogsQL stats result name {:?} collides with a group field",
+                expression.alias
+            )));
+        }
     }
-    Ok(PipelineOp::Stats(expressions))
+    Ok(PipelineOp::Stats(StatsSpec {
+        group_by,
+        expressions,
+    }))
 }
 
 fn parse_stats_expression(expression: &str) -> Result<StatsExpression, LogsqlError> {
@@ -3131,14 +3173,16 @@ fn parse_query_rows_source<'a>(
 fn normalize_query_rows_source(query: &mut LogsqlPlan) {
     if query.output == LogsqlOutput::Count {
         query.output = LogsqlOutput::Pipeline;
-        query.pipeline = vec![PipelineOp::Stats(vec![StatsExpression {
-            kind: StatsKind::Count,
-            fields: vec![PipelineField::All],
-            alias: "total".into(),
-            limit: None,
-            quantile: None,
-            sort_fields: Vec::new(),
-        }])];
+        query.pipeline = vec![PipelineOp::Stats(StatsSpec::ungrouped(vec![
+            StatsExpression {
+                kind: StatsKind::Count,
+                fields: vec![PipelineField::All],
+                alias: "total".into(),
+                limit: None,
+                quantile: None,
+                sort_fields: Vec::new(),
+            },
+        ]))];
         query.spec.limit = 0;
         query.spec.offset = 0;
         query.spec.descending = false;
@@ -4405,7 +4449,7 @@ fn parse_json_values_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
             "expected LogsQL json_values pipe, not {segment:?}"
         )));
     }
-    Ok(PipelineOp::Stats(vec![expression]))
+    Ok(PipelineOp::Stats(StatsSpec::ungrouped(vec![expression])))
 }
 
 fn is_histogram_pipe(segment: &str) -> bool {
@@ -4432,7 +4476,7 @@ fn parse_histogram_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
             "expected LogsQL histogram pipe, not {segment:?}"
         )));
     }
-    Ok(PipelineOp::Stats(vec![expression]))
+    Ok(PipelineOp::Stats(StatsSpec::ungrouped(vec![expression])))
 }
 
 fn is_drop_empty_fields_pipe(segment: &str) -> bool {
@@ -5633,6 +5677,25 @@ pub(crate) struct RunningStatsSpec {
     pub expressions: Vec<RunningStatsExpression>,
 }
 
+/// `stats [by (fields...)] fn(), ...` — grouped aggregation. An empty
+/// `group_by` is the classic whole-result stats row; with groups, one
+/// output row per distinct group-value tuple carrying the group fields
+/// plus every aggregate.
+#[derive(Clone, Debug)]
+pub(crate) struct StatsSpec {
+    pub group_by: Vec<PipelineField>,
+    pub expressions: Vec<StatsExpression>,
+}
+
+impl StatsSpec {
+    pub(crate) fn ungrouped(expressions: Vec<StatsExpression>) -> Self {
+        Self {
+            group_by: Vec::new(),
+            expressions,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PipelineSortField {
     pub field: PipelineField,
@@ -6010,7 +6073,7 @@ pub(crate) enum PipelineOp {
     Project(Vec<PipelineField>),
     Delete(Vec<PipelineField>),
     Filter(LogPredicate),
-    Stats(Vec<StatsExpression>),
+    Stats(StatsSpec),
     RunningStats(RunningStatsSpec),
     QueryStats,
     First(FirstSpec),
@@ -6441,14 +6504,16 @@ fn parse_with_scoped_context(
                 advance_count_pipeline(&mut pipeline_stage)?;
                 let _ = function;
                 output = LogsqlOutput::Count;
-                pipeline.push(PipelineOp::Stats(vec![StatsExpression {
-                    kind: StatsKind::Count,
-                    fields: vec![PipelineField::All],
-                    alias: "total".into(),
-                    limit: None,
-                    quantile: None,
-                    sort_fields: Vec::new(),
-                }]));
+                pipeline.push(PipelineOp::Stats(StatsSpec::ungrouped(vec![
+                    StatsExpression {
+                        kind: StatsKind::Count,
+                        fields: vec![PipelineField::All],
+                        alias: "total".into(),
+                        limit: None,
+                        quantile: None,
+                        sort_fields: Vec::new(),
+                    },
+                ])));
             }
             ["stats", function @ ("count(*)" | "count()"), "as", "total"]
             | ["stats", function @ ("count(*)" | "count()"), "total"]
@@ -6457,14 +6522,16 @@ fn parse_with_scoped_context(
                 advance_count_pipeline(&mut pipeline_stage)?;
                 let _ = function;
                 output = LogsqlOutput::Count;
-                pipeline.push(PipelineOp::Stats(vec![StatsExpression {
-                    kind: StatsKind::Count,
-                    fields: vec![PipelineField::All],
-                    alias: "total".into(),
-                    limit: None,
-                    quantile: None,
-                    sort_fields: Vec::new(),
-                }]));
+                pipeline.push(PipelineOp::Stats(StatsSpec::ungrouped(vec![
+                    StatsExpression {
+                        kind: StatsKind::Count,
+                        fields: vec![PipelineField::All],
+                        alias: "total".into(),
+                        limit: None,
+                        quantile: None,
+                        sort_fields: Vec::new(),
+                    },
+                ])));
             }
             _ if segment.starts_with("field_values ") => {
                 pipeline.push(parse_field_values_pipe(segment)?);
@@ -11472,6 +11539,54 @@ fn clamp_native_timestamp(timestamp: i128) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_by_grammar_is_exact_and_strict() {
+        for query in [
+            "* | stats by (host) count()",
+            "* | stats by (host, service) count() as hits, sum(bytes) as total",
+            "* | stats (host) count()",
+            r#"* | stats by ("nested.field") count_uniq(client_mac)"#,
+            "* | STATS BY (host) COUNT()",
+        ] {
+            let plan = parse_at(query, TimestampUnit::Microseconds, 0)
+                .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
+            assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
+            let [PipelineOp::Stats(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected stats-by plan: {plan:?}");
+            };
+            assert!(!spec.group_by.is_empty(), "{query:?}");
+            assert!(!spec.expressions.is_empty(), "{query:?}");
+        }
+
+        // Ungrouped stays ungrouped.
+        let plan = parse_at("* | stats count() as n", TimestampUnit::Microseconds, 0).unwrap();
+        let [PipelineOp::Stats(spec)] = plan.pipeline.as_slice() else {
+            panic!("unexpected stats plan: {plan:?}");
+        };
+        assert!(spec.group_by.is_empty());
+
+        // The bare count fast path is untouched by grouping.
+        let counted = parse_at("* | stats count()", TimestampUnit::Microseconds, 0).unwrap();
+        assert_eq!(counted.output, LogsqlOutput::Count);
+
+        for malformed in [
+            "* | stats by () count()",
+            "* | stats by (host)",
+            "* | stats by (host, host) count()",
+            "* | stats by (host) count() as host",
+            "* | stats by (host*) count()",
+            "* | stats by (*) count()",
+            "* | stats by host count()",
+            "* | stats by (host",
+        ] {
+            assert!(
+                parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
+                "{malformed:?} was accepted"
+            );
+        }
+    }
+
     use serde_json::json;
 
     #[test]
@@ -14899,7 +15014,8 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
             assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
             assert_eq!(plan.implicit_result_limit, None, "{query:?}");
-            let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+            let [PipelineOp::Stats(StatsSpec { expressions, .. })] = plan.pipeline.as_slice()
+            else {
                 panic!("unexpected json_values plan: {plan:?}");
             };
             assert_eq!(expressions.len(), 1, "{query:?}");
@@ -14922,7 +15038,8 @@ mod tests {
         ] {
             let plan = parse_at(query, TimestampUnit::Microseconds, 0)
                 .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
-            let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+            let [PipelineOp::Stats(StatsSpec { expressions, .. })] = plan.pipeline.as_slice()
+            else {
                 panic!("unexpected json_values plan: {plan:?}");
             };
             assert_eq!(expressions[0].alias, expected_alias, "{query:?}");
@@ -14959,7 +15076,8 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{query:?}: {error:?}"));
             assert_eq!(plan.output, LogsqlOutput::Pipeline, "{query:?}");
             assert_eq!(plan.implicit_result_limit, None, "{query:?}");
-            let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+            let [PipelineOp::Stats(StatsSpec { expressions, .. })] = plan.pipeline.as_slice()
+            else {
                 panic!("unexpected histogram plan: {plan:?}");
             };
             assert_eq!(expressions.len(), 1, "{query:?}");
@@ -14974,7 +15092,7 @@ mod tests {
         }
 
         let plan = parse_at("* | HiStOgRaM(value)", TimestampUnit::Microseconds, 0).unwrap();
-        let [PipelineOp::Stats(expressions)] = plan.pipeline.as_slice() else {
+        let [PipelineOp::Stats(StatsSpec { expressions, .. })] = plan.pipeline.as_slice() else {
             panic!("unexpected histogram plan: {plan:?}");
         };
         assert_eq!(expressions[0].alias, "histogram(value)");

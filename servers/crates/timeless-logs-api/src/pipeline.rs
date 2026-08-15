@@ -28,7 +28,7 @@ use crate::logsql::{
     MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec, PipelineField,
     PipelineOp, QueryRowsSource, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
     RunningStatsExpression, RunningStatsKind, RunningStatsMode, RunningStatsSpec,
-    SetStreamFieldsSpec, SplitSpec, StatsExpression, StatsKind, TimeAddSpec, TopSpec,
+    SetStreamFieldsSpec, SplitSpec, StatsExpression, StatsKind, StatsSpec, TimeAddSpec, TopSpec,
     UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec,
     UnpackWordsSpec, UnrollSpec,
 };
@@ -491,13 +491,25 @@ pub(crate) fn execute(
                 execution.timestamp_unit,
                 execution.cancelled,
             )?,
-            PipelineOp::Stats(expressions) => vec![Value::Object(stats(
-                &rows,
-                expressions,
-                execution.rate_window_seconds,
-                execution.limits,
-                execution.cancelled,
-            )?)],
+            PipelineOp::Stats(spec) => {
+                if spec.group_by.is_empty() {
+                    vec![Value::Object(stats(
+                        &rows,
+                        &spec.expressions,
+                        execution.rate_window_seconds,
+                        execution.limits,
+                        execution.cancelled,
+                    )?)]
+                } else {
+                    grouped_stats(
+                        rows,
+                        spec,
+                        execution.rate_window_seconds,
+                        execution.limits,
+                        execution.cancelled,
+                    )?
+                }
+            }
             PipelineOp::RunningStats(spec) => {
                 running_stats_rows(rows, spec, execution.limits, execution.cancelled)?
             }
@@ -9439,6 +9451,90 @@ fn filter(
     Ok(output)
 }
 
+/// `stats by (fields...) ...`: partition rows by their group-value
+/// tuple and run the ordinary [`stats`] kernel once per partition, so
+/// every stats function behaves identically grouped and ungrouped.
+/// Rows move into their partitions (the stats pipe is terminal for its
+/// input — aggregation replaces rows), and output rows carry the group
+/// fields plus every aggregate, ordered lexicographically by group
+/// values for deterministic results.
+fn grouped_stats(
+    rows: Vec<Value>,
+    spec: &StatsSpec,
+    rate_window_seconds: Option<f64>,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let mut paths: Vec<(&[String], &str)> = Vec::with_capacity(spec.group_by.len());
+    for field in &spec.group_by {
+        let PipelineField::Exact { path, name } = field else {
+            return Err("LogsQL stats group field is not exact".to_string());
+        };
+        paths.push((path.as_slice(), name.as_str()));
+    }
+
+    let mut state_bytes = size_of::<BTreeMap<Vec<String>, Vec<Value>>>();
+    let mut groups: BTreeMap<Vec<String>, Vec<Value>> = BTreeMap::new();
+    for (row_index, row) in rows.into_iter().enumerate() {
+        check_periodically(cancelled, row_index)?;
+        let mut key = Vec::with_capacity(paths.len());
+        for (path, _) in &paths {
+            key.push(projected_text(field_value(&row, path)).into_owned());
+        }
+        let group_count = groups.len();
+        match groups.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().push(row);
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                if group_count >= limits.max_state_items {
+                    return Err(format!(
+                        "LogsQL stats group cardinality exceeds max_work_rows={}",
+                        limits.max_state_items
+                    ));
+                }
+                for value in entry.key() {
+                    state_bytes = state_bytes
+                        .checked_add(value.len())
+                        .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+                        .ok_or("LogsQL stats group state size overflow")?;
+                }
+                state_bytes = state_bytes
+                    .checked_add(size_of::<(Vec<String>, Vec<Value>)>())
+                    .ok_or("LogsQL stats group state size overflow")?;
+                if state_bytes > limits.max_state_bytes {
+                    return Err(format!(
+                        "LogsQL stats group state exceeds max_state_bytes={}",
+                        limits.max_state_bytes
+                    ));
+                }
+                entry.insert(vec![row]);
+            }
+        }
+    }
+
+    let mut output = Vec::with_capacity(groups.len());
+    for (key, group_rows) in groups {
+        ensure_active(cancelled)?;
+        let aggregates = stats(
+            &group_rows,
+            &spec.expressions,
+            rate_window_seconds,
+            limits,
+            cancelled,
+        )?;
+        let mut object = Map::with_capacity(paths.len() + aggregates.len());
+        for ((_, name), value) in paths.iter().zip(key) {
+            object.insert((*name).to_owned(), Value::String(value));
+        }
+        for (name, value) in aggregates {
+            object.insert(name, value);
+        }
+        output.push(Value::Object(object));
+    }
+    Ok(output)
+}
+
 fn stats(
     rows: &[Value],
     expressions: &[StatsExpression],
@@ -11553,6 +11649,86 @@ fn json_array_primitive_in(values: &[String], value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stats_by_partitions_and_matches_ungrouped_kernel() {
+        let parse_spec = |query: &str| {
+            let plan = crate::logsql::parse_at(query, TimestampUnit::Microseconds, 0).unwrap();
+            let [PipelineOp::Stats(spec)] = plan.pipeline.as_slice() else {
+                panic!("unexpected stats plan: {plan:?}");
+            };
+            spec.clone()
+        };
+        let limits = PipelineLimits {
+            max_result_rows: 100,
+            max_state_items: 100,
+            max_state_bytes: 1_000_000,
+        };
+        let cancelled = AtomicBool::new(false);
+        let rows = vec![
+            json!({"host": "a", "mac": "00:01", "bytes": 10}),
+            json!({"host": "a", "mac": "00:02", "bytes": 5}),
+            json!({"host": "b", "mac": "00:01", "bytes": 7}),
+            json!({"host": "a", "mac": "00:01", "bytes": 3}),
+            json!({"mac": "00:03", "bytes": 1}), // missing host groups under ""
+        ];
+
+        let spec = parse_spec(
+            "* | stats by (host) count() as hits, sum(bytes) as total, count_uniq(mac) as macs",
+        );
+        let output = grouped_stats(rows.clone(), &spec, None, limits, &cancelled).unwrap();
+        assert_eq!(
+            output,
+            vec![
+                json!({"host": "", "hits": 1, "total": 1, "macs": 1}),
+                json!({"host": "a", "hits": 3, "total": 18, "macs": 2}),
+                json!({"host": "b", "hits": 1, "total": 7, "macs": 1}),
+            ]
+        );
+
+        // Two group fields: tuple keys, lexicographic order.
+        let spec = parse_spec("* | stats by (host, mac) count() as hits");
+        let output = grouped_stats(rows.clone(), &spec, None, limits, &cancelled).unwrap();
+        assert_eq!(
+            output,
+            vec![
+                json!({"host": "", "mac": "00:03", "hits": 1}),
+                json!({"host": "a", "mac": "00:01", "hits": 2}),
+                json!({"host": "a", "mac": "00:02", "hits": 1}),
+                json!({"host": "b", "mac": "00:01", "hits": 1}),
+            ]
+        );
+
+        // Every group's aggregates equal the ungrouped kernel run over
+        // just that group's rows — the defining property.
+        let spec = parse_spec("* | stats by (host) sum(bytes) as total");
+        let grouped = grouped_stats(rows.clone(), &spec, None, limits, &cancelled).unwrap();
+        for row in &grouped {
+            let host = row["host"].as_str().unwrap();
+            let subset: Vec<Value> = rows
+                .iter()
+                .filter(|r| projected_text(r.get("host")) == host)
+                .cloned()
+                .collect();
+            let solo = stats(&subset, &spec.expressions, None, limits, &cancelled).unwrap();
+            assert_eq!(row["total"], solo["total"], "host {host:?}");
+        }
+
+        // Group cardinality is bounded by max_state_items.
+        let tight = PipelineLimits {
+            max_state_items: 2,
+            ..limits
+        };
+        let error = grouped_stats(
+            rows.clone(),
+            &parse_spec("* | stats by (mac) count()"),
+            None,
+            tight,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(error.contains("group cardinality"), "{error}");
+    }
 
     #[test]
     fn typed_keys_keep_missing_null_empty_and_numbers_distinct() {

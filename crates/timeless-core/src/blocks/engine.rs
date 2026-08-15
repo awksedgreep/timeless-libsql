@@ -1784,6 +1784,16 @@ impl BlockEngine {
             .store(native.unwrap_or(0).max(0), Ordering::Relaxed);
     }
 
+    /// Change the retention window and persist it for future connects —
+    /// the runtime-command counterpart of the CREATE-time `retention`
+    /// arg, mirroring how [`Self::reindex`] persists `index_keys`.
+    pub fn set_retention_persistent(&self, native: i64) -> Result<(), String> {
+        self.store
+            .save_meta("retention", native.to_string().as_bytes())?;
+        self.set_retention(Some(native));
+        Ok(())
+    }
+
     /// Apply the configured retention window at a maintenance boundary.
     /// Cutoff is DATA time: max queryable ts (ts_range) - retention.
     /// Called by the flush/optimize wrappers AFTER their transition

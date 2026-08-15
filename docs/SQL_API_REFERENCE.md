@@ -223,9 +223,14 @@ The exact severity vocabulary is `debug`, `info`, `notice`, `warning`,
 `error`, `critical`, `alert`, and `emergency`. `metadata` is canonical typed
 JSON and preserves missing, null, empty, scalar, array, and nested-object
 distinctions. Writes are append-only. Commands are `flush`, `optimize`,
-`optimize:<positive max source entries>`, and `prune:<timestamp>`. A bounded
-optimize may finish one merge cohort beyond the requested entry budget so it
-always makes progress. The authoritative ingest buffer is 8,192 entries.
+`optimize:<positive max source entries>`, `prune:<timestamp>`,
+`reindex:<keys>` (rewrite every block's postings against a new `index_keys`
+allowlist and persist it — connections opened before the command keep their
+old allowlist until they reconnect), and `retention:<n>[s|m|h|d]` (persist a
+new retention window and apply it to the live engine; enforcement happens at
+the next flush/optimize boundary). A bounded optimize may finish one merge
+cohort beyond the requested entry budget so it always makes progress. The
+authoritative ingest buffer is 8,192 entries.
 
 ### `timeless_traces`
 
@@ -496,7 +501,11 @@ frame.
 physical accounting. Signal servers and embedded applications must not query
 shadow tables or reconstruct their names. Its `key, value` rows are an
 additive contract: consumers select the keys they understand and tolerate new
-keys. `index_bytes` is an INTEGER when SQLite's `dbstat` module is available
+keys. Every module also reports `module`, `retention` (native timestamp
+units, NULL when unset), and `index_keys` (the persisted indexed-metadata
+allowlist, comma-joined, NULL when the module has none) — the public way for
+hosts to compare desired store policy against the store's persisted policy.
+`index_bytes` is an INTEGER when SQLite's `dbstat` module is available
 and NULL otherwise; it counts the signal's physical posting/catalog/index
 b-trees, not the database file or result payload.
 

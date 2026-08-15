@@ -214,6 +214,9 @@ pub struct LogsTab {
     /// The allowlist of indexed metadata keys, in declared-column order
     /// (position k ↔ column FIXED_COLS+k ↔ bitmask bit 8<<k).
     index_keys: Vec<String>,
+    /// Native timestamp ticks per second — the unit context runtime
+    /// commands need (e.g. parsing 'retention:<n>[s|m|h|d]').
+    native_per_second: i64,
     /// Shared process-wide across connections via the R4 registry —
     /// see metrics_vtab.rs and shared.rs for the full story.
     shared: Arc<SharedEngine<BlockEngine>>,
@@ -458,6 +461,7 @@ impl LogsTab {
                 table_name: table,
                 database_name: database,
                 index_keys,
+                native_per_second: timestamp_unit.per_second,
                 shared: shared_engine,
                 key,
                 query_reports,
@@ -637,10 +641,22 @@ impl LogsTab {
                 .parse()
                 .map_err(|_| module_err(format!("prune: expected 'prune:<ts>', got {cmd:?}")))?;
             self.shared.engine.prune(ts).map_err(module_err)?;
+        } else if let Some(value) = cmd.strip_prefix("retention:") {
+            // Change the retention window on a live store — same value
+            // grammar as the CREATE arg (<n>[s|m|h|d]). Persisted for
+            // future connects and applied to this engine immediately;
+            // enforcement happens at the next flush/optimize boundary.
+            let native = table_args::parse_retention(value.trim(), self.native_per_second)
+                .map_err(|e| module_err(format!("retention: {e}")))?;
+            self.shared
+                .engine
+                .set_retention_persistent(native)
+                .map_err(module_err)?;
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'optimize', \
-                 'optimize:<max_entries>', 'prune:<ts>', 'reindex:<keys>'"
+                 'optimize:<max_entries>', 'prune:<ts>', 'reindex:<keys>', \
+                 'retention:<n[s|m|h|d]>'"
             )));
         }
         Ok(0)

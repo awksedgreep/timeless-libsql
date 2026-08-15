@@ -274,6 +274,8 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_LOGS_LOGSQL_MAX_WORK_ROWS` | logs | `100000` | Cumulative decoded/examined rows and bounded state items. |
 | `TIMELESS_LOGS_LOGSQL_MAX_RESPONSE_BYTES` | logs | `16777216` | Response and bounded pipeline-state bytes. |
 | `TIMELESS_LOGS_LOGSQL_DEADLINE_MS` | logs | `30000` | Hard LogsQL/native-query deadline in milliseconds. |
+| `TIMELESS_LOGS_INDEX_KEYS` | logs | absent/inherit | Comma-separated indexed-metadata allowlist. New stores are created with it; an existing store whose persisted allowlist differs is reindexed once at startup (postings rewritten for every block). Absent preserves the store's current allowlist. |
+| `TIMELESS_LOGS_RETENTION` | logs | absent/inherit | Retention window as `<n>` plus a required unit suffix `s`, `m`, `h`, or `d`. Applied to new and existing stores at startup; enforcement remains at flush/optimize boundaries. Absent preserves the store's current window. |
 | `TIMELESS_TRACES_READER_CONNECTIONS` | traces | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_TRACES_COMMAND_QUEUE_BATCHES` | traces | `256` | Writer-command queue capacity in admitted requests. |
 | `TIMELESS_TRACES_RETENTION_SECS` | traces | absent/inherit | If absent, preserve the vtab's stored retention (a fresh table has none); positive sets and enforces it; `0` explicitly disables it. |

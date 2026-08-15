@@ -1291,8 +1291,8 @@ fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(
                     crate::logsql::PipelineOp::Offset(offset) if *offset > limits.max_work_rows => {
                         return Err(("max_work_rows", limits.max_work_rows));
                     }
-                    crate::logsql::PipelineOp::Stats(expressions) => {
-                        for expression in expressions {
+                    crate::logsql::PipelineOp::Stats(spec) => {
+                        for expression in &spec.expressions {
                             let Some(limit) = expression.limit else {
                                 continue;
                             };

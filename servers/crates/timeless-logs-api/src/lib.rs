@@ -27,7 +27,7 @@ pub use logsql::{
 };
 pub use storage::{
     FieldCompareOp, LogEntry, LogField, LogPredicate, MetadataExact, NumericOp, PatternMatchMode,
-    PatternMatcher, QuerySpec, Storage, StorageStats, TimestampUnit, ValueTypeKind,
+    PatternMatcher, QuerySpec, Storage, StorageStats, StorePolicy, TimestampUnit, ValueTypeKind,
 };
 pub use timeless_api_common::BackupReport;
 
@@ -83,6 +83,7 @@ pub struct Config {
     pub timestamp_unit: TimestampUnit,
     pub logs_query_limits: LogsQueryLimits,
     pub auth: AuthConfig,
+    pub store_policy: StorePolicy,
 }
 
 impl Default for Config {
@@ -106,6 +107,7 @@ impl Default for Config {
             timestamp_unit: TimestampUnit::Microseconds,
             logs_query_limits: LogsQueryLimits::default(),
             auth: AuthConfig::disabled(),
+            store_policy: StorePolicy::default(),
         }
     }
 }
@@ -137,12 +139,13 @@ impl Config {
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
 
-    let storage = Storage::start_with_timestamp_unit(
+    let storage = Storage::start_with_policy(
         config.database_path.clone(),
         config.extension_path.clone(),
         config.reader_connections,
         config.command_queue_batches,
         config.timestamp_unit,
+        config.store_policy.clone(),
     )?;
     let app = protect_router(
         router_with_limits(storage.clone(), config.logs_query_limits),

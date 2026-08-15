@@ -27,6 +27,21 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   data `/health` already serves unauthenticated. New stat surface only —
   no new instrumentation.
 
+- Grouped aggregation: `stats by (fields...)` in LogsQL — one output row
+  per distinct group-value tuple, every existing stats function supported
+  (the grouped path partitions rows and runs the ungrouped kernel per
+  partition, so semantics are identical by construction). Group output is
+  ordered lexicographically by group values; combine with
+  `first N by (alias desc)` for top-N. Group cardinality is bounded by
+  the existing state-item and state-byte limits.
+- Logs store policy without SQL: `TIMELESS_LOGS_INDEX_KEYS` (create new
+  stores with the allowlist; reindex an existing store once at startup
+  when it differs) and `TIMELESS_LOGS_RETENTION` (`<n>[s|m|h|d]`, unit
+  suffix required; applied to new and existing stores). New extension
+  command `retention:<n[s|m|h|d]>` persists and applies a retention
+  window on a live logs store; shadow-meta reads now accept TEXT or
+  BLOB representations of the same value.
+
 ### Changed
 
 - `message_contains` queries prove absence and skip decode work using the

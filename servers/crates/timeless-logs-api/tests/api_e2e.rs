@@ -19567,3 +19567,184 @@ async fn self_metrics_exposes_prometheus_families() {
 
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn stats_by_groups_aggregates_end_to_end() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    let app = router(storage.clone());
+
+    // The ddnet parity scenario: DHCP NAKs carrying client_mac as a
+    // structured field; "top NAKed MACs in the storm hour" is one query.
+    let mut body = String::new();
+    for i in 0..90 {
+        let mac = format!("00:1a:2b:{:02x}", i % 3); // 3 macs, 30 naks each
+        body.push_str(&format!(
+            "{{\"_time\":\"2027-01-01T00:00:{:02}Z\",\"_msg\":\"DHCP NAK - MAC:{mac}\",\"level\":\"warning\",\"client_mac\":\"{mac}\",\"bytes\":{}}}\n",
+            i % 60,
+            i + 1,
+        ));
+    }
+    for i in 0..10 {
+        body.push_str(&format!(
+            "{{\"_time\":\"2027-01-01T00:01:{:02}Z\",\"_msg\":\"DHCP ACK ok\",\"level\":\"info\",\"client_mac\":\"00:1a:2b:ff\",\"bytes\":1}}\n",
+            i,
+        ));
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/insert/jsonline")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let rows = pipeline_rows(
+        &app,
+        r#""DHCP NAK" | stats by (client_mac) count() as hits, sum(bytes) as bytes_total"#,
+    )
+    .await;
+    assert_eq!(rows.len(), 3);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(
+            row["client_mac"].as_str().unwrap(),
+            format!("00:1a:2b:{index:02x}")
+        );
+        assert_eq!(row["hits"], serde_json::json!(30));
+    }
+
+    // Grouped aggregate + bounded ordered selection: the top-N shape.
+    let rows = pipeline_rows(
+        &app,
+        r#"* | stats by (level) count() as hits | first 1 by (hits desc)"#,
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["level"], "warning");
+    assert_eq!(rows[0]["hits"], serde_json::json!(90));
+
+    // Grouped count_uniq across two fields.
+    let rows = pipeline_rows(
+        &app,
+        r#"* | stats by (level) count_uniq(client_mac) as macs"#,
+    )
+    .await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["level"], "info");
+    assert_eq!(rows[0]["macs"], serde_json::json!(1));
+    assert_eq!(rows[1]["level"], "warning");
+    assert_eq!(rows[1]["macs"], serde_json::json!(3));
+
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn store_policy_creates_reindexes_and_retunes_without_sql() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("logs.db");
+    let meta = |key: &str| {
+        let conn = Connection::open(&db).unwrap();
+        unsafe {
+            conn.load_extension_enable().unwrap();
+            conn.load_extension(&extension, None::<&str>).unwrap();
+        }
+        conn.query_row(
+            "SELECT CAST(v AS TEXT) FROM logs_meta WHERE k = ?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+
+    // A fresh store adopts the policy at creation.
+    let storage = Storage::start_with_policy(
+        db.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+        timeless_logs_api::StorePolicy {
+            index_keys: Some("service,client_mac".into()),
+            retention: Some("30d".into()),
+        },
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/insert/jsonline")
+                .body(Body::from(
+                    "{\"_time\":\"2027-01-01T00:00:00Z\",\"_msg\":\"NAK a\",\"level\":\"warning\",\"client_mac\":\"00:aa\"}\n\
+                     {\"_time\":\"2027-01-01T00:00:01Z\",\"_msg\":\"NAK b\",\"level\":\"warning\",\"client_mac\":\"00:bb\"}\n",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+    assert_eq!(meta("index_keys").as_deref(), Some("service,client_mac"));
+    assert_eq!(
+        meta("retention").as_deref(),
+        Some((30i64 * 86_400 * 1_000_000).to_string().as_str())
+    );
+
+    // A changed policy reindexes the existing store at startup and
+    // retunes retention — no SQL, no migration. Pre-policy entries must
+    // be findable through the newly indexed key (the reindex contract).
+    let storage = Storage::start_with_policy(
+        db.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+        timeless_logs_api::StorePolicy {
+            index_keys: Some("service,host,client_mac".into()),
+            retention: Some("90d".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        meta("index_keys").as_deref(),
+        Some("service,host,client_mac")
+    );
+    assert_eq!(
+        meta("retention").as_deref(),
+        Some((90i64 * 86_400 * 1_000_000).to_string().as_str())
+    );
+    let app = router(storage.clone());
+    let rows = pipeline_rows(&app, r#"client_mac:"00:aa""#).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["_msg"], "NAK a");
+
+    // No policy: an unchanged boot leaves everything alone.
+    storage.shutdown().await.unwrap();
+    let storage = Storage::start_with_timestamp_unit(
+        db.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_eq!(
+        meta("index_keys").as_deref(),
+        Some("service,host,client_mac")
+    );
+    storage.shutdown().await.unwrap();
+}

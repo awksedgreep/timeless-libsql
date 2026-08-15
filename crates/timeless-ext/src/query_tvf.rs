@@ -4529,6 +4529,14 @@ unsafe impl VTabCursor for StatsCursor<'_> {
             let retention =
                 crate::shadow_meta::load_retention(&conn, &database, &table).map_err(module_err)?;
             rows.push(("retention", opt_ts(retention)));
+            // The persisted indexed-metadata allowlist, comma-joined;
+            // NULL when the module has none. Public so hosts can compare
+            // a desired allowlist against the store's without touching
+            // private shadow storage.
+            let index_keys =
+                crate::shadow_meta::load_meta_text(&conn, &database, &table, "index_keys")
+                    .map_err(module_err)?;
+            rows.push(("index_keys", index_keys.map_or(Value::Null, Value::Text)));
         }
         match module {
             TimelessModule::Metrics => {
