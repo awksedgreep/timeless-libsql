@@ -307,29 +307,37 @@ async fn scrape_loop(storage: Storage, controller: ScrapeController, target: Scr
             .unwrap_or(0);
 
         match result {
-            Ok(body) => match storage.submit_prometheus(body).await {
-                Ok(()) => {
-                    controller
-                        .update_report(target.id, |report| {
-                            report.health = "up".into();
-                            report.last_scrape_unix = Some(now);
-                            report.last_duration_ms = Some(duration_ms);
-                            report.last_error = None;
-                            report.samples_scraped = None;
-                        })
-                        .await;
+            Ok(body) => {
+                // Counted here because the body is moved into the ingest queue
+                // below and never parsed on this path: submit_prometheus admits
+                // it with points: None and the writer parses later, so no count
+                // comes back in time to report it.
+                let samples = count_samples(&body);
+
+                match storage.submit_prometheus(body).await {
+                    Ok(()) => {
+                        controller
+                            .update_report(target.id, |report| {
+                                report.health = "up".into();
+                                report.last_scrape_unix = Some(now);
+                                report.last_duration_ms = Some(duration_ms);
+                                report.last_error = None;
+                                report.samples_scraped = Some(samples);
+                            })
+                            .await;
+                    }
+                    Err(error) => {
+                        controller
+                            .update_report(target.id, |report| {
+                                report.health = "down".into();
+                                report.last_scrape_unix = Some(now);
+                                report.last_duration_ms = Some(duration_ms);
+                                report.last_error = Some(error);
+                            })
+                            .await;
+                    }
                 }
-                Err(error) => {
-                    controller
-                        .update_report(target.id, |report| {
-                            report.health = "down".into();
-                            report.last_scrape_unix = Some(now);
-                            report.last_duration_ms = Some(duration_ms);
-                            report.last_error = Some(error);
-                        })
-                        .await;
-                }
-            },
+            }
             Err(error) => {
                 controller
                     .update_report(target.id, |report| {
@@ -384,6 +392,42 @@ async fn scrape_once(client: &reqwest::Client, target: &ScrapeTarget) -> Result<
         return Err("scrape response exceeds 10 MiB".into());
     }
     Ok(decorate_body(body, &target.labels))
+}
+
+/// Number of samples in a Prometheus exposition body.
+///
+/// A byte scan rather than a parse: this runs on every scrape, the body is
+/// already in memory, and the exposition format puts exactly one sample on each
+/// line that is neither blank nor a comment. Counting what the target exposed is
+/// also the honest meaning of "scraped" — how many of those samples storage
+/// ultimately keeps is a separate question.
+fn count_samples(body: &[u8]) -> u64 {
+    body.split(|byte| *byte == b'\n')
+        .filter(|line| {
+            let line = trim_ascii(line);
+            !line.is_empty() && line[0] != b'#'
+        })
+        .count() as u64
+}
+
+fn trim_ascii(mut line: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = line {
+        if first.is_ascii_whitespace() {
+            line = rest;
+        } else {
+            break;
+        }
+    }
+
+    while let [rest @ .., last] = line {
+        if last.is_ascii_whitespace() {
+            line = rest;
+        } else {
+            break;
+        }
+    }
+
+    line
 }
 
 fn decorate_body(body: Bytes, labels: &BTreeMap<String, String>) -> Bytes {
@@ -622,6 +666,45 @@ fn default_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_only_sample_lines() {
+        // HELP and TYPE lines describe samples; they are not samples.
+        let body = b"# HELP up test\n# TYPE up gauge\nup 1\nready 2\n";
+        assert_eq!(count_samples(body), 2);
+    }
+
+    #[test]
+    fn ignores_blank_and_whitespace_lines() {
+        // A trailing newline leaves an empty final line, and exporters pad with
+        // blank lines between families. Neither is a sample.
+        let body = b"up 1\n\n   \nready 2\n";
+        assert_eq!(count_samples(body), 2);
+    }
+
+    #[test]
+    fn tolerates_carriage_returns() {
+        // Without trimming, the trailing \r would leave the line non-empty but
+        // the count would still be right; the risk is a lone \r line counting as
+        // a sample.
+        let body = b"up 1\r\n\r\nready 2\r\n";
+        assert_eq!(count_samples(body), 2);
+    }
+
+    #[test]
+    fn counts_indented_comments_as_comments() {
+        let body = b"  # HELP up test\nup 1\n";
+        assert_eq!(count_samples(body), 1);
+    }
+
+    #[test]
+    fn an_empty_body_has_no_samples() {
+        // The case that matters most: a target answering 200 with nothing must
+        // report zero, not be indistinguishable from one that was never counted.
+        assert_eq!(count_samples(b""), 0);
+        assert_eq!(count_samples(b"\n\n"), 0);
+        assert_eq!(count_samples(b"# HELP up test\n"), 0);
+    }
 
     #[test]
     fn decorates_without_overwriting_existing_labels() {
