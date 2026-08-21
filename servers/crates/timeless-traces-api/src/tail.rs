@@ -17,6 +17,7 @@
 //! when at least one subscriber exists -- an idle hub costs one atomic load
 //! per publish call.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,11 @@ pub(crate) struct SpanFilter {
     pub name: Option<String>,
     pub kind: Option<String>,
     pub status: Option<String>,
+    /// Span attributes that must all be present with these exact values.
+    /// Distinct from `name`, which searches attribute values as substrings:
+    /// this selects a specific attribute by key, which is what pinning a
+    /// stream to one host needs.
+    pub attributes: BTreeMap<String, String>,
 }
 
 impl SpanFilter {
@@ -67,6 +73,17 @@ impl SpanFilter {
         if let Some(status) = &self.status {
             if field("status") != status {
                 return false;
+            }
+        }
+        if !self.attributes.is_empty() {
+            let actual = row.get("attributes").and_then(Value::as_object);
+            for (key, expected) in &self.attributes {
+                let matched = actual
+                    .and_then(|attributes| attributes.get(key))
+                    .is_some_and(|value| &scalar_text(value) == expected);
+                if !matched {
+                    return false;
+                }
             }
         }
         if let Some(pattern) = &self.name {
@@ -101,6 +118,11 @@ pub(crate) struct TailParams {
     pub service: Option<String>,
     pub kind: Option<String>,
     pub status: Option<String>,
+    /// A JSON object of attribute keys to required values, e.g.
+    /// `{"host.name":"srv1"}`. One parameter rather than a repeated one
+    /// because attribute keys are dotted and arbitrary, and inventing a
+    /// prefix convention for them invites collisions with real parameters.
+    pub attributes: Option<String>,
 }
 
 impl TailParams {
@@ -126,13 +148,51 @@ impl TailParams {
         {
             return Err("invalid dashboard span status".into());
         }
+        let attributes = match nonempty(self.attributes) {
+            None => BTreeMap::new(),
+            Some(text) => parse_attributes(&text)?,
+        };
+
         Ok(SpanFilter {
             service: nonempty(self.service),
             name: nonempty(self.name),
             kind,
             status,
+            attributes,
         })
     }
+}
+
+/// Attribute values are compared as text. A string compares as itself;
+/// numbers and booleans compare as they render, so `{"http.status_code":"500"}`
+/// selects the span whether the exporter sent 500 or "500". Containers have no
+/// sensible scalar form and match nothing.
+fn scalar_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(_) | Value::Bool(_) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Rejected rather than ignored: a filter that silently did nothing would
+/// stream every span while appearing to be pinned to one host.
+fn parse_attributes(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let parsed: Value = serde_json::from_str(text)
+        .map_err(|_| "attributes must be a JSON object of string values".to_owned())?;
+    let Some(object) = parsed.as_object() else {
+        return Err("attributes must be a JSON object of string values".into());
+    };
+    object
+        .iter()
+        .map(|(key, value)| match value {
+            Value::String(text) => Ok((key.clone(), text.clone())),
+            Value::Number(_) | Value::Bool(_) => Ok((key.clone(), value.to_string())),
+            _ => Err(format!(
+                "attribute {key} must be a string, number or boolean"
+            )),
+        })
+        .collect()
 }
 
 pub(crate) struct TailHub {
@@ -357,6 +417,71 @@ mod tests {
     }
 
     #[test]
+    fn attributes_match_a_specific_key_exactly() {
+        let filter = TailParams {
+            attributes: Some(r#"{"http.route":"/orders"}"#.into()),
+            ..TailParams::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert!(!filter.is_empty());
+        assert!(filter.matches(&row()));
+
+        // Keyed and exact, unlike `name`, which searches attribute values as
+        // substrings: this is what pinning a stream to one host needs.
+        let partial = TailParams {
+            attributes: Some(r#"{"http.route":"/order"}"#.into()),
+            ..TailParams::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert!(!partial.matches(&row()));
+
+        let wrong_key = TailParams {
+            attributes: Some(r#"{"http.path":"/orders"}"#.into()),
+            ..TailParams::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert!(!wrong_key.matches(&row()));
+    }
+
+    #[test]
+    fn every_named_attribute_must_match() {
+        let filter = TailParams {
+            attributes: Some(r#"{"http.route":"/orders","http.status_code":"404"}"#.into()),
+            ..TailParams::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert!(!filter.matches(&row()));
+    }
+
+    #[test]
+    fn attribute_values_compare_as_text_whatever_the_exporter_sent() {
+        // http.status_code is a JSON number on the row; a filter is text.
+        let filter = TailParams {
+            attributes: Some(r#"{"http.status_code":"500"}"#.into()),
+            ..TailParams::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert!(filter.matches(&row()));
+    }
+
+    #[test]
+    fn malformed_attributes_are_rejected_rather_than_ignored() {
+        // Ignoring them would stream every span while appearing pinned.
+        for bad in [r#"not json"#, r#"["a"]"#, r#"{"k":{"nested":1}}"#] {
+            let params = TailParams {
+                attributes: Some(bad.into()),
+                ..TailParams::default()
+            };
+            assert!(params.into_filter().is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
     fn params_reject_a_kind_or_status_outside_the_enumerated_set() {
         let bad_kind = TailParams {
             kind: Some("srever".into()),
@@ -380,6 +505,7 @@ mod tests {
             name: Some(String::new()),
             kind: Some(String::new()),
             status: Some(String::new()),
+            attributes: Some(String::new()),
         };
         assert!(params.into_filter().unwrap().is_empty());
     }
@@ -391,6 +517,7 @@ mod tests {
             service: Some("checkout".into()),
             kind: Some("server".into()),
             status: Some("error".into()),
+            attributes: Some(r#"{"http.route":"/orders"}"#.into()),
         }
         .into_filter()
         .unwrap();

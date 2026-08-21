@@ -173,6 +173,77 @@ async fn tail_rejects_a_kind_or_status_outside_the_enumerated_set() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn tail_pins_to_a_host_through_a_span_attribute() {
+    // How a canvas trace element scopes itself to one host.
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("tail-attr.db"),
+        required_extension(),
+        2,
+        16,
+        None,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/select/timeless/api/spans/tail?attributes=%7B%22host.name%22%3A%22srv-a%22%7D")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+
+    let ingest = app
+        .clone()
+        .oneshot(ingest_request(
+            r#"{"resourceSpans":[{"scopeSpans":[{"spans":[
+                {"traceId":"00000000000000000000000000000001","spanId":"0000000000000001","name":"on other host","startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"host.name","value":{"stringValue":"srv-b"}}]},
+                {"traceId":"00000000000000000000000000000002","spanId":"0000000000000002","name":"on our host","startTimeUnixNano":"3","endTimeUnixNano":"4","attributes":[{"key":"host.name","value":{"stringValue":"srv-a"}}]}
+            ]}]}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert!(ingest.status().is_success());
+
+    let row = next_row(&mut body).await;
+    assert_eq!(row["name"], "on our host");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tail_rejects_attributes_that_are_not_a_json_object() {
+    // Ignoring them would stream every span while appearing pinned to a host.
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("tail-attr-bad.db"),
+        required_extension(),
+        2,
+        16,
+        None,
+    )
+    .unwrap();
+    let app = router(storage);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/select/timeless/api/spans/tail?attributes=srv-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 /// Reads frames until one carries a span, skipping keepalive newlines.
 async fn next_row(body: &mut Body) -> Value {
     loop {
