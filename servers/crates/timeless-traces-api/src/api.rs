@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::rejection::QueryRejection;
-use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -15,6 +15,7 @@ use timeless_api_common::{
 
 use crate::otlp;
 use crate::query::{DashboardSearchParams, ReadRequest, SearchParams};
+use crate::tail::TailParams;
 use crate::{IngestTimings, Storage};
 
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -34,6 +35,10 @@ pub fn router(storage: Storage) -> Router {
         .route("/select/jaeger/api/traces", get(search_traces))
         .route("/select/jaeger/api/traces/{trace_id}", get(trace_by_id))
         .route("/select/timeless/api/spans", get(dashboard_search))
+        .route(
+            "/select/timeless/api/spans/tail",
+            get(tail_get).post(tail_post),
+        )
         .route(
             "/select/timeless/api/traces/{trace_id}",
             get(dashboard_trace),
@@ -124,6 +129,22 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 "timeless_traces_completed_spans_total",
                 "Spans durably written.",
                 clamp(stats.completed_spans),
+            );
+            let (tail_subscribers, tail_sent, tail_dropped) = storage.tail_hub().stats();
+            x.counter(
+                "timeless_traces_tail_spans_sent_total",
+                "Spans delivered to live-tail subscribers.",
+                clamp(tail_sent),
+            );
+            x.counter(
+                "timeless_traces_tail_spans_dropped_total",
+                "Spans dropped for slow live-tail subscribers.",
+                clamp(tail_dropped),
+            );
+            x.gauge(
+                "timeless_traces_tail_active_subscribers",
+                "Live-tail subscribers currently connected.",
+                clamp(tail_subscribers),
             );
             x.counter(
                 "timeless_traces_failed_spans_total",
@@ -411,13 +432,97 @@ async fn ingest_otlp(
         .submit_otlp_batch(batch, span_count, body_bytes, timings)
         .await
     {
-        Ok(()) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            Bytes::from_static(br#"{"partialSuccess":{}}"#),
-        )
-            .into_response(),
+        Ok(()) => {
+            // Published only once the batch is durably accepted, so a live
+            // subscriber never sees a span a search would not return. An idle
+            // hub costs one atomic load.
+            storage.tail_hub().publish(&spans);
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from_static(br#"{"partialSuccess":{}}"#),
+            )
+                .into_response()
+        }
         Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+// -- Live tail (/select/timeless/api/spans/tail) -----------------------------
+//
+// The live-matchable subset of the dashboard search parameters, matched
+// in-memory against every admitted span by the storage tail hub. No time
+// bounds and no paging: the stream is already bounded by now. Slow consumers
+// drop spans (counted in stats) rather than backpressuring ingest.
+
+async fn tail_get(
+    State(storage): State<Storage>,
+    params: Result<Query<TailParams>, QueryRejection>,
+) -> Response {
+    let Ok(Query(params)) = params else {
+        return unsupported_query_parameters();
+    };
+    tail(storage, params)
+}
+
+async fn tail_post(State(storage): State<Storage>, Form(params): Form<TailParams>) -> Response {
+    tail(storage, params)
+}
+
+fn tail(storage: Storage, params: TailParams) -> Response {
+    let filter = match params.into_filter() {
+        Ok(filter) => filter,
+        Err(error) => return client_error(StatusCode::BAD_REQUEST, error),
+    };
+    // An unfiltered tail is the whole firehose, which is a legitimate ask;
+    // skipping the per-span match for it is just the cheaper way to serve it.
+    let filter = if filter.is_empty() {
+        None
+    } else {
+        Some(filter)
+    };
+
+    let subscription = storage.tail_hub().subscribe(filter);
+    let id = crate::tail::TailHub::subscription_id(&subscription);
+    // Heartbeat newlines keep idle connections alive through proxies; a full
+    // buffer skips the beat rather than blocking, and a gone subscriber ends
+    // the task.
+    if let Some(heartbeat) = storage.tail_hub().heartbeat_sender(id) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                if heartbeat.is_closed() {
+                    break;
+                }
+                let _ = heartbeat.try_send("\n".to_owned());
+            }
+        });
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(TailStream { subscription }))
+        .expect("tail response builds")
+}
+
+/// Dropping the stream (client disconnect) drops the subscription, which
+/// unsubscribes from the hub.
+struct TailStream {
+    subscription: crate::tail::TailSubscription,
+}
+
+impl futures_core::Stream for TailStream {
+    type Item = Result<Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.subscription
+            .receiver
+            .poll_recv(context)
+            .map(|line| line.map(|line| Ok(Bytes::from(line))))
     }
 }
 

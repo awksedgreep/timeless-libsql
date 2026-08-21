@@ -377,6 +377,7 @@ struct StorageInner {
     retention: Option<Duration>,
     queue_capacity: usize,
     shutting_down: AtomicBool,
+    tail: Arc<crate::tail::TailHub>,
 }
 
 #[derive(Clone)]
@@ -531,7 +532,12 @@ impl Storage {
             retention,
             queue_capacity: queue_batches,
             shutting_down: AtomicBool::new(false),
+            tail: crate::tail::TailHub::new(),
         })))
+    }
+
+    pub(crate) fn tail_hub(&self) -> Arc<crate::tail::TailHub> {
+        Arc::clone(&self.0.tail)
     }
 
     /// The Session 3 OTLP handler uses this seam after parsing one request

@@ -402,6 +402,121 @@ fn bytes_id<const N: usize>(value: &[u8], name: &str) -> Result<[u8; N], String>
         .map_err(|_| format!("{name} must contain exactly {N} bytes"))
 }
 
+/// The dashboard query surface's row shape (`query::dashboard_span`), built
+/// from an ingest-side span instead of a stored one, so a live subscriber and
+/// a search return the same fields for the same span.
+///
+/// `service` is carried as well, which the stored surface leaves implicit in
+/// the resource attributes: the tail matches filters against this row rather
+/// than against SQL, so the field a filter names has to be present on it.
+///
+/// Attribute bundles travel as JSON text and are parsed back here. Text that
+/// does not parse yields no row rather than a row that misstates the span --
+/// the span itself is still stored normally.
+pub(crate) fn tail_row(span: &Span) -> Option<Value> {
+    let end_time = span.start_ts.checked_add(span.duration_ns)?;
+    let resource: Value = serde_json::from_str(&span.resource).ok()?;
+    let service = resource
+        .get("service.name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+
+    let mut row = Map::new();
+    row.insert("trace_id".into(), Value::String(hex_id(&span.trace_id)));
+    row.insert("span_id".into(), Value::String(hex_id(&span.span_id)));
+    row.insert(
+        "parent_span_id".into(),
+        match &span.parent_span_id {
+            Some(id) => Value::String(hex_id(id)),
+            None => Value::Null,
+        },
+    );
+    row.insert("name".into(), Value::String(span.name.clone()));
+    row.insert("service".into(), Value::String(service));
+    row.insert("kind".into(), Value::String(kind_name(span.kind).into()));
+    row.insert(
+        "status".into(),
+        Value::String(status_name(span.status).into()),
+    );
+    row.insert("start_time".into(), Value::Number(span.start_ts.into()));
+    row.insert("end_time".into(), Value::Number(end_time.into()));
+    row.insert("duration_ns".into(), Value::Number(span.duration_ns.into()));
+    row.insert(
+        "status_message".into(),
+        if span.status_description.is_empty() {
+            Value::Null
+        } else {
+            Value::String(span.status_description.clone())
+        },
+    );
+    row.insert(
+        "attributes".into(),
+        serde_json::from_str(&span.attributes).ok()?,
+    );
+    row.insert("events".into(), serde_json::from_str(&span.events).ok()?);
+    row.insert("resource".into(), resource);
+    row.insert(
+        "instrumentation_scope".into(),
+        serde_json::from_str(&span.scope).ok()?,
+    );
+    row.insert("links".into(), serde_json::from_str(&span.links).ok()?);
+    row.insert(
+        "trace_state".into(),
+        Value::String(span.trace_state.clone()),
+    );
+    row.insert("trace_flags".into(), Value::Number(span.trace_flags.into()));
+    row.insert(
+        "dropped_attributes_count".into(),
+        Value::Number(span.dropped_attributes_count.into()),
+    );
+    row.insert(
+        "dropped_events_count".into(),
+        Value::Number(span.dropped_events_count.into()),
+    );
+    row.insert(
+        "dropped_links_count".into(),
+        Value::Number(span.dropped_links_count.into()),
+    );
+    row.insert(
+        "resource_schema_url".into(),
+        Value::String(span.resource_schema_url.clone()),
+    );
+    row.insert(
+        "scope_schema_url".into(),
+        Value::String(span.scope_schema_url.clone()),
+    );
+    row.insert(
+        "resource_dropped_attributes_count".into(),
+        Value::Number(span.resource_dropped_attributes_count.into()),
+    );
+    row.insert(
+        "scope_dropped_attributes_count".into(),
+        Value::Number(span.scope_dropped_attributes_count.into()),
+    );
+    Some(Value::Object(row))
+}
+
+/// The wire encoding is numeric; the query surface exposes these names, and a
+/// tail filter is written against the names.
+fn kind_name(kind: u8) -> &'static str {
+    match kind {
+        1 => "server",
+        2 => "client",
+        3 => "producer",
+        4 => "consumer",
+        _ => "internal",
+    }
+}
+
+fn status_name(status: u8) -> &'static str {
+    match status {
+        1 => "ok",
+        2 => "error",
+        _ => "unset",
+    }
+}
+
 fn hex_id<const N: usize>(value: &[u8; N]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(N * 2);
@@ -1034,6 +1149,63 @@ mod tests {
         assert!(parse_json(bad_id).unwrap_err().contains("traceId"));
         let reversed = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"00000000000000000000000000000001","spanId":"0000000000000001","startTimeUnixNano":"20","endTimeUnixNano":"10"}]}]}]}"#;
         assert!(parse_json(reversed).unwrap_err().contains("precedes"));
+    }
+
+    #[test]
+    fn tail_row_carries_the_dashboard_span_shape() {
+        // The fields query::dashboard_span emits, plus `service`, which the
+        // stored surface keeps in a column and the tail needs on the row to
+        // filter against. Keep these in step: a subscriber and a search are
+        // supposed to describe the same span the same way.
+        let body = br#"{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"checkout"}}]},"scopeSpans":[{"spans":[{"traceId":"0000000000000000000000000000000a","spanId":"000000000000000b","parentSpanId":"000000000000000c","name":"GET /orders","kind":"SPAN_KIND_SERVER","startTimeUnixNano":"100","endTimeUnixNano":"250","status":{"code":"STATUS_CODE_ERROR","message":"upstream timeout"},"attributes":[{"key":"http.route","value":{"stringValue":"/orders"}}]}]}]}]}"#;
+        let spans = parse_json(body).unwrap();
+        let row = tail_row(&spans[0]).unwrap();
+
+        assert_eq!(row["trace_id"], "0000000000000000000000000000000a");
+        assert_eq!(row["span_id"], "000000000000000b");
+        assert_eq!(row["parent_span_id"], "000000000000000c");
+        assert_eq!(row["name"], "GET /orders");
+        assert_eq!(row["service"], "checkout");
+        assert_eq!(row["kind"], "server");
+        assert_eq!(row["status"], "error");
+        assert_eq!(row["status_message"], "upstream timeout");
+        assert_eq!(row["start_time"], 100);
+        // Stored spans carry a duration; the row carries the end time the
+        // dashboard computes from it, so both surfaces agree.
+        assert_eq!(row["end_time"], 250);
+        assert_eq!(row["duration_ns"], 150);
+        assert_eq!(row["attributes"]["http.route"], "/orders");
+        assert_eq!(row["resource"]["service.name"], "checkout");
+
+        for field in [
+            "events",
+            "links",
+            "instrumentation_scope",
+            "trace_state",
+            "trace_flags",
+            "dropped_attributes_count",
+            "dropped_events_count",
+            "dropped_links_count",
+            "resource_schema_url",
+            "scope_schema_url",
+            "resource_dropped_attributes_count",
+            "scope_dropped_attributes_count",
+        ] {
+            assert!(row.get(field).is_some(), "row is missing {field}");
+        }
+    }
+
+    #[test]
+    fn tail_row_reports_an_absent_parent_and_an_empty_status_message_as_null() {
+        let body = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"0000000000000000000000000000000a","spanId":"000000000000000b","startTimeUnixNano":"1","endTimeUnixNano":"2"}]}]}]}"#;
+        let row = tail_row(&parse_json(body).unwrap()[0]).unwrap();
+
+        assert_eq!(row["parent_span_id"], Value::Null);
+        assert_eq!(row["status_message"], Value::Null);
+        // Absent, not "unknown": the defaults the OTLP spec assigns.
+        assert_eq!(row["kind"], "internal");
+        assert_eq!(row["status"], "unset");
+        assert_eq!(row["service"], "");
     }
 
     #[test]

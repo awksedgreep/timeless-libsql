@@ -9,6 +9,7 @@ mod api;
 mod otlp;
 mod query;
 mod storage;
+mod tail;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
