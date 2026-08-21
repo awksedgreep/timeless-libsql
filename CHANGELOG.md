@@ -10,11 +10,53 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.7.4 -->
+<!-- release-target: 0.7.6 -->
 
 ## [Unreleased]
 
-No changes recorded after `0.7.4`.
+No changes recorded after `0.7.6`.
+
+## [0.7.6] — 2026-08-20
+
+### Added
+- **Traces gained a live tail**: `GET|POST /select/timeless/api/spans/tail`
+  streams admitted spans as `application/x-ndjson`, the streaming twin of
+  `/select/timeless/api/spans`. Logs have had one since the query surface
+  landed; traces had no route and no hub behind one, so a subscriber had
+  nothing to attach to and simply received nothing — indistinguishable from a
+  system producing no spans.
+
+  Filters are the search surface's live-matchable parameters under the same
+  names — `service`, `name`, `kind`, `status` — so one filter moves between a
+  search and a tail unchanged. Time bounds and paging are deliberately absent:
+  a live stream is already bounded by now, and there is no page to skip to.
+  `attributes` additionally takes a JSON object of span attributes that must
+  all match exactly, which is how a stream pins itself to one host.
+
+  Matching happens server-side, per subscriber, before serialisation. A row
+  carries the dashboard row shape plus `service`, so a streamed span and a
+  searched one describe the span identically. A `kind` or `status` outside the
+  enumerated set, or an `attributes` value that is not a JSON object of
+  scalars, is rejected rather than ignored: accepting `kind=srever` would
+  stream nothing and look exactly like a system with no matching spans.
+
+  Spans publish only once storage has durably accepted the batch, so a
+  subscriber never sees a span a search would not return. Slow consumers drop
+  spans rather than backpressuring ingest.
+
+- `timeless_traces_tail_spans_sent_total`,
+  `timeless_traces_tail_spans_dropped_total` and
+  `timeless_traces_tail_active_subscribers` in the traces `/metrics`
+  exposition — what distinguishes a quiet system from a saturated subscriber.
+
+## [0.7.5] — 2026-08-20
+
+Recorded after the fact; the release itself carried no changelog entry.
+
+### Fixed
+- The metrics scrape endpoint reported `samples: 0` for every successful
+  scrape. Samples are now counted from the body before it moves into the
+  ingest queue, so the number reflects what was actually scraped.
 
 ## [0.7.4] — 2026-08-15
 
