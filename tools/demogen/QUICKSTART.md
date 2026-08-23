@@ -48,14 +48,23 @@ Delete the `.db` file to start over; seeding is deterministic per seed
 
 ## Recording the screencast
 
-Terminal-only (the timeless_phoenix `demo_install.cast` pattern):
+Don't type it on camera — `screencast.py` drives the whole tour through a
+real sqlite3 session with simulated keystrokes (prompt-synced, paced for
+reading), so every take is pristine and identical:
 
 ```sh
-asciinema rec demo.cast     # then run the sqlite3 session above; Ctrl-D ends
+rm -f demo.db
+python3 tools/demogen/screencast.py demo.db large          # rehearse it once
+rm -f demo.db
+asciinema rec -c 'python3 tools/demogen/screencast.py demo.db large' demo.cast
 agg demo.cast demo.gif      # optional: gif/video for the blog post
 ```
 
-Determinism means you can rehearse the exact take: same seed, same
-numbers, every time. For a version that includes the dashboards in a
-browser, use any screen recorder and run `timeless_demo('follow', 120)`
-in the terminal while the UI updates alongside.
+Record at 120x32 or larger (the driver sets that pty size). The tour:
+seed, series count, the incident error-bucket ramp, error logs, the
+log→trace pivot, and the storage report. Edit the `SCRIPT` list at the
+top of screencast.py to change the shots.
+
+For a take that includes the dashboards in a browser, use any screen
+recorder and run `timeless_demo('follow', 120)` in the terminal while
+the UI updates alongside.
