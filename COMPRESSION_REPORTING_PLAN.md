@@ -50,13 +50,16 @@ Add per-signal `ingest_raw_bytes_total` to `timeless_stats`, counted at
 ingest (both row-at-a-time and batch paths) using the definition above.
 Purely additive stats keys: no data-ABI or SQL-surface bump.
 
-- [ ] metrics: count 16 B per accepted point.
-- [ ] logs: ts+level+message+metadata per accepted entry.
-- [ ] traces: fixed 50 B + string fields per accepted span.
-- [ ] Decide persistence (open question below) and document the choice
-      in the stats key description.
+- [x] metrics: RESOLVED as no-counter-needed — `16 × total_points` from
+      durable point counts IS the definition, exactly, so the Phase 2
+      derivation is already lifetime-accurate. Nothing to add.
+- [ ] logs: ts+level+message+metadata per entry, accrued when entries
+      become durable (same transaction as the block write).
+- [ ] traces: fixed 50 B + string fields per span, same accrual point.
+- [ ] Persistence: follow the `compression_totals` `_meta` pattern
+      (decided; see resolved open question 1).
 - [ ] Unit coverage: ingest N known rows, assert exact counter values;
-      re-run optimize, assert the counter does NOT move.
+      optimize/prune must not move it; reopen must preserve it.
 
 ## Phase 2 — servers: export the honest series (all three planes)
 
@@ -112,12 +115,10 @@ Grafana boards:
    counter should follow that exact pattern — one integer per signal,
    updated in the same transactions — so lifetime ratios survive
    restarts and match `report` forever.
-2. **Span raw convention.** Per-span resource/scope strings are counted
-   per row (the denormalized shape the vtab returns, same convention the
-   Victoria/Tempo family quotes). Alternative (OTLP wire batches share
-   resource blocks) would shrink raw ~15-20%. Staying with per-row: it
-   matches "logical rows as queried" and is defensible; note it wherever
-   the ratio is documented.
+2. **Span raw convention. RESOLVED 2026-08-23:** per-row counting stays
+   (owner's call — conform where easy, and per-row matches "logical
+   rows as queried" plus the Victoria/Tempo-family convention). Already
+   implemented and documented everywhere.
 
 ## Non-goals
 
