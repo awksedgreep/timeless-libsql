@@ -197,6 +197,36 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 stats.sqlite_index_bytes,
             );
             x.gauge(
+                "timeless_traces_storage_bytes",
+                "Bytes of span block payload on disk — the stored side of a compression ratio; excludes indexes, WAL, and freelist.",
+                stats.bytes_on_disk,
+            );
+            x.gauge(
+                "timeless_traces_index_bytes",
+                "SQLite index bytes on disk, reported beside storage bytes and never inside a compression ratio.",
+                stats.sqlite_index_bytes,
+            );
+            x.gauge(
+                "timeless_traces_wal_bytes",
+                "SQLite write-ahead log size.",
+                clamp(stats.database_wal_bytes),
+            );
+            x.counter(
+                "timeless_traces_compression_input_bytes_total",
+                "Raw span-block bytes fed to first-pass compression; persisted in the store's _meta, so it survives restarts. Recompression (merge, duration backfill) never accrues here.",
+                stats.extension_compression_input_bytes_total,
+            );
+            x.counter(
+                "timeless_traces_compression_output_bytes_total",
+                "Compressed bytes standing in for those inputs (merges adjust this side only); persisted in the store's _meta, so it survives restarts.",
+                stats.extension_compression_output_bytes_total,
+            );
+            x.counter(
+                "timeless_traces_raw_ingested_bytes_total",
+                "Estimated raw span bytes ingested: the persisted compression input total, whose input side accrues only first-pass compression (no recompression to subtract). Survives restarts; excludes spans not yet through their first compression pass.",
+                stats.raw_ingested_bytes_total,
+            );
+            x.gauge(
                 "timeless_traces_buffered_spans",
                 "Spans buffered in memory ahead of flush.",
                 stats.buffered_spans,

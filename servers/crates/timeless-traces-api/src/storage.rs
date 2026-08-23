@@ -108,6 +108,14 @@ pub struct StorageStats {
     pub extension_optimize_raw_input_bytes: i64,
     pub extension_compression_input_bytes_total: i64,
     pub extension_compression_output_bytes_total: i64,
+    // Interim raw-ingest estimate (COMPRESSION_REPORTING_PLAN Phase 2):
+    // the persisted compression input total. Its input side accrues only
+    // first-pass compression of raw blocks — merge and duration-backfill
+    // recompression never add to it — so no recompression subtraction is
+    // needed; clamped non-negative. Durable in the extension's _meta, so
+    // it survives restarts, but it excludes spans still buffered or in
+    // raw blocks awaiting their first compression pass.
+    pub raw_ingested_bytes_total: i64,
     pub extension_optimize_raw_output_bytes: i64,
     pub extension_optimize_raw_total_ns: i64,
     pub extension_optimize_merge_groups: i64,
@@ -1489,6 +1497,7 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         extension_optimize_raw_input_bytes: integer("optimize_raw_input_bytes"),
         extension_compression_input_bytes_total: integer("compression_input_bytes_total"),
         extension_compression_output_bytes_total: integer("compression_output_bytes_total"),
+        raw_ingested_bytes_total: integer("compression_input_bytes_total").max(0),
         extension_optimize_raw_output_bytes: integer("optimize_raw_output_bytes"),
         extension_optimize_raw_total_ns: integer("optimize_raw_total_ns"),
         extension_optimize_merge_groups: integer("optimize_merge_groups"),
