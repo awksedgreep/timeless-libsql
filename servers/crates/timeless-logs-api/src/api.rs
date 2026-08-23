@@ -132,6 +132,29 @@ async fn self_metrics(State(storage): State<Storage>) -> impl IntoResponse {
                 "Entries dropped for slow live-tail subscribers.",
                 stats.tail_entries_dropped,
             );
+            x.counter(
+                "timeless_logs_compression_input_bytes_total",
+                "Block payload bytes fed into first-pass compression; \
+                 lifetime counter persisted in the database, survives \
+                 restarts.",
+                stats.compression_input_bytes_total,
+            );
+            x.counter(
+                "timeless_logs_compression_output_bytes_total",
+                "Compressed block bytes produced, net of optimize merge \
+                 savings; lifetime counter persisted in the database, \
+                 survives restarts.",
+                stats.compression_output_bytes_total,
+            );
+            x.counter(
+                "timeless_logs_raw_ingested_bytes_total",
+                "Raw ingested bytes, interim-derived from the compression \
+                 input total: counts each entry's payload once at first \
+                 compression, excludes optimize/merge recompression and \
+                 entries not yet compressed; persisted in the database, \
+                 survives restarts.",
+                stats.raw_ingested_bytes_total,
+            );
             x.gauge(
                 "timeless_logs_entries",
                 "Log entries resident in storage.",
@@ -164,12 +187,25 @@ async fn self_metrics(State(storage): State<Storage>) -> impl IntoResponse {
             );
             x.gauge(
                 "timeless_logs_disk_size_bytes",
-                "Block payload bytes on disk.",
+                "SQLite page bytes of the whole database (page count times \
+                 page size); never part of a compression ratio.",
                 stats.disk_size,
             );
             x.gauge(
                 "timeless_logs_index_size_bytes",
                 "Term index bytes on disk.",
+                stats.index_size,
+            );
+            x.gauge(
+                "timeless_logs_storage_bytes",
+                "Data block payload bytes on disk; the only stored side of \
+                 a compression ratio (excludes indexes, WAL, and freelist).",
+                stats.total_bytes,
+            );
+            x.gauge(
+                "timeless_logs_index_bytes",
+                "Term index bytes on disk, reported beside compression \
+                 series, never inside them.",
                 stats.index_size,
             );
             x.gauge(

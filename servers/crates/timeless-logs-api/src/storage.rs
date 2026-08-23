@@ -927,6 +927,7 @@ pub struct StorageStats {
     pub optimize_raw_output_bytes: i64,
     pub compression_input_bytes_total: i64,
     pub compression_output_bytes_total: i64,
+    pub raw_ingested_bytes_total: i64,
     pub optimize_raw_total_ns: i64,
     pub optimize_merge_groups: i64,
     pub optimize_merge_blocks: i64,
@@ -3978,6 +3979,18 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         optimize_raw_output_bytes: stat("optimize_raw_output_bytes"),
         compression_input_bytes_total: stat("compression_input_bytes_total"),
         compression_output_bytes_total: stat("compression_output_bytes_total"),
+        // Interim raw-ingested derivation (COMPRESSION_REPORTING_PLAN.md
+        // Phase 2). The engine's persistent compression input total already
+        // counts each entry's block payload exactly once, at first-pass
+        // compression: optimize's raw phase only processes raw-codec blocks,
+        // and merge recompression is folded into the OUTPUT side only, so
+        // there is no optimize/merge input to subtract here. Subtracting the
+        // since-open optimize_raw/merge_input_bytes profile counters from
+        // this persistent lifetime total would corrupt it after a restart.
+        // Clamped at zero; superseded by the engine's per-signal
+        // ingest_raw_bytes_total once plan Phase 1 lands. Entries still
+        // buffered or in raw (uncompressed) blocks are not counted yet.
+        raw_ingested_bytes_total: stat("compression_input_bytes_total").max(0),
         optimize_raw_total_ns: stat("optimize_raw_total_ns"),
         optimize_merge_groups: stat("optimize_merge_groups"),
         optimize_merge_blocks: stat("optimize_merge_blocks"),
