@@ -2071,3 +2071,49 @@ fn compression_totals_persist_across_reopen_and_credit_merges() {
     let reopened = SpanBlockEngine::new(Box::new(spy(&shared)), auto_config(0, 100)).unwrap();
     assert_eq!(reopened.load_compression_totals().unwrap(), (in3, out3));
 }
+
+#[test]
+fn ingest_raw_bytes_total_counts_flushed_spans_exactly_and_persists() {
+    let shared = Arc::new(MemSpanStore::new());
+    let spy = |s: &Arc<MemSpanStore>| SpyStore {
+        inner: Arc::clone(s),
+        reads: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        put_terms: Arc::new(Mutex::new(Vec::new())),
+        replace_terms: Arc::new(Mutex::new(Vec::new())),
+    };
+    let engine = SpanBlockEngine::new(Box::new(spy(&shared)), auto_config(0, 100)).unwrap();
+
+    // Buffered spans are not durable yet: nothing accrues before flush.
+    engine
+        .push(span(1, 1, None, "op", "api", 1, 0, 1_000, &[]))
+        .unwrap();
+    engine
+        .push(span(1, 2, Some(1), "op2", "db", 2, 2, 1_001, &[("k", "v")]))
+        .unwrap();
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), 0);
+
+    // Flush → 50 fixed + name + service + attributes + status message +
+    // events + resource + scope bytes per span (the span() helper fills
+    // "" / "[]" / "{}" / "{}" for the last four):
+    //   span 1: 50 + "op" (2) + "api" (3) + {} (2) + 0 + 2 + 2 + 2 = 63
+    //   span 2: 50 + "op2" (3) + "db" (2) + {"k":"v"} (9) + 0 + 2 + 2 + 2 = 70
+    engine.flush().unwrap();
+    let expected = 63 + 70;
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), expected);
+
+    // First-pass compression, then the merge tier: neither re-persists
+    // logical spans, so the lifetime total never moves.
+    engine.optimize().unwrap();
+    engine.optimize().unwrap();
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), expected);
+
+    // Prune everything: blocks vanish, the lifetime total stays.
+    engine.prune(i64::MAX).unwrap();
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), expected);
+
+    // Durable: a fresh engine over the same store reads it back.
+    drop(engine);
+    let reopened = SpanBlockEngine::new(Box::new(spy(&shared)), auto_config(0, 100)).unwrap();
+    assert_eq!(reopened.load_ingest_raw_total().unwrap(), expected);
+}

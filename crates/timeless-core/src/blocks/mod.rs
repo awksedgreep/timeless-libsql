@@ -130,6 +130,43 @@ impl LogEntry {
     pub fn is_rich(&self) -> bool {
         self.severity.is_some() || self.metadata_json.is_some()
     }
+
+    /// Logical raw bytes of this entry as the public surface returns it:
+    /// 8 (ts) + 1 (level) + message bytes + metadata JSON bytes
+    /// (`metadata_json` verbatim for rich entries, the canonical flat
+    /// `{"k":"v",...}` reconstruction the SQL boundary emits otherwise).
+    /// This is the demogen ground-truth definition (tools/demogen
+    /// drive.rs) and the raw side of every honest compression ratio.
+    pub fn raw_ingest_bytes(&self) -> u64 {
+        let metadata_bytes = match &self.metadata_json {
+            Some(json) => json.len() as u64,
+            None => flat_json_bytes(&self.metadata),
+        };
+        8 + 1 + self.message.len() as u64 + metadata_bytes
+    }
+}
+
+/// Byte length of the canonical flat JSON object the SQL boundary
+/// reconstructs from sorted string pairs (minimal escaping, same rules as
+/// the extension's pairs_to_json) — computed without building the string.
+fn flat_json_bytes(pairs: &[(String, String)]) -> u64 {
+    let mut total = 2u64; // braces
+    total += pairs.len().saturating_sub(1) as u64; // commas between pairs
+    for (k, v) in pairs {
+        // "key":"value" — four quotes and a colon around the escaped text.
+        total += 5 + json_escaped_bytes(k) + json_escaped_bytes(v);
+    }
+    total
+}
+
+fn json_escaped_bytes(s: &str) -> u64 {
+    s.chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' => 2,
+            c if (c as u32) < 0x20 => 6, // \u00XX
+            c => c.len_utf8() as u64,
+        })
+        .sum()
 }
 
 /// Where a persisted block lives. An opaque i64 id chosen by the store:

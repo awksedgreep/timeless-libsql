@@ -14,6 +14,17 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- `timeless_stats` gained a persistent `ingest_raw_bytes_total` key for logs
+  and traces: the lifetime logical row bytes made durable by flushes (ts +
+  level + message + metadata per entry; 50 fixed bytes plus every string
+  field per span — the demogen ground-truth definition). It accrues in the
+  same transaction that first persists the entries' blocks, so a rolled-back
+  ingest never counts, and optimize, merges, retention, and reopen never move
+  it. Additive stats key; no data-ABI change. Metrics deliberately has no
+  counter — its raw side is exactly `16 × total_points`.
+
 ### Fixed
 
 - With auth enabled, `POST` to the live-tail routes (`/select/logsql/tail`,

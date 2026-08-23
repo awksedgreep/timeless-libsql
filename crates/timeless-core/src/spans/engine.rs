@@ -935,6 +935,11 @@ impl SpanBlockEngine {
         let locs = self
             .store
             .put_blocks_with_duration_bounds(&blocks, &duration_bounds)?;
+        // The spans just became durable: accrue their logical raw bytes
+        // in the same host transaction as the block rows, so a rollback
+        // takes the increment with it (see persist_ingest_raw_total).
+        let raw_ingest_bytes: u64 = buf.iter().map(SpanEntry::raw_ingest_bytes).sum();
+        self.persist_ingest_raw_total(raw_ingest_bytes)?;
         {
             let mut index = self.index_lock();
             for ((block, loc), status) in blocks.iter().zip(&locs).zip(&statuses) {
@@ -1535,6 +1540,33 @@ impl SpanBlockEngine {
                 .saturating_sub(merge_in)
         );
         self.store.save_meta("compression_totals", value.as_bytes())
+    }
+
+    /// Lifetime logical raw bytes made durable by flushes in _meta — the
+    /// spans twin of BlockEngine::persist_ingest_raw_total (50 fixed +
+    /// string-field bytes per span; see SpanEntry::raw_ingest_bytes).
+    /// Same host transaction as the put_blocks call, so a rolled-back
+    /// ingest never leaks an increment; optimize, merges, and retention
+    /// never move it.
+    fn persist_ingest_raw_total(&self, added: u64) -> Result<(), String> {
+        if added == 0 {
+            return Ok(());
+        }
+        let total = self.load_ingest_raw_total()?;
+        self.store.save_meta(
+            "ingest_raw_bytes_total",
+            total.saturating_add(added).to_string().as_bytes(),
+        )
+    }
+
+    /// Parse the persisted total; absent or malformed reads as zero (a
+    /// pre-upgrade store simply starts counting from its next flush).
+    pub fn load_ingest_raw_total(&self) -> Result<u64, String> {
+        let Some(bytes) = self.store.load_meta("ingest_raw_bytes_total")? else {
+            return Ok(0);
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        Ok(text.trim().parse().unwrap_or(0))
     }
 
     /// Parse the persisted "in out" pair; absent or malformed reads as zero.

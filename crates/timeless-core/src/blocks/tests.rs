@@ -2370,6 +2370,57 @@ fn compression_totals_persist_across_reopen_and_credit_merges() {
     assert_eq!(reopened.load_compression_totals().unwrap(), (in3, out3));
 }
 
+#[test]
+fn ingest_raw_bytes_total_counts_flushed_entries_exactly_and_persists() {
+    let shared = Arc::new(MemBlockStore::new());
+    let engine = BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&[])).unwrap();
+
+    // Buffered entries are not durable yet: nothing accrues before flush.
+    engine
+        .push(entry(1_000, 1, "hello", &[("k", "v")]))
+        .unwrap();
+    engine.push(entry(1_001, 3, "boom", &[])).unwrap();
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), 0);
+
+    // Flush → 8 ts + 1 level + message + canonical metadata JSON bytes:
+    //   entry 1: 9 + "hello" (5) + {"k":"v"} (9) = 23
+    //   entry 2: 9 + "boom" (4)  + {} (2)        = 15
+    engine.flush().unwrap();
+    let mut expected = (9 + 5 + 9) + (9 + 4 + 2);
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), expected);
+
+    // Rich entries count their canonical metadata_json verbatim.
+    engine
+        .push(LogEntry {
+            ts: 2_000,
+            level: 1,
+            severity: Some("notice".into()),
+            message: "rich".into(),
+            metadata: vec![("status".into(), "202".into())],
+            metadata_json: Some("{\"status\":202}".into()),
+        })
+        .unwrap();
+    engine.flush().unwrap();
+    expected += 9 + 4 + 14; // {"status":202}
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), expected);
+
+    // First-pass compression, then the merge tier: neither re-persists
+    // logical entries, so the lifetime total never moves.
+    engine.optimize().unwrap();
+    engine.optimize().unwrap();
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), expected);
+
+    // Prune everything: blocks vanish, the lifetime total stays.
+    engine.prune(i64::MAX).unwrap();
+    assert_eq!(engine.load_ingest_raw_total().unwrap(), expected);
+
+    // Durable: a fresh engine over the same store reads it back.
+    drop(engine);
+    let reopened =
+        BlockEngine::new(Box::new(SharedStore(Arc::clone(&shared))), config(&[])).unwrap();
+    assert_eq!(reopened.load_ingest_raw_total().unwrap(), expected);
+}
+
 // ---------------------------------------------------------------------------
 // CLP-dictionary pruning (issue #2): message_contains on codec-8 blocks
 // proves absence from the template/variable dictionaries without decoding,
