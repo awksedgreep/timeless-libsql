@@ -24,8 +24,8 @@ cd tools/demogen/ext && cargo build --release  # the demo module
 
 ```text
 $ sqlite3 demo.db
-sqlite> .load ./target/release/libtimeless_ext.so
-sqlite> .load ./tools/demogen/ext/target/release/libtimeless_demogen.so
+sqlite> .load ./target/release/libtimeless_ext
+sqlite> .load ./tools/demogen/ext/target/release/libtimeless_demogen
 sqlite> PRAGMA auto_vacuum=INCREMENTAL;   -- BEFORE anything writes the file
 sqlite> PRAGMA journal_mode=WAL;
 sqlite> .timer on

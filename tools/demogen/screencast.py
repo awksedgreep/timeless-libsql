@@ -26,8 +26,8 @@ PROMPT = b"sqlite> "
 
 # (command, seconds to let the result sit on screen)
 SCRIPT = [
-    (".load ./target/release/libtimeless_ext.so", 0.8),
-    (".load ./tools/demogen/ext/target/release/libtimeless_demogen.so", 0.8),
+    (".load ./target/release/libtimeless_ext", 0.8),
+    (".load ./tools/demogen/ext/target/release/libtimeless_demogen", 0.8),
     ("PRAGMA auto_vacuum=INCREMENTAL;", 0.6),
     ("PRAGMA journal_mode=WAL;", 0.8),
     (".timer on", 0.8),

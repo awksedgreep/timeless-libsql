@@ -2,6 +2,19 @@
 
 Prereqs: Rust toolchain, stock `sqlite3`.
 
+On macOS, Apple's `/usr/bin/sqlite3` refuses to load extensions. Install a real
+one and put it first on `PATH` for the whole session — `screencast.py` resolves
+`sqlite3` through `PATH`:
+
+```sh
+brew install sqlite
+export PATH="$(brew --prefix sqlite)/bin:$PATH"
+```
+
+The `.load` lines below carry no file suffix on purpose: SQLite appends the
+platform-native one (`.so` on Linux, `.dylib` on macOS), so the same commands
+work on both.
+
 ```sh
 git clone https://github.com/awksedgreep/timeless-libsql
 cd timeless-libsql
@@ -13,8 +26,8 @@ Run the whole demo inside one sqlite3 session:
 
 ```text
 $ sqlite3 demo.db
-.load ./target/release/libtimeless_ext.so
-.load ./tools/demogen/ext/target/release/libtimeless_demogen.so
+.load ./target/release/libtimeless_ext
+.load ./tools/demogen/ext/target/release/libtimeless_demogen
 PRAGMA auto_vacuum=INCREMENTAL;    -- must come before any other write
 PRAGMA journal_mode=WAL;
 .mode list --charlimit 0 --linelimit 0
@@ -56,12 +69,20 @@ reading), so every take is pristine and identical:
 rm -f demo.db
 python3 tools/demogen/screencast.py demo.db large          # rehearse it once
 rm -f demo.db
-asciinema rec -c 'python3 tools/demogen/screencast.py demo.db large' demo.cast
+asciinema rec --window-size 120x32 \
+  -c 'python3 tools/demogen/screencast.py demo.db large' demo.cast
 agg demo.cast demo.gif      # optional: gif/video for the blog post
 ```
 
-Record at 120x32 or larger (the driver sets that pty size). The tour:
-seed, series count, the incident error-bucket ramp, error logs, the
+Pass `--window-size` explicitly. The driver sets its inner pty to 120x32 so
+sqlite3 formats for that width, but asciinema records at its own geometry —
+and asciinema 3.x *silently ignores* `--cols`/`--rows`, so a mis-flagged take
+looks fine until the 80-column playback wraps every table.
+
+`agg` caps idle gaps at 5s by default, which is why the GIF runs shorter than
+the recording.
+
+The tour: seed, series count, the incident error-bucket ramp, error logs, the
 log→trace pivot, and the storage report. Edit the `SCRIPT` list at the
 top of screencast.py to change the shots.
 

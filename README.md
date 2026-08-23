@@ -26,6 +26,28 @@ CREATE VIRTUAL TABLE traces USING timeless_traces(
 );
 ```
 
+## The two-minute tour
+
+![Seeding 37.6M rows of correlated telemetry into one SQLite file, then querying
+the incident and reading the compression report](docs/images/demo.gif)
+
+Everything above happens inside a single `sqlite3` session against one `.db`
+file — no server, no daemon, no sidecar. The tour seeds a synthetic fleet with
+an incident baked into the middle third of the window, counts the error ramp
+out of a 5-minute bucket, pivots from an error log to its trace, and prints the
+storage report:
+
+```text
+  metrics     29,700,000 samples  raw    475 MB -> stored   59.7 MB  (  8.0x, 2.0 B/sample)
+  logs         5,000,000 entries  raw    541 MB -> stored   42.2 MB  ( 12.8x, 8.4 B/entry)
+  traces       2,880,684 spans    raw    721 MB -> stored   80.2 MB  (  9.0x, 27.8 B/span)
+  total    raw 1737 MB -> stored 182 MB (9.5x); indexes 74.5 MB
+```
+
+37.6M rows ingested and queried in under two minutes on a laptop. Run it
+yourself with [the demo quickstart](tools/demogen/QUICKSTART.md) — the
+generator is a second loadable extension, so the whole tour is SQL.
+
 ## Current status
 
 The project is on the pre-1.0 `0.7.x` compatibility line. Extension and Rust
