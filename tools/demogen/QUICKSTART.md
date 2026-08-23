@@ -17,6 +17,7 @@ $ sqlite3 demo.db
 .load ./tools/demogen/ext/target/release/libtimeless_demogen.so
 PRAGMA auto_vacuum=INCREMENTAL;    -- must come before any other write
 PRAGMA journal_mode=WAL;
+.mode list --charlimit 0 --linelimit 0
 .timer on
 SELECT timeless_demo('seed','large');   -- ~245k series, 5M logs, ~3M spans
 ```
