@@ -63,18 +63,21 @@ Purely additive stats keys: no data-ABI or SQL-surface bump.
 For each plane, add to both the Prometheus `/metrics` exposition and the
 stats JSON endpoint:
 
-- [ ] `timeless_<signal>_storage_bytes` (logs/traces are missing it;
-      metrics already has it)
-- [ ] `timeless_<signal>_index_bytes`
-- [ ] `timeless_<signal>_raw_ingested_bytes_total` (Phase 1 counter;
-      until it lands, logs/traces use `compression_input_bytes_total`
-      directly — persistent, first-pass-only, no subtraction — and
-      metrics uses `16 × total_points`)
-- [ ] logs/traces: add `wal_bytes` gauge (metrics already exports it)
-- [ ] Extend each plane's `storage_contract.rs` to assert the exposition
-      keys exist and reconcile against `timeless_stats` on a seeded db.
-- [ ] Plane READMEs + `docs/SERVER_API_REFERENCE.md`. ⚠ Those files have
-      uncommitted local edits in flight — coordinate before touching.
+- [x] `timeless_<signal>_storage_bytes` (all three planes)
+- [x] `timeless_<signal>_index_bytes` (all three planes; logs/traces
+      keep their pre-existing `*_index_size_bytes` aliases for scraper
+      compatibility — candidates for later deprecation)
+- [x] `timeless_<signal>_raw_ingested_bytes_total` (interim: logs and
+      traces use `compression_input_bytes_total` directly — persistent,
+      first-pass-only, no subtraction; metrics uses `16 × total_points`,
+      lifetime-accurate from durable counts)
+- [x] logs/traces: compression input/output counters exported;
+      `wal_bytes` present on all three planes
+- [x] Each plane's `storage_contract.rs` asserts the exposition keys and
+      reconciles exactly against `timeless_stats` (traces suite: 9 tests;
+      logs gained its first storage_contract.rs; metrics: 95).
+- [x] Plane READMEs done. Remaining: `docs/SERVER_API_REFERENCE.md`
+      needs the new series documented (single coordinated docs pass).
 
 ## Phase 3 — downstream dashboards (separate repos)
 
