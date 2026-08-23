@@ -1,0 +1,11 @@
+# Pure generator logic shared by the demogen CLI (bundled-sqlite binary)
+# and the demogen loadable extension (cdylib). Deliberately dependency-free
+# so both consumers can pick their own — incompatible — rusqlite builds.
+[workspace]
+
+[package]
+name = "demogen-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false

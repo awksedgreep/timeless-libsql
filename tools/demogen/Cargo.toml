@@ -1,0 +1,31 @@
+# Standalone tool (detached from the parent workspace on purpose, same as
+# tools/bench and tools/query-harness): rusqlite's "bundled" feature
+# compiles its own SQLite so the generator works on any host, and keeping
+# the crate out of the workspace keeps that C build — and this whole tool —
+# out of every ordinary `cargo build` of the extension and servers.
+[workspace]
+# core/ and ext/ are their own standalone roots (ext needs an
+# incompatible rusqlite build), not members of this one.
+exclude = ["core", "ext"]
+
+[package]
+name = "timeless-demogen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "timeless-demogen"
+path = "src/main.rs"
+
+[dependencies]
+# bundled         = compile SQLite in, ignore the system library
+# load_extension  = expose sqlite3_load_extension so we can .so-load
+#                   the timeless extension we are seeding through
+rusqlite = { version = "0.40", features = ["bundled", "load_extension"] }
+demogen-core = { path = "core" }
+
+[profile.release]
+lto = true
+codegen-units = 1

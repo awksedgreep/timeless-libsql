@@ -1,0 +1,26 @@
+# The demogen LOADABLE EXTENSION: `.load ./libtimeless_demogen.so` next to
+# the telemetry artifact and drive everything from the sqlite3 prompt via
+# SELECT timeless_demo(...). Standalone workspace like the CLI, and it must
+# stay a separate crate: rusqlite's `loadable_extension` build (routes every
+# sqlite3_* call through the host's api-routines table, links no SQLite) is
+# incompatible with the CLI's `bundled` build.
+[workspace]
+
+[package]
+name = "timeless-demogen-ext"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "timeless_demogen"
+crate-type = ["cdylib"]
+
+[dependencies]
+demogen-core = { path = "../core" }
+rusqlite = { version = "0.40", features = ["loadable_extension", "functions"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
