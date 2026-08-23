@@ -15518,6 +15518,9 @@ async fn self_metrics_exposes_prometheus_families() {
         "# TYPE timeless_metrics_completed_points_total counter",
         "# TYPE timeless_metrics_import_errors_total counter",
         "# TYPE timeless_metrics_series gauge",
+        "# TYPE timeless_metrics_storage_bytes gauge",
+        "# TYPE timeless_metrics_raw_ingested_bytes gauge",
+        "# TYPE timeless_metrics_index_bytes gauge",
         "# TYPE timeless_metrics_database_file_bytes gauge",
         "# TYPE timeless_metrics_wal_bytes gauge",
         "# TYPE timeless_metrics_oldest_queued_ms gauge",
@@ -15525,4 +15528,100 @@ async fn self_metrics_exposes_prometheus_families() {
         assert!(text.contains(family), "missing {family} in:\n{text}");
     }
     storage.shutdown().await.unwrap();
+}
+
+/// The compression-reporting invariant: raw is 16 bytes per stored sample
+/// (8-byte timestamp + 8-byte value; series identity is the amortized
+/// catalog), stored is chunk payload only, and index bytes are reported
+/// beside the ratio, never inside it.
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn compression_reporting_derives_raw_bytes_and_reconciles_index_bytes() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("compression.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+
+    // Cross the 4,096-point flush threshold so points sit on disk and in
+    // the write buffer at once; raw bytes must count both sides.
+    storage
+        .submit_named_batch(named_batch(4_096, 1_700_000_000), 4_096)
+        .await
+        .unwrap();
+    storage
+        .submit_named_batch(named_batch(10, 1_700_004_096), 10)
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+
+    let stats = get_json(&app, "/select/metrics/stats").await;
+    assert_eq!(stats.0, StatusCode::OK);
+    assert_eq!(stats.1["disk_points"], 4_096);
+    assert_eq!(stats.1["buffered_points"], 10);
+    assert_eq!(stats.1["total_points"], 4_106);
+    assert_eq!(stats.1["raw_ingested_bytes"], 16 * 4_106);
+    assert!(stats.1["sqlite_index_bytes"].as_i64().unwrap() > 0);
+
+    // Flush so the exposition reflects a fully durable database; a flush
+    // moves points to disk, it never mints or drops them, so raw bytes
+    // must not move.
+    let flush = post_json(&app, "/api/v1/flush").await;
+    assert_eq!(flush.0, StatusCode::OK);
+    assert_eq!(flush.1["status"], "ok");
+
+    let response = app
+        .clone()
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let exposed = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("missing {name} in:\n{text}"))
+            .parse::<i64>()
+            .unwrap()
+    };
+    assert_eq!(
+        exposed("timeless_metrics_raw_ingested_bytes"),
+        16 * 4_106,
+        "raw must be exactly 16 bytes per stored sample"
+    );
+    let exposed_index = exposed("timeless_metrics_index_bytes");
+    assert!(exposed_index > 0);
+    assert!(exposed("timeless_metrics_storage_bytes") > 0);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    // The exposed index gauge must reconcile with the engine's own public
+    // accounting on the same database.
+    let conn = open_with_extension(&database, &extension);
+    let engine_index: i64 = conn
+        .query_row(
+            "SELECT value FROM timeless_stats('metric_samples') WHERE key = 'index_bytes'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(exposed_index, engine_index);
+    let engine_disk_points: i64 = conn
+        .query_row(
+            "SELECT value FROM timeless_stats('metric_samples') WHERE key = 'disk_points'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(engine_disk_points, 4_106);
 }

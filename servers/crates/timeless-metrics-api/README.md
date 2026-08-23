@@ -31,6 +31,24 @@ The exact public storage contract is in the
 - SIGINT/SIGTERM stops admission, drains accepted work, flushes, checkpoints
   WAL, closes workers, and releases the exclusive owner lease.
 
+## Storage observability
+
+`GET /metrics` (Prometheus exposition) and `GET /select/metrics/stats` (JSON)
+publish the honest storage split:
+
+- `timeless_metrics_storage_bytes` (`bytes_on_disk` in JSON) is chunk payload
+  bytes on disk — the only stored side of a compression ratio.
+- `timeless_metrics_raw_ingested_bytes` (`raw_ingested_bytes`) is the raw
+  comparator at the standard 16 bytes per sample (8-byte timestamp + 8-byte
+  value; series identity is the amortized catalog, not the row). It derives
+  from durable point counts — disk plus buffered — so it stays
+  lifetime-accurate across restarts.
+- `timeless_metrics_index_bytes` (`sqlite_index_bytes`) is SQLite index
+  bytes, reported beside a compression ratio, never inside it.
+- `timeless_metrics_database_file_bytes`, `timeless_metrics_wal_bytes`, and
+  `timeless_metrics_freelist_bytes` are operational series and are never part
+  of a compression number.
+
 ## HTTP surface
 
 The server provides:
