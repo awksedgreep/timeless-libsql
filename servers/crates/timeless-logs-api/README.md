@@ -37,6 +37,7 @@ The exact public storage contract is in the
 The server provides:
 
 - `GET /live`, `/ready`, and `/health`;
+- `GET /metrics` for Prometheus self-metrics;
 - `POST /insert/jsonline` for rich NDJSON ingestion;
 - `GET|POST /select/logsql/query` for native parameters and strict LogsQL;
 - `GET /select/logsql/field_values` and `/select/logsql/stats`;
@@ -45,6 +46,30 @@ The server provides:
 
 See the [server API reference](../../../docs/SERVER_API_REFERENCE.md#complete-route-inventory)
 for exact methods, scopes, parameters, and envelopes.
+
+## Storage and compression series
+
+`GET /metrics` and `GET /select/logsql/stats` publish the storage split as
+separate series so a compression ratio is never blended with operational
+bytes:
+
+- `timeless_logs_storage_bytes` — data block payload bytes on disk, the only
+  stored side of a compression ratio (JSON `total_bytes`);
+- `timeless_logs_index_bytes` — term index bytes on disk, reported beside
+  compression series, never inside them (JSON `index_size`; also exported as
+  the pre-existing `timeless_logs_index_size_bytes`);
+- `timeless_logs_wal_bytes`, `timeless_logs_freelist_bytes`, and
+  `timeless_logs_database_file_bytes` — operational gauges, never part of a
+  compression number;
+- `timeless_logs_compression_input_bytes_total` and
+  `timeless_logs_compression_output_bytes_total` — lifetime byte counters
+  persisted inside the database (they survive restarts); the input side
+  counts each entry's block payload once at first-pass compression, and the
+  output side is net of optimize merge savings;
+- `timeless_logs_raw_ingested_bytes_total` — interim raw-side counter derived
+  from the compression input total (JSON `raw_ingested_bytes_total`); it
+  excludes optimize/merge recompression and does not yet include buffered or
+  still-raw entries.
 
 ## LogsQL compatibility
 
