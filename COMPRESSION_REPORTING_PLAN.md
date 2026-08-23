@@ -18,10 +18,16 @@ Context (found 2026-08-23, while building the demogen report):
 - The metrics plane exports the clean stored split
   (`timeless_metrics_storage_bytes`, file/wal/freelist as separate
   gauges) but no raw side, so no ratio there either.
-- `compression_input_bytes_total` re-accrues on every optimize/merge
-  recompression, so it slowly overstates raw on a long-lived database
-  (the optimize inputs are broken out and can be subtracted, but a
-  dedicated ingest counter is cleaner).
+- `compression_input/output_bytes_total` are PERSISTENT (stored in the
+  extension `_meta` since 0.6.2/0.6.3, updated in the same transaction
+  as each optimize swap), and the input side accrues only first-pass
+  compression of raw blocks — merges adjust the output side only. So
+  the counter is already a lifetime-honest raw proxy; note it measures
+  pre-codec columnar block bytes, which is close to but not exactly the
+  logical-row definition below (a dedicated ingest counter remains the
+  definition-exact fix). The `optimize_*_input_bytes` breakouts are
+  in-memory since-open profile counters — never mix them with the
+  persistent totals. (Verified in-engine 2026-08-23.)
 
 ## Invariant: the measurement definition
 
@@ -61,9 +67,9 @@ stats JSON endpoint:
       metrics already has it)
 - [ ] `timeless_<signal>_index_bytes`
 - [ ] `timeless_<signal>_raw_ingested_bytes_total` (Phase 1 counter;
-      until it lands, logs/traces may interim-derive
-      `compression_input − optimize/merge inputs`, metrics
-      `16 × total_points`)
+      until it lands, logs/traces use `compression_input_bytes_total`
+      directly — persistent, first-pass-only, no subtraction — and
+      metrics uses `16 × total_points`)
 - [ ] logs/traces: add `wal_bytes` gauge (metrics already exports it)
 - [ ] Extend each plane's `storage_contract.rs` to assert the exposition
       keys exist and reconcile against `timeless_stats` on a seeded db.
@@ -97,13 +103,12 @@ Grafana boards:
 
 ## Open questions
 
-1. **Counter persistence.** Existing compression counters are
-   in-memory-since-open; a lifetime-honest raw counter would need a row
-   in `*_meta`. Recommendation: persist it (one integer per signal,
-   updated with the same transactions as ingest) — window-delta
-   dashboards work either way, but lifetime ratios survive restarts and
-   match `report` forever. If persistence is declined, document that
-   ratios are since-open.
+1. **Counter persistence.** Partially answered: the engine already
+   persists `compression_*_bytes_total` in `_meta` (the
+   `compression_totals` row). The Phase 1 `ingest_raw_bytes_total`
+   counter should follow that exact pattern — one integer per signal,
+   updated in the same transactions — so lifetime ratios survive
+   restarts and match `report` forever.
 2. **Span raw convention.** Per-span resource/scope strings are counted
    per row (the denormalized shape the vtab returns, same convention the
    Victoria/Tempo family quotes). Alternative (OTLP wire batches share
