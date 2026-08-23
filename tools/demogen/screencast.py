@@ -24,26 +24,34 @@ DB = sys.argv[1] if len(sys.argv) > 1 else "demo.db"
 PROFILE = sys.argv[2] if len(sys.argv) > 2 else "medium"
 PROMPT = b"sqlite> "
 
-# (command, seconds to let the result sit on screen)
+# (command, seconds to let the result sit on screen[, typing pace])
+#
+# Pace 0 pastes the line in one write instead of typing it. The setup lines
+# are load/pragma boilerplate nobody needs to watch being typed, and at full
+# pace they burned ~15s before the seed even started — long enough to lose a
+# viewer before the demo begins. Everything from the seed on types normally.
 SCRIPT = [
-    (".load ./target/release/libtimeless_ext", 0.8),
-    (".load ./tools/demogen/ext/target/release/libtimeless_demogen", 0.8),
-    ("PRAGMA auto_vacuum=INCREMENTAL;", 0.6),
-    ("PRAGMA journal_mode=WAL;", 0.8),
-    (".timer on", 0.8),
+    (".load ./target/release/libtimeless_ext", 0.25, 0),
+    (".load ./tools/demogen/ext/target/release/libtimeless_demogen", 0.25, 0),
+    ("PRAGMA auto_vacuum=INCREMENTAL;", 0.2, 0),
+    ("PRAGMA journal_mode=WAL;", 0.3, 0),
+    (".timer on", 0.2, 0),
     # list mode prints the multi-line seed/report text verbatim; box mode
     # would truncate it into one squashed cell.
-    (".mode list --charlimit 0 --linelimit 0", 0.5),
+    (".mode list --charlimit 0 --linelimit 0", 0.2, 0),
     (f"SELECT timeless_demo('seed','{PROFILE}');", 6.0),
     (".mode box", 0.5),
     ("SELECT count(*) AS series FROM timeless_series('metrics');", 2.5),
-    # The incident jumps out of a per-bucket error count.
-    ("SELECT bucket_ts, n FROM timeless_log_buckets('logs','level',"
+    # The incident jumps out of a per-bucket error count. Log timestamps are
+    # in the table's persisted unit (ms by default), so /1000 before
+    # 'unixepoch'; time-of-day alone keeps the ramp scannable.
+    ("SELECT strftime('%H:%M', bucket_ts/1000, 'unixepoch') AS bucket, n "
+     "FROM timeless_log_buckets('logs','level',"
      "'{\"service\":\"auth\",\"level\":\"error\"}',"
      "(SELECT min(min_ts) FROM timeless_series('metrics')),"
      "(SELECT max(max_ts) FROM timeless_series('metrics')), 300000);", 4.0),
-    ("SELECT ts, message FROM logs WHERE service='auth' AND level='error' "
-     "ORDER BY ts DESC LIMIT 5;", 3.5),
+    ("SELECT datetime(ts/1000,'unixepoch') AS time, message FROM logs "
+     "WHERE service='auth' AND level='error' ORDER BY ts DESC LIMIT 5;", 3.5),
     # Log -> trace pivot: error logs carry real trace ids.
     ("SELECT json_extract(metadata,'$.trace_id') AS trace_id FROM logs "
      "WHERE level='error' AND json_extract(metadata,'$.trace_id') IS NOT NULL "
@@ -53,11 +61,15 @@ SCRIPT = [
 ]
 
 
-def type_line(fd, line):
-    for ch in line:
-        os.write(fd, ch.encode())
-        time.sleep(random.uniform(0.015, 0.045))
-    time.sleep(0.25)
+def type_line(fd, line, pace=1.0):
+    if pace <= 0:
+        os.write(fd, line.encode())
+        time.sleep(0.08)
+    else:
+        for ch in line:
+            os.write(fd, ch.encode())
+            time.sleep(random.uniform(0.015, 0.045) * pace)
+        time.sleep(0.25)
     os.write(fd, b"\r")
 
 
@@ -89,9 +101,10 @@ def main():
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
     try:
         pump_until_prompt(fd)
-        for command, dwell in SCRIPT:
-            time.sleep(0.6)
-            type_line(fd, command)
+        for command, dwell, *rest in SCRIPT:
+            pace = rest[0] if rest else 1.0
+            time.sleep(0.6 if pace else 0.15)
+            type_line(fd, command, pace)
             pump_until_prompt(fd)
             time.sleep(dwell)
         time.sleep(1.0)
