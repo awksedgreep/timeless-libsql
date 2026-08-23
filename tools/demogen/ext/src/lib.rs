@@ -227,6 +227,18 @@ fn fmt_count(n: usize) -> String {
     out
 }
 
+/// `HH:MM` UTC from unix milliseconds.
+///
+/// The seeded window is an hour at most and is always anchored to "now", so
+/// the time of day is the only part that carries information — which means no
+/// calendar arithmetic and no date dependency. The raw millisecond bounds are
+/// still printed alongside, because those are what you paste back into a
+/// bucket or range query.
+fn fmt_hhmm(ms: i64) -> String {
+    let secs_of_day = ms.div_euclid(1000).rem_euclid(86_400);
+    format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
+}
+
 fn ensure_tables(conn: &Connection) -> std::result::Result<(), String> {
     // Best-effort on a fresh database: incremental auto_vacuum lets
     // `report` return freed pages to the OS view of the file. Both can
@@ -445,7 +457,8 @@ fn seed_cmd(conn: &Connection, profile_name: &str, seed: u64) -> std::result::Re
          \x20 traces:  {} spans in {:.1}s ({:.0}k spans/s)\n\
          \x20 publish: {:.1}s (flush + compact + optimize)\n\
          {report}\n\
-         \x20 window:  {} .. {} (unix ms), incident on '{}' {} .. {}\n\
+         \x20 window:  {} .. {} UTC, incident on '{}' {} .. {}\n\
+         \x20 bounds:  {} .. {} (unix ms)\n\
          next: SELECT timeless_demo('info');",
         fmt_count(catalog.len()),
         cfg.services,
@@ -460,11 +473,13 @@ fn seed_cmd(conn: &Connection, profile_name: &str, seed: u64) -> std::result::Re
         trace_secs,
         traces_t.items as f64 / trace_secs.max(1e-9) / 1e3,
         publish_secs,
+        fmt_hhmm(cfg.start_ms()),
+        fmt_hhmm(cfg.end_ms),
+        cfg.service_name(cfg.incident().service),
+        fmt_hhmm(cfg.incident().start_ms),
+        fmt_hhmm(cfg.incident().end_ms),
         cfg.start_ms(),
         cfg.end_ms,
-        cfg.service_name(cfg.incident().service),
-        cfg.incident().start_ms,
-        cfg.incident().end_ms,
     ))
 }
 
