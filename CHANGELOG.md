@@ -25,6 +25,25 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   it. Additive stats key; no data-ABI change. Metrics deliberately has no
   counter — its raw side is exactly `16 × total_points`.
 
+- **All three signal servers now export the honest storage split.** Each
+  plane's `/metrics` exposition and stats JSON publish, as separate series:
+  `timeless_<signal>_storage_bytes` (engine data-block payload only),
+  `timeless_<signal>_index_bytes`, `timeless_<signal>_wal_bytes`, and a raw
+  comparator — `timeless_metrics_raw_ingested_bytes` (16 B x total points)
+  and `timeless_logs|traces_raw_ingested_bytes_total` (the engine's
+  persisted ingest-raw counter). Logs and traces additionally export their
+  persisted `compression_input|output_bytes_total`. A compression ratio is
+  raw versus storage bytes; index, WAL, freelist, and whole-file sizes are
+  operational series and never part of one. Additive gauges; storage
+  contract tests reconcile every value against the public `timeless_stats`
+  surface. (Pre-existing `*_disk_size_bytes` / `*_index_size_bytes` gauges
+  are unchanged for scraper compatibility.)
+
+- `tools/demogen`: on-demand synthetic telemetry for demos — a detached
+  CLI plus a `libtimeless_demogen` loadable extension driving seed /
+  tick / follow / report from a sqlite3 prompt through the public Tier 2
+  batch surface. Repo tooling only; not part of the release artifacts.
+
 ### Fixed
 
 - With auth enabled, `POST` to the live-tail routes (`/select/logsql/tail`,
