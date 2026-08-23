@@ -446,6 +446,19 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 stats.bytes_on_disk,
             );
             x.gauge(
+                "timeless_metrics_raw_ingested_bytes",
+                "Raw bytes of all stored points at the standard 16 bytes per \
+                 sample (8-byte timestamp + 8-byte value); the honest \
+                 comparator for timeless_metrics_storage_bytes.",
+                stats.raw_ingested_bytes,
+            );
+            x.gauge(
+                "timeless_metrics_index_bytes",
+                "SQLite index bytes beside the chunk payload; never part of \
+                 a compression ratio.",
+                stats.sqlite_index_bytes,
+            );
+            x.gauge(
                 "timeless_metrics_queued_batches",
                 "Batches waiting in the write queue.",
                 clamp(stats.queued_batches),

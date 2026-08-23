@@ -59,6 +59,11 @@ pub struct StorageStats {
     pub total_points: i64,
     pub bytes_on_disk: i64,
     pub bytes_per_point: f64,
+    // The raw comparator for compression reporting: 16 bytes per sample
+    // (8-byte timestamp + 8-byte value; series identity is the amortized
+    // catalog, not the row). Derived from durable point counts, so it is
+    // lifetime-accurate across restarts, unlike since-open counters.
+    pub raw_ingested_bytes: i64,
     pub buffer_memory_bytes: i64,
     pub oldest_timestamp_seconds: Option<i64>,
     pub newest_timestamp_seconds: Option<i64>,
@@ -1350,6 +1355,7 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
     let sqlite_index_bytes = integer("index_bytes");
     let disk_points = integer("disk_points");
     let buffered_points = integer("buffered_points");
+    let total_points = disk_points.saturating_add(buffered_points);
     Ok(StorageStats {
         module: text("module").unwrap_or_else(|| "metrics".into()),
         rollup_tiers: text("rollup_tiers"),
@@ -1359,9 +1365,10 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
         rollup_chunks: rollup_entries,
         disk_points,
         buffered_points,
-        total_points: disk_points.saturating_add(buffered_points),
+        total_points,
         bytes_on_disk: integer("bytes_on_disk"),
         bytes_per_point: real("bytes_per_point"),
+        raw_ingested_bytes: total_points.saturating_mul(16),
         buffer_memory_bytes: integer("buffer_memory"),
         oldest_timestamp_seconds: optional_integer(values.get("ts_min")),
         newest_timestamp_seconds: optional_integer(values.get("ts_max")),
