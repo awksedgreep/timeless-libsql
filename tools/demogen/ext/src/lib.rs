@@ -75,13 +75,23 @@ const INFO: &str = r#"timeless_demo — synthetic telemetry, generated in-sessio
         medium ≈ 35k series,   2M logs,   ~1M spans, 60 min
         large  ≈ 245k series,  5M logs,   ~3M spans, 60 min
 
-      Bring your own tables: create any timeless vtables you like BEFORE
-      seeding and those get filled — your names, your creation arguments,
-      and only the signals you created. Nothing is created for you and no
-      other signal is generated:
-        CREATE VIRTUAL TABLE my_metrics USING timeless_metrics(retention='14d');
-        SELECT timeless_demo('seed','small');   -- metrics only, into my_metrics
-      Declare nothing and you get the full three-signal demo as before.
+  SELECT timeless_demo('seed', 'small', 'web_server_metrics');
+      Name the table(s) to fill and the generator fills exactly those —
+      your names, your creation arguments, nothing created, nothing
+      inferred. Comma-separate to name more than one, at most one table
+      per signal:
+        CREATE VIRTUAL TABLE web_server_metrics USING timeless_metrics;
+        SELECT timeless_demo('seed','small','web_server_metrics');
+        SELECT timeless_demo('seed','small','my_metrics, app_logs');
+      The seed integer and the table list are told apart by type, so
+      ('seed','small',7) and ('seed','small',7,'my_metrics') both work.
+
+      Name nothing and the tables are inferred: any timeless vtables
+      already in the database are used, and if there are none the full
+      three-signal demo is created for you.
+
+      Seeding refuses any table that already holds data — synthetic
+      telemetry cannot be removed from an append-only table afterwards.
       Seeding logs without traces is fine; those error logs simply carry
       no trace_id, because there are no spans to point at.
 
@@ -124,12 +134,30 @@ fn dispatch(ctx: &Context) -> std::result::Result<String, String> {
             } else {
                 "medium".to_string()
             };
-            let seed: i64 = if ctx.len() > 2 {
-                ctx.get(2).map_err(|e| e.to_string())?
-            } else {
-                42
-            };
-            seed_cmd(&conn, &profile_name, seed as u64)
+            // Trailing arguments are order-free and told apart by type: an
+            // integer is the RNG seed, text is the target table list. That
+            // keeps the old ('seed', profile, seed_int) form working while
+            // letting a caller name the tables to fill.
+            let mut seed: u64 = 42;
+            let mut targets: Option<String> = None;
+            for i in 2..ctx.len() {
+                use rusqlite::types::ValueRef;
+                match ctx.get_raw(i) {
+                    ValueRef::Integer(v) => seed = v as u64,
+                    ValueRef::Text(_) => {
+                        targets = Some(ctx.get::<String>(i).map_err(|e| e.to_string())?)
+                    }
+                    ValueRef::Null => {}
+                    other => {
+                        return Err(format!(
+                            "seed argument {} must be an integer seed or a table list, got {:?}",
+                            i + 1,
+                            other.data_type()
+                        ))
+                    }
+                }
+            }
+            seed_cmd(&conn, &profile_name, seed, targets.as_deref())
         }
         "tick" => {
             let secs: i64 = if ctx.len() > 1 { ctx.get(1).map_err(|e| e.to_string())? } else { 15 };
@@ -373,6 +401,78 @@ fn discover_tables(conn: &Connection) -> std::result::Result<Tables, String> {
     Ok(found)
 }
 
+/// Resolve an explicit, caller-supplied target list: `'web_server_metrics'`
+/// or `'my_metrics, app_logs'`.
+///
+/// Every name must already exist and be a timeless vtable. Nothing is created
+/// and nothing is inferred — naming the target is the unambiguous way to say
+/// where the data goes.
+fn resolve_named(conn: &Connection, list: &str) -> std::result::Result<Tables, String> {
+    let mut out = Tables::default();
+    for raw in list.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(sql) = sql else {
+            return Err(format!(
+                "no table named '{name}' in this database — create it first, \
+                 e.g. CREATE VIRTUAL TABLE {name} USING timeless_metrics;"
+            ));
+        };
+        let slot = match module_of(&sql).as_deref() {
+            Some("timeless_metrics") => &mut out.metrics,
+            Some("timeless_logs") => &mut out.logs,
+            Some("timeless_traces") => &mut out.spans,
+            Some(other) => {
+                return Err(format!(
+                    "'{name}' is a {other} table, not a timeless signal table"
+                ))
+            }
+            None => return Err(format!("'{name}' is not a virtual table")),
+        };
+        if let Some(taken) = slot.replace(name.to_string()) {
+            return Err(format!(
+                "'{taken}' and '{name}' are both the same signal — name at most one table per signal"
+            ));
+        }
+    }
+    if !out.any() {
+        return Err("no target tables named".into());
+    }
+    Ok(out)
+}
+
+/// Refuse to seed into a table that already holds data.
+///
+/// Synthetic telemetry appended to a real table cannot be taken back out —
+/// these tables are append-only. A vtable the caller just created is empty,
+/// so this never blocks the intended path.
+fn refuse_if_populated(conn: &Connection, tables: &Tables) -> std::result::Result<(), String> {
+    for name in [&tables.metrics, &tables.logs, &tables.spans].into_iter().flatten() {
+        let occupied: Option<i64> = conn
+            .query_row(&format!("SELECT 1 FROM {name} LIMIT 1"), [], |r| r.get(0))
+            .optional()
+            .map_err(|e| format!("checking whether {name} is empty: {e}"))?;
+        if occupied.is_some() {
+            return Err(format!(
+                "'{name}' already contains data — demogen will not mix synthetic telemetry \
+                 into an existing table, and these tables are append-only. Seed into an \
+                 empty table or a scratch database file."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Decide which tables this seed will fill, creating the demo defaults only
 /// when the database declares none of its own.
 fn resolve_tables(conn: &Connection) -> std::result::Result<Tables, String> {
@@ -500,7 +600,12 @@ fn flush_all(conn: &Connection, tables: &Tables) -> std::result::Result<(), Stri
 // seed
 // ---------------------------------------------------------------------------
 
-fn seed_cmd(conn: &Connection, profile_name: &str, seed: u64) -> std::result::Result<String, String> {
+fn seed_cmd(
+    conn: &Connection,
+    profile_name: &str,
+    seed: u64,
+    targets: Option<&str>,
+) -> std::result::Result<String, String> {
     if load_state(conn)?.is_some() {
         return Err(
             "this database is already seeded — use timeless_demo('tick'/'follow'), \
@@ -511,7 +616,11 @@ fn seed_cmd(conn: &Connection, profile_name: &str, seed: u64) -> std::result::Re
     let Some(spec) = profile(profile_name) else {
         return Err(format!("unknown profile '{profile_name}' (small|medium|large)"));
     };
-    let tables = resolve_tables(conn)?;
+    let tables = match targets {
+        Some(list) => resolve_named(conn, list)?,
+        None => resolve_tables(conn)?,
+    };
+    refuse_if_populated(conn, &tables)?;
 
     let cfg = spec.config(seed, now_ms());
     let incident = cfg.incident();
