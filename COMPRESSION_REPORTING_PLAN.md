@@ -53,13 +53,17 @@ Purely additive stats keys: no data-ABI or SQL-surface bump.
 - [x] metrics: RESOLVED as no-counter-needed — `16 × total_points` from
       durable point counts IS the definition, exactly, so the Phase 2
       derivation is already lifetime-accurate. Nothing to add.
-- [ ] logs: ts+level+message+metadata per entry, accrued when entries
-      become durable (same transaction as the block write).
-- [ ] traces: fixed 50 B + string fields per span, same accrual point.
-- [ ] Persistence: follow the `compression_totals` `_meta` pattern
-      (decided; see resolved open question 1).
-- [ ] Unit coverage: ingest N known rows, assert exact counter values;
-      optimize/prune must not move it; reopen must preserve it.
+- [x] logs: ts+level+message+metadata per entry, accrued in the same
+      transaction as the block write (blocks/engine.rs flush hook).
+- [x] traces: fixed 50 B + string fields per span, same accrual point
+      (spans/engine.rs).
+- [x] Persistence: `compression_totals` `_meta` pattern; rollback-safe,
+      monotonic under optimize/merge/prune, restart-safe.
+- [x] Unit coverage in both engines: exact hand-computed totals,
+      optimize×2/prune leave it unchanged, reopen preserves it.
+- [x] End-to-end ground truth: on a demogen-seeded db the engine counter
+      equals demogen's generation-side count byte-for-byte (logs
+      21,225,007; spans 47,584,437 on the small profile).
 
 ## Phase 2 — servers: export the honest series (all three planes)
 
@@ -70,10 +74,10 @@ stats JSON endpoint:
 - [x] `timeless_<signal>_index_bytes` (all three planes; logs/traces
       keep their pre-existing `*_index_size_bytes` aliases for scraper
       compatibility — candidates for later deprecation)
-- [x] `timeless_<signal>_raw_ingested_bytes_total` (interim: logs and
-      traces use `compression_input_bytes_total` directly — persistent,
-      first-pass-only, no subtraction; metrics uses `16 × total_points`,
-      lifetime-accurate from durable counts)
+- [x] `timeless_<signal>_raw_ingested_bytes_total` — logs and traces now
+      serve the engine's `ingest_raw_bytes_total` directly (the interim
+      compression-input derivation is retired); metrics stays on
+      `16 × total_points`, lifetime-accurate from durable counts.
 - [x] logs/traces: compression input/output counters exported;
       `wal_bytes` present on all three planes
 - [x] Each plane's `storage_contract.rs` asserts the exposition keys and
