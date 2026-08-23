@@ -628,6 +628,37 @@ a complete retention story in two lines of SQL.
 Dropping a table cleans up after itself — `DROP TABLE metrics` removes all
 of its shadow storage.
 
+### Keeping the file size honest
+
+`optimize`, `compact`, and `prune` all free pages, but SQLite only returns
+freed pages to the operating system if auto-vacuum is on — and the pragma
+silently does nothing unless it runs **before anything writes the file**
+(even switching to WAL writes page 1). On a fresh database, in this order:
+
+```sql
+PRAGMA auto_vacuum = INCREMENTAL;   -- first, before any other statement
+PRAGMA journal_mode = WAL;
+```
+
+Then pair your maintenance cron with:
+
+```sql
+PRAGMA wal_checkpoint(TRUNCATE);    -- fold the WAL back into the main file
+PRAGMA incremental_vacuum;          -- hand freed pages back
+```
+
+Skip this and nothing corrupts — but freed pages accumulate on the freelist
+forever and the file on disk stops reflecting what is stored in it. On an
+existing database where auto-vacuum was never enabled, a one-time `VACUUM;`
+rewrites the file compactly (and can enable auto-vacuum for the future).
+
+When you measure storage or quote a compression number, use the public
+counters, not the file size: `bytes_on_disk` in `timeless_stats(...)` is the
+data-block payload alone, and `index_bytes` is the index overhead beside it.
+The file additionally contains WAL frames, freelist pages, and btree
+overhead — operational facts worth watching (`dbhealth` graphs them), but
+none of them belong inside a compression ratio.
+
 ## 9. Common errors and what they mean
 
 | error | cause / fix |

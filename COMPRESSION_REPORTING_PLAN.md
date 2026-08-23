@@ -86,13 +86,14 @@ Grafana boards:
 
 ## Phase 4 — ops guardrails (docs)
 
-- [ ] Deployment note: `PRAGMA auto_vacuum=INCREMENTAL` must run before
+- [x] Deployment note: `PRAGMA auto_vacuum=INCREMENTAL` must run before
       the first write to a fresh database (even the WAL switch writes
       page 1; set late it silently no-ops) — otherwise freelist
       accumulates forever. Include periodic `incremental_vacuum`
-      guidance.
-- [ ] GUIDE section: how to read the storage series; what is and is not
-      in a compression number.
+      guidance. (GUIDE §8, "Keeping the file size honest".)
+- [x] GUIDE section: how to read the storage series; what is and is not
+      in a compression number. (Same section; server gauge names get a
+      pointer once Phase 2 lands.)
 
 ## Open questions
 
