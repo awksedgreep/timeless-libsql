@@ -47,6 +47,21 @@ SELECT timeless_demo('follow', 60);   -- live data for 60s (tail/dashboard demo)
 SELECT timeless_demo('info');         -- built-in cheat sheet of queries
 ```
 
+Into your own table:
+
+```sql
+CREATE VIRTUAL TABLE web_server_metrics USING timeless_metrics;
+SELECT timeless_demo('seed','small','web_server_metrics');
+```
+
+Name the tables and exactly those get filled — comma-separate for more than
+one, at most one per signal. They must already exist and be timeless vtables;
+nothing is created for you. Name nothing and the generator uses any timeless
+vtables already in the database, or creates all three if there are none.
+
+Seeding a table that already holds data is refused: these tables are
+append-only, so synthetic telemetry cannot be removed afterwards.
+
 Profiles: `small` (~4k series, seconds), `medium` (~35k), `large`
 (~245k). Bigger than large — use the CLI instead:
 

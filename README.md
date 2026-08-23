@@ -46,9 +46,17 @@ storage report:
 
 37.6M rows ingested and queried in about two minutes on a laptop. The tour
 declares its own virtual tables up front — its own `retention`, `index_keys`,
-and span `attribute_indexes` — and the generator fills those. Run it yourself
-with [the demo quickstart](tools/demogen/QUICKSTART.md); the generator is a
-second loadable extension, so the whole thing is SQL in one `sqlite3` session.
+and span `attribute_indexes` — and the generator fills those. You can point it
+at any table you create:
+
+```sql
+CREATE VIRTUAL TABLE web_server_metrics USING timeless_metrics;
+SELECT timeless_demo('seed','small','web_server_metrics');
+```
+
+Run it yourself with [the demo quickstart](tools/demogen/QUICKSTART.md); the
+generator is a second loadable extension, so the whole thing is SQL in one
+`sqlite3` session.
 
 ## Current status
 

@@ -68,6 +68,44 @@ SELECT timeless_demo('report');       -- compression/storage report, any time
 SELECT timeless_demo('info');         -- built-in cheat sheet
 ```
 
+## Bring your own tables
+
+Name the table you want filled and the generator fills exactly that one:
+
+```sql
+CREATE VIRTUAL TABLE web_server_metrics USING timeless_metrics;
+SELECT timeless_demo('seed','small','web_server_metrics');
+--> seeded profile 'small' (seed 42) into metrics (web_server_metrics)
+```
+
+Comma-separate to name more than one, at most one table per signal:
+
+```sql
+SELECT timeless_demo('seed','small','my_metrics, app_logs');
+```
+
+Named tables must already exist and be timeless vtables — your names, your
+creation arguments (`retention`, `index_keys`, `attribute_indexes`), and
+nothing created or guessed on your behalf. Unknown names, ordinary tables,
+and two tables claiming the same signal are all rejected explicitly.
+
+The seed integer and the table list are told apart by type, so
+`('seed','small',7)` and `('seed','small',7,'my_metrics')` both do what they
+look like.
+
+**Name nothing and the tables are inferred**: any timeless vtables already in
+the database are used as-is, and a database with none gets the full
+three-signal demo created for it. That is what the screencast relies on — it
+declares its own three tables, then seeds.
+
+**Seeding refuses a table that already holds data.** These tables are
+append-only, so synthetic telemetry mixed into real data cannot be taken back
+out. Seed into an empty table or a scratch file.
+
+Seeding only some signals is fine. Logs without traces means those error logs
+carry no `trace_id` — there are no spans to point at — and the compression
+report simply omits the signals that have no table.
+
 ## The compression report
 
 The report never lets bookkeeping muddy the compression story. Raw bytes
@@ -140,8 +178,15 @@ cd tools/demogen && cargo build --release
 
 Every profile knob has a flag (`--services`, `--pods`, `--paths`,
 `--minutes`, `--step-secs`, `--logs`, `--traces`, `--seed`, live-mode
-rates); `--help` lists them. Re-seeding an existing file is refused unless
-you pass `--append`.
+rates); `--help` lists them.
+
+The CLI does **not** have the table controls the extension has. It always
+creates and fills `metrics`, `logs`, and `spans`, and its only guard is on
+the database file: seeding a path that already exists is refused unless you
+pass `--append`, which then appends to whatever those three tables hold. If
+you want to name your own tables, seed a subset, or rely on the
+already-populated check, use `timeless_demo(...)` from a sqlite3 session
+instead.
 
 ## Notes
 
