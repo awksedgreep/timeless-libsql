@@ -544,6 +544,26 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
+async fn get_text(app: &axum::Router, uri: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// The single sample line `name value` for an exposition family.
+fn sample(text: &str, name: &str) -> i64 {
+    text.lines()
+        .find_map(|line| line.strip_prefix(name).and_then(|rest| rest.strip_prefix(' ')))
+        .unwrap_or_else(|| panic!("missing sample for {name} in:\n{text}"))
+        .parse()
+        .unwrap()
+}
+
 async fn post_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let response = app
         .clone()
@@ -974,9 +994,110 @@ async fn self_metrics_exposes_prometheus_families() {
         "# TYPE timeless_traces_admitted_bytes_total counter",
         "# TYPE timeless_traces_spans gauge",
         "# TYPE timeless_traces_disk_size_bytes gauge",
+        "# TYPE timeless_traces_storage_bytes gauge",
+        "# TYPE timeless_traces_index_bytes gauge",
+        "# TYPE timeless_traces_wal_bytes gauge",
+        "# TYPE timeless_traces_compression_input_bytes_total counter",
+        "# TYPE timeless_traces_compression_output_bytes_total counter",
+        "# TYPE timeless_traces_raw_ingested_bytes_total counter",
         "# TYPE timeless_traces_oldest_queued_ms gauge",
     ] {
         assert!(text.contains(family), "missing {family} in:\n{text}");
     }
     storage.shutdown().await.unwrap();
+}
+
+/// COMPRESSION_REPORTING_PLAN Phase 2: the exposition's storage series
+/// must reconcile exactly with the engine's `timeless_stats` on the same
+/// database, and the compression ratio inputs never blend index, WAL,
+/// freelist, or whole-file bytes.
+#[tokio::test]
+async fn metrics_exposition_reconciles_storage_series_with_timeless_stats() {
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("honest-storage.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        Some(DEFAULT_RETENTION),
+    )
+    .unwrap();
+    let app = router(storage.clone());
+
+    let spans = minimal_spans(4_096);
+    let batch = rich_batch(&spans);
+    storage
+        .submit_batch(batch.clone(), spans.len(), batch.len())
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    storage.schedule_optimize().await.unwrap();
+
+    let text = get_text(&app, "/metrics").await;
+    let storage_bytes = sample(&text, "timeless_traces_storage_bytes");
+    let index_bytes = sample(&text, "timeless_traces_index_bytes");
+    let wal_bytes = sample(&text, "timeless_traces_wal_bytes");
+    let compression_input = sample(&text, "timeless_traces_compression_input_bytes_total");
+    let compression_output = sample(&text, "timeless_traces_compression_output_bytes_total");
+    let raw_ingested = sample(&text, "timeless_traces_raw_ingested_bytes_total");
+    assert!(storage_bytes > 0, "optimize left no block payload bytes");
+    assert!(index_bytes > 0, "trace shadow indexes must have bytes");
+    assert!(wal_bytes >= 0);
+    assert!(
+        compression_input > 0 && compression_output > 0,
+        "optimize must persist first-pass compression totals"
+    );
+    assert_eq!(
+        raw_ingested, compression_input,
+        "interim raw derivation: the persisted input side already \
+         excludes recompression, so nothing is subtracted"
+    );
+
+    let stats = get_json(&app, "/select/traces/stats").await;
+    assert_eq!(stats.0, StatusCode::OK);
+    assert_eq!(stats.1["bytes_on_disk"].as_i64().unwrap(), storage_bytes);
+    assert_eq!(stats.1["sqlite_index_bytes"].as_i64().unwrap(), index_bytes);
+    assert_eq!(
+        stats.1["extension_compression_input_bytes_total"]
+            .as_i64()
+            .unwrap(),
+        compression_input
+    );
+    assert_eq!(
+        stats.1["extension_compression_output_bytes_total"]
+            .as_i64()
+            .unwrap(),
+        compression_output
+    );
+    assert_eq!(
+        stats.1["raw_ingested_bytes_total"].as_i64().unwrap(),
+        raw_ingested
+    );
+    assert!(stats.1["database_wal_bytes"].as_i64().is_some());
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    // Ground truth: the engine's own timeless_stats on the same database.
+    let conn = Connection::open(&database).unwrap();
+    load_extension(&conn, &extension);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM traces", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 4_096);
+    let engine = |key: &str| -> i64 {
+        conn.query_row(
+            "SELECT value FROM timeless_stats('traces') WHERE key=?1",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(engine("bytes_on_disk"), storage_bytes);
+    assert_eq!(engine("index_bytes"), index_bytes);
+    assert_eq!(engine("compression_input_bytes_total"), compression_input);
+    assert_eq!(engine("compression_output_bytes_total"), compression_output);
 }
