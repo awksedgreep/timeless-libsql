@@ -127,6 +127,30 @@ Trace responses additionally pass through the cumulative public
 `extension_query_*` fields; they remain aggregate diagnostics rather than
 request-local attribution when readers overlap.
 
+### Storage and compression series
+
+Every plane's `/metrics` exposition publishes the honest storage split as
+separate families: `timeless_<plane>_storage_bytes` (the engine's
+`bytes_on_disk` — data-block payload only), `timeless_<plane>_index_bytes`,
+`timeless_<plane>_wal_bytes`, `timeless_<plane>_freelist_bytes`, and
+`timeless_<plane>_database_file_bytes`. A compression ratio is
+raw-vs-storage; index, WAL, freelist, and whole-file bytes are operational
+series and are never part of one.
+
+The raw side per plane: `timeless_metrics_raw_ingested_bytes` is
+`16 × total_points` (8-byte timestamp + 8-byte value per sample — the
+standard raw comparator; series identity is the amortized catalog), and is
+lifetime-accurate because it derives from durable point counts.
+`timeless_logs_raw_ingested_bytes_total` and
+`timeless_traces_raw_ingested_bytes_total` surface the extension's
+persisted `compression_input_bytes_total` (first-pass compression input,
+stored in extension metadata, survives restarts); entries still buffered or
+in raw uncompressed blocks are not yet counted, so the ratio briefly
+understates after bursts and self-corrects on flush/optimize. The paired
+`timeless_logs|traces_compression_input|output_bytes_total` counters are
+exported alongside. The same values appear in the serialized `StorageStats`
+responses; each plane README documents its exact series list.
+
 ## Metrics requests
 
 GET and POST query endpoints consume URL-encoded parameters. On POST, form

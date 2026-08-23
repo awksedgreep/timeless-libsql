@@ -76,8 +76,8 @@ stats JSON endpoint:
 - [x] Each plane's `storage_contract.rs` asserts the exposition keys and
       reconciles exactly against `timeless_stats` (traces suite: 9 tests;
       logs gained its first storage_contract.rs; metrics: 95).
-- [x] Plane READMEs done. Remaining: `docs/SERVER_API_REFERENCE.md`
-      needs the new series documented (single coordinated docs pass).
+- [x] Plane READMEs done; `docs/SERVER_API_REFERENCE.md` documents the
+      series and the ratio rules ("Storage and compression series").
 
 ## Phase 3 — downstream dashboards (separate repos)
 
