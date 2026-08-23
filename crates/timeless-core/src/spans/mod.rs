@@ -172,6 +172,26 @@ pub struct SpanEntry {
     pub scope_dropped_attributes_count: u32,
 }
 
+impl SpanEntry {
+    /// Logical raw bytes of this span as the public surface returns it:
+    /// 50 fixed (16+8+8 ids, 1+1 kind/status, 8+8 start/duration) plus
+    /// the byte lengths of the name, service, attributes, status
+    /// message, events, resource, and scope strings. This is the demogen
+    /// ground-truth definition (tools/demogen drive.rs) — the
+    /// per-row/denormalized convention the Victoria/Tempo family quotes;
+    /// links, trace_state, and the OTel bookkeeping counters are not
+    /// part of it.
+    pub fn raw_ingest_bytes(&self) -> u64 {
+        50 + (self.name.len()
+            + self.service.len()
+            + self.attributes.len()
+            + self.status_description.len()
+            + self.events.len()
+            + self.resource.len()
+            + self.instrumentation_scope.len()) as u64
+    }
+}
+
 /// A fully-encoded span block ready to persist: payload + metadata +
 /// index rows. Compared to blocks::EncodedBlock there is ONE extra
 /// field, and it is the whole reason this module exists: the deduped

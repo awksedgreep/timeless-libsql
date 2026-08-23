@@ -1074,6 +1074,12 @@ impl BlockEngine {
         let store_started = Instant::now();
         let locs = self.store.put_blocks(&blocks)?;
         let store_ns = elapsed_ns(store_started);
+        // The entries just became durable: accrue their logical raw
+        // bytes in the same host transaction as the block rows, so a
+        // rollback takes the increment with it (see
+        // persist_ingest_raw_total).
+        let raw_ingest_bytes: u64 = buf.iter().map(LogEntry::raw_ingest_bytes).sum();
+        self.persist_ingest_raw_total(raw_ingest_bytes)?;
         {
             let mut index = self.index_lock();
             for ((block, loc), level) in blocks.iter().zip(&locs).zip(&levels) {
@@ -1831,6 +1837,35 @@ impl BlockEngine {
                 .saturating_sub(merge_in)
         );
         self.store.save_meta("compression_totals", value.as_bytes())
+    }
+
+    /// Lifetime logical raw bytes made durable by flushes — the honest
+    /// raw side of a compression ratio (8 ts + 1 level + message +
+    /// metadata bytes per entry; see LogEntry::raw_ingest_bytes).
+    /// Persisted in _meta inside the same host transaction as the
+    /// put_blocks call, so a rolled-back ingest never leaks an
+    /// increment. Monotonic: optimize, merges, and retention rewrite or
+    /// drop blocks but never re-persist entries, so nothing here ever
+    /// moves it back down.
+    fn persist_ingest_raw_total(&self, added: u64) -> Result<(), String> {
+        if added == 0 {
+            return Ok(());
+        }
+        let total = self.load_ingest_raw_total()?;
+        self.store.save_meta(
+            "ingest_raw_bytes_total",
+            total.saturating_add(added).to_string().as_bytes(),
+        )
+    }
+
+    /// Parse the persisted total; absent or malformed reads as zero (a
+    /// pre-upgrade store simply starts counting from its next flush).
+    pub fn load_ingest_raw_total(&self) -> Result<u64, String> {
+        let Some(bytes) = self.store.load_meta("ingest_raw_bytes_total")? else {
+            return Ok(0);
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        Ok(text.trim().parse().unwrap_or(0))
     }
 
     /// Parse the persisted "in out" pair; absent or malformed reads as zero

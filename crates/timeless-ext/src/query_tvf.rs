@@ -4671,6 +4671,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     .engine
                     .load_compression_totals()
                     .map_err(module_err)?;
+                let ingest_raw_total = shared.engine.load_ingest_raw_total().map_err(module_err)?;
                 let gate = shared.write_gate.profile();
                 let storage = log_storage_summary(&database, &table)?;
                 let timestamp_unit = {
@@ -4922,6 +4923,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(compression_totals.1 as i64),
                     ),
                     (
+                        "ingest_raw_bytes_total",
+                        Value::Integer(ingest_raw_total as i64),
+                    ),
+                    (
                         "optimize_raw_total_ns",
                         Value::Integer(profile.optimize_raw_total_ns as i64),
                     ),
@@ -5017,6 +5022,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     .engine
                     .load_compression_totals()
                     .map_err(module_err)?;
+                let ingest_raw_total = shared.engine.load_ingest_raw_total().map_err(module_err)?;
                 let gate = shared.write_gate.profile();
                 let storage = trace_storage_summary(&database, &table)?;
                 let attribute_index_fields = shared.engine.config().attribute_indexes.len();
@@ -5244,6 +5250,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "compression_output_bytes_total",
                         Value::Integer(compression_totals.1 as i64),
+                    ),
+                    (
+                        "ingest_raw_bytes_total",
+                        Value::Integer(ingest_raw_total as i64),
                     ),
                     (
                         "optimize_raw_total_ns",
