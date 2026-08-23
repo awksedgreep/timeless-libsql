@@ -24,8 +24,8 @@ use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
 use demogen_core::drive::{
-    drive_logs, drive_metrics, drive_traces, format_report, profile, warm_states, SignalReport,
-    LIVE_LOG_RATE, LIVE_TRACE_RATE,
+    drive_logs, drive_metrics, drive_traces, format_report, profile, warm_states, DriveTotals,
+    SignalReport, LIVE_LOG_RATE, LIVE_TRACE_RATE,
 };
 use demogen_core::fleet::{build_catalog, Config, Incident, Rng, SeriesSpec, TraceReservoir};
 
@@ -74,6 +74,16 @@ const INFO: &str = r#"timeless_demo — synthetic telemetry, generated in-sessio
         small  ≈  4k series, 200k logs, ~200k spans, 30 min
         medium ≈ 35k series,   2M logs,   ~1M spans, 60 min
         large  ≈ 245k series,  5M logs,   ~3M spans, 60 min
+
+      Bring your own tables: create any timeless vtables you like BEFORE
+      seeding and those get filled — your names, your creation arguments,
+      and only the signals you created. Nothing is created for you and no
+      other signal is generated:
+        CREATE VIRTUAL TABLE my_metrics USING timeless_metrics(retention='14d');
+        SELECT timeless_demo('seed','small');   -- metrics only, into my_metrics
+      Declare nothing and you get the full three-signal demo as before.
+      Seeding logs without traces is fine; those error logs simply carry
+      no trace_id, because there are no spans to point at.
 
   SELECT timeless_demo('tick'[, seconds]);      -- default 15
       Instantly append the last N seconds of fleet activity.
@@ -150,6 +160,9 @@ struct DemoState {
     metrics_raw: u64,
     logs_raw: u64,
     spans_raw: u64,
+    /// Which tables this database was seeded into. Persisted so `tick`,
+    /// `follow`, and `report` keep hitting the same ones in later sessions.
+    tables: Tables,
 }
 
 fn ensure_state_table(conn: &Connection) -> std::result::Result<(), String> {
@@ -164,6 +177,14 @@ fn load_state(conn: &Connection) -> std::result::Result<Option<DemoState>, Strin
         .optional()
         .map_err(|e| e.to_string())?;
     let Some(row) = row else { return Ok(None) };
+    // Table names live in their own row: the v1 row is whitespace-separated
+    // integers, and names are not integers. A database seeded before this
+    // existed has no row and falls back to the original hardcoded names.
+    let names: Option<String> = conn
+        .query_row("SELECT value FROM demogen_state WHERE key='tables'", [], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let tables = names.as_deref().map(Tables::parse).unwrap_or_else(Tables::defaults);
     let v: Vec<i64> = row.split_whitespace().filter_map(|t| t.parse().ok()).collect();
     // 12 fields was the pre-report layout; raw counters default to zero.
     if v.len() != 12 && v.len() != 15 {
@@ -188,6 +209,7 @@ fn load_state(conn: &Connection) -> std::result::Result<Option<DemoState>, Strin
         metrics_raw: raw(12),
         logs_raw: raw(13),
         spans_raw: raw(14),
+        tables,
     }))
 }
 
@@ -202,6 +224,11 @@ fn save_state(conn: &Connection, st: &DemoState) -> std::result::Result<(), Stri
     conn.execute(
         "INSERT OR REPLACE INTO demogen_state(key, value) VALUES ('v1', ?1)",
         params![value],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO demogen_state(key, value) VALUES ('tables', ?1)",
+        params![st.tables.serialize()],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -239,12 +266,126 @@ fn fmt_hhmm(ms: i64) -> String {
     format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
 }
 
-fn ensure_tables(conn: &Connection) -> std::result::Result<(), String> {
+/// Which signals this database has a table for, and what they are called.
+///
+/// Resolved from the schema by *module* (`USING timeless_traces`) rather than
+/// by table name, which answers two questions at once: a user who declares
+/// their own vtables gets those populated, under whatever names they chose,
+/// and gets only the signals they actually declared. Declaring nothing still
+/// gets the full three-signal demo, so the standard tour is unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Tables {
+    metrics: Option<String>,
+    logs: Option<String>,
+    spans: Option<String>,
+}
+
+impl Tables {
+    fn any(&self) -> bool {
+        self.metrics.is_some() || self.logs.is_some() || self.spans.is_some()
+    }
+
+    /// The demo defaults, used only when the database declares no timeless
+    /// vtables of its own.
+    fn defaults() -> Self {
+        Self {
+            metrics: Some("metrics".into()),
+            logs: Some("logs".into()),
+            spans: Some("spans".into()),
+        }
+    }
+
+    /// `metrics (my_metrics), traces (app_spans)` — what we are about to fill.
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        for (label, name) in [
+            ("metrics", &self.metrics),
+            ("logs", &self.logs),
+            ("traces", &self.spans),
+        ] {
+            if let Some(name) = name {
+                if name == label || (label == "traces" && name == "spans") {
+                    parts.push(label.to_string());
+                } else {
+                    parts.push(format!("{label} ({name})"));
+                }
+            }
+        }
+        parts.join(", ")
+    }
+
+    fn serialize(&self) -> String {
+        let slot = |s: &Option<String>| s.clone().unwrap_or_else(|| "-".into());
+        format!("{} {} {}", slot(&self.metrics), slot(&self.logs), slot(&self.spans))
+    }
+
+    fn parse(row: &str) -> Self {
+        let mut it = row.split_whitespace();
+        let mut slot = || match it.next() {
+            None | Some("-") => None,
+            Some(name) => Some(name.to_string()),
+        };
+        Self { metrics: slot(), logs: slot(), spans: slot() }
+    }
+}
+
+/// The module name in `CREATE VIRTUAL TABLE x USING <module>(...)`.
+///
+/// Parsed rather than matched with LIKE so `timeless_metrics` cannot be
+/// confused with a longer module that merely starts the same way.
+fn module_of(sql: &str) -> Option<String> {
+    let upper = sql.to_ascii_uppercase();
+    let start = upper.find(" USING ")? + " USING ".len();
+    let rest = &sql[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_ascii_lowercase())
+}
+
+/// Timeless vtables already present in this database, by signal. The first
+/// match per signal wins; `seed` reports exactly which names it chose so a
+/// second table of the same signal is never a silent surprise.
+fn discover_tables(conn: &Connection) -> std::result::Result<Tables, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, sql FROM sqlite_schema
+              WHERE type = 'table' AND sql IS NOT NULL
+              ORDER BY name",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut found = Tables::default();
+    for row in rows {
+        let (name, sql) = row.map_err(|e| e.to_string())?;
+        let slot = match module_of(&sql).as_deref() {
+            Some("timeless_metrics") => &mut found.metrics,
+            Some("timeless_logs") => &mut found.logs,
+            Some("timeless_traces") => &mut found.spans,
+            _ => continue,
+        };
+        if slot.is_none() {
+            *slot = Some(name);
+        }
+    }
+    Ok(found)
+}
+
+/// Decide which tables this seed will fill, creating the demo defaults only
+/// when the database declares none of its own.
+fn resolve_tables(conn: &Connection) -> std::result::Result<Tables, String> {
     // Best-effort on a fresh database: incremental auto_vacuum lets
     // `report` return freed pages to the OS view of the file. Both can
     // fail depending on when we're called — never fatal.
     let _ = conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;");
     let _ = conn.execute_batch("PRAGMA synchronous = NORMAL;");
+
+    let declared = discover_tables(conn)?;
+    if declared.any() {
+        return Ok(declared);
+    }
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS metrics USING timeless_metrics;
          CREATE VIRTUAL TABLE IF NOT EXISTS logs
@@ -253,7 +394,8 @@ fn ensure_tables(conn: &Connection) -> std::result::Result<(), String> {
     )
     .map_err(|e| {
         format!("{e} — is libtimeless_ext loaded? (.load it before libtimeless_demogen)")
-    })
+    })?;
+    Ok(Tables::defaults())
 }
 
 fn command(conn: &Connection, table: &str, cmd: &str) -> std::result::Result<(), String> {
@@ -290,35 +432,44 @@ fn checkpoint_and_vacuum(conn: &Connection) {
 /// and index counters.
 fn storage_report(conn: &Connection, st: &DemoState) -> std::result::Result<String, String> {
     checkpoint_and_vacuum(conn);
-    let signals = [
-        SignalReport {
+    // Only report the signals this database actually has. `stat` reads
+    // timeless_stats(<table>), which fails outright on a table that was
+    // never created, so an absent signal has to be skipped rather than
+    // reported as zero.
+    let mut signals: Vec<SignalReport> = Vec::with_capacity(3);
+    if let Some(t) = st.tables.metrics.as_deref() {
+        signals.push(SignalReport {
             label: "metrics",
             unit: "samples",
             per: "sample",
-            items: stat(conn, "metrics", "disk_points")? as u64,
+            items: stat(conn, t, "disk_points")? as u64,
             raw_bytes: st.metrics_raw,
-            payload_bytes: stat(conn, "metrics", "bytes_on_disk")? as u64,
-            index_bytes: stat(conn, "metrics", "index_bytes")? as u64,
-        },
-        SignalReport {
+            payload_bytes: stat(conn, t, "bytes_on_disk")? as u64,
+            index_bytes: stat(conn, t, "index_bytes")? as u64,
+        });
+    }
+    if let Some(t) = st.tables.logs.as_deref() {
+        signals.push(SignalReport {
             label: "logs",
             unit: "entries",
             per: "entry",
-            items: stat(conn, "logs", "disk_entries")? as u64,
+            items: stat(conn, t, "disk_entries")? as u64,
             raw_bytes: st.logs_raw,
-            payload_bytes: stat(conn, "logs", "bytes_on_disk")? as u64,
-            index_bytes: stat(conn, "logs", "index_bytes")? as u64,
-        },
-        SignalReport {
+            payload_bytes: stat(conn, t, "bytes_on_disk")? as u64,
+            index_bytes: stat(conn, t, "index_bytes")? as u64,
+        });
+    }
+    if let Some(t) = st.tables.spans.as_deref() {
+        signals.push(SignalReport {
             label: "traces",
             unit: "spans",
             per: "span",
-            items: stat(conn, "spans", "disk_spans")? as u64,
+            items: stat(conn, t, "disk_spans")? as u64,
             raw_bytes: st.spans_raw,
-            payload_bytes: stat(conn, "spans", "bytes_on_disk")? as u64,
-            index_bytes: stat(conn, "spans", "index_bytes")? as u64,
-        },
-    ];
+            payload_bytes: stat(conn, t, "bytes_on_disk")? as u64,
+            index_bytes: stat(conn, t, "index_bytes")? as u64,
+        });
+    }
     let (file, free): (i64, i64) = conn
         .query_row(
             "SELECT page_count * page_size, freelist_count * page_size
@@ -333,10 +484,16 @@ fn storage_report(conn: &Connection, st: &DemoState) -> std::result::Result<Stri
 fn report_cmd(conn: &Connection) -> std::result::Result<String, String> {
     let st = load_state(conn)?
         .ok_or("no demogen state in this database — run timeless_demo('seed', ...) first")?;
-    command(conn, "metrics", "flush")?;
-    command(conn, "logs", "flush")?;
-    command(conn, "spans", "flush")?;
+    flush_all(conn, &st.tables)?;
     storage_report(conn, &st)
+}
+
+/// Flush every signal this database has, and only those.
+fn flush_all(conn: &Connection, tables: &Tables) -> std::result::Result<(), String> {
+    for t in [&tables.metrics, &tables.logs, &tables.spans].into_iter().flatten() {
+        command(conn, t, "flush")?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -354,14 +511,15 @@ fn seed_cmd(conn: &Connection, profile_name: &str, seed: u64) -> std::result::Re
     let Some(spec) = profile(profile_name) else {
         return Err(format!("unknown profile '{profile_name}' (small|medium|large)"));
     };
-    ensure_tables(conn)?;
+    let tables = resolve_tables(conn)?;
 
     let cfg = spec.config(seed, now_ms());
     let incident = cfg.incident();
     let catalog = build_catalog(&cfg);
     let mut reservoir = TraceReservoir::new(20_000);
     eprintln!(
-        "seeding profile {profile_name}: {} services x {} pods = {} series, {} min window, incident on '{}'",
+        "seeding profile {profile_name} into {}: {} services x {} pods = {} series, {} min window, incident on '{}'",
+        tables.describe(),
         cfg.services,
         cfg.pods,
         fmt_count(catalog.len()),
@@ -369,71 +527,88 @@ fn seed_cmd(conn: &Connection, profile_name: &str, seed: u64) -> std::result::Re
         cfg.service_name(incident.service)
     );
 
-    let t0 = Instant::now();
-    let mut stmt = conn
-        .prepare("INSERT INTO spans(spans) VALUES (?1)")
-        .map_err(|e| e.to_string())?;
-    let mut rng = Rng::new(cfg.seed ^ 0x0724_7CE5);
-    let mut sink = |blob: &[u8], total: usize| {
-        stmt.execute(params![blob]).map_err(|e| e.to_string())?;
-        eprint!("\r  traces: {} spans", fmt_count(total));
-        Ok(())
-    };
-    let traces_t = drive_traces(
-        &cfg, &incident, &mut rng, cfg.start_ms(), cfg.end_ms, cfg.traces,
-        &mut reservoir, &mut sink,
-    )?;
-    drop(sink);
-    drop(stmt);
-    let trace_secs = t0.elapsed().as_secs_f64();
-    eprintln!("\r  traces: {} spans in {:.1}s", fmt_count(traces_t.items), trace_secs);
+    // Traces first: the reservoir it fills is what lets error logs carry a
+    // real trace_id. Seeding logs without traces leaves that reservoir empty,
+    // and `pick` simply returns None — the entries are still correct, they
+    // just have nothing to point at.
+    let mut traces_t = DriveTotals::default();
+    let mut trace_secs = 0.0;
+    if let Some(table) = tables.spans.as_deref() {
+        let t0 = Instant::now();
+        let mut stmt = conn
+            .prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)"))
+            .map_err(|e| e.to_string())?;
+        let mut rng = Rng::new(cfg.seed ^ 0x0724_7CE5);
+        let mut sink = |blob: &[u8], total: usize| {
+            stmt.execute(params![blob]).map_err(|e| e.to_string())?;
+            eprint!("\r  traces: {} spans", fmt_count(total));
+            Ok(())
+        };
+        traces_t = drive_traces(
+            &cfg, &incident, &mut rng, cfg.start_ms(), cfg.end_ms, cfg.traces,
+            &mut reservoir, &mut sink,
+        )?;
+        drop(sink);
+        drop(stmt);
+        trace_secs = t0.elapsed().as_secs_f64();
+        eprintln!("\r  traces: {} spans in {:.1}s", fmt_count(traces_t.items), trace_secs);
+    }
 
-    let t1 = Instant::now();
-    let mut stmt = conn
-        .prepare("INSERT INTO logs(logs) VALUES (?1)")
-        .map_err(|e| e.to_string())?;
-    let mut rng = Rng::new(cfg.seed ^ 0x1065);
-    let mut sink = |blob: &[u8], total: usize| {
-        stmt.execute(params![blob]).map_err(|e| e.to_string())?;
-        eprint!("\r  logs: {} entries", fmt_count(total));
-        Ok(())
-    };
-    let logs_t = drive_logs(
-        &cfg, &incident, &mut rng, cfg.start_ms(), cfg.end_ms, cfg.logs, &reservoir, &mut sink,
-    )?;
-    drop(sink);
-    drop(stmt);
-    let log_secs = t1.elapsed().as_secs_f64();
-    eprintln!("\r  logs: {} entries in {:.1}s", fmt_count(logs_t.items), log_secs);
+    let mut logs_t = DriveTotals::default();
+    let mut log_secs = 0.0;
+    if let Some(table) = tables.logs.as_deref() {
+        let t1 = Instant::now();
+        let mut stmt = conn
+            .prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)"))
+            .map_err(|e| e.to_string())?;
+        let mut rng = Rng::new(cfg.seed ^ 0x1065);
+        let mut sink = |blob: &[u8], total: usize| {
+            stmt.execute(params![blob]).map_err(|e| e.to_string())?;
+            eprint!("\r  logs: {} entries", fmt_count(total));
+            Ok(())
+        };
+        logs_t = drive_logs(
+            &cfg, &incident, &mut rng, cfg.start_ms(), cfg.end_ms, cfg.logs, &reservoir, &mut sink,
+        )?;
+        drop(sink);
+        drop(stmt);
+        log_secs = t1.elapsed().as_secs_f64();
+        eprintln!("\r  logs: {} entries in {:.1}s", fmt_count(logs_t.items), log_secs);
+    }
 
-    let t2 = Instant::now();
-    let mut stmt = conn
-        .prepare("INSERT INTO metrics(metrics) VALUES (?1)")
-        .map_err(|e| e.to_string())?;
-    let mut states = warm_states(&catalog, &cfg, &incident, 0);
     let step_ms = (cfg.step_secs * 1000) as i64;
-    let start = cfg.start_ms();
-    let mut sink = |blob: &[u8], total: usize| {
-        stmt.execute(params![blob]).map_err(|e| e.to_string())?;
-        eprint!("\r  metrics: {} samples", fmt_count(total));
-        Ok(())
-    };
-    let metrics_t = drive_metrics(
-        &cfg, &incident, &catalog, &mut states, 0, cfg.steps(),
-        &|i| start + i as i64 * step_ms, &mut sink,
-    )?;
-    drop(sink);
-    drop(stmt);
-    let metric_secs = t2.elapsed().as_secs_f64();
-    eprintln!("\r  metrics: {} samples in {:.1}s", fmt_count(metrics_t.items), metric_secs);
+    let mut metrics_t = DriveTotals::default();
+    let mut metric_secs = 0.0;
+    if let Some(table) = tables.metrics.as_deref() {
+        let t2 = Instant::now();
+        let mut stmt = conn
+            .prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)"))
+            .map_err(|e| e.to_string())?;
+        let mut states = warm_states(&catalog, &cfg, &incident, 0);
+        let start = cfg.start_ms();
+        let mut sink = |blob: &[u8], total: usize| {
+            stmt.execute(params![blob]).map_err(|e| e.to_string())?;
+            eprint!("\r  metrics: {} samples", fmt_count(total));
+            Ok(())
+        };
+        metrics_t = drive_metrics(
+            &cfg, &incident, &catalog, &mut states, 0, cfg.steps(),
+            &|i| start + i as i64 * step_ms, &mut sink,
+        )?;
+        drop(sink);
+        drop(stmt);
+        metric_secs = t2.elapsed().as_secs_f64();
+        eprintln!("\r  metrics: {} samples in {:.1}s", fmt_count(metrics_t.items), metric_secs);
+    }
 
     let tm = Instant::now();
-    command(conn, "metrics", "flush")?;
-    command(conn, "logs", "flush")?;
-    command(conn, "spans", "flush")?;
-    command(conn, "metrics", "compact")?;
-    command(conn, "logs", "optimize")?;
-    command(conn, "spans", "optimize")?;
+    flush_all(conn, &tables)?;
+    if let Some(t) = tables.metrics.as_deref() {
+        command(conn, t, "compact")?;
+    }
+    for t in [&tables.logs, &tables.spans].into_iter().flatten() {
+        command(conn, t, "optimize")?;
+    }
     let publish_secs = tm.elapsed().as_secs_f64();
     eprintln!("  publish (flush+compact+optimize): {publish_secs:.1}s");
 
@@ -445,33 +620,51 @@ fn seed_cmd(conn: &Connection, profile_name: &str, seed: u64) -> std::result::Re
         logs_raw: logs_t.raw_bytes,
         spans_raw: traces_t.raw_bytes,
         cfg: cfg.clone(),
+        tables: tables.clone(),
     };
     save_state(conn, &state)?;
 
+    // One rate line per seeded signal; a signal this database has no table
+    // for is left out rather than printed as a row of zeros.
+    let mut rates = String::new();
+    if tables.metrics.is_some() {
+        rates.push_str(&format!(
+            "  series:  {} ({} services x {} pods)\n  metrics: {} samples in {:.1}s ({:.1}M samples/s)\n",
+            fmt_count(catalog.len()),
+            cfg.services,
+            cfg.pods,
+            fmt_count(metrics_t.items),
+            metric_secs,
+            metrics_t.items as f64 / metric_secs.max(1e-9) / 1e6,
+        ));
+    }
+    if tables.logs.is_some() {
+        rates.push_str(&format!(
+            "  logs:    {} entries in {:.1}s ({:.0}k entries/s)\n",
+            fmt_count(logs_t.items),
+            log_secs,
+            logs_t.items as f64 / log_secs.max(1e-9) / 1e3,
+        ));
+    }
+    if tables.spans.is_some() {
+        rates.push_str(&format!(
+            "  traces:  {} spans in {:.1}s ({:.0}k spans/s)\n",
+            fmt_count(traces_t.items),
+            trace_secs,
+            traces_t.items as f64 / trace_secs.max(1e-9) / 1e3,
+        ));
+    }
+
     let report = storage_report(conn, &state)?;
     Ok(format!(
-        "seeded profile '{profile_name}' (seed {seed})\n\
-         \x20 series:  {} ({} services x {} pods)\n\
-         \x20 metrics: {} samples in {:.1}s ({:.1}M samples/s)\n\
-         \x20 logs:    {} entries in {:.1}s ({:.0}k entries/s)\n\
-         \x20 traces:  {} spans in {:.1}s ({:.0}k spans/s)\n\
+        "seeded profile '{profile_name}' (seed {seed}) into {}\n\
+         {rates}\
          \x20 publish: {:.1}s (flush + compact + optimize)\n\
          {report}\n\
          \x20 window:  {} .. {} UTC, incident on '{}' {} .. {}\n\
          \x20 bounds:  {} .. {} (unix ms)\n\
          next: SELECT timeless_demo('info');",
-        fmt_count(catalog.len()),
-        cfg.services,
-        cfg.pods,
-        fmt_count(metrics_t.items),
-        metric_secs,
-        metrics_t.items as f64 / metric_secs.max(1e-9) / 1e6,
-        fmt_count(logs_t.items),
-        log_secs,
-        logs_t.items as f64 / log_secs.max(1e-9) / 1e3,
-        fmt_count(traces_t.items),
-        trace_secs,
-        traces_t.items as f64 / trace_secs.max(1e-9) / 1e3,
+        tables.describe(),
         publish_secs,
         fmt_hhmm(cfg.start_ms()),
         fmt_hhmm(cfg.end_ms),
@@ -517,11 +710,14 @@ fn append_window(
 ) -> std::result::Result<(usize, usize, usize), String> {
     let secs = (to_ms - from_ms).max(0) as f64 / 1000.0;
 
+    let tables = s.st.tables.clone();
+
     let mut spans = 0usize;
     let n_traces = (LIVE_TRACE_RATE as f64 * secs) as usize;
-    if n_traces > 0 {
+    if n_traces > 0 && tables.spans.is_some() {
+        let table = tables.spans.as_deref().unwrap();
         let mut stmt = conn
-            .prepare("INSERT INTO spans(spans) VALUES (?1)")
+            .prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)"))
             .map_err(|e| e.to_string())?;
         let mut sink = |blob: &[u8], _total: usize| {
             stmt.execute(params![blob]).map_err(|e| e.to_string())?;
@@ -537,9 +733,10 @@ fn append_window(
 
     let mut entries = 0usize;
     let n_logs = (LIVE_LOG_RATE as f64 * secs) as usize;
-    if n_logs > 0 {
+    if n_logs > 0 && tables.logs.is_some() {
+        let table = tables.logs.as_deref().unwrap();
         let mut stmt = conn
-            .prepare("INSERT INTO logs(logs) VALUES (?1)")
+            .prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)"))
             .map_err(|e| e.to_string())?;
         let mut sink = |blob: &[u8], _total: usize| {
             stmt.execute(params![blob]).map_err(|e| e.to_string())?;
@@ -554,11 +751,12 @@ fn append_window(
 
     let mut samples = 0usize;
     let step_ms = (s.cfg.step_secs * 1000) as i64;
-    while s.st.next_scrape_ms <= to_ms {
+    while tables.metrics.is_some() && s.st.next_scrape_ms <= to_ms {
+        let table = tables.metrics.as_deref().unwrap();
         let ts = s.st.next_scrape_ms;
         let step = s.st.steps_done;
         let mut stmt = conn
-            .prepare("INSERT INTO metrics(metrics) VALUES (?1)")
+            .prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)"))
             .map_err(|e| e.to_string())?;
         let mut sink = |blob: &[u8], _total: usize| {
             stmt.execute(params![blob]).map_err(|e| e.to_string())?;
@@ -574,10 +772,13 @@ fn append_window(
     }
 
     if samples > 0 {
-        command(conn, "metrics", "flush")?;
+        if let Some(t) = tables.metrics.as_deref() {
+            command(conn, t, "flush")?;
+        }
     }
-    command(conn, "logs", "flush")?;
-    command(conn, "spans", "flush")?;
+    for t in [&tables.logs, &tables.spans].into_iter().flatten() {
+        command(conn, t, "flush")?;
+    }
     s.st.last_ms = to_ms;
     save_state(conn, &s.st)?;
     Ok((entries, spans, samples))

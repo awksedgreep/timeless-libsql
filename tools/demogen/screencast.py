@@ -43,6 +43,23 @@ SCRIPT = [
     # would box the string and repeat it as a column header. Each caption
     # pastes instantly and the query below it types at full speed, so the
     # typing time doubles as reading time.
+    #
+    # The three CREATE VIRTUAL TABLE statements are the point of the whole
+    # tour: they are the extension's actual public surface, and without them
+    # a viewer only sees a function dumping rows into a file. Declaring them
+    # here also means the generator fills OUR tables -- our names, our
+    # index_keys, our attribute_indexes -- rather than creating its own.
+    (".print '-- three virtual tables. this is the entire API surface of the "
+     "extension'", 0.4, 0),
+    ("CREATE VIRTUAL TABLE metrics USING timeless_metrics(retention='14d');",
+     1.2),
+    ("CREATE VIRTUAL TABLE logs USING timeless_logs("
+     "index_keys='service,path,status');", 1.2),
+    ("CREATE VIRTUAL TABLE spans USING timeless_traces("
+     "attribute_indexes='[{\"scope\":\"span\",\"path\":\"/http.method\"}]');",
+     1.6),
+    (".print '-- the generator fills the tables we just declared -- our "
+     "names, our indexes'", 0.4, 0),
     (".print '-- seed a synthetic fleet: services x pods, correlated "
      "metrics + logs + traces, one incident'", 0.4, 0),
     (f"SELECT timeless_demo('seed','{PROFILE}');", 6.0),
@@ -70,6 +87,13 @@ SCRIPT = [
     ("SELECT json_extract(metadata,'$.trace_id') AS trace_id FROM logs "
      "WHERE level='error' AND json_extract(metadata,'$.trace_id') IS NOT NULL "
      "LIMIT 3;", 3.5),
+    # Payoff for declaring the tables ourselves: the attribute index above
+    # is one WE asked for, answering a query over generated data.
+    (".print '-- and the span attribute index we declared up front answers "
+     "this one'", 0.4, 0),
+    ("SELECT service, count(*) AS spans FROM spans WHERE attribute_filter="
+     "'{\"scope\":\"span\",\"path\":\"/http.method\",\"value\":\"GET\"}' "
+     "GROUP BY service ORDER BY spans DESC LIMIT 4;", 3.5),
     (".mode list --charlimit 0 --linelimit 0", 0.2, 0),
     (".print '-- what it cost on disk: raw logical bytes vs engine block "
      "bytes, indexes counted apart'", 0.4, 0),

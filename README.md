@@ -41,12 +41,14 @@ storage report:
   metrics     29,700,000 samples  raw    475 MB -> stored   59.7 MB  (  8.0x, 2.0 B/sample)
   logs         5,000,000 entries  raw    541 MB -> stored   42.2 MB  ( 12.8x, 8.4 B/entry)
   traces       2,880,684 spans    raw    721 MB -> stored   80.2 MB  (  9.0x, 27.8 B/span)
-  total    raw 1737 MB -> stored 182 MB (9.5x); indexes 74.5 MB
+  total    raw 1737 MB -> stored 182 MB (9.5x); indexes 75.0 MB
 ```
 
-37.6M rows ingested and queried in under two minutes on a laptop. Run it
-yourself with [the demo quickstart](tools/demogen/QUICKSTART.md) — the
-generator is a second loadable extension, so the whole tour is SQL.
+37.6M rows ingested and queried in about two minutes on a laptop. The tour
+declares its own virtual tables up front — its own `retention`, `index_keys`,
+and span `attribute_indexes` — and the generator fills those. Run it yourself
+with [the demo quickstart](tools/demogen/QUICKSTART.md); the generator is a
+second loadable extension, so the whole thing is SQL in one `sqlite3` session.
 
 ## Current status
 
