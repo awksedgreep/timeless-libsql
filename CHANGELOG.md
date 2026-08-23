@@ -10,9 +10,9 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.7.6 -->
+<!-- release-target: 0.7.7 -->
 
-## [Unreleased]
+## [0.7.7] — 2026-08-23
 
 ### Added
 
