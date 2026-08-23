@@ -508,6 +508,9 @@ fn required_scope(signal: &str, method: &Method, path: &str) -> String {
         || path.contains("services")
         || path.contains("operations")
         || path.contains("traces/")
+        // A tail streams admitted data; its POST form only carries the
+        // filter parameters, so it is a read regardless of method.
+        || path.ends_with("/tail")
     {
         "read"
     } else {
@@ -960,6 +963,21 @@ mod tests {
                 required_scope(signal, &Method::POST, "/api/v1/backup"),
                 format!("{signal}:maintenance")
             );
+        }
+    }
+
+    #[test]
+    fn tail_is_a_read_operation_for_both_methods() {
+        for (signal, path) in [
+            ("logs", "/select/logsql/tail"),
+            ("traces", "/select/timeless/api/spans/tail"),
+        ] {
+            for method in [Method::GET, Method::POST] {
+                assert_eq!(
+                    required_scope(signal, &method, path),
+                    format!("{signal}:read")
+                );
+            }
         }
     }
     use axum::routing::{get, post};

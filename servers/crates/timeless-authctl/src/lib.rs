@@ -200,7 +200,15 @@ pub fn mint(
 ) -> Result<String, String> {
     let now = unix_now()?;
     let jti = format!("authctl-{now}-{}", std::process::id());
-    mint_at(key_path, policy_path, subject, signal, ttl_seconds, now, &jti)
+    mint_at(
+        key_path,
+        policy_path,
+        subject,
+        signal,
+        ttl_seconds,
+        now,
+        &jti,
+    )
 }
 
 /// The deterministic core of `mint`: fixed issue time and token id. Exists

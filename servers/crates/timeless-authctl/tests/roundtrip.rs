@@ -25,19 +25,20 @@ async fn authctl_tokens_verify_through_the_server_middleware() {
         &policy_path,
     )
     .unwrap();
-    timeless_authctl::policy_add_subject(
-        &policy_path,
-        "reader",
-        &["metrics:read".to_owned()],
-    )
-    .unwrap();
+    timeless_authctl::policy_add_subject(&policy_path, "reader", &["metrics:read".to_owned()])
+        .unwrap();
 
     let config = AuthConfig::enforced("metrics", "default", &policy_path);
-    config.preflight().expect("scaffolded policy must pass the verifier preflight");
+    config
+        .preflight()
+        .expect("scaffolded policy must pass the verifier preflight");
     let app = protect_router(
         Router::new()
             .route("/api/v1/query", get(|| async { "read" }))
-            .route("/api/v1/flush", axum::routing::post(|| async { "maintenance" })),
+            .route(
+                "/api/v1/flush",
+                axum::routing::post(|| async { "maintenance" }),
+            ),
         config,
     );
 
@@ -128,8 +129,14 @@ fn ttl_parsing_and_policy_cap() {
     let dir = tempfile::tempdir().unwrap();
     let keypair = timeless_authctl::keygen(dir.path()).unwrap();
     let policy_path = dir.path().join("policy.json");
-    timeless_authctl::policy_init("logs", &keypair.public_key, "default", "default", &policy_path)
-        .unwrap();
+    timeless_authctl::policy_init(
+        "logs",
+        &keypair.public_key,
+        "default",
+        "default",
+        &policy_path,
+    )
+    .unwrap();
     // Scaffolded policies inherit the verifier's 3600s max_token_seconds
     // default; a longer ttl is refused at mint time, not at verify time.
     let error = timeless_authctl::mint(

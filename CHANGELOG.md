@@ -14,7 +14,13 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-No changes recorded after `0.7.6`.
+### Fixed
+
+- With auth enabled, `POST` to the live-tail routes (`/select/logsql/tail`,
+  `/select/timeless/api/spans/tail`) now requires the `:read` scope its GET
+  twin and the documentation already claimed, instead of falling through the
+  path heuristics to `:write`. A tail streams admitted data; its POST form
+  only carries the filter parameters.
 
 ## [0.7.6] — 2026-08-20
 
@@ -514,7 +520,17 @@ Hardened statement atomicity, savepoints, multi-process series identity,
 attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
-[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.5...v0.7.6
+[0.7.5]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.4...v0.7.5
+[0.7.4]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.3...v0.7.4
+[0.7.3]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/awksedgreep/timeless-libsql/compare/v0.6.4...v0.7.0
+[0.6.4]: https://github.com/awksedgreep/timeless-libsql/compare/v0.6.2...v0.6.4
+[0.6.2]: https://github.com/awksedgreep/timeless-libsql/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/awksedgreep/timeless-libsql/compare/v0.6.0...v0.6.1
 [0.5.0]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/awksedgreep/timeless-libsql/compare/v0.4.0...v0.4.1
