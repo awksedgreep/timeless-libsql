@@ -223,7 +223,7 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
             );
             x.counter(
                 "timeless_traces_raw_ingested_bytes_total",
-                "Estimated raw span bytes ingested: the persisted compression input total, whose input side accrues only first-pass compression (no recompression to subtract). Survives restarts; excludes spans not yet through their first compression pass.",
+                "Raw ingested bytes: logical span bytes (ids, kind/status, timings, and all string fields) counted once when spans become durable, from the engine's persisted ingest_raw_bytes_total; monotonic under optimize and prune, survives restarts; buffered spans are not yet counted.",
                 stats.raw_ingested_bytes_total,
             );
             x.gauge(

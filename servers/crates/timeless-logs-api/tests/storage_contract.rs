@@ -82,10 +82,10 @@ async fn exposition_and_stats_json_reconcile_with_engine_timeless_stats() {
         output_total <= input_total,
         "compression must not inflate: {output_total} > {input_total}"
     );
-    // Interim derivation: raw ingested is the persistent compression input
-    // total (already counted once per entry at first-pass compression),
-    // clamped at zero.
-    assert_eq!(raw_ingested, input_total.max(0));
+    // Raw ingested is the engine's persisted logical-row-bytes counter;
+    // every seeded entry is on disk here, so it must be positive, and it
+    // must reconcile exactly with the engine below.
+    assert!(raw_ingested > 0, "raw_ingested={raw_ingested}");
     // The stored side of a compression ratio is data-block payload only:
     // it never includes the index, and both sit strictly inside the page
     // space of the whole database file.
@@ -120,6 +120,7 @@ async fn exposition_and_stats_json_reconcile_with_engine_timeless_stats() {
     assert_eq!(engine["index_bytes"], index_bytes);
     assert_eq!(engine["compression_input_bytes_total"], input_total);
     assert_eq!(engine["compression_output_bytes_total"], output_total);
+    assert_eq!(engine["ingest_raw_bytes_total"], raw_ingested);
 }
 
 fn series_value(text: &str, name: &str) -> i64 {

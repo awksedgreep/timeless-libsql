@@ -148,11 +148,11 @@ async fn self_metrics(State(storage): State<Storage>) -> impl IntoResponse {
             );
             x.counter(
                 "timeless_logs_raw_ingested_bytes_total",
-                "Raw ingested bytes, interim-derived from the compression \
-                 input total: counts each entry's payload once at first \
-                 compression, excludes optimize/merge recompression and \
-                 entries not yet compressed; persisted in the database, \
-                 survives restarts.",
+                "Raw ingested bytes: logical row bytes (timestamp, level, \
+                 message, metadata) counted once when entries become \
+                 durable, from the engine's persisted ingest_raw_bytes_total; \
+                 monotonic under optimize and prune, survives restarts; \
+                 buffered entries are not yet counted.",
                 stats.raw_ingested_bytes_total,
             );
             x.gauge(

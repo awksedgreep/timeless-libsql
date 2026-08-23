@@ -3982,15 +3982,12 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         // Interim raw-ingested derivation (COMPRESSION_REPORTING_PLAN.md
         // Phase 2). The engine's persistent compression input total already
         // counts each entry's block payload exactly once, at first-pass
-        // compression: optimize's raw phase only processes raw-codec blocks,
-        // and merge recompression is folded into the OUTPUT side only, so
-        // there is no optimize/merge input to subtract here. Subtracting the
-        // since-open optimize_raw/merge_input_bytes profile counters from
-        // this persistent lifetime total would corrupt it after a restart.
-        // Clamped at zero; superseded by the engine's per-signal
-        // ingest_raw_bytes_total once plan Phase 1 lands. Entries still
-        // buffered or in raw (uncompressed) blocks are not counted yet.
-        raw_ingested_bytes_total: stat("compression_input_bytes_total").max(0),
+        // The engine's persistent ingest-raw counter: logical row bytes
+        // (ts + level + message + metadata) accrued in the same transaction
+        // that makes entries durable. Monotonic under optimize/merge/prune,
+        // survives restarts; entries still buffered in memory are not yet
+        // counted. Clamped at zero for pre-upgrade stores that read 0.
+        raw_ingested_bytes_total: stat("ingest_raw_bytes_total").max(0),
         optimize_raw_total_ns: stat("optimize_raw_total_ns"),
         optimize_merge_groups: stat("optimize_merge_groups"),
         optimize_merge_blocks: stat("optimize_merge_blocks"),

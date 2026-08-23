@@ -1497,7 +1497,9 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         extension_optimize_raw_input_bytes: integer("optimize_raw_input_bytes"),
         extension_compression_input_bytes_total: integer("compression_input_bytes_total"),
         extension_compression_output_bytes_total: integer("compression_output_bytes_total"),
-        raw_ingested_bytes_total: integer("compression_input_bytes_total").max(0),
+        // Engine's persistent ingest-raw counter (logical span bytes made
+        // durable); monotonic, restart-safe, 0 on pre-upgrade stores.
+        raw_ingested_bytes_total: integer("ingest_raw_bytes_total").max(0),
         extension_optimize_raw_output_bytes: integer("optimize_raw_output_bytes"),
         extension_optimize_raw_total_ns: integer("optimize_raw_total_ns"),
         extension_optimize_merge_groups: integer("optimize_merge_groups"),

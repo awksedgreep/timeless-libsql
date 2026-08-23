@@ -1049,11 +1049,10 @@ async fn metrics_exposition_reconciles_storage_series_with_timeless_stats() {
         compression_input > 0 && compression_output > 0,
         "optimize must persist first-pass compression totals"
     );
-    assert_eq!(
-        raw_ingested, compression_input,
-        "interim raw derivation: the persisted input side already \
-         excludes recompression, so nothing is subtracted"
-    );
+    // Raw ingested is the engine's persisted logical-span-bytes counter;
+    // all seeded spans are on disk here, so it is positive, and it must
+    // reconcile exactly with the engine at the bottom of this test.
+    assert!(raw_ingested > 0, "raw_ingested={raw_ingested}");
 
     let stats = get_json(&app, "/select/traces/stats").await;
     assert_eq!(stats.0, StatusCode::OK);
@@ -1100,4 +1099,5 @@ async fn metrics_exposition_reconciles_storage_series_with_timeless_stats() {
     assert_eq!(engine("index_bytes"), index_bytes);
     assert_eq!(engine("compression_input_bytes_total"), compression_input);
     assert_eq!(engine("compression_output_bytes_total"), compression_output);
+    assert_eq!(engine("ingest_raw_bytes_total"), raw_ingested);
 }

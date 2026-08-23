@@ -66,10 +66,11 @@ bytes:
   persisted inside the database (they survive restarts); the input side
   counts each entry's block payload once at first-pass compression, and the
   output side is net of optimize merge savings;
-- `timeless_logs_raw_ingested_bytes_total` — interim raw-side counter derived
-  from the compression input total (JSON `raw_ingested_bytes_total`); it
-  excludes optimize/merge recompression and does not yet include buffered or
-  still-raw entries.
+- `timeless_logs_raw_ingested_bytes_total` — the engine's persisted
+  ingest-raw counter (JSON `raw_ingested_bytes_total`): logical row bytes
+  (timestamp, level, message, metadata) counted once when entries become
+  durable; monotonic under optimize and prune, survives restarts. Entries
+  still buffered in memory are not yet counted.
 
 ## LogsQL compatibility
 

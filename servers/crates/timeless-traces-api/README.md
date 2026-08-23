@@ -51,8 +51,8 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   split (`bytes_on_disk`, `sqlite_index_bytes`, `database_wal_bytes`,
   `freelist_bytes`), the persisted compression totals
   (`extension_compression_input_bytes_total`,
-  `extension_compression_output_bytes_total`), and the interim
-  `raw_ingested_bytes_total` estimate.
+  `extension_compression_output_bytes_total`), and the engine-persisted
+  `raw_ingested_bytes_total` counter.
 - `GET /metrics` serves the plane's Prometheus text exposition. Alongside the
   operational series it exports the honest storage split as separate gauges —
   `timeless_traces_storage_bytes` (span block payload only),
@@ -62,10 +62,12 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   `timeless_traces_raw_ingested_bytes_total`. The compression totals are
   persisted in the store's `_meta` (they survive restarts); the input side
   accrues only first-pass compression, never merge or duration-backfill
-  recompression, so `raw_ingested` is currently that same input total. A
-  compression ratio divides raw ingested by storage bytes; index, WAL,
-  freelist, and whole-file sizes are separate series and never part of the
-  ratio.
+  recompression. `raw_ingested` is the engine's persisted ingest-raw
+  counter: logical span bytes (ids, kind/status, timings, and all string
+  fields) counted once when spans become durable, monotonic under optimize
+  and prune; buffered spans are not yet counted. A compression ratio
+  divides raw ingested by storage bytes; index, WAL, freelist, and
+  whole-file sizes are separate series and never part of the ratio.
 - `GET|POST /api/v1/flush` is an ordered completion and durability barrier. Its
   response identifies the admitted request watermark covered by the flush.
 - `POST /api/v1/backup` flushes, drains actionable optimize backlog,

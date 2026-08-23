@@ -143,10 +143,13 @@ standard raw comparator; series identity is the amortized catalog), and is
 lifetime-accurate because it derives from durable point counts.
 `timeless_logs_raw_ingested_bytes_total` and
 `timeless_traces_raw_ingested_bytes_total` surface the extension's
-persisted `compression_input_bytes_total` (first-pass compression input,
-stored in extension metadata, survives restarts); entries still buffered or
-in raw uncompressed blocks are not yet counted, so the ratio briefly
-understates after bursts and self-corrects on flush/optimize. The paired
+persisted `ingest_raw_bytes_total` counter: logical row bytes (log
+timestamp + level + message + metadata; span ids + kind/status + timings +
+string fields) counted once when rows become durable, monotonic under
+optimize and prune, restart-safe. Rows still buffered in memory are not
+yet counted, so the ratio briefly understates after bursts and
+self-corrects on flush; pre-upgrade databases start the counter at their
+next flush. The paired
 `timeless_logs|traces_compression_input|output_bytes_total` counters are
 exported alongside. The same values appear in the serialized `StorageStats`
 responses; each plane README documents its exact series list.
