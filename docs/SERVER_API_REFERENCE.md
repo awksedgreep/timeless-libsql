@@ -100,6 +100,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `traces` | `GET` | `/select/jaeger/api/traces` | `traces:read` | Jaeger trace search. |
 | `traces` | `GET` | `/select/jaeger/api/traces/{trace_id}` | `traces:read` | One Jaeger trace with all matching spans. |
 | `traces` | `GET` | `/select/timeless/api/spans` | `traces:read` | Native rich-span search for the Timeless dashboard contract. |
+| `traces` | `GET, POST` | `/select/timeless/api/spans/tail` | `traces:read` | Live tail: streams admitted spans as NDJSON, filtered by the search surface's live-matchable parameters (`service`, `name`, `kind`, `status`) plus an `attributes` JSON object of exact scalar matches; invalid values are rejected; slow consumers drop spans (counted in stats). |
 | `traces` | `GET` | `/select/timeless/api/traces/{trace_id}` | `traces:read` | One native trace with complete rich-span fields. |
 | `traces` | `GET, POST` | `/api/v1/flush` | `traces:maintenance` | Ordered writer completion, extension flush, and durability barrier. |
 | `traces` | `POST` | `/api/v1/backup` | `traces:maintenance` | Flush, optimize, checkpoint, and verified SQLite backup. |

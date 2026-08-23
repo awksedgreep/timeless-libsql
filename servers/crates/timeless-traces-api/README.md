@@ -77,6 +77,13 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   ordered native trace with typed attributes, status description, events,
   per-span resources, and instrumentation scope intact. These two routes are
   traces-specific; they do not change or masquerade as the Jaeger contract.
+- `GET|POST /select/timeless/api/spans/tail` streams admitted spans as
+  NDJSON — the streaming twin of the span search. Filters reuse the search
+  surface's live-matchable parameters (`service`, `name`, `kind`, `status`)
+  plus an `attributes` JSON object of exact scalar matches; invalid values
+  are rejected rather than ignored. Spans publish only after storage durably
+  accepts the batch, and slow consumers drop spans (counted in stats) rather
+  than backpressuring ingest.
 
 The public SQL waist remains useful outside this daemon. Unbounded
 `timeless_traces` cursors stream one decoded block at a time; exact

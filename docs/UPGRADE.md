@@ -6,14 +6,14 @@ not turn the server binaries into readers for an unrelated Rust block-store
 directory; that conversion belongs to the higher-order product that owns the
 legacy format and must write through the public Timeless batch/SQL contracts.
 
-The current tagged source line is `0.5.0`. Its four native package jobs and
-complete outer-checksum gate passed, and the archives plus `SHA256SUMS` are
-published as permanent `v0.5.0` GitHub Release assets — see the
-[artifact guide](ARTIFACTS.md) for the exact channel; never mix archives from
-different versions. The `0.5.0` handshake floors pair extension and servers
-at `0.5.0` in both directions, so earlier `0.4.x` binaries are not valid
-peers for the current line (and the `v0.3.0` tag predates the capability
-handshake entirely).
+The current tagged source line is `0.7.x` (`v0.7.6`). Its four native package
+jobs and complete outer-checksum gate passed, and the archives plus
+`SHA256SUMS` are published as permanent `v0.7.6` GitHub Release assets — see
+the [artifact guide](ARTIFACTS.md) for the exact channel; never mix archives
+from different versions. The `0.7.x` handshake floors pair extension and
+servers at `0.7.0` in both directions, so earlier `0.6.x` and older binaries
+are not valid peers for the current line (and the `v0.3.0` tag predates the
+capability handshake entirely).
 
 ## Invariants
 
@@ -139,8 +139,8 @@ SELECT name, sql
 SQL
 ```
 
-Require extension version `0.4.x`, `data_abi=1`,
-`sql_surface_version=1`, `minimum_server_version>=0.4.0`, the expected signal
+Require extension version `0.7.x`, `data_abi=1`,
+`sql_surface_version=1`, `minimum_server_version>=0.7.0`, the expected signal
 batch generations, and every query work guard required by the intended
 server. The canonical field inventory is in the
 [SQL API reference](SQL_API_REFERENCE.md#capability-and-version-handshake).
@@ -168,7 +168,7 @@ parity.
 7. Repeat for each independently owned signal database/process.
 
 Startup must fail closed for a missing capability function, extension below
-`0.4.0`, server below the extension's floor, wrong data ABI, missing rich batch
+the server's floor, server below the extension's floor, wrong data ABI, missing rich batch
 generation, required query guard absence, future schema ledger, incompatible
 timestamp/retention policy, corruption, or another owner lease.
 
@@ -223,9 +223,9 @@ contracts. Restore the matching backup.
 | Detected source | Action |
 |---|---|
 | Fresh database | Create the public signal vtab with the desired timestamp/index/retention options; record schema ledger v1 through the writer. |
-| Current SQLite/libSQL database and matching `0.4.x` extension | Start normally after backup; full handshake and schema preflight remain mandatory. |
+| Current SQLite/libSQL database and matching `0.7.x` extension | Start normally after backup; full handshake and schema preflight remain mandatory. |
 | Pre-ledger SQLite telemetry database | Back up, preflight with the new extension on a copy, then allow the new writer to add ledger v1 idempotently. |
-| Database created by tagged `v0.3.0` | Replace the extension with `0.4.x` before starting a release server; validate all signals on a copy because the old tag has no capability document. |
+| Database created by tagged `v0.3.0` | Replace the extension with the current line before starting a release server; validate all signals on a copy because the old tag has no capability document. |
 | Future ledger or different data ABI | Stop. Use a compatible newer binary or an explicit versioned migration; do not mutate/downgrade. |
 | Corrupt database or failed semantic parity | Stop and retain both source and candidate; restore/continue the old deployment. |
 | External legacy Rust block store | Use the owning higher-order library's explicit converter. These signal binaries do not read it and must not recreate its storage format. |

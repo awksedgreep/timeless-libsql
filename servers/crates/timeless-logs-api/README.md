@@ -55,7 +55,7 @@ pipelines execute over bounded public rows. Invalid or unsupported syntax
 fails explicitly before storage rather than being ignored.
 
 The [LogsQL feature matrix](../../../docs/LOGSQL_FEATURE_MATRIX.md) is the
-compatibility authority. At the `v0.4.0` source line, 107 rows are shipped and
+compatibility authority. At the `0.7.x` source line, 107 rows are shipped and
 7 are deferred behind named storage/topology prerequisites. Important
 deferrals include tenant-scoped VictoriaLogs stream identity, same-stream
 context, physical VictoriaLogs block diagnostics, intra-query parallelism,

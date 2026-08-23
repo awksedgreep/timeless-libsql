@@ -58,7 +58,7 @@ aggregation, modifier, histogram behavior, experimental gate, and deferred
 data-model prerequisite. Unsupported syntax fails explicitly before storage;
 it is never silently ignored or delegated.
 
-At the `v0.4.0` source line, the matrix dispositions are:
+At the `0.7.x` source line, the matrix dispositions are:
 
 | tier | shipped | experimental | deferred |
 |---|---:|---:|---:|

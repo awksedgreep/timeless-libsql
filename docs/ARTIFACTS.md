@@ -9,25 +9,25 @@ reachable from `main`.
 
 ## Current publication status
 
-`v0.5.0` was tagged from `main` at
-`daabaf7d39e867be551e04f8a315f130fbe8fd27` on 2026-08-09 (UTC). GitHub
-Actions run `31285260705` built, identity-checked, install/remove-drilled,
+`v0.7.6` was tagged from `main` at
+`507fb861a261d33f4be0c4302eb3f6e63647cbe1` on 2026-08-21 (UTC). GitHub
+Actions run `32441629720` built, identity-checked, install/remove-drilled,
 and uploaded all four intended Linux/macOS archives; its checksum job
 downloaded the whole matrix, produced and verified the complete outer
 `SHA256SUMS`; and the workflow published the
-[`v0.5.0` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.5.0)
+[`v0.7.6` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.7.6)
 with the four archives plus `SHA256SUMS` as permanent release assets. This is
-the current download channel.
+the current download channel. Complete published releases also exist for
+`v0.7.5` back through `v0.7.1`, `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`,
+`v0.5.0`, and `v0.4.2`.
 
-For history: `v0.4.2` (run `31281301520`) completed the same matrix and
-published this repository's first GitHub Release, proving the tag→Release
-path its own changelog entry describes. `v0.4.1` passed all four package jobs
-and the outer checksum gate but predates Release publication — its five
-files existed only as workflow-retained artifacts (until 2026-11-06).
-`v0.4.0` produced only its two Linux candidates: both macOS jobs failed
-because the release tool used Apple's restricted system SQLite, and the
-aggregate checksum job was skipped; `v0.4.1` fixed that packaging defect by
-building the release tool with bundled SQLite.
+For history: some tags record source only, because their artifact runs failed
+and the fix became the next patch — `v0.7.0` (authctl missed the `--version`
+identity contract), `v0.6.3` (version bump without refreshed lockfiles under
+`--locked`), and `v0.4.0` (the release tool linked Apple's restricted system
+SQLite, so both macOS jobs failed). `v0.4.1` passed all four package jobs and
+the outer checksum gate but predates Release publication; `v0.4.2` published
+this repository's first GitHub Release, proving the tag→Release path.
 
 The standalone dbhealth extension is intentionally not in this bundle. Build
 `dbhealth-ext` separately from compatible source when it is required.
@@ -128,13 +128,14 @@ identity. Before distribution, compare:
 
 ## Installing
 
-After obtaining the complete `v0.4.1` workflow artifact set, verify the outer
-checksum, extract the archive matching the host, then run its installer. These
-names illustrate the versioned layout; they are not GitHub Release URLs:
+Download the archive matching the host plus the outer `SHA256SUMS` from the
+current GitHub Release, verify the outer checksum, extract, then run the
+bundled installer:
 
 ```sh
-tar -xzf timeless-telemetry-data-plane-0.4.1-x86_64-unknown-linux-gnu.tar.gz
-cd timeless-telemetry-data-plane-0.4.1-x86_64-unknown-linux-gnu
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf timeless-telemetry-data-plane-0.7.6-x86_64-unknown-linux-gnu.tar.gz
+cd timeless-telemetry-data-plane-0.7.6-x86_64-unknown-linux-gnu
 sudo ./install.sh --prefix /opt/timeless
 ```
 

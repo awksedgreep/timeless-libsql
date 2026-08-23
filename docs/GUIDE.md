@@ -34,7 +34,7 @@ cargo build --release -p timeless-ext
 # produces: target/release/libtimeless_ext.so   (.dylib on macOS)
 ```
 
-`v0.5.0` passed the complete four-platform archive and outer-checksum matrix
+`v0.7.6` passed the complete four-platform archive and outer-checksum matrix
 and published the archives plus `SHA256SUMS` as permanent GitHub Release
 assets. Build from source or follow the exact current download status in the
 [artifact guide](ARTIFACTS.md).

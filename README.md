@@ -8,7 +8,7 @@ blocks, indexes, rollups, and maintenance metadata in that database, so the
 host retains SQLite transactions, WAL, backup, and libSQL deployment choices.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Release line: 0.4.x](https://img.shields.io/badge/release%20line-0.4.x-orange.svg)
+![Release line: 0.7.x](https://img.shields.io/badge/release%20line-0.7.x-orange.svg)
 
 Think of it as **FTS5 for telemetry**: load one extension, create the table
 types you need, and query them with SQL.
@@ -28,17 +28,16 @@ CREATE VIRTUAL TABLE traces USING timeless_traces(
 
 ## Current status
 
-The project is on the pre-1.0 `0.4.x` compatibility line. Extension and Rust
+The project is on the pre-1.0 `0.7.x` compatibility line. Extension and Rust
 signal-server versions move together and negotiate capabilities at startup;
 matching version strings alone are not sufficient.
 
-The `v0.4.0` source tag exists on `main`. As of 2026-08-08, it does **not**
-have a complete published native release set: both Linux candidate bundles
-passed their package/install checks, while the macOS packaging jobs exposed a
-release-tool link issue before producing archives. There is no complete outer
-checksum set or GitHub Release for that tag. Build from source until a later
-tag publishes the complete verified artifact set described in
-[the artifact guide](docs/ARTIFACTS.md).
+`v0.7.6` is the current release. Its tag-triggered artifact run built,
+identity-checked, and install/remove-drilled all four native Linux/macOS
+archives, verified the complete outer checksum set, and published the
+[`v0.7.6` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.7.6)
+with the archives plus `SHA256SUMS` as permanent assets. Download and
+verification steps are in [the artifact guide](docs/ARTIFACTS.md).
 
 The storage, SQL, and Rust API contracts are implemented and extensively
 tested. Query-language coverage is explicit rather than implied:
@@ -305,13 +304,20 @@ timeless-<signal>-api <libtimeless_ext.so> <database> [listen-address]
 | binary | default listener | main protocols |
 |---|---:|---|
 | `timeless-metrics-api` | `127.0.0.1:19439` | Prometheus text import/scraping, PromQL, explicit MetricsQL routes, VictoriaMetrics JSON-line import/export, native discovery |
-| `timeless-logs-api` | `127.0.0.1:19429` | NDJSON rich-log ingest, LogsQL query and field discovery |
-| `timeless-traces-api` | `127.0.0.1:19449` | OTLP JSON/protobuf/gzip ingest, Jaeger discovery/search, native rich-span reads |
+| `timeless-logs-api` | `127.0.0.1:19429` | NDJSON rich-log ingest, LogsQL query and field discovery, NDJSON live tail |
+| `timeless-traces-api` | `127.0.0.1:19449` | OTLP JSON/protobuf/gzip ingest, Jaeger discovery/search, native rich-span reads, NDJSON live span tail |
+
+Each binary also serves its own operational stats as Prometheus text
+exposition on `GET /metrics`, including a `timeless_build_info` metric so
+version drift between environments is visible on any compatible dashboard.
 
 Release binaries start open — no authentication and no configuration —
 matching the library `Config::default()` and comparable telemetry servers.
 Set `TIMELESS_AUTH_MODE=required` with `TIMELESS_AUTH_POLICY_FILE` to enable
-token verification. Non-loopback binding is
+token verification; the bundled `timeless-authctl` handles Ed25519 keygen,
+policy scaffolding, and token minting. `TIMELESS_ADMIN_KEY` optionally locks
+the administrative routes alone while ingest and query stay open.
+Non-loopback binding is
 rejected unless `TIMELESS_ALLOW_NON_LOOPBACK=1` is explicitly set for a
 separately secured deployment. TCP is the implemented transport; this release
 does not claim a Unix-socket listener.

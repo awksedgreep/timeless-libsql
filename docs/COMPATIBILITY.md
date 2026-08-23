@@ -15,8 +15,8 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.7.4` | Current extension/core/dbhealth source line. |
-| `server_workspace` | `0.7.4` | Current metrics/logs/traces server source line. |
+| `extension_workspace` | `0.7.6` | Current extension/core/dbhealth source line. |
+| `server_workspace` | `0.7.6` | Current metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
 | `extension_minimum_server` | `0.7.0` | Oldest server accepted by the current extension document. |
@@ -74,10 +74,10 @@ These independent versions must not be conflated:
 
 | Extension | Rust server | Verdict | Reason |
 |---|---|---|---|
-| current `0.5.x` | matching current `0.5.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
-| tagged `v0.3.0` | `0.5.x` | unsupported | The tag predates `timeless_capabilities()` and the release-server query guards. |
-| tagged `0.4.x` | current `0.5.x` server | unsupported | The current servers declare a `0.5.0` extension floor: a `0.4.x` extension cannot decode codec-8 blocks a `0.5.x` optimize may already have written. |
-| `0.5.x` | tagged `0.3.x`/`0.4.x` server | unsupported | The current extension declares a `0.5.0` server floor; an old server cannot prove it understands the current API/resource contract. |
+| current `0.7.x` | matching current `0.7.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
+| tagged `v0.3.0` | `0.7.x` | unsupported | The tag predates `timeless_capabilities()` and the release-server query guards. |
+| tagged `0.4.x`–`0.6.x` | current `0.7.x` server | unsupported | The current servers declare a `0.7.0` extension floor; a pre-`0.5.0` extension additionally cannot decode codec-8 blocks a later optimize may already have written. |
+| `0.7.x` | tagged `0.3.x`–`0.6.x` server | unsupported | The current extension declares a `0.7.0` server floor; an old server cannot prove it understands the current API/resource contract, and the `0.7` line changed the documented authentication default. |
 | any version with a different `data_abi` | current servers | unsupported | The server refuses before virtual-table initialization. |
 | current extension with a future-schema database | current servers | unsupported/fail closed | The server does not downgrade or mutate a future ledger. |
 | current extension loaded directly by SQLite/libSQL | no Timeless server; host-owned | supported | The host must negotiate capabilities and own maintenance, backup, concurrency, and limits. |
@@ -140,10 +140,10 @@ storage.
 ## Platform and SQLite/libSQL boundary
 
 The release-tool target inventory covers x86-64/AArch64 Linux GNU and
-x86-64/AArch64 macOS. For `v0.5.0`, all four native build, identity,
+x86-64/AArch64 macOS. For `v0.7.6`, all four native build, identity,
 install/remove, and upload jobs passed, followed by the complete outer
 checksum job, and the workflow published the archives plus `SHA256SUMS` as
-permanent `v0.5.0` GitHub Release assets (the tag→Release path first proven
+permanent `v0.7.6` GitHub Release assets (the tag→Release path first proven
 by `v0.4.2`). The [artifact guide](ARTIFACTS.md) is the canonical
 publication-status record.
 
