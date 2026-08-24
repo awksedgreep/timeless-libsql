@@ -31,6 +31,11 @@ pub use storage::{
 };
 pub use timeless_api_common::BackupReport;
 
+/// Cadence of the writer's periodic `wal_checkpoint(TRUNCATE)`. It keeps the
+/// WAL file near its configured bound instead of its high-water size; a busy
+/// pass is only reported and the next interval tries again.
+const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
+
 /// Hard LogsQL execution limits applied even when authentication is disabled.
 /// Claim-derived policy may lower these values but cannot raise the storage
 /// owner's bounds.
@@ -166,6 +171,11 @@ pub async fn run(config: Config) -> Result<(), String> {
         storage.clone(),
         |storage| async move { storage.schedule_optimize().await },
     );
+    let wal_checkpoint_task = maintenance_task(
+        WAL_CHECKPOINT_INTERVAL,
+        storage.clone(),
+        |storage| async move { storage.schedule_wal_checkpoint().await },
+    );
 
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -174,6 +184,7 @@ pub async fn run(config: Config) -> Result<(), String> {
 
     flush_task.abort();
     optimize_task.abort();
+    wal_checkpoint_task.abort();
     let shutdown = storage.shutdown().await;
     served.and(shutdown)
 }

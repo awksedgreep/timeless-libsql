@@ -13,7 +13,8 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
-    preflight_database, preflight_extension, require_current_schema, BackupReport, DataPlaneSpec,
+    periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
+    BackupReport, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -350,6 +351,7 @@ enum WriteCommand {
         destination: PathBuf,
         reply: oneshot::Sender<Result<BackupReport, String>>,
     },
+    WalCheckpoint(oneshot::Sender<Result<(), String>>),
     Shutdown(oneshot::Sender<Result<(), String>>),
 }
 
@@ -736,6 +738,21 @@ impl Storage {
             .map_err(|_| "SQLite writer stopped before optimize completed".to_string())?
     }
 
+    /// Best-effort periodic TRUNCATE checkpoint so the WAL file cannot keep
+    /// its high-water size between backups. A busy result is surfaced, not
+    /// retried; the next interval tries again.
+    pub async fn schedule_wal_checkpoint(&self) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::WalCheckpoint(reply_tx))
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before WAL checkpoint completed".to_string())?
+    }
+
     pub async fn backup(&self, destination: PathBuf) -> Result<BackupReport, String> {
         let _ordered = self.0.admission.lock().await;
         if self.0.shutting_down.load(Ordering::Acquire) {
@@ -1051,6 +1068,10 @@ fn writer_main(
                 record_backup(&profile, started.elapsed(), &result);
                 let _ = reply.send(result);
             }
+            WriteCommand::WalCheckpoint(reply) => {
+                let result = periodic_wal_checkpoint(&conn, "traces");
+                let _ = reply.send(result);
+            }
             WriteCommand::Shutdown(reply) => {
                 let flush = run_command(&conn, "flush", "graceful traces flush");
                 let checkpoint_started = Instant::now();
@@ -1295,6 +1316,12 @@ fn open_connection(
             ),
             None => "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces;".to_owned(),
         };
+        // Writer WAL discipline: with the 16 KiB pages above,
+        // wal_autocheckpoint = 1000 attempts a passive checkpoint once the
+        // WAL holds ~16 MiB, and journal_size_limit truncates the WAL file
+        // back to at most 64 MiB after checkpoints instead of leaving it at
+        // its high-water size. Both are per-connection settings; the writer
+        // always takes this branch, so they apply on every boot.
         conn.execute_batch(&format!(
             "PRAGMA page_size = 16384;
              PRAGMA journal_mode = WAL;
@@ -1302,7 +1329,8 @@ fn open_connection(
              PRAGMA cache_size = -128000;
              PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA mmap_size = 2147483648;
-             PRAGMA wal_autocheckpoint = 10000;
+             PRAGMA wal_autocheckpoint = 1000;
+             PRAGMA journal_size_limit = 67108864;
              PRAGMA temp_store = MEMORY;
              PRAGMA busy_timeout = 5000;
              {create}"

@@ -12,6 +12,33 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 <!-- release-target: 0.7.7 -->
 
+## [Unreleased]
+
+### Changed
+
+- **All three signal servers now bound the WAL with the same embedded
+  profile.** Every writer connection sets `wal_autocheckpoint = 1000` — a
+  passive checkpoint attempt near ~16 MiB of WAL on metrics and traces
+  (16 KiB pages) and ~4 MiB on logs (default 4 KiB pages) — replacing the
+  metrics/traces value of 10000 and the logs writer's inherited SQLite
+  default, plus `journal_size_limit = 67108864` so checkpoints truncate the
+  WAL file back to at most 64 MiB instead of leaving it at its high-water
+  size. Both are per-connection settings applied on the writer's open path
+  every boot (the logs store-creation connection gets the same two bounds).
+  The logs writer additionally gains the `cache_size = -128000`,
+  `mmap_size = 2147483648`, and `temp_store = MEMORY` tuning the metrics and
+  traces writers already had, so the three planes' writer profiles match.
+- **Each server runs a periodic truncating checkpoint.** A new maintenance
+  task sends a `WalCheckpoint` command through the writer queue every 300 s;
+  the writer executes one best-effort `PRAGMA wal_checkpoint(TRUNCATE)`
+  (shared `periodic_wal_checkpoint` in `timeless-api-common`), bounded by
+  the connection's existing 5 s busy timeout. A complete pass is silent; a
+  busy pass surfaces its `(busy, log, checkpointed)` counts through the
+  maintenance-error log line and is retried on the next interval. Previously
+  no plane truncated the WAL outside the backup and shutdown paths. Server
+  behavior only; no extension, SQL, or data-ABI change. GUIDE §8 now
+  documents the recommended embedded WAL profile and checkpoint cadence.
+
 ## [0.7.7] — 2026-08-23
 
 ### Added

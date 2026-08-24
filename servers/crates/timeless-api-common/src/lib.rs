@@ -78,6 +78,25 @@ pub fn checkpoint_wal(conn: &Connection, signal: &str) -> Result<CheckpointRepor
     }
 }
 
+/// One best-effort `wal_checkpoint(TRUNCATE)` for periodic maintenance,
+/// bounded only by the connection's busy timeout. Unlike [`checkpoint_wal`]
+/// a busy or partial result is not retried here — the caller's next interval
+/// tries again — but it is surfaced as the error string so the maintenance
+/// loop's logging reports it. A complete checkpoint is silent.
+pub fn periodic_wal_checkpoint(conn: &Connection, signal: &str) -> Result<(), String> {
+    let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|error| format!("periodic {signal} WAL checkpoint: {error}"))?;
+    if busy != 0 {
+        return Err(format!(
+            "periodic {signal} WAL checkpoint could not complete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+        ));
+    }
+    Ok(())
+}
+
 /// Copy a database with SQLite's public online-backup API while the caller's
 /// established writer connection is the sole storage owner. The final path is
 /// published without overwrite only after page-copy, integrity, schema, and

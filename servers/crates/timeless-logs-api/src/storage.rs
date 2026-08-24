@@ -15,8 +15,8 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
-    preflight_database, preflight_extension, require_current_schema, require_query_surface,
-    BackupReport, DataPlaneSpec,
+    periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
+    require_query_surface, BackupReport, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -996,6 +996,7 @@ enum WriteCommand {
         destination: PathBuf,
         reply: oneshot::Sender<Result<BackupReport, String>>,
     },
+    WalCheckpoint(oneshot::Sender<Result<(), String>>),
     Shutdown(oneshot::Sender<Result<(), String>>),
 }
 
@@ -1250,6 +1251,21 @@ impl Storage {
             .send(WriteCommand::Optimize)
             .await
             .map_err(|_| "SQLite writer is not running".to_string())
+    }
+
+    /// Best-effort periodic TRUNCATE checkpoint so the WAL file cannot keep
+    /// its high-water size between backups. A busy result is surfaced, not
+    /// retried; the next interval tries again.
+    pub async fn schedule_wal_checkpoint(&self) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.0
+            .writer
+            .send(WriteCommand::WalCheckpoint(reply_tx))
+            .await
+            .map_err(|_| "SQLite writer is not running".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before WAL checkpoint completed".to_string())?
     }
 
     /// Ordered API test/administration barrier. It changes no storage state;
@@ -1686,6 +1702,9 @@ fn writer_main(
                 record_backup(&profile, started.elapsed(), &result);
                 let _ = reply.send(result);
             }
+            WriteCommand::WalCheckpoint(reply) => {
+                let _ = reply.send(periodic_wal_checkpoint(&conn, "logs"));
+            }
             WriteCommand::Shutdown(reply) => {
                 let flush = conn
                     .execute("INSERT INTO logs(logs) VALUES ('flush')", [])
@@ -2008,10 +2027,15 @@ fn apply_store_policy(
             .as_deref()
             .map(|value| format!(", retention='{}'", value.replace('\'', "")))
             .unwrap_or_default();
+        // Same WAL bound as the long-lived writer: this creation connection
+        // can churn the WAL (a policy change reindexes every block), so it
+        // must not leave a high-water WAL file behind either.
         conn.execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA wal_autocheckpoint = 1000;
+             PRAGMA journal_size_limit = 67108864;
              CREATE VIRTUAL TABLE logs USING timeless_logs(
                index_keys='{}', timestamp_unit='{}'{retention_arg});",
             keys.replace('\'', ""),
@@ -2109,10 +2133,23 @@ fn open_connection(
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| format!("set busy timeout: {e}"))?;
     if let Some(timestamp_unit) = initialize {
+        // Writer WAL discipline: logs keeps SQLite's default 4 KiB page
+        // size, so wal_autocheckpoint = 1000 attempts a passive checkpoint
+        // once the WAL holds ~4 MiB, and journal_size_limit truncates the
+        // WAL file back to at most 64 MiB after checkpoints instead of
+        // leaving it at its high-water size. Both are per-connection
+        // settings; the writer always takes this branch, so they apply on
+        // every boot. The cache/mmap/temp_store tuning matches the metrics
+        // and traces writers.
         conn.execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -128000;
              PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA mmap_size = 2147483648;
+             PRAGMA wal_autocheckpoint = 1000;
+             PRAGMA journal_size_limit = 67108864;
+             PRAGMA temp_store = MEMORY;
              CREATE VIRTUAL TABLE IF NOT EXISTS logs USING timeless_logs(
                index_keys='{DEFAULT_INDEX_KEYS}', timestamp_unit='{}');",
             timestamp_unit.sql_name()

@@ -29,6 +29,11 @@ pub use timeless_api_common::BackupReport;
 
 pub const DEFAULT_RAW_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Cadence of the writer's periodic `wal_checkpoint(TRUNCATE)`. It keeps the
+/// WAL file near its configured bound instead of its high-water size; a busy
+/// pass is only reported and the next interval tries again.
+const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
+
 /// Hard PromQL execution limits that apply even when API authentication is
 /// disabled. Authentication claims may impose tighter request-specific
 /// limits, but can never raise these storage-owner bounds.
@@ -181,6 +186,11 @@ pub async fn run(config: Config) -> Result<(), String> {
         storage.clone(),
         |storage| async move { storage.schedule_retention().await },
     );
+    let wal_checkpoint_task = maintenance_task(
+        WAL_CHECKPOINT_INTERVAL,
+        storage.clone(),
+        |storage| async move { storage.schedule_wal_checkpoint().await },
+    );
 
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -190,9 +200,11 @@ pub async fn run(config: Config) -> Result<(), String> {
     flush_task.abort();
     compact_task.abort();
     retention_task.abort();
+    wal_checkpoint_task.abort();
     let _ = flush_task.await;
     let _ = compact_task.await;
     let _ = retention_task.await;
+    let _ = wal_checkpoint_task.await;
     let shutdown = storage.shutdown().await;
     served.and(shutdown)
 }

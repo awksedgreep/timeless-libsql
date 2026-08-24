@@ -659,6 +659,40 @@ The file additionally contains WAL frames, freelist pages, and btree
 overhead — operational facts worth watching (`dbhealth` graphs them), but
 none of them belong inside a compression ratio.
 
+### Keeping the WAL bounded: the embedded profile
+
+WAL mode has one more file to keep honest. SQLite's automatic checkpoint is
+*passive*: it never interrupts a reader or writer, so under sustained load
+the `-wal` file can grow well past the autocheckpoint threshold — and once
+checkpointed, SQLite reuses the file without shrinking it, so it keeps its
+high-water size forever unless you say otherwise. The embedded profile that
+bounds it, per writing connection:
+
+```sql
+PRAGMA journal_mode = WAL;            -- readers never block the writer
+PRAGMA synchronous = NORMAL;          -- fsync at checkpoint, not every commit
+PRAGMA wal_autocheckpoint = 1000;     -- try a passive checkpoint every 1000
+                                      --   pages (~4 MiB at the default 4 KiB
+                                      --   page size, ~16 MiB at 16 KiB)
+PRAGMA journal_size_limit = 67108864; -- checkpoints truncate the WAL file
+                                      --   back to at most 64 MiB
+```
+
+`wal_autocheckpoint` and `journal_size_limit` are per-connection settings,
+not database properties — reapply them every time the writer opens the file.
+Then give the WAL a real floor: a passive checkpoint can be starved
+indefinitely by overlapping readers, so pair the profile with a periodic
+
+```sql
+PRAGMA wal_checkpoint(TRUNCATE);      -- fold the WAL in and shrink it to zero
+```
+
+on the writing connection — every few minutes is plenty (the Rust signal
+servers run it every 300 s). A `TRUNCATE` checkpoint waits behind readers up
+to the connection's `busy_timeout` and reports `(busy, log, checkpointed)`;
+a busy result is not a failure, just a pass to retry next interval. Watch
+`wal_size` in `dbhealth` to confirm the bound holds in practice.
+
 ## 9. Common errors and what they mean
 
 | error | cause / fix |
