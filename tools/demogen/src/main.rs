@@ -16,12 +16,13 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use demogen_core::drive::{
     drive_logs, drive_metrics, drive_traces, format_report, profile, warm_states, SignalReport,
     LIVE_LOG_RATE, LIVE_TRACE_RATE,
 };
+use demogen_core::tables::{missing_error, module_of, populated_error, Signal, Tables};
 use demogen_core::fleet::{build_catalog, Config, Incident, Rng, SeriesSpec, TraceReservoir};
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ struct Opts {
     traces: Option<usize>,
     follow: bool,
     append: bool,
+    tables: Option<String>,
     log_rate: usize,
     trace_rate: usize,
     tick_secs: u64,
@@ -72,6 +74,7 @@ OPTIONS:
   --logs N           override log entry count
   --traces N         override trace count (spans ≈ 10x)
   --append           allow seeding into an existing file
+  --tables LIST      comma-separated tables to fill (default: metrics,logs,spans)
   --follow           after seeding, keep appending live data (implies live)
   --log-rate N       live mode: log entries per second (default 1500)
   --trace-rate N     live mode: traces per second (default 40)
@@ -102,6 +105,7 @@ fn parse_opts() -> Opts {
         traces: None,
         follow: false,
         append: false,
+        tables: None,
         log_rate: LIVE_LOG_RATE,
         trace_rate: LIVE_TRACE_RATE,
         tick_secs: 2,
@@ -121,6 +125,7 @@ fn parse_opts() -> Opts {
             "--logs" => o.logs = need(args.next()).parse().ok(),
             "--traces" => o.traces = need(args.next()).parse().ok(),
             "--append" => o.append = true,
+            "--tables" => o.tables = Some(need(args.next())),
             "--follow" => o.follow = true,
             "--log-rate" => o.log_rate = need(args.next()).parse().unwrap_or_else(|_| usage()),
             "--trace-rate" => o.trace_rate = need(args.next()).parse().unwrap_or_else(|_| usage()),
@@ -217,7 +222,82 @@ fn open_db(path: &str, ext: &str) -> Connection {
     conn
 }
 
-fn ensure_tables(conn: &Connection) {
+/// Timeless vtables already in this database, by signal.
+fn discover_tables(conn: &Connection) -> Tables {
+    let mut stmt = conn
+        .prepare("SELECT name, sql FROM sqlite_schema WHERE type='table' AND sql IS NOT NULL ORDER BY name")
+        .expect("read schema");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("read schema");
+    let mut found = Tables::default();
+    for row in rows.flatten() {
+        let (name, sql) = row;
+        let Some(signal) = module_of(&sql).as_deref().and_then(Signal::from_module) else {
+            continue;
+        };
+        let slot = found.slot(signal);
+        if slot.is_none() {
+            *slot = Some(name);
+        }
+    }
+    found
+}
+
+/// Resolve an explicit `--tables` list. Every name must already exist and be
+/// a timeless vtable; nothing is created and nothing is inferred.
+fn resolve_named(conn: &Connection, list: &str) -> Result<Tables, String> {
+    let mut out = Tables::default();
+    for raw in list.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let sql: Option<String> = conn
+            .query_row("SELECT sql FROM sqlite_schema WHERE type='table' AND name = ?1", params![name], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let sql = sql.ok_or_else(|| missing_error(name))?;
+        out.claim(name, &sql)?;
+    }
+    if !out.any() {
+        return Err("--tables named no tables".into());
+    }
+    Ok(out)
+}
+
+/// Refuse to seed into a table that already holds data: these tables are
+/// append-only, so synthetic telemetry cannot be taken back out.
+fn refuse_if_populated(conn: &Connection, tables: &Tables) -> Result<(), String> {
+    for name in tables.names() {
+        let occupied: Option<i64> = conn
+            .query_row(&format!("SELECT 1 FROM {name} LIMIT 1"), [], |r| r.get(0))
+            .optional()
+            .map_err(|e| format!("checking whether {name} is empty: {e}"))?;
+        if occupied.is_some() {
+            return Err(populated_error(name));
+        }
+    }
+    Ok(())
+}
+
+/// Decide which tables this run fills. An explicit `--tables` list wins;
+/// otherwise any timeless vtables already present are used, and a database
+/// with none gets the three demo defaults created.
+fn resolve_tables(conn: &Connection, named: Option<&str>) -> Result<Tables, String> {
+    prepare_db(conn);
+    if let Some(list) = named {
+        return resolve_named(conn, list);
+    }
+    let declared = discover_tables(conn);
+    if declared.any() {
+        return Ok(declared);
+    }
+    create_defaults(conn);
+    Ok(Tables::defaults())
+}
+
+fn prepare_db(conn: &Connection) {
     // auto_vacuum FIRST: it only takes effect before anything touches the
     // file, and even the WAL switch writes page 1. WAL so a demo reader
     // (sqlite3 shell, server) can query while live mode keeps writing.
@@ -225,6 +305,9 @@ fn ensure_tables(conn: &Connection) {
         .expect("auto_vacuum");
     conn.pragma_update(None, "journal_mode", "WAL").expect("WAL");
     conn.pragma_update(None, "synchronous", "NORMAL").expect("synchronous");
+}
+
+fn create_defaults(conn: &Connection) {
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS metrics USING timeless_metrics;
          CREATE VIRTUAL TABLE IF NOT EXISTS logs
@@ -277,15 +360,15 @@ fn stat(conn: &Connection, tbl: &str, key: &str) -> u64 {
     .unwrap_or_else(|e| panic!("timeless_stats({tbl}).{key}: {e}")) as u64
 }
 
-fn seed(conn: &Connection, cfg: &Config, incident: &Incident, catalog: &[SeriesSpec]) -> TraceReservoir {
+fn seed(conn: &Connection, cfg: &Config, incident: &Incident, catalog: &[SeriesSpec], tables: &Tables) -> TraceReservoir {
     let mut reservoir = TraceReservoir::new(20_000);
     // Raw logical bytes per signal (metrics, logs, spans) for the report.
     let mut raw = (0u64, 0u64, 0u64);
     let t0 = Instant::now();
 
     conn.execute_batch("BEGIN").unwrap();
-    {
-        let mut stmt = conn.prepare("INSERT INTO spans(spans) VALUES (?1)").unwrap();
+    if let Some(table) = tables.spans.as_deref() {
+        let mut stmt = conn.prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)")).unwrap();
         let mut rng = Rng::new(cfg.seed ^ 0x0724_7CE5);
         let mut sink = insert_sink!(stmt, "traces", "spans");
         let t = drive_traces(
@@ -306,8 +389,8 @@ fn seed(conn: &Connection, cfg: &Config, incident: &Incident, catalog: &[SeriesS
 
     let t1 = Instant::now();
     conn.execute_batch("BEGIN").unwrap();
-    {
-        let mut stmt = conn.prepare("INSERT INTO logs(logs) VALUES (?1)").unwrap();
+    if let Some(table) = tables.logs.as_deref() {
+        let mut stmt = conn.prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)")).unwrap();
         let mut rng = Rng::new(cfg.seed ^ 0x1065);
         let mut sink = insert_sink!(stmt, "logs", "entries");
         let t = drive_logs(
@@ -328,8 +411,8 @@ fn seed(conn: &Connection, cfg: &Config, incident: &Incident, catalog: &[SeriesS
 
     let t2 = Instant::now();
     conn.execute_batch("BEGIN").unwrap();
-    {
-        let mut stmt = conn.prepare("INSERT INTO metrics(metrics) VALUES (?1)").unwrap();
+    if let Some(table) = tables.metrics.as_deref() {
+        let mut stmt = conn.prepare(&format!("INSERT INTO {table}({table}) VALUES (?1)")).unwrap();
         let mut states = warm_states(catalog, cfg, incident, 0);
         let step_ms = (cfg.step_secs * 1000) as i64;
         let start = cfg.start_ms();
@@ -351,12 +434,15 @@ fn seed(conn: &Connection, cfg: &Config, incident: &Incident, catalog: &[SeriesS
     conn.execute_batch("COMMIT").unwrap();
 
     let tm = Instant::now();
-    command(conn, "metrics", "flush");
-    command(conn, "logs", "flush");
-    command(conn, "spans", "flush");
-    command(conn, "metrics", "compact");
-    command(conn, "logs", "optimize");
-    command(conn, "spans", "optimize");
+    for t in tables.names() {
+        command(conn, t, "flush");
+    }
+    if let Some(t) = tables.metrics.as_deref() {
+        command(conn, t, "compact");
+    }
+    for t in [&tables.logs, &tables.spans].into_iter().flatten() {
+        command(conn, t, "optimize");
+    }
     eprintln!("  maintenance (flush+compact+optimize): {:.1}s", tm.elapsed().as_secs_f64());
 
     // Keep bookkeeping out of the compression story: fold the WAL back
@@ -369,29 +455,36 @@ fn seed(conn: &Connection, cfg: &Config, incident: &Incident, catalog: &[SeriesS
     }
     let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 
-    let signals = [
-        SignalReport {
+    // Only the signals this database actually has: timeless_stats fails
+    // outright on a table that was never created.
+    let mut signals: Vec<SignalReport> = Vec::with_capacity(3);
+    if let Some(t) = tables.metrics.as_deref() {
+        signals.push(SignalReport {
             label: "metrics", unit: "samples", per: "sample",
-            items: stat(conn, "metrics", "disk_points"),
+            items: stat(conn, t, "disk_points"),
             raw_bytes: raw.0,
-            payload_bytes: stat(conn, "metrics", "bytes_on_disk"),
-            index_bytes: stat(conn, "metrics", "index_bytes"),
-        },
-        SignalReport {
+            payload_bytes: stat(conn, t, "bytes_on_disk"),
+            index_bytes: stat(conn, t, "index_bytes"),
+        });
+    }
+    if let Some(t) = tables.logs.as_deref() {
+        signals.push(SignalReport {
             label: "logs", unit: "entries", per: "entry",
-            items: stat(conn, "logs", "disk_entries"),
+            items: stat(conn, t, "disk_entries"),
             raw_bytes: raw.1,
-            payload_bytes: stat(conn, "logs", "bytes_on_disk"),
-            index_bytes: stat(conn, "logs", "index_bytes"),
-        },
-        SignalReport {
+            payload_bytes: stat(conn, t, "bytes_on_disk"),
+            index_bytes: stat(conn, t, "index_bytes"),
+        });
+    }
+    if let Some(t) = tables.spans.as_deref() {
+        signals.push(SignalReport {
             label: "traces", unit: "spans", per: "span",
-            items: stat(conn, "spans", "disk_spans"),
+            items: stat(conn, t, "disk_spans"),
             raw_bytes: raw.2,
-            payload_bytes: stat(conn, "spans", "bytes_on_disk"),
-            index_bytes: stat(conn, "spans", "index_bytes"),
-        },
-    ];
+            payload_bytes: stat(conn, t, "bytes_on_disk"),
+            index_bytes: stat(conn, t, "index_bytes"),
+        });
+    }
     let (file, free): (i64, i64) = conn
         .query_row(
             "SELECT page_count * page_size, freelist_count * page_size
@@ -411,12 +504,15 @@ fn seed(conn: &Connection, cfg: &Config, incident: &Incident, catalog: &[SeriesS
 fn live(
     conn: &Connection,
     cfg: &Config,
-    incident: &Incident,
     catalog: &[SeriesSpec],
     reservoir: &mut TraceReservoir,
     o: &Opts,
+    tables: &Tables,
     mut step_index: usize,
 ) {
+    // `incident` is a pure derivation of `cfg`; deriving it here keeps the
+    // parameter list honest rather than passing the same fact twice.
+    let incident = &cfg.incident();
     let mut states = warm_states(catalog, cfg, incident, step_index);
     let mut rng = Rng::new(cfg.seed ^ 0x11FE);
     let tick = Duration::from_secs(o.tick_secs.max(1));
@@ -430,9 +526,15 @@ fn live(
     let mut last_ms = now_ms();
     let mut next_scrape = last_ms - last_ms.rem_euclid(scrape_ms) + scrape_ms;
 
-    let mut log_stmt = conn.prepare("INSERT INTO logs(logs) VALUES (?1)").unwrap();
-    let mut span_stmt = conn.prepare("INSERT INTO spans(spans) VALUES (?1)").unwrap();
-    let mut metric_stmt = conn.prepare("INSERT INTO metrics(metrics) VALUES (?1)").unwrap();
+    // Only prepare a statement for a signal this database actually has;
+    // preparing against a missing table would fail before the first tick.
+    let prep = |name: &Option<String>| {
+        name.as_deref()
+            .map(|t| conn.prepare(&format!("INSERT INTO {t}({t}) VALUES (?1)")).unwrap())
+    };
+    let mut log_stmt = prep(&tables.logs);
+    let mut span_stmt = prep(&tables.spans);
+    let mut metric_stmt = prep(&tables.metrics);
 
     eprintln!(
         "live: {} logs/s, {} traces/s, metric scrape every {}s — Ctrl-C to stop",
@@ -445,7 +547,7 @@ fn live(
 
         let mut spans = 0usize;
         let n_traces = o.trace_rate * o.tick_secs as usize;
-        if n_traces > 0 {
+        if let (true, Some(span_stmt)) = (n_traces > 0, span_stmt.as_mut()) {
             let mut sink = |blob: &[u8], total: usize| {
                 span_stmt.execute(params![blob]).map_err(|e| e.to_string())?;
                 spans = total;
@@ -457,7 +559,7 @@ fn live(
 
         let mut entries = 0usize;
         let n_logs = o.log_rate * o.tick_secs as usize;
-        if n_logs > 0 {
+        if let (true, Some(log_stmt)) = (n_logs > 0, log_stmt.as_mut()) {
             let mut sink = |blob: &[u8], total: usize| {
                 log_stmt.execute(params![blob]).map_err(|e| e.to_string())?;
                 entries = total;
@@ -468,7 +570,8 @@ fn live(
         }
 
         let mut scraped = 0usize;
-        while now >= next_scrape {
+        if let Some(metric_stmt) = metric_stmt.as_mut() {
+          while now >= next_scrape {
             let ts = next_scrape;
             let mut points = 0usize;
             let mut sink = |blob: &[u8], total: usize| {
@@ -481,12 +584,16 @@ fn live(
             scraped += points;
             step_index += 1;
             next_scrape += scrape_ms;
+          }
         }
         if scraped > 0 {
-            command(conn, "metrics", "flush");
+            if let Some(t) = tables.metrics.as_deref() {
+                command(conn, t, "flush");
+            }
         }
-        command(conn, "logs", "flush");
-        command(conn, "spans", "flush");
+        for t in [&tables.logs, &tables.spans].into_iter().flatten() {
+            command(conn, t, "flush");
+        }
 
         let mut line = format!("  +{} logs, +{} spans", fmt_count(entries), fmt_count(spans));
         if scraped > 0 {
@@ -554,15 +661,28 @@ fn main() {
     }
 
     let conn = open_db(&o.db, &ext);
-    ensure_tables(&conn);
+    let tables = match resolve_tables(&conn, o.tables.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if o.cmd == "seed" {
+        if let Err(e) = refuse_if_populated(&conn, &tables) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 
     let catalog = build_catalog(&cfg);
     let mut reservoir = TraceReservoir::new(20_000);
 
     if o.cmd == "seed" {
         println!(
-            "seeding {} — profile {}: {} services x {} pods = {} series, {} min window, incident on '{}'",
+            "seeding {} into {} — profile {}: {} services x {} pods = {} series, {} min window, incident on '{}'",
             o.db,
+            tables.describe(),
             o.profile,
             cfg.services,
             cfg.pods,
@@ -571,7 +691,7 @@ fn main() {
             cfg.service_name(incident.service),
         );
         let t0 = Instant::now();
-        reservoir = seed(&conn, &cfg, &incident, &catalog);
+        reservoir = seed(&conn, &cfg, &incident, &catalog, &tables);
         let bytes = std::fs::metadata(&o.db).map(|m| m.len()).unwrap_or(0);
         println!(
             "done in {:.1}s — {} ({:.1} MB)",
@@ -584,6 +704,6 @@ fn main() {
 
     if o.cmd == "live" || o.follow {
         let steps = if o.cmd == "seed" || exists { cfg.steps() } else { 0 };
-        live(&conn, &cfg, &incident, &catalog, &mut reservoir, &o, steps);
+        live(&conn, &cfg, &catalog, &mut reservoir, &o, &tables, steps);
     }
 }

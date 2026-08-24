@@ -28,6 +28,7 @@ use demogen_core::drive::{
     SignalReport, LIVE_LOG_RATE, LIVE_TRACE_RATE,
 };
 use demogen_core::fleet::{build_catalog, Config, Incident, Rng, SeriesSpec, TraceReservoir};
+use demogen_core::tables::{missing_error, module_of, populated_error, Signal, Tables};
 
 /// Entry points. SQLite's `.load` looks for `sqlite3_extension_init` and,
 /// as a fallback, the name derived from the file name
@@ -294,83 +295,6 @@ fn fmt_hhmm(ms: i64) -> String {
     format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
 }
 
-/// Which signals this database has a table for, and what they are called.
-///
-/// Resolved from the schema by *module* (`USING timeless_traces`) rather than
-/// by table name, which answers two questions at once: a user who declares
-/// their own vtables gets those populated, under whatever names they chose,
-/// and gets only the signals they actually declared. Declaring nothing still
-/// gets the full three-signal demo, so the standard tour is unchanged.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Tables {
-    metrics: Option<String>,
-    logs: Option<String>,
-    spans: Option<String>,
-}
-
-impl Tables {
-    fn any(&self) -> bool {
-        self.metrics.is_some() || self.logs.is_some() || self.spans.is_some()
-    }
-
-    /// The demo defaults, used only when the database declares no timeless
-    /// vtables of its own.
-    fn defaults() -> Self {
-        Self {
-            metrics: Some("metrics".into()),
-            logs: Some("logs".into()),
-            spans: Some("spans".into()),
-        }
-    }
-
-    /// `metrics (my_metrics), traces (app_spans)` — what we are about to fill.
-    fn describe(&self) -> String {
-        let mut parts = Vec::new();
-        for (label, name) in [
-            ("metrics", &self.metrics),
-            ("logs", &self.logs),
-            ("traces", &self.spans),
-        ] {
-            if let Some(name) = name {
-                if name == label || (label == "traces" && name == "spans") {
-                    parts.push(label.to_string());
-                } else {
-                    parts.push(format!("{label} ({name})"));
-                }
-            }
-        }
-        parts.join(", ")
-    }
-
-    fn serialize(&self) -> String {
-        let slot = |s: &Option<String>| s.clone().unwrap_or_else(|| "-".into());
-        format!("{} {} {}", slot(&self.metrics), slot(&self.logs), slot(&self.spans))
-    }
-
-    fn parse(row: &str) -> Self {
-        let mut it = row.split_whitespace();
-        let mut slot = || match it.next() {
-            None | Some("-") => None,
-            Some(name) => Some(name.to_string()),
-        };
-        Self { metrics: slot(), logs: slot(), spans: slot() }
-    }
-}
-
-/// The module name in `CREATE VIRTUAL TABLE x USING <module>(...)`.
-///
-/// Parsed rather than matched with LIKE so `timeless_metrics` cannot be
-/// confused with a longer module that merely starts the same way.
-fn module_of(sql: &str) -> Option<String> {
-    let upper = sql.to_ascii_uppercase();
-    let start = upper.find(" USING ")? + " USING ".len();
-    let rest = &sql[start..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_ascii_lowercase())
-}
-
 /// Timeless vtables already present in this database, by signal. The first
 /// match per signal wins; `seed` reports exactly which names it chose so a
 /// second table of the same signal is never a silent surprise.
@@ -388,12 +312,12 @@ fn discover_tables(conn: &Connection) -> std::result::Result<Tables, String> {
     let mut found = Tables::default();
     for row in rows {
         let (name, sql) = row.map_err(|e| e.to_string())?;
-        let slot = match module_of(&sql).as_deref() {
-            Some("timeless_metrics") => &mut found.metrics,
-            Some("timeless_logs") => &mut found.logs,
-            Some("timeless_traces") => &mut found.spans,
-            _ => continue,
+        let Some(signal) = module_of(&sql).as_deref().and_then(Signal::from_module) else {
+            continue;
         };
+        // Inference is best-effort: a second table for a signal is ignored
+        // rather than an error, and `seed` prints the names it chose.
+        let slot = found.slot(signal);
         if slot.is_none() {
             *slot = Some(name);
         }
@@ -422,28 +346,8 @@ fn resolve_named(conn: &Connection, list: &str) -> std::result::Result<Tables, S
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        let Some(sql) = sql else {
-            return Err(format!(
-                "no table named '{name}' in this database — create it first, \
-                 e.g. CREATE VIRTUAL TABLE {name} USING timeless_metrics;"
-            ));
-        };
-        let slot = match module_of(&sql).as_deref() {
-            Some("timeless_metrics") => &mut out.metrics,
-            Some("timeless_logs") => &mut out.logs,
-            Some("timeless_traces") => &mut out.spans,
-            Some(other) => {
-                return Err(format!(
-                    "'{name}' is a {other} table, not a timeless signal table"
-                ))
-            }
-            None => return Err(format!("'{name}' is not a virtual table")),
-        };
-        if let Some(taken) = slot.replace(name.to_string()) {
-            return Err(format!(
-                "'{taken}' and '{name}' are both the same signal — name at most one table per signal"
-            ));
-        }
+        let sql = sql.ok_or_else(|| missing_error(name))?;
+        out.claim(name, &sql)?;
     }
     if !out.any() {
         return Err("no target tables named".into());
@@ -457,17 +361,13 @@ fn resolve_named(conn: &Connection, list: &str) -> std::result::Result<Tables, S
 /// these tables are append-only. A vtable the caller just created is empty,
 /// so this never blocks the intended path.
 fn refuse_if_populated(conn: &Connection, tables: &Tables) -> std::result::Result<(), String> {
-    for name in [&tables.metrics, &tables.logs, &tables.spans].into_iter().flatten() {
+    for name in tables.names() {
         let occupied: Option<i64> = conn
             .query_row(&format!("SELECT 1 FROM {name} LIMIT 1"), [], |r| r.get(0))
             .optional()
             .map_err(|e| format!("checking whether {name} is empty: {e}"))?;
         if occupied.is_some() {
-            return Err(format!(
-                "'{name}' already contains data — demogen will not mix synthetic telemetry \
-                 into an existing table, and these tables are append-only. Seed into an \
-                 empty table or a scratch database file."
-            ));
+            return Err(populated_error(name));
         }
     }
     Ok(())

@@ -180,13 +180,18 @@ Every profile knob has a flag (`--services`, `--pods`, `--paths`,
 `--minutes`, `--step-secs`, `--logs`, `--traces`, `--seed`, live-mode
 rates); `--help` lists them.
 
-The CLI does **not** have the table controls the extension has. It always
-creates and fills `metrics`, `logs`, and `spans`, and its only guard is on
-the database file: seeding a path that already exists is refused unless you
-pass `--append`, which then appends to whatever those three tables hold. If
-you want to name your own tables, seed a subset, or rely on the
-already-populated check, use `timeless_demo(...)` from a sqlite3 session
-instead.
+`--tables` works the same as naming targets in SQL — same resolution, same
+rules, same refusals, because both front ends share `core/src/tables.rs`:
+
+```sh
+./target/release/timeless-demogen seed --db demo.db --tables web_server_metrics
+./target/release/timeless-demogen live --db demo.db --tables web_server_metrics
+```
+
+Without `--tables` the CLI uses any timeless vtables already in the file and
+creates the three defaults if there are none. Seeding a table that already
+holds data is refused. `--append` remains a separate, file-level guard:
+seeding a database path that already exists needs it.
 
 ## Notes
 
