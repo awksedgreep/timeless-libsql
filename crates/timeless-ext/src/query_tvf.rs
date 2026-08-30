@@ -3313,6 +3313,7 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
         }
 
         let _bind = DbGuard::bind(self.db);
+        require_logs_table(M, &database, &table)?;
         let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
         let read = read_permit(&shared, self.db, &table)?;
         let count = shared
@@ -3517,6 +3518,7 @@ unsafe impl VTabCursor for LogValuesCursor<'_> {
         }
 
         let _bind = DbGuard::bind(self.db);
+        require_logs_table(M, &database, &table)?;
         let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
         let read = read_permit(&shared, self.db, &table)?;
         self.values = shared
@@ -3700,6 +3702,7 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
         }
 
         let _bind = DbGuard::bind(self.db);
+        require_logs_table(M, &database, &table)?;
         let shared = LogsTab::shared_engine_for(self.db, &database, &table)?;
         let _read = read_permit(&shared, self.db, &table)?;
         let q = timeless_core::LogQuery {
@@ -3933,6 +3936,17 @@ fn detect_module(database: &str, table: &str) -> Result<TimelessModule> {
              (no shadow tables found)"
         )))
     }
+}
+
+fn require_logs_table(caller: &str, database: &str, table: &str) -> Result<()> {
+    let found = detect_module(database, table)?;
+    if found != TimelessModule::Logs {
+        return Err(module_err(format!(
+            "{caller}: {database}.{table} is not a timeless_logs table (found {})",
+            found.name()
+        )));
+    }
+    Ok(())
 }
 
 fn split_spec(spec: &str) -> (String, String) {

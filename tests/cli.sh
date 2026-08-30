@@ -1617,6 +1617,15 @@ err=$(sqlite3 "$F4DB" ".load $EXT" \
   "SELECT * FROM timeless_log_buckets('l', 'path', NULL, 0, 10, 1);" 2>&1 || true)
 check_eq "undeclared group key names the valid set" \
   "$(grep -c "expected 'level' or a declared index key" <<<"$err")" "1"
+for query in \
+  "SELECT n FROM timeless_log_count('t');" \
+  "SELECT value FROM timeless_log_values('t', 'service');" \
+  "SELECT * FROM timeless_log_buckets('t', 'level', NULL, 0, 10, 1);"
+do
+  err=$(sqlite3 "$F4DB" ".load $EXT" "$query" 2>&1 || true)
+  check_eq "log kernel rejects a traces table before decode" \
+    "$(grep -c 'is not a timeless_logs table (found timeless_traces)' <<<"$err")" "1"
+done
 
 # ---------------------------------------------------------------------------
 echo "== section 27: F5 batch blob ingest (logs + traces v0) =="
