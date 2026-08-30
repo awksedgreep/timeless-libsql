@@ -104,6 +104,12 @@ The three signal servers are independently usable. They do not contain a
 second storage engine and never read private shadow tables: all durable work
 crosses public `libtimeless_ext` SQL or batch interfaces.
 
+Because the extension executes inside its SQLite/libSQL host, its virtual-table
+callbacks follow an explicit [FFI panic policy](docs/FFI_PANIC_POLICY.md):
+malformed input and recoverable runtime failures return SQL errors, while a
+residual Rust panic is treated as an unrecoverable extension defect and may
+abort the host process.
+
 Phoenix, Elixir, dashboards, token issuance, cluster administration, and UI
 state are outside this repository. They can act as a control plane, but no
 storage or query request requires BEAM, a NIF, Rocket, or an Elixir fallback.

@@ -32,6 +32,13 @@
 //! during another connection's write transaction gets a retryable busy-style
 //! error. See shared.rs for the full design + semantics notes.
 //!
+//! PANIC SAFETY: virtual-table callbacks must not panic. rusqlite's vtab
+//! adapters use the non-unwinding C ABI, so a residual panic aborts the host
+//! process. This is an explicit fail-stop policy: catching a panic after a
+//! mutating callback could expose partially changed engine or transaction
+//! state. Public input and recoverable runtime failures must therefore return
+//! `rusqlite::Error`, never rely on panic. See `docs/FFI_PANIC_POLICY.md`.
+//!
 //! Usage:
 //!   .load target/release/libtimeless_ext
 //!   CREATE VIRTUAL TABLE metrics USING timeless_metrics;
