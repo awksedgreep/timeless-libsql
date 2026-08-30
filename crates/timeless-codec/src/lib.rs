@@ -57,6 +57,7 @@
 //! lossless over the raw bits, not the numeric value).
 
 use std::collections::{BTreeMap, HashSet};
+use std::mem::size_of;
 
 // ---------------------------------------------------------------------------
 // Encoding ids — crate-public, on-disk stable. Grouped by column type;
@@ -94,6 +95,28 @@ const SAMPLE_LEN: usize = 65536;
 
 /// Frame overhead per column: 1 byte encoding id + 4 bytes payload len.
 const FRAME_LEN: usize = 5;
+
+fn validate_minimum_encoded_len(
+    count: usize,
+    width: usize,
+    available: usize,
+    what: &str,
+) -> Result<(), String> {
+    let minimum = count
+        .checked_mul(width)
+        .ok_or_else(|| format!("{what}: count overflows minimum encoded length"))?;
+    if minimum > available {
+        return Err(format!(
+            "{what}: {count} entries require at least {minimum} bytes, but only {available} available"
+        ));
+    }
+    Ok(())
+}
+
+fn reserve_decoded<T>(out: &mut Vec<T>, count: usize, what: &str) -> Result<(), String> {
+    out.try_reserve(count)
+        .map_err(|_| format!("{what}: cannot allocate {count} decoded entries"))
+}
 
 // ---------------------------------------------------------------------------
 // ColumnEnc — one encoded column, strategy tag + payload.
@@ -637,7 +660,9 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
         ENC_STR_ZSTD => {
             let raw = zstd_decompress(payload, "string column")?;
             let mut r = Reader::new(&raw);
-            let mut out = Vec::with_capacity(n);
+            validate_minimum_encoded_len(n, size_of::<u32>(), raw.len(), "string column")?;
+            let mut out = Vec::new();
+            reserve_decoded(&mut out, n, "string column")?;
             for i in 0..n {
                 let len = r.u32("string length")? as usize;
                 let b = r.take(len, "string bytes")?;
@@ -660,7 +685,14 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
             // Dictionary table.
             let dict_raw = zstd_decompress(dict_zstd, "string dictionary")?;
             let mut dr = Reader::new(&dict_raw);
-            let mut dict: Vec<String> = Vec::with_capacity(dict_count);
+            validate_minimum_encoded_len(
+                dict_count,
+                size_of::<u32>(),
+                dict_raw.len(),
+                "string dictionary",
+            )?;
+            let mut dict: Vec<String> = Vec::new();
+            reserve_decoded(&mut dict, dict_count, "string dictionary")?;
             for i in 0..dict_count {
                 let len = dr.u32("dict entry length")? as usize;
                 let b = dr.take(len, "dict entry bytes")?;
@@ -678,7 +710,7 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
             if codes_raw.len() % 8 != 0 {
                 return Err("string column: RLE stream is not (u32,u32) pairs".into());
             }
-            let mut out = Vec::with_capacity(n);
+            let mut expanded = 0usize;
             for pair in codes_raw.as_chunks::<8>().0 {
                 let run = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
                 let code = u32::from_le_bytes(pair[4..8].try_into().unwrap()) as usize;
@@ -688,20 +720,26 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
                         dict.len()
                     ));
                 }
-                if run == 0 || out.len() + run > n {
+                if run == 0 || expanded.checked_add(run).is_none_or(|total| total > n) {
                     return Err(format!(
                         "string column: RLE runs sum past expected count {n}"
                     ));
                 }
+                expanded += run;
+            }
+            if expanded != n {
+                return Err(format!(
+                    "string column: RLE expanded to {expanded} values, expected {n}"
+                ));
+            }
+            let mut out = Vec::new();
+            reserve_decoded(&mut out, n, "string column")?;
+            for pair in codes_raw.as_chunks::<8>().0 {
+                let run = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
+                let code = u32::from_le_bytes(pair[4..8].try_into().unwrap()) as usize;
                 for _ in 0..run {
                     out.push(dict[code].clone());
                 }
-            }
-            if out.len() != n {
-                return Err(format!(
-                    "string column: RLE expanded to {} values, expected {n}",
-                    out.len()
-                ));
             }
             Ok(out)
         }
@@ -755,7 +793,14 @@ pub fn decode_str_selected(
 
             let dict_raw = zstd_decompress(dict_zstd, "string dictionary")?;
             let mut dict_reader = Reader::new(&dict_raw);
-            let mut dict = Vec::with_capacity(dict_count);
+            validate_minimum_encoded_len(
+                dict_count,
+                size_of::<u32>(),
+                dict_raw.len(),
+                "string dictionary",
+            )?;
+            let mut dict = Vec::new();
+            reserve_decoded(&mut dict, dict_count, "string dictionary")?;
             for index in 0..dict_count {
                 let len = dict_reader.u32("dict entry length")? as usize;
                 let value = dict_reader.take(len, "dict entry bytes")?;
@@ -1110,6 +1155,47 @@ mod tests {
     #[test]
     fn str_count_mismatch_is_an_error() {
         assert!(encode_str(["a", "b"].into_iter(), 3, LVL).is_err());
+    }
+
+    #[test]
+    fn string_decoders_reject_unrepresentable_counts_before_allocation() {
+        let empty_zstd = zstd_compress(&[], LVL).unwrap();
+
+        let mut dict_payload = Vec::new();
+        dict_payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        dict_payload.extend_from_slice(&(empty_zstd.len() as u32).to_le_bytes());
+        dict_payload.extend_from_slice(&empty_zstd);
+        dict_payload.extend_from_slice(&empty_zstd);
+        let dict_frame = ColumnEnc {
+            encoding: ENC_STR_DICT,
+            payload: dict_payload,
+        }
+        .to_bytes();
+
+        for error in [
+            decode_str(&dict_frame, 0).unwrap_err(),
+            decode_str_selected(&dict_frame, 0, &[]).unwrap_err(),
+        ] {
+            assert!(error.contains("string dictionary"), "{error}");
+            assert!(
+                error.contains("count overflows minimum encoded length")
+                    || error.contains("4294967295 entries require at least"),
+                "{error}"
+            );
+        }
+
+        let concat_frame = ColumnEnc {
+            encoding: ENC_STR_ZSTD,
+            payload: empty_zstd,
+        }
+        .to_bytes();
+        let error = decode_str(&concat_frame, u32::MAX as usize).unwrap_err();
+        assert!(error.contains("string column"), "{error}");
+        assert!(
+            error.contains("count overflows minimum encoded length")
+                || error.contains("4294967295 entries require at least"),
+            "{error}"
+        );
     }
 
     fn rt_u8(values: &[u8]) {
