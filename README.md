@@ -64,14 +64,14 @@ The project is on the pre-1.0 `0.7.x` compatibility line. Extension and Rust
 signal-server versions move together and negotiate capabilities at startup;
 matching version strings alone are not sufficient.
 
-`v0.7.7` is the current release, and it is what makes the compression numbers
+`v0.7.8` is the current release, and it is what makes the compression numbers
 above honest: every signal now exports data-block payload, index, and WAL
 bytes as separate series, with a raw comparator, so a ratio is raw versus
 storage and never quietly folds in index or file overhead. Its tag-triggered
 artifact run built, identity-checked, and install/remove-drilled all four
 native Linux/macOS archives, verified the complete outer checksum set, and
 published the
-[`v0.7.7` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.7.7)
+[`v0.7.8` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.7.8)
 with the archives plus `SHA256SUMS` as permanent assets. Download and
 verification steps are in [the artifact guide](docs/ARTIFACTS.md).
 

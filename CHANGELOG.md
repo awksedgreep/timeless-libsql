@@ -10,9 +10,11 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.7.7 -->
+<!-- release-target: 0.7.8 -->
 
 ## [Unreleased]
+
+## [0.7.8] — 2026-08-30
 
 ### Changed
 
@@ -38,6 +40,34 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   no plane truncated the WAL outside the backup and shutdown paths. Server
   behavior only; no extension, SQL, or data-ABI change. GUIDE §8 now
   documents the recommended embedded WAL profile and checkpoint cadence.
+- Storage virtual tables and raw table-valued functions now push a plain SQL
+  `LIMIT` down as a scan bound when no offset or residual filter can require
+  more rows. Small exploratory queries no longer decode an entire matching
+  range merely to discard it above the virtual-table boundary.
+- Authentication route classification is explicit, including read scope for
+  both live-tail POST routes, and admin keys supplied in query parameters are
+  decoded before comparison.
+- The extension FFI panic policy is documented: exported callbacks contain
+  Rust panics at the SQLite boundary, while invariant-only internals remain
+  fail-fast during development.
+
+### Fixed
+
+- Hardened untrusted-input paths: batch reservations and string decoding are
+  allocation-bounded, batch byte arithmetic is checked on 32-bit targets,
+  and batch result ordering is validated in release builds before results are
+  associated with requests.
+- Log virtual tables now reject the wrong shadow-table module reliably, and
+  trace attribute filtering handles stored JSON `null` without confusing it
+  with a missing key.
+- Dropping storage pins now reclaims retired blocks promptly instead of
+  waiting for unrelated later work.
+- Legacy schemas are upgraded through explicit supported transitions rather
+  than being silently accepted by newer code.
+- Spike shadow-table identifiers are quoted safely, and dbhealth maintenance
+  has a single scheduler owner with canonical database-path matching.
+- CI actions are pinned to immutable revisions, and new Rust compiler
+  warnings in the batch path have been removed.
 
 ## [0.7.7] — 2026-08-23
 

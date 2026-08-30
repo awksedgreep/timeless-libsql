@@ -14,8 +14,9 @@ than the exact tree being tagged verifies nothing.
 
 1. **Version bump**: both workspaces move together (`Cargo.toml`,
    `servers/Cargo.toml`), per the pairing policy in
-   [COMPATIBILITY.md](COMPATIBILITY.md). Line changes (0.x → 0.y) also move
-   the capability document, both floors, and their guard tests.
+   [COMPATIBILITY.md](COMPATIBILITY.md), whose two current workspace values
+   move with every release. Line changes (0.x → 0.y) also move the capability
+   document, both floors, and their guard tests.
 2. **Lockfiles**: `cargo check --workspace --locked` in the root AND
    `servers/` (and `tools/query-harness/`). The release workflow builds with
    `--locked`; a bump without a lock refresh fails every platform job.
@@ -24,7 +25,7 @@ than the exact tree being tagged verifies nothing.
 4. **CLI suite**: `./tests/cli.sh` — all sections.
 5. **Correctness suites**: `./tests/correctness.sh` for each section
    (`r1 r2 r3 r4 r8 logs-rich`), plus `./tests/dbhealth.sh` and
-   `./tests/crash.sh`.
+   `./tests/crash.sh target/release/libtimeless_ext.so`.
 6. **Query contracts + oracles** (the `query-contracts` gate, runnable
    locally):
    `cargo test --manifest-path tools/query-harness/Cargo.toml --locked`,
