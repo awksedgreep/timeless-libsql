@@ -194,6 +194,23 @@ SQL
 )
 check_eq "spike vtab round-trip" "$got" "1|2.5"
 
+got=$(sqlite3 "$TMP/spike_quoted.db" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE "s""quoted" USING timeless_spike;
+INSERT INTO "s""quoted"(ts, value) VALUES (2, 3.5);
+UPDATE "s""quoted" SET value = 4.5 WHERE ts = 2;
+SELECT ts, value FROM "s""quoted";
+DELETE FROM "s""quoted" WHERE ts = 2;
+SELECT COUNT(*) FROM "s""quoted";
+DROP TABLE "s""quoted";
+SELECT COUNT(*) FROM sqlite_schema WHERE name = 's"quoted_shadow';
+SQL
+)
+check_eq "spike quotes embedded double quotes across every callback" "$got" \
+'2|4.5
+0
+0'
+
 # ---------------------------------------------------------------------------
 echo "== section 2: name + ts range pushdown =="
 # New process: also exercises xConnect recovery implicitly. BETWEEN

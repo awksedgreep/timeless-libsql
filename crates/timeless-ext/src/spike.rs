@@ -29,6 +29,8 @@ use rusqlite::vtab::{
 };
 use rusqlite::{Connection, Result};
 
+use crate::sql_ident;
+
 /// Register the "timeless_spike" module on a freshly-loaded connection.
 /// Called from the shared extension entry point in lib.rs.
 pub(crate) fn register(db: &Connection) -> Result<()> {
@@ -84,11 +86,12 @@ impl SpikeTab {
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let handle = unsafe { db.handle() };
-        let shadow = format!("{table}_shadow");
+        let shadow = sql_ident::shadow_object(&table, "shadow");
+        let shadow_ident = sql_ident::quote(&shadow);
         let vtab = SpikeTab {
             base: ffi::sqlite3_vtab::default(),
             db: handle,
-            insert_sql: format!("INSERT INTO \"{shadow}\" (ts, value) VALUES (?1, ?2)"),
+            insert_sql: format!("INSERT INTO {shadow_ident} (ts, value) VALUES (?1, ?2)"),
             shadow,
             host: unsafe { Connection::from_handle(handle) }?,
         };
@@ -98,8 +101,8 @@ impl SpikeTab {
         if is_create {
             let host = vtab.host()?;
             host.execute_batch(&format!(
-                "CREATE TABLE IF NOT EXISTS \"{}\" (ts INTEGER, value REAL)",
-                vtab.shadow
+                "CREATE TABLE IF NOT EXISTS {} (ts INTEGER, value REAL)",
+                sql_ident::quote(&vtab.shadow)
             ))?;
         }
 
@@ -162,8 +165,10 @@ impl CreateVTab<'_> for SpikeTab {
 
     /// DROP TABLE on the vtab: remove the shadow table too.
     fn destroy(&self) -> Result<()> {
-        self.host()?
-            .execute_batch(&format!("DROP TABLE IF EXISTS \"{}\"", self.shadow))?;
+        self.host()?.execute_batch(&format!(
+            "DROP TABLE IF EXISTS {}",
+            sql_ident::quote(&self.shadow)
+        ))?;
         Ok(())
     }
 }
@@ -183,7 +188,10 @@ impl UpdateVTab<'_> for SpikeTab {
     fn delete(&mut self, arg: ValueRef<'_>) -> Result<()> {
         let rowid = arg.as_i64()?;
         self.host()?.execute(
-            &format!("DELETE FROM \"{}\" WHERE rowid = ?1", self.shadow),
+            &format!(
+                "DELETE FROM {} WHERE rowid = ?1",
+                sql_ident::quote(&self.shadow)
+            ),
             [rowid],
         )?;
         Ok(())
@@ -196,8 +204,8 @@ impl UpdateVTab<'_> for SpikeTab {
         let value: f64 = args.get(3)?;
         self.host()?.execute(
             &format!(
-                "UPDATE \"{}\" SET ts = ?1, value = ?2 WHERE rowid = ?3",
-                self.shadow
+                "UPDATE {} SET ts = ?1, value = ?2 WHERE rowid = ?3",
+                sql_ident::quote(&self.shadow)
             ),
             (ts, value, rowid),
         )?;
@@ -237,8 +245,8 @@ unsafe impl VTabCursor for SpikeCursor<'_> {
     ) -> Result<()> {
         let host = unsafe { Connection::from_handle(self.db) }?;
         let mut stmt = host.prepare(&format!(
-            "SELECT rowid, ts, value FROM \"{}\" ORDER BY rowid",
-            self.shadow
+            "SELECT rowid, ts, value FROM {} ORDER BY rowid",
+            sql_ident::quote(&self.shadow)
         ))?;
         self.rows = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
