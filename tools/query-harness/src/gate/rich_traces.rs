@@ -1159,7 +1159,10 @@ fn attribute_index_contract(connection: &Connection) -> Result<(Vec<SemanticSpan
         // optimize (which rides these per-span flushes) can compress the
         // blocks but never merge them — this test's premise is 257 DISTINCT
         // candidate blocks at query time.
-        let mut span = rich_span(82_000 + index, Some(10_000 + index as i64 * 7_200_000_000_000));
+        let mut span = rich_span(
+            82_000 + index,
+            Some(10_000 + index as i64 * 7_200_000_000_000),
+        );
         span.status = 1;
         span.attributes = json!({
             "service.name":"attribute-chunks",

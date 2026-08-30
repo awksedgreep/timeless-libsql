@@ -1621,7 +1621,7 @@ fn lower_label_set(
     }
     let inner = lower_label_input(inner, "label_set", context, depth)?;
     let mut pairs = Vec::with_capacity(labels.len() / 2);
-    for pair in labels.chunks_exact(2) {
+    for pair in labels.as_chunks::<2>().0 {
         pairs.push((
             lower_string_argument(pair[0], "label_set", context.lookback)?,
             lower_string_argument(pair[1], "label_set", context.lookback)?,

@@ -1035,8 +1035,10 @@ fn decode_adaptive_u32(stored: &[u8], n: usize, label: &'static str) -> Result<V
 }
 
 fn decode_raw_u32(raw: &[u8]) -> Vec<u32> {
-    raw.chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+    raw.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -1146,8 +1148,8 @@ fn decode_span_block_v2_v3(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         }
         let mut timestamps = Vec::with_capacity(n);
         let mut previous = 0i64;
-        for chunk in cols[7].chunks_exact(8) {
-            let value = i64::from_le_bytes(chunk.try_into().unwrap());
+        for chunk in cols[7].as_chunks::<8>().0 {
+            let value = i64::from_le_bytes(*chunk);
             if codec == CODEC_ZSTD {
                 previous = previous.wrapping_add(value);
                 timestamps.push(previous);
@@ -1156,8 +1158,10 @@ fn decode_span_block_v2_v3(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
             }
         }
         let durations = cols[8]
-            .chunks_exact(8)
-            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| i64::from_le_bytes(*c))
             .collect();
         (
             cols[0].clone(),
@@ -1416,18 +1420,20 @@ fn decode_span_block_v1(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
     let mut timestamps = Vec::with_capacity(n);
     if codec == CODEC_ZSTD {
         let mut prev = 0i64;
-        for c in cols[7].chunks_exact(8) {
-            prev = prev.wrapping_add(i64::from_le_bytes(c.try_into().unwrap()));
+        for c in cols[7].as_chunks::<8>().0 {
+            prev = prev.wrapping_add(i64::from_le_bytes(*c));
             timestamps.push(prev);
         }
     } else {
-        for c in cols[7].chunks_exact(8) {
-            timestamps.push(i64::from_le_bytes(c.try_into().unwrap()));
+        for c in cols[7].as_chunks::<8>().0 {
+            timestamps.push(i64::from_le_bytes(*c));
         }
     }
     let durations: Vec<i64> = cols[8]
-        .chunks_exact(8)
-        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| i64::from_le_bytes(*c))
         .collect();
 
     // ── Variable columns: parents, names, services, attributes ───────

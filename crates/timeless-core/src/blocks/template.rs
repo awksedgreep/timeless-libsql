@@ -28,7 +28,7 @@
 //! digit-run (shred digit runs inside tokens — wins on id/size-heavy
 //! blocks) vs whole-token (keep each digit-bearing token as one
 //! variable — wins on timestamp-heavy blocks, which dictionary-dedup).
-//! [`encode_template_str`] trial-encodes both and keeps the smaller,
+//! [`template::encode_template_str`] trial-encodes both and keeps the smaller,
 //! the same measure-don't-guess pick every encoder in this crate makes.
 //!
 //! Variable layout is "v2-lite": streams ordered by (template, slot) so

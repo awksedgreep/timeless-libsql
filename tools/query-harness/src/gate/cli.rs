@@ -101,16 +101,20 @@ fn read_u32(blob: &[u8], offset: usize) -> Result<u32> {
 fn read_i64s(blob: &[u8], offset: usize, count: usize) -> Result<Vec<i64>> {
     blob.get(offset..offset + count * 8)
         .context("truncated i64 column")?
-        .chunks_exact(8)
-        .map(|word| Ok(i64::from_le_bytes(word.try_into()?)))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|word| Ok(i64::from_le_bytes(*word)))
         .collect()
 }
 
 fn read_u64s(blob: &[u8], offset: usize, count: usize) -> Result<Vec<u64>> {
     blob.get(offset..offset + count * 8)
         .context("truncated u64 column")?
-        .chunks_exact(8)
-        .map(|word| Ok(u64::from_le_bytes(word.try_into()?)))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|word| Ok(u64::from_le_bytes(*word)))
         .collect()
 }
 

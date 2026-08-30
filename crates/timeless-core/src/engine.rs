@@ -143,7 +143,9 @@ impl SeriesRegistry {
     /// Exact forward lookup: hash bucket, then verify each candidate
     /// against series_info (collisions are resolved, never trusted).
     fn lookup(&self, metric_name: &str, labels: &Labels) -> Option<i64> {
-        let ids = self.series_map.get(&Self::identity_hash(metric_name, labels))?;
+        let ids = self
+            .series_map
+            .get(&Self::identity_hash(metric_name, labels))?;
         ids.iter().copied().find(|id| {
             self.series_info
                 .get(id)
@@ -1287,8 +1289,7 @@ impl Engine {
                             })?;
                             for row in &legacy_rows {
                                 let labels: Labels = row.labels.iter().cloned().collect();
-                                if registry.lookup(&row.name, &labels) != Some(row.id)
-                                {
+                                if registry.lookup(&row.name, &labels) != Some(row.id) {
                                     return Err(format!(
                                         "legacy series {} did not migrate with its original id",
                                         row.id
@@ -4250,12 +4251,16 @@ impl Engine {
             }
             (
                 ts_data
-                    .chunks_exact(8)
-                    .map(|b| i64::from_be_bytes(b.try_into().unwrap()))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| i64::from_be_bytes(*b))
                     .collect(),
                 val_data
-                    .chunks_exact(8)
-                    .map(|b| f64::from_be_bytes(b.try_into().unwrap()))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from_be_bytes(*b))
                     .collect(),
             )
         } else {
@@ -4492,14 +4497,15 @@ impl Engine {
         let cached_gen = *self.catalog_gen_lock();
         let cached_wm = *self.append_wm_lock();
         if let (Some(old_gen), Some(old_wm), Some(new_wm)) = (cached_gen, cached_wm, wm_new) {
-            if new_wm.0 == old_wm.0 {
-                match self.apply_append_delta(old_gen.0, old_wm.1, observed, new_wm) {
-                    Ok(()) => return Ok(()),
-                    // Partial application is harmless: the reload below
-                    // replaces registry and indexes wholesale.
-                    Err(_) => {}
-                }
+            if new_wm.0 == old_wm.0
+                && self
+                    .apply_append_delta(old_gen.0, old_wm.1, observed, new_wm)
+                    .is_ok()
+            {
+                return Ok(());
             }
+            // Partial application is harmless: the reload below
+            // replaces registry and indexes wholesale.
         }
 
         let rows = self
@@ -4630,7 +4636,12 @@ impl Engine {
                 continue;
             }
             rollups.insert(
-                (pk, chunk.resolution, chunk.meta.min_ts, self.next_chunk_seq()),
+                (
+                    pk,
+                    chunk.resolution,
+                    chunk.meta.min_ts,
+                    self.next_chunk_seq(),
+                ),
                 chunk.meta,
             );
         }

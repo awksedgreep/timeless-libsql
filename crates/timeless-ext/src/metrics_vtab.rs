@@ -64,6 +64,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_int, CStr, CString};
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use rusqlite::ffi;
@@ -104,6 +105,19 @@ const NATIVE_PER_SECOND: i64 = 1;
 /// to the user (rusqlite renders ModuleError's message verbatim).
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
+}
+
+fn validate_named_series_count(n_series: usize, remaining: usize) -> Result<()> {
+    const MIN_SERIES_BYTES: usize = 2 * size_of::<u32>();
+    let minimum = n_series.checked_mul(MIN_SERIES_BYTES).ok_or_else(|| {
+        module_err("batch blob: n_series overflows minimum series table length".into())
+    })?;
+    if minimum > remaining {
+        return Err(module_err(format!(
+            "batch blob truncated: {n_series} series require at least {minimum} series-table byte(s), but only {remaining} remain"
+        )));
+    }
+    Ok(())
 }
 
 /// Load the persisted F3 ladder ("res:ret,..." native units) if any.
@@ -462,7 +476,17 @@ impl MetricsTab {
         let n_points = r.u32("n_points")? as usize;
 
         // ── 2. Series table: n_series × { name, labels-JSON } ────────
-        let mut entries: Vec<(String, Labels)> = Vec::with_capacity(n_series);
+        // Every entry needs at least two u32 length fields. Prove the blob
+        // can contain that much structure before allowing its count to drive
+        // an allocation, then keep allocation failure on the SQLite-error
+        // path instead of letting it abort the host.
+        validate_named_series_count(n_series, r.remaining())?;
+        let mut entries: Vec<(String, Labels)> = Vec::new();
+        entries.try_reserve(n_series).map_err(|_| {
+            module_err(format!(
+                "batch blob: cannot allocate series table for {n_series} entries"
+            ))
+        })?;
         for i in 0..n_series {
             let name_len = r.u32("series name length")? as usize;
             let name_bytes = r.take(name_len, "series name")?;
@@ -510,8 +534,8 @@ impl MetricsTab {
         // (all-or-nothing contract: write_batch_raw below cannot be
         // un-done, so nothing may reach it until the whole batch checks
         // out).
-        for (i, chunk) in idx_bytes.chunks_exact(4).enumerate() {
-            let idx = u32::from_le_bytes(chunk.try_into().unwrap()) as usize;
+        for (i, chunk) in idx_bytes.as_chunks::<4>().0.iter().enumerate() {
+            let idx = u32::from_le_bytes(*chunk) as usize;
             if idx >= n_series {
                 return Err(module_err(format!(
                     "batch blob: point {i}: series index {idx} out of range \
@@ -595,8 +619,8 @@ impl MetricsTab {
         // Validate all ids before mutating any partition buffer.
         {
             let registry = self.shared.engine.series_read();
-            for (i, bytes) in sid_bytes.chunks_exact(8).enumerate() {
-                let sid = i64::from_le_bytes(bytes.try_into().unwrap());
+            for (i, bytes) in sid_bytes.as_chunks::<8>().0.iter().enumerate() {
+                let sid = i64::from_le_bytes(*bytes);
                 if registry.info_for(sid).is_none() {
                     return Err(module_err(format!(
                         "resolved batch: point {i}: unknown series id {sid}; batch rejected"
@@ -1316,5 +1340,24 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
     /// within one scan, which is all SQLite requires of us here.
     fn rowid(&self) -> Result<i64> {
         Ok(self.pos as i64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_named_series_count;
+    use rusqlite::Error;
+
+    #[test]
+    fn named_batch_rejects_unrepresentable_series_table_before_allocation() {
+        let error = validate_named_series_count(u32::MAX as usize, 0).unwrap_err();
+        let Error::ModuleError(message) = error else {
+            panic!("expected module error");
+        };
+        assert!(
+            message.contains("n_series overflows minimum series table length")
+                || (message.contains("4294967295 series require at least")
+                    && message.contains("but only 0 remain"))
+        );
     }
 }

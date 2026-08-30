@@ -14093,8 +14093,8 @@ mod tests {
             "_msg":"\u{1b}[mfoo\u{1b}[1;31mERROR bar\u{1b}[10;5H",
             "source field":"left\u{1b}[2Jright",
             "classes":"A\u{1b}[?25lB\u{1b}[1;2$zC",
-            "invalid":format!("a\u{1b}[\u{1}b\u{1b}[abc\u{1b}["),
-            "osc":format!("\u{1b}]0;title\u{7}tail"),
+            "invalid":"a\u{1b}[\u{1}b\u{1b}[abc\u{1b}[".to_string(),
+            "osc":"\u{1b}]0;title\u{7}tail".to_string(),
             "plain":"unchanged",
             "number":9007199254740993u64,
             "flag":false,
@@ -14126,7 +14126,7 @@ mod tests {
         assert_eq!(result[0]["_msg"], "fooERROR bar");
         assert_eq!(result[0]["source field"], "leftright");
         assert_eq!(result[0]["classes"], "ABC");
-        assert_eq!(result[0]["invalid"], format!("a\u{1}bbc"));
+        assert_eq!(result[0]["invalid"], "a\u{1}bbc".to_string());
         assert_eq!(result[0]["osc"], row["osc"]);
         assert_eq!(result[0]["plain"], row["plain"]);
         assert_eq!(result[0]["number"], row["number"]);

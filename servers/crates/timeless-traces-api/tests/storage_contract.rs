@@ -558,7 +558,10 @@ async fn get_text(app: &axum::Router, uri: &str) -> String {
 /// The single sample line `name value` for an exposition family.
 fn sample(text: &str, name: &str) -> i64 {
     text.lines()
-        .find_map(|line| line.strip_prefix(name).and_then(|rest| rest.strip_prefix(' ')))
+        .find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(' '))
+        })
         .unwrap_or_else(|| panic!("missing sample for {name} in:\n{text}"))
         .parse()
         .unwrap()
@@ -931,7 +934,7 @@ fn hex_8(value: &str) -> [u8; 8] {
 }
 
 fn decode_hex(value: &str, out: &mut [u8]) {
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = std::str::from_utf8(pair).unwrap();
         out[index] = u8::from_str_radix(pair, 16).unwrap();
     }

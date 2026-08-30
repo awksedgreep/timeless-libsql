@@ -388,7 +388,7 @@ fn json_id<const N: usize>(value: Option<&Value>, name: &str) -> Result<[u8; N],
         return Err(format!("{name} must be a {}-character hex string", N * 2));
     }
     let mut out = [0_u8; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = std::str::from_utf8(pair).unwrap();
         out[index] = u8::from_str_radix(pair, 16)
             .map_err(|_| format!("{name} must be a {}-character hex string", N * 2))?;

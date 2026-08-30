@@ -179,7 +179,7 @@ fn hex_to_bytes<const N: usize>(s: &str) -> Option<[u8; N]> {
         return None;
     }
     let mut out = [0u8; N];
-    for (i, pair) in b.chunks_exact(2).enumerate() {
+    for (i, pair) in b.as_chunks::<2>().0.iter().enumerate() {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         out[i] = ((hi << 4) | lo) as u8;

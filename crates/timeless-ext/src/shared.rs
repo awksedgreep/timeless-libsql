@@ -564,12 +564,12 @@ pub(crate) fn pin_for_drop<E>(
 /// DROP TABLE semantics are unchanged: a dropped table's instance id
 /// rotates, so a recreate builds a fresh engine under a fresh key;
 /// the stale pin holds only memory and dies with the connection.
-static CONN_PINS: LazyLock<
-    Mutex<HashMap<usize, HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>>>,
-> = LazyLock::new(|| Mutex::new(HashMap::new()));
+type ErasedEngine = Arc<dyn Any + Send + Sync>;
+type ConnectionPins = HashMap<usize, HashMap<RegistryKey, ErasedEngine>>;
 
-fn conn_pins_lock(
-) -> MutexGuard<'static, HashMap<usize, HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>>> {
+static CONN_PINS: LazyLock<Mutex<ConnectionPins>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn conn_pins_lock() -> MutexGuard<'static, ConnectionPins> {
     CONN_PINS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -587,7 +587,9 @@ impl ConnPinScope {
     /// `timeless_pins()` return value, and the deterministic
     /// observable the test suite asserts on.
     pub(crate) fn count(&self) -> i64 {
-        conn_pins_lock().get(&self.0).map_or(0, |pins| pins.len() as i64)
+        conn_pins_lock()
+            .get(&self.0)
+            .map_or(0, |pins| pins.len() as i64)
     }
 }
 

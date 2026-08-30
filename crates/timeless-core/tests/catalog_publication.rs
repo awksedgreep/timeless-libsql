@@ -145,7 +145,11 @@ fn rolled_back_captured_generation_is_not_published() {
     let state = Arc::new(CatalogState::default());
     let engine = engine(Arc::clone(&state));
     engine.refresh_authoritative_state().unwrap();
-    assert_eq!(loads(&state), (1, 1), "primed token skips the redundant reload");
+    assert_eq!(
+        loads(&state),
+        (1, 1),
+        "primed token skips the redundant reload"
+    );
 
     engine.txn_begin();
     state.chunk_generation.store(1, Ordering::SeqCst);

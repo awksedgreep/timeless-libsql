@@ -1550,7 +1550,9 @@ fn expect_start_failure(
 }
 
 fn invalid_storage_probes(client: &Client, state: &SignalState, root: &Path) -> Result<()> {
-    let source = root.join("backups").join(format!("probe-source-{}.db", state.signal.name()));
+    let source = root
+        .join("backups")
+        .join(format!("probe-source-{}.db", state.signal.name()));
     require_status(
         http_request(
             client,

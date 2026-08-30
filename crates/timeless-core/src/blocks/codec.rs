@@ -632,13 +632,13 @@ fn decode_block_legacy(codec: u8, n: usize, stored: Vec<&[u8]>) -> Result<Vec<Lo
     let mut timestamps = Vec::with_capacity(n);
     if codec == CODEC_ZSTD {
         let mut prev = 0i64;
-        for c in cols[0].chunks_exact(8) {
-            prev = prev.wrapping_add(i64::from_le_bytes(c.try_into().unwrap()));
+        for c in cols[0].as_chunks::<8>().0 {
+            prev = prev.wrapping_add(i64::from_le_bytes(*c));
             timestamps.push(prev);
         }
     } else {
-        for c in cols[0].chunks_exact(8) {
-            timestamps.push(i64::from_le_bytes(c.try_into().unwrap()));
+        for c in cols[0].as_chunks::<8>().0 {
+            timestamps.push(i64::from_le_bytes(*c));
         }
     }
 

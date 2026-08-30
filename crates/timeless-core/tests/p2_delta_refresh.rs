@@ -15,21 +15,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use timeless_core::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, Engine, ResolvedSeries,
-    StoredChunk, StoredRollupChunk, StoredSeries,
+    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, Engine, ResolvedSeries, StoredChunk,
+    StoredRollupChunk, StoredSeries,
 };
 
 #[derive(Default)]
 struct State {
     series: Vec<StoredSeries>,
     /// (rowid, series_id, meta, ts payload, val payload)
-    chunks: Vec<(i64, i64, ChunkMeta, Vec<u8>, Vec<u8>)>,
+    chunks: Vec<StoredChunkRow>,
     next_rowid: i64,
     chunk_gen: i64,
     shape_gen: i64,
     full_scans: AtomicUsize,
     delta_scans: AtomicUsize,
 }
+
+type StoredChunkRow = (i64, i64, ChunkMeta, Vec<u8>, Vec<u8>);
 
 struct ScriptedStore(Arc<Mutex<State>>);
 
@@ -55,8 +57,13 @@ impl ChunkStore for ScriptedStore {
                 loc: ChunkLoc::Row { rowid },
                 encoding: c.encoding,
             };
-            st.chunks
-                .push((rowid, c.series_id, meta, c.ts_bytes.clone(), c.val_bytes.clone()));
+            st.chunks.push((
+                rowid,
+                c.series_id,
+                meta,
+                c.ts_bytes.clone(),
+                c.val_bytes.clone(),
+            ));
             locs.push(ChunkLoc::Row { rowid });
         }
         st.chunk_gen += 1;
@@ -95,7 +102,9 @@ impl ChunkStore for ScriptedStore {
     fn delete_chunks(&self, locs: &[ChunkLoc]) -> Vec<String> {
         let mut st = lock(self);
         st.chunks.retain(|(r, ..)| {
-            !locs.iter().any(|l| matches!(l, ChunkLoc::Row { rowid } if rowid == r))
+            !locs
+                .iter()
+                .any(|l| matches!(l, ChunkLoc::Row { rowid } if rowid == r))
         });
         st.chunk_gen += 1;
         st.shape_gen += 1;
@@ -262,7 +271,10 @@ fn shape_change_forces_full_reload() {
     {
         let loc = {
             let st = state.lock().unwrap();
-            st.chunks.first().map(|(r, ..)| ChunkLoc::Row { rowid: *r }).unwrap()
+            st.chunks
+                .first()
+                .map(|(r, ..)| ChunkLoc::Row { rowid: *r })
+                .unwrap()
         };
         let store = ScriptedStore(Arc::clone(&state));
         store.delete_chunks(&[loc]);

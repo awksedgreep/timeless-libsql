@@ -380,8 +380,10 @@ pub fn decode_i64(bytes: &[u8], n: usize) -> Result<Vec<i64>, String> {
                     raw.len()
                 ));
             }
-            raw.chunks_exact(8)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            raw.as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| i64::from_le_bytes(*c))
                 .collect()
         }
         other => return Err(format!("i64 column: unknown encoding id {other}")),
@@ -472,8 +474,10 @@ pub fn decode_f64(bytes: &[u8], n: usize) -> Result<Vec<f64>, String> {
                     raw.len()
                 ));
             }
-            raw.chunks_exact(8)
-                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            raw.as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| f64::from_le_bytes(*c))
                 .collect()
         }
         other => return Err(format!("f64 column: unknown encoding id {other}")),
@@ -675,7 +679,7 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
                 return Err("string column: RLE stream is not (u32,u32) pairs".into());
             }
             let mut out = Vec::with_capacity(n);
-            for pair in codes_raw.chunks_exact(8) {
+            for pair in codes_raw.as_chunks::<8>().0 {
                 let run = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
                 let code = u32::from_le_bytes(pair[4..8].try_into().unwrap()) as usize;
                 if code >= dict.len() {
@@ -769,7 +773,7 @@ pub fn decode_str_selected(
             }
             let mut row = 0usize;
             let mut selected_pos = 0usize;
-            for pair in codes_raw.chunks_exact(8) {
+            for pair in codes_raw.as_chunks::<8>().0 {
                 let run = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
                 let code = u32::from_le_bytes(pair[4..8].try_into().unwrap()) as usize;
                 if code >= dict.len() {
@@ -862,7 +866,7 @@ pub fn decode_u8(bytes: &[u8], n: usize) -> Result<Vec<u8>, String> {
                 return Err("u8 column: RLE stream is not (u32,u8) pairs".into());
             }
             let mut out = Vec::with_capacity(n);
-            for pair in payload.chunks_exact(5) {
+            for pair in payload.as_chunks::<5>().0 {
                 let run = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
                 let val = pair[4];
                 // Incremental cap: corrupt run lengths must not allocate.

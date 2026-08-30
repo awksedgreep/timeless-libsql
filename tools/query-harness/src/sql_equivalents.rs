@@ -127,6 +127,9 @@ fn open(extension: &Path, database: &Path) -> Result<Connection> {
 /// native functions; domain errors surface as NaN, which SQLite
 /// stores as NULL — the same observable the native functions give.
 fn register_math_polyfill(connection: &Connection) -> Result<()> {
+    type UnaryMath = (&'static str, fn(f64) -> f64);
+    type BinaryMath = (&'static str, fn(f64, f64) -> f64);
+
     use rusqlite::functions::FunctionFlags;
     if connection
         .query_row("SELECT sqrt(1.0)", [], |_| Ok(()))
@@ -135,7 +138,7 @@ fn register_math_polyfill(connection: &Connection) -> Result<()> {
         return Ok(());
     }
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
-    let unary: &[(&str, fn(f64) -> f64)] = &[
+    let unary: &[UnaryMath] = &[
         ("sqrt", f64::sqrt),
         ("ln", f64::ln),
         ("exp", f64::exp),
@@ -163,7 +166,7 @@ fn register_math_polyfill(connection: &Connection) -> Result<()> {
             Ok(ctx.get::<Option<f64>>(0)?.map(f))
         })?;
     }
-    let binary: &[(&str, fn(f64, f64) -> f64)] = &[
+    let binary: &[BinaryMath] = &[
         ("pow", f64::powf),
         ("power", f64::powf),
         ("atan2", f64::atan2),

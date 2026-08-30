@@ -1932,7 +1932,7 @@ fn auto_optimize_compresses_after_interval_flushes_without_manual_call() {
                 "op",
                 "api",
                 1,
-                (i % 3) as u8,
+                i % 3,
                 1_000 + i as i64,
                 &[],
             ))
