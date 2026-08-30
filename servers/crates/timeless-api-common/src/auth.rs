@@ -491,26 +491,35 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, AuthError> {
 fn required_scope(signal: &str, method: &Method, path: &str) -> String {
     // "/metrics" is exempted above; classified here anyway so the scope
     // stays sensible if the exemption list ever changes.
-    let operation = if path == "/ready"
-        || path == "/health"
-        || path == "/metrics"
-        || path.ends_with("/stats")
-    {
+    let operation = if matches!(
+        path,
+        "/ready"
+            | "/health"
+            | "/metrics"
+            | "/select/metrics/stats"
+            | "/select/logsql/stats"
+            | "/select/traces/stats"
+    ) {
         "stats"
-    } else if path.ends_with("/flush") || path.ends_with("/optimize") || path.ends_with("/backup") {
+    } else if matches!(
+        path,
+        "/api/v1/flush" | "/api/v1/optimize" | "/api/v1/backup"
+    ) {
         "maintenance"
     } else if *method == Method::GET
         || *method == Method::HEAD
-        || path.contains("query")
-        || path.contains("series")
-        || path.contains("labels")
-        || path.contains("search")
-        || path.contains("services")
-        || path.contains("operations")
-        || path.contains("traces/")
-        // A tail streams admitted data; its POST form only carries the
-        // filter parameters, so it is a read regardless of method.
-        || path.ends_with("/tail")
+        || matches!(
+            path,
+            "/api/v1/query"
+                | "/api/v1/query_range"
+                | "/prometheus/api/v1/query"
+                | "/prometheus/api/v1/query_range"
+                | "/metricsql/api/v1/query"
+                | "/metricsql/api/v1/query_range"
+                | "/select/logsql/query"
+                | "/select/logsql/tail"
+                | "/select/timeless/api/spans/tail"
+        )
     {
         "read"
     } else {
@@ -957,28 +966,146 @@ mod tests {
     }
 
     #[test]
-    fn backup_is_a_maintenance_operation_for_every_signal() {
-        for signal in ["metrics", "logs", "traces"] {
+    fn every_registered_route_has_the_expected_scope() {
+        let routes = [
+            // Metrics API.
+            ("metrics", Method::GET, "/live", "read"),
+            ("metrics", Method::GET, "/ready", "stats"),
+            ("metrics", Method::GET, "/health", "stats"),
+            ("metrics", Method::GET, "/metrics", "stats"),
+            ("metrics", Method::GET, "/select/metrics/stats", "stats"),
+            ("metrics", Method::POST, "/api/v1/flush", "maintenance"),
+            ("metrics", Method::POST, "/api/v1/backup", "maintenance"),
+            ("metrics", Method::POST, "/api/v1/import", "write"),
+            (
+                "metrics",
+                Method::POST,
+                "/api/v1/import/prometheus",
+                "write",
+            ),
+            ("metrics", Method::GET, "/api/v1/scrape/targets", "read"),
+            ("metrics", Method::PUT, "/api/v1/scrape/targets", "write"),
+            ("metrics", Method::GET, "/api/v1/query", "read"),
+            ("metrics", Method::POST, "/api/v1/query", "read"),
+            ("metrics", Method::GET, "/api/v1/export", "read"),
+            ("metrics", Method::GET, "/api/v1/query_range", "read"),
+            ("metrics", Method::POST, "/api/v1/query_range", "read"),
+            ("metrics", Method::GET, "/api/v1/labels", "read"),
+            ("metrics", Method::GET, "/api/v1/label/name/values", "read"),
+            ("metrics", Method::GET, "/api/v1/series", "read"),
+            ("metrics", Method::GET, "/prometheus/api/v1/labels", "read"),
+            (
+                "metrics",
+                Method::GET,
+                "/prometheus/api/v1/label/name/values",
+                "read",
+            ),
+            ("metrics", Method::GET, "/prometheus/api/v1/series", "read"),
+            ("metrics", Method::GET, "/prometheus/api/v1/query", "read"),
+            ("metrics", Method::POST, "/prometheus/api/v1/query", "read"),
+            (
+                "metrics",
+                Method::GET,
+                "/prometheus/api/v1/query_range",
+                "read",
+            ),
+            (
+                "metrics",
+                Method::POST,
+                "/prometheus/api/v1/query_range",
+                "read",
+            ),
+            ("metrics", Method::GET, "/metricsql/api/v1/query", "read"),
+            ("metrics", Method::POST, "/metricsql/api/v1/query", "read"),
+            (
+                "metrics",
+                Method::GET,
+                "/metricsql/api/v1/query_range",
+                "read",
+            ),
+            (
+                "metrics",
+                Method::POST,
+                "/metricsql/api/v1/query_range",
+                "read",
+            ),
+            // Logs API.
+            ("logs", Method::GET, "/live", "read"),
+            ("logs", Method::GET, "/ready", "stats"),
+            ("logs", Method::GET, "/health", "stats"),
+            ("logs", Method::GET, "/metrics", "stats"),
+            ("logs", Method::POST, "/insert/jsonline", "write"),
+            ("logs", Method::GET, "/select/logsql/query", "read"),
+            ("logs", Method::POST, "/select/logsql/query", "read"),
+            ("logs", Method::GET, "/select/logsql/field_values", "read"),
+            ("logs", Method::GET, "/select/logsql/stats", "stats"),
+            ("logs", Method::GET, "/select/logsql/tail", "read"),
+            ("logs", Method::POST, "/select/logsql/tail", "read"),
+            ("logs", Method::GET, "/api/v1/flush", "maintenance"),
+            ("logs", Method::POST, "/api/v1/backup", "maintenance"),
+            // Traces API.
+            ("traces", Method::GET, "/live", "read"),
+            ("traces", Method::GET, "/ready", "stats"),
+            ("traces", Method::GET, "/health", "stats"),
+            ("traces", Method::GET, "/metrics", "stats"),
+            ("traces", Method::GET, "/select/traces/stats", "stats"),
+            ("traces", Method::GET, "/select/jaeger/api/services", "read"),
+            (
+                "traces",
+                Method::GET,
+                "/select/jaeger/api/services/svc/operations",
+                "read",
+            ),
+            ("traces", Method::GET, "/select/jaeger/api/traces", "read"),
+            (
+                "traces",
+                Method::GET,
+                "/select/jaeger/api/traces/id",
+                "read",
+            ),
+            ("traces", Method::GET, "/select/timeless/api/spans", "read"),
+            (
+                "traces",
+                Method::GET,
+                "/select/timeless/api/spans/tail",
+                "read",
+            ),
+            (
+                "traces",
+                Method::POST,
+                "/select/timeless/api/spans/tail",
+                "read",
+            ),
+            (
+                "traces",
+                Method::GET,
+                "/select/timeless/api/traces/id",
+                "read",
+            ),
+            ("traces", Method::GET, "/api/v1/flush", "maintenance"),
+            ("traces", Method::POST, "/api/v1/flush", "maintenance"),
+            ("traces", Method::POST, "/api/v1/backup", "maintenance"),
+            (
+                "traces",
+                Method::POST,
+                "/insert/opentelemetry/v1/traces",
+                "write",
+            ),
+        ];
+
+        for (signal, method, path, operation) in routes {
             assert_eq!(
-                required_scope(signal, &Method::POST, "/api/v1/backup"),
-                format!("{signal}:maintenance")
+                required_scope(signal, &method, path),
+                format!("{signal}:{operation}"),
+                "{method} {path}"
             );
         }
-    }
 
-    #[test]
-    fn tail_is_a_read_operation_for_both_methods() {
-        for (signal, path) in [
-            ("logs", "/select/logsql/tail"),
-            ("traces", "/select/timeless/api/spans/tail"),
-        ] {
-            for method in [Method::GET, Method::POST] {
-                assert_eq!(
-                    required_scope(signal, &method, path),
-                    format!("{signal}:read")
-                );
-            }
-        }
+        // Route-like words cannot accidentally downgrade a future write route.
+        assert_eq!(
+            required_scope("metrics", &Method::POST, "/api/v1/query-import"),
+            "metrics:write"
+        );
     }
     use axum::routing::{get, post};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
