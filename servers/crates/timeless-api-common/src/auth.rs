@@ -368,9 +368,8 @@ fn admin_key_matches(request: &Request, expected: &str) -> bool {
         .map(str::to_owned)
         .or_else(|| {
             request.uri().query().and_then(|query| {
-                query
-                    .split('&')
-                    .find_map(|pair| pair.strip_prefix("admin_key=").map(str::to_owned))
+                form_urlencoded::parse(query.as_bytes())
+                    .find_map(|(name, value)| (name == "admin_key").then(|| value.into_owned()))
             })
         });
     match presented {
@@ -893,6 +892,24 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/v1/flush?admin_key=sesame")
+                    .method("POST")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Query keys use application/x-www-form-urlencoded decoding, so
+        // reserved characters, spaces, and UTF-8 are representable.
+        let encoded = protect_router(
+            Router::new().route("/api/v1/backup", post(|| async { "backup" })),
+            AuthConfig::disabled().with_admin_key(Some("a+b& c/✓".into())),
+        );
+        let response = encoded
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/backup?ignored=value&admin_key=a%2Bb%26+c%2F%E2%9C%93")
                     .method("POST")
                     .body(axum::body::Body::empty())
                     .unwrap(),
