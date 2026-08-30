@@ -293,6 +293,11 @@ fn corrupt_legacy(extension: &Path, temporary: &Path) -> Result<()> {
         params![vec![0_u8]],
     )?;
     drop(plain);
+    let upgrade = open(extension, &database)?;
+    ensure!(upgrade
+        .query_row("SELECT timeless_upgrade('metrics')", [], |_| Ok(()))
+        .is_err());
+    drop(upgrade);
     let (mut process, reply) = Worker::start(extension, &database)?;
     ensure!(
         matches!(reply, WorkerReply::Error(_)),
@@ -330,6 +335,9 @@ fn legacy_migrates(extension: &Path, temporary: &Path) -> Result<()> {
         params![registry],
     )?;
     drop(plain);
+    let upgrade = open(extension, &database)?;
+    upgrade.query_row("SELECT timeless_upgrade('metrics')", [], |_| Ok(()))?;
+    drop(upgrade);
     let (mut reader, ready) = Worker::start(extension, &database)?;
     ensure!(matches!(ready, WorkerReply::Ready));
     ensure!(reader.counts(&["legacy_metric"])?["legacy_metric"] == 1);

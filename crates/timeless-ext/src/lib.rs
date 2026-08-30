@@ -70,6 +70,7 @@ mod sql_ident;
 mod sql_value;
 mod table_args;
 mod traces_vtab;
+mod upgrade;
 mod vtab_tx;
 
 #[cfg(feature = "entrypoints")]
@@ -109,6 +110,7 @@ pub fn register_telemetry(db: &Connection) -> Result<()> {
     register_conn_pins(db)?;
     let log_query_reports = std::sync::Arc::new(query_report::LogQueryReportState::default());
     capabilities::register(db)?;
+    upgrade::register(db)?;
     metrics_vtab::register(db)?;
     logs_vtab::register(db, std::sync::Arc::clone(&log_query_reports))?;
     traces_vtab::register(db)?;

@@ -101,6 +101,7 @@ The following table is machine-checked against the Rust registration source.
 |---|---|---|---|
 | `timeless_capabilities` | scalar | telemetry | Machine-readable build, ABI, batching, format, and SQL-surface handshake. |
 | `timeless_pins` | scalar | telemetry | Count of engines pinned by this connection (P1 diagnostics; deterministic test observable). |
+| `timeless_upgrade` | scalar | telemetry | Explicitly apply additive legacy shadow-schema upgrades to `table` or `schema.table` on a writable connection. |
 | `timeless_metrics` | stored virtual-table module | telemetry | Compressed float metric series. |
 | `timeless_logs` | stored virtual-table module | telemetry | Compressed rich logs with exact severity and typed metadata. |
 | `timeless_traces` | stored virtual-table module | telemetry | Compressed rich spans with trace and term indexes. |
@@ -131,6 +132,22 @@ The following table is machine-checked against the Rust registration source.
 | `timeless_health` | stored virtual-table alias | dbhealth | Alias for `dbhealth`, retained for existing databases. |
 
 <!-- public-sql-symbols:end -->
+
+### Legacy shadow-schema upgrades
+
+Opening or querying a legacy timeless table never changes its shadow schema.
+When an additive upgrade is required, the read fails with the exact maintenance
+statement to run on a writable connection:
+
+```sql
+SELECT timeless_upgrade('metrics');
+SELECT timeless_upgrade('archive.traces');
+```
+
+The argument is `table` or `schema.table`. The scalar detects whether metrics,
+logs, or traces owns the table, applies only that module's idempotent additive
+upgrade, and returns the module name. Run it before opening the table on a
+read-only replica; unknown tables and non-additive corruption still fail.
 
 ## Shared SQL conventions
 

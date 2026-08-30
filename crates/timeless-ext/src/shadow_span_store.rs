@@ -143,6 +143,28 @@ pub(crate) fn ensure_attribute_blooms_table(
     ))
 }
 
+pub(crate) fn require_read_schema(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> rusqlite::Result<()> {
+    let blocks = sql_ident::qualified_shadow(database, table, "blocks");
+    let durations = sql_ident::qualified_shadow(database, table, "duration_bounds");
+    let attributes = sql_ident::qualified_shadow(database, table, "attribute_blooms");
+    let upgrade = || {
+        rusqlite::Error::ModuleError(format!(
+            "{database}.{table} requires a legacy schema upgrade; run \
+             SELECT timeless_upgrade('{database}.{table}') on a writable connection"
+        ))
+    };
+    conn.prepare(&format!("SELECT 1 FROM {blocks} LIMIT 0"))?;
+    conn.prepare(&format!("SELECT block_id FROM {durations} LIMIT 0"))
+        .map_err(|_| upgrade())?;
+    conn.prepare(&format!("SELECT block_id FROM {attributes} LIMIT 0"))
+        .map_err(|_| upgrade())?;
+    Ok(())
+}
+
 /// Statements to remove the shadow tables again (vtab xDestroy).
 pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
     let blocks = sql_ident::qualified_shadow(database, table, "blocks");

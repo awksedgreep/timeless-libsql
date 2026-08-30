@@ -228,6 +228,17 @@ pub struct LogsTab {
 }
 
 impl LogsTab {
+    pub(crate) fn upgrade_legacy_schema(
+        handle: *mut ffi::sqlite3,
+        database: &str,
+        table: &str,
+    ) -> Result<()> {
+        let _bind = DbGuard::bind(handle);
+        let host = unsafe { Connection::from_handle(handle) }?;
+        shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+        Ok(())
+    }
+
     /// Resolve the shared engine for an EXISTING timeless_logs table on
     /// this connection — the read-side entry point for stats/kernel TVFs
     /// (query_tvf.rs). Mirrors the xConnect tail: index_keys come from
@@ -244,7 +255,7 @@ impl LogsTab {
     ) -> Result<Arc<SharedEngine<BlockEngine>>> {
         let host = unsafe { Connection::from_handle(handle) }?;
         let instance_id =
-            shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+            shadow_meta::require_instance_id(&host, database, table).map_err(module_err)?;
         let store = ShadowBlockStore::new(database, table);
         let index_keys = match store.load_meta("index_keys").map_err(module_err)? {
             Some(bytes) => {
@@ -314,8 +325,12 @@ impl LogsTab {
             let _ = host.execute_batch(&sql_ident::incremental_auto_vacuum(&database));
             host.execute_batch(&shadow_block_store::ddl(&database, &table))?;
         }
-        let instance_id =
-            shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
+        let instance_id = if is_create {
+            shadow_meta::ensure_instance_id(&host, &database, &table)
+        } else {
+            shadow_meta::require_instance_id(&host, &database, &table)
+        }
+        .map_err(module_err)?;
 
         let (index_keys, retention, timestamp_unit) = if is_create {
             // index_keys comes from the CREATE args and is PERSISTED in

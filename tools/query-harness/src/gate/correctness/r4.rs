@@ -200,6 +200,13 @@ fn instance_migration(extension: &Path, temporary: &Path) -> Result<()> {
     }
     drop(plain);
     let migrated = open(extension, &database)?;
+    for table in SIGNALS {
+        migrated.query_row(
+            &format!("SELECT timeless_upgrade('{table}')"),
+            [],
+            |_| Ok(()),
+        )?;
+    }
     ensure!(counts(&migrated)? == [1, 1, 1]);
     ensure!(instance_ids(&migrated)?
         .iter()

@@ -806,14 +806,14 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     ensure!(stat(&compacted, "raw_blocks")? == 0);
     ensure!(stat(&compacted, "duration_bounded_blocks")? == 1);
     drop(connection);
-    // Simulate a database produced before duration extrema existed. The
-    // current xConnect must add the private side table, keep every span
-    // readable, and conservatively decode the unknown legacy blocks.
+    // Simulate a database produced before duration extrema existed. Apply the
+    // explicit additive upgrade, then conservatively decode legacy blocks.
     let legacy = Connection::open(database)?;
     legacy.execute_batch("DROP TABLE traces_duration_bounds")?;
     drop(legacy);
 
     let reopened = open(extension, database)?;
+    reopened.query_row("SELECT timeless_upgrade('traces')", [], |_| Ok(()))?;
     ensure!(scalar_i64(&reopened, "SELECT COUNT(*) FROM traces")? == 12);
     let reopened_stats = stats(&reopened, "traces")?;
     ensure!(stat(&reopened_stats, "index_bytes")? > 0);

@@ -177,6 +177,29 @@ pub struct MetricsTab {
 }
 
 impl MetricsTab {
+    pub(crate) fn upgrade_legacy_schema(
+        handle: *mut ffi::sqlite3,
+        database: &str,
+        table: &str,
+    ) -> Result<()> {
+        let _bind = DbGuard::bind(handle);
+        let host = unsafe { Connection::from_handle(handle) }?;
+        host.execute_batch(&shadow_store::series_ddl(database, table))?;
+        shadow_store::ensure_max_ts_val_column(&host, database, table)?;
+        shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+        let store = ShadowTableStore::new(database, table);
+        Engine::with_store(
+            Box::new(store),
+            FLUSH_THRESHOLD,
+            MIN_FLUSH_SIZE,
+            COMPRESSION_LEVEL,
+            MEMORY_BUDGET,
+            DEFER_COMPRESSION,
+        )
+        .map_err(module_err)?;
+        Ok(())
+    }
+
     pub(crate) fn connect_create(
         db: &mut VTabConnection,
         _aux: Option<&()>,
@@ -211,15 +234,16 @@ impl MetricsTab {
             let _ = host.execute_batch(&sql_ident::incremental_auto_vacuum(&database));
 
             host.execute_batch(&shadow_store::ddl(&database, &table))?;
+            shadow_store::ensure_max_ts_val_column(&host, &database, &table)?;
         } else {
-            // Databases created before R2 do not have the normalized catalog.
-            // Create only that new shadow table here; Engine::with_store then
-            // imports and validates the legacy registry blob.
-            host.execute_batch(&shadow_store::series_ddl(&database, &table))?;
+            shadow_store::require_read_schema(&host, &database, &table)?;
         }
-        shadow_store::ensure_max_ts_val_column(&host, &database, &table)?;
-        let instance_id =
-            shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
+        let instance_id = if is_create {
+            shadow_meta::ensure_instance_id(&host, &database, &table)
+        } else {
+            shadow_meta::require_instance_id(&host, &database, &table)
+        }
+        .map_err(module_err)?;
         // xConnect: the shadow tables already exist in the reopened db.
 
         // R4: one engine per (db file, schema alias, table, instance)
@@ -232,7 +256,11 @@ impl MetricsTab {
         // xConnect just bumps the Arc.
         let key = shared::registry_key(handle, database_name, &table, instance_id);
         let shared_engine = shared::get_or_create(&key, || {
-            let store = ShadowTableStore::new(&database, &table);
+            let store = if is_create {
+                ShadowTableStore::new(&database, &table)
+            } else {
+                ShadowTableStore::new_read_only(&database, &table)
+            };
             Engine::with_store(
                 Box::new(store),
                 FLUSH_THRESHOLD,
@@ -342,13 +370,12 @@ impl MetricsTab {
         table: &str,
     ) -> Result<Arc<SharedEngine<Engine>>> {
         let host = unsafe { Connection::from_handle(handle) }?;
+        shadow_store::require_read_schema(&host, database, table)?;
         let instance_id =
-            shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
-        host.execute_batch(&shadow_store::series_ddl(database, table))?;
-        shadow_store::ensure_max_ts_val_column(&host, database, table)?;
+            shadow_meta::require_instance_id(&host, database, table).map_err(module_err)?;
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
         let shared = shared::get_or_create(&key, || {
-            let store = ShadowTableStore::new(database, table);
+            let store = ShadowTableStore::new_read_only(database, table);
             Engine::with_store(
                 Box::new(store),
                 FLUSH_THRESHOLD,

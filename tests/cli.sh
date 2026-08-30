@@ -2534,18 +2534,34 @@ check_eq "latest survives a new-process reopen" "$got" \
 'reopen|{"env":"dev","host":"b"}|20|2.0
 reopen|{"env":"prod","host":"a"}|40|6.0'
 
-# Simulate a database created before max_ts_val existed. Reopen must add the
-# nullable column and old rows must take the exact decode fallback.
+# Simulate a database created before max_ts_val existed. Reads must fail with
+# an actionable upgrade command without silently altering the schema.
 sqlite3 "$E36DB" "ALTER TABLE latest_chunks DROP COLUMN max_ts_val;"
+set +e
+legacy_err=$(sqlite3 "$E36DB" ".load $EXT" \
+  "SELECT * FROM timeless_latest('latest','cpu',NULL,0,100);" 2>&1)
+legacy_rc=$?
+set -e
+if [[ $legacy_rc -ne 0 && "$legacy_err" == *"SELECT timeless_upgrade('main.latest')"* ]]; then
+  pass "legacy metrics read fails with an explicit upgrade command"
+else
+  fail "legacy metrics read fails with an explicit upgrade command"
+  printf '%s\n' "$legacy_err"
+fi
+check_eq "legacy metrics read does not alter schema" \
+  "$(sqlite3 "$E36DB" "SELECT COUNT(*) FROM pragma_table_info('latest_chunks') WHERE name='max_ts_val';")" \
+  '0'
 got=$(sqlite3 "$E36DB" <<SQL
 .load $EXT
+SELECT 'upgrade', timeless_upgrade('latest');
 SELECT 'migrated', labels, ts, value
   FROM timeless_latest('latest','cpu',NULL,0,100) ORDER BY labels;
 SELECT 'column', COUNT(*) FROM pragma_table_info('latest_chunks') WHERE name='max_ts_val';
 SQL
 )
-check_eq "latest migrates legacy schema and decodes legacy chunks" "$got" \
-'migrated|{"env":"dev","host":"b"}|20|2.0
+check_eq "explicit upgrade migrates legacy schema and decodes legacy chunks" "$got" \
+'upgrade|timeless_metrics
+migrated|{"env":"dev","host":"b"}|20|2.0
 migrated|{"env":"prod","host":"a"}|40|6.0
 column|1'
 
@@ -2781,6 +2797,54 @@ after_logs_tvf|2'
 # Pins are per-connection state: a fresh process starts at zero.
 got=$(sqlite3 "$P1DB" ".load $EXT" "SELECT timeless_pins();")
 check_eq "pins do not leak across connections" "$got" "0"
+
+# ---------------------------------------------------------------------------
+echo "== section 47: explicit legacy schema upgrades =="
+UPGRADEDB="$TMP/upgrade47.db"
+sqlite3 "$UPGRADEDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE old_logs USING timeless_logs;
+CREATE VIRTUAL TABLE old_traces USING timeless_traces;
+SQL
+sqlite3 "$UPGRADEDB" \
+  "DELETE FROM old_logs_meta WHERE k='instance_id'; DELETE FROM old_traces_meta WHERE k='instance_id'; DROP TABLE old_traces_duration_bounds; DROP TABLE old_traces_attribute_blooms;"
+
+set +e
+logs_upgrade_err=$(sqlite3 "$UPGRADEDB" ".load $EXT" \
+  "SELECT COUNT(*) FROM old_logs;" 2>&1)
+logs_upgrade_rc=$?
+traces_upgrade_err=$(sqlite3 "$UPGRADEDB" ".load $EXT" \
+  "SELECT COUNT(*) FROM old_traces;" 2>&1)
+traces_upgrade_rc=$?
+set -e
+if [[ $logs_upgrade_rc -ne 0 && "$logs_upgrade_err" == *"SELECT timeless_upgrade('main.old_logs')"* ]]; then
+  pass "legacy logs read fails with an explicit upgrade command"
+else
+  fail "legacy logs read fails with an explicit upgrade command"
+  printf '%s\n' "$logs_upgrade_err"
+fi
+if [[ $traces_upgrade_rc -ne 0 && "$traces_upgrade_err" == *"SELECT timeless_upgrade('main.old_traces')"* ]]; then
+  pass "legacy traces read fails with an explicit upgrade command"
+else
+  fail "legacy traces read fails with an explicit upgrade command"
+  printf '%s\n' "$traces_upgrade_err"
+fi
+check_eq "legacy reads leave logs/traces schemas untouched" \
+  "$(sqlite3 "$UPGRADEDB" "SELECT (SELECT COUNT(*) FROM old_logs_meta WHERE k='instance_id'), (SELECT COUNT(*) FROM old_traces_meta WHERE k='instance_id'), (SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('old_traces_duration_bounds','old_traces_attribute_blooms'));")" \
+  '0|0|0'
+got=$(sqlite3 "$UPGRADEDB" <<SQL
+.load $EXT
+SELECT timeless_upgrade('old_logs');
+SELECT timeless_upgrade('main.old_traces');
+SELECT COUNT(*) FROM old_logs;
+SELECT COUNT(*) FROM old_traces;
+SQL
+)
+check_eq "explicit logs/traces upgrades restore reads" "$got" \
+'timeless_logs
+timeless_traces
+0
+0'
 
 # ---------------------------------------------------------------------------
 echo

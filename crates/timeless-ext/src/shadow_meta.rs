@@ -97,3 +97,24 @@ pub(crate) fn ensure_instance_id(
         .map_err(|err| format!("{table}: failed to reload instance_id: {err}"))?;
     decode_instance_id(bytes, table)
 }
+
+/// Load the durable identity without mutating a legacy database from a read.
+pub(crate) fn require_instance_id(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> Result<InstanceId, String> {
+    let meta = sql_ident::qualified_shadow(database, table, "meta");
+    let select = format!("SELECT v FROM {meta} WHERE k = 'instance_id'");
+    let bytes = conn
+        .query_row(&select, [], |row| row.get::<_, Vec<u8>>(0))
+        .optional()
+        .map_err(|err| format!("{table}: failed to load instance_id: {err}"))?
+        .ok_or_else(|| {
+            format!(
+                "{database}.{table} requires a legacy schema upgrade; run \
+                 SELECT timeless_upgrade('{database}.{table}') on a writable connection"
+            )
+        })?;
+    decode_instance_id(bytes, table)
+}

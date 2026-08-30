@@ -1301,6 +1301,11 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
         [],
     )?;
     connection.execute_batch("DROP TABLE attribute_legacy_attribute_blooms")?;
+    connection.query_row(
+        "SELECT timeless_upgrade('attribute_legacy')",
+        [],
+        |_| Ok(()),
+    )?;
     let expected_attribute_legacy = semantic_rows(&connection, "attribute_legacy")?;
     connection.execute(
         "INSERT INTO percentile_spans(percentile_spans) VALUES ('flush')",

@@ -135,6 +135,32 @@ pub(crate) fn ensure_max_ts_val_column(
     }
 }
 
+pub(crate) fn require_read_schema(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> rusqlite::Result<()> {
+    let chunks = sql_ident::qualified_shadow(database, table, "chunks");
+    let series = sql_ident::qualified_shadow(database, table, "series");
+    let upgrade = || {
+        rusqlite::Error::ModuleError(format!(
+            "{database}.{table} requires a legacy schema upgrade; run \
+             SELECT timeless_upgrade('{database}.{table}') on a writable connection"
+        ))
+    };
+    // Preserve SQLite's native "no such table" error for a name that was
+    // never a metrics table; only an existing legacy schema gets upgrade
+    // guidance.
+    conn.prepare(&format!("SELECT 1 FROM {chunks} LIMIT 0"))?;
+    conn.prepare(&format!("SELECT max_ts_val FROM {chunks} LIMIT 0"))
+        .map_err(|_| upgrade())?;
+    conn.prepare(&format!(
+        "SELECT id, name, canonical_labels FROM {series} LIMIT 0"
+    ))
+    .map_err(|_| upgrade())?;
+    Ok(())
+}
+
 /// Statements to remove the shadow tables again (vtab xDestroy).
 pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
     let chunks = sql_ident::qualified_shadow(database, table, "chunks");
@@ -148,6 +174,7 @@ DROP TABLE IF EXISTS {series};"#
 }
 
 pub(crate) struct ShadowTableStore {
+    allow_legacy_migration: bool,
     // Pre-formatted SQL, built once in the constructor so the trait
     // methods never allocate query strings on the hot path. (The table
     // name is baked in — SQLite cannot parameterize identifiers.)
@@ -193,10 +220,19 @@ pub(crate) struct ShadowTableStore {
 
 impl ShadowTableStore {
     pub(crate) fn new(database: &str, table: &str) -> Self {
+        Self::with_migration(database, table, true)
+    }
+
+    pub(crate) fn new_read_only(database: &str, table: &str) -> Self {
+        Self::with_migration(database, table, false)
+    }
+
+    fn with_migration(database: &str, table: &str, allow_legacy_migration: bool) -> Self {
         let chunks = sql_ident::qualified_shadow(database, table, "chunks");
         let meta = sql_ident::qualified_shadow(database, table, "meta");
         let series = sql_ident::qualified_shadow(database, table, "series");
         ShadowTableStore {
+            allow_legacy_migration,
             insert_sql: format!(
                 "INSERT INTO {chunks} (series_id, ts_min, ts_max, max_ts_val, point_count, \
                  min_val, max_val, sum_val, encoding, resolution, ts_data, val_data) \
@@ -986,6 +1022,13 @@ impl ChunkStore for ShadowTableStore {
     }
 
     fn migrate_series(&self, series: &[StoredSeries]) -> Result<(), String> {
+        if !self.allow_legacy_migration {
+            return Err(
+                "legacy series catalog requires an explicit schema upgrade; run \
+                 SELECT timeless_upgrade('<table>') on a writable connection"
+                    .to_owned(),
+            );
+        }
         let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.migrate_series_sql)

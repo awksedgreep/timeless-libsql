@@ -236,6 +236,19 @@ pub struct TracesTab {
 }
 
 impl TracesTab {
+    pub(crate) fn upgrade_legacy_schema(
+        handle: *mut ffi::sqlite3,
+        database: &str,
+        table: &str,
+    ) -> Result<()> {
+        let _bind = DbGuard::bind(handle);
+        let host = unsafe { Connection::from_handle(handle) }?;
+        shadow_span_store::ensure_duration_bounds_table(&host, database, table)?;
+        shadow_span_store::ensure_attribute_blooms_table(&host, database, table)?;
+        shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+        Ok(())
+    }
+
     /// Resolve the shared engine for an EXISTING timeless_traces table on
     /// this connection — the read-side entry point for stats/kernel TVFs
     /// (query_tvf.rs). Mirrors the xConnect tail. A table that was never
@@ -247,11 +260,10 @@ impl TracesTab {
         table: &str,
     ) -> Result<Arc<SharedEngine<SpanBlockEngine>>> {
         let host = unsafe { Connection::from_handle(handle) }?;
-        shadow_span_store::ensure_duration_bounds_table(&host, database, table)?;
-        shadow_span_store::ensure_attribute_blooms_table(&host, database, table)?;
+        shadow_span_store::require_read_schema(&host, database, table)?;
         let attribute_indexes = load_attribute_indexes(&host, database, table)?;
         let instance_id =
-            shadow_meta::ensure_instance_id(&host, database, table).map_err(module_err)?;
+            shadow_meta::require_instance_id(&host, database, table).map_err(module_err)?;
         let store = ShadowSpanStore::new(database, table);
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
         let shared = shared::get_or_create(&key, move || {
@@ -309,10 +321,18 @@ impl TracesTab {
             // this db) know these blocks speak nanoseconds.
             store.save_meta("ts_unit", b"ns").map_err(module_err)?;
         }
-        shadow_span_store::ensure_duration_bounds_table(&host, &database, &table)?;
-        shadow_span_store::ensure_attribute_blooms_table(&host, &database, &table)?;
-        let instance_id =
-            shadow_meta::ensure_instance_id(&host, &database, &table).map_err(module_err)?;
+        if is_create {
+            shadow_span_store::ensure_duration_bounds_table(&host, &database, &table)?;
+            shadow_span_store::ensure_attribute_blooms_table(&host, &database, &table)?;
+        } else {
+            shadow_span_store::require_read_schema(&host, &database, &table)?;
+        }
+        let instance_id = if is_create {
+            shadow_meta::ensure_instance_id(&host, &database, &table)
+        } else {
+            shadow_meta::require_instance_id(&host, &database, &table)
+        }
+        .map_err(module_err)?;
 
         // Retention and attribute index configuration are data properties:
         // xCreate validates and persists them, xConnect loads metadata and
