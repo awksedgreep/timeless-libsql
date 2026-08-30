@@ -519,10 +519,15 @@ impl RegistryKey {
 /// Sole-owner engines destroyed inside an explicit transaction need one
 /// temporary strong reference: xDestroy frees the vtab object immediately,
 /// before SQLite knows whether DROP will commit or roll back.
-static DROP_PINS: LazyLock<Mutex<HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>>> =
+struct DropPin {
+    connection: usize,
+    _engine: Arc<dyn Any + Send + Sync>,
+}
+
+static DROP_PINS: LazyLock<Mutex<HashMap<RegistryKey, DropPin>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn drop_pins_lock() -> MutexGuard<'static, HashMap<RegistryKey, Arc<dyn Any + Send + Sync>>> {
+fn drop_pins_lock() -> MutexGuard<'static, HashMap<RegistryKey, DropPin>> {
     DROP_PINS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -541,7 +546,13 @@ pub(crate) fn pin_for_drop<E>(
         return;
     }
     let erased: Arc<dyn Any + Send + Sync> = shared.clone();
-    drop_pins_lock().insert(key.clone(), erased);
+    drop_pins_lock().insert(
+        key.clone(),
+        DropPin {
+            connection: db as usize,
+            _engine: erased,
+        },
+    );
 }
 
 /// P1: per-CONNECTION engine pins. The process registry below holds
@@ -596,6 +607,7 @@ impl ConnPinScope {
 impl Drop for ConnPinScope {
     fn drop(&mut self) {
         conn_pins_lock().remove(&self.0);
+        drop_pins_lock().retain(|_, pin| pin.connection != self.0);
     }
 }
 
@@ -946,7 +958,13 @@ mod tests {
         // registry is type-erased and generic over E.
         let a: Arc<SharedEngine<String>> = get_or_create(&k1, || Ok("engine".to_owned())).unwrap();
         let erased: Arc<dyn Any + Send + Sync> = a.clone();
-        drop_pins_lock().insert(k1.clone(), erased);
+        drop_pins_lock().insert(
+            k1.clone(),
+            DropPin {
+                connection: 1,
+                _engine: erased,
+            },
+        );
         let b: Arc<SharedEngine<String>> =
             get_or_create(&k1, || panic!("must reuse, not rebuild")).unwrap();
         assert!(Arc::ptr_eq(&a, &b), "same key must share one engine");
@@ -957,7 +975,13 @@ mod tests {
         let c: Arc<SharedEngine<String>> = get_or_create(&k2, || Ok("engine2".to_owned())).unwrap();
         assert!(!Arc::ptr_eq(&a, &c), "different table = different engine");
         let erased: Arc<dyn Any + Send + Sync> = a.clone();
-        drop_pins_lock().insert(k1.clone(), erased);
+        drop_pins_lock().insert(
+            k1.clone(),
+            DropPin {
+                connection: 1,
+                _engine: erased,
+            },
+        );
         let d: Arc<SharedEngine<String>> = get_or_create(&k3, || Ok("engine3".to_owned())).unwrap();
         assert!(
             !Arc::ptr_eq(&a, &d),
@@ -1038,6 +1062,53 @@ mod tests {
         assert!(rebuilt.get(), "close must release the connection's pins");
         assert_eq!(c.engine, 8);
         remove(&k);
+    }
+
+    #[test]
+    fn conn_scope_drop_reclaims_only_its_drop_pins() {
+        let db = 0x7157_0012 as *mut ffi::sqlite3;
+        let other_db = 0x7157_0013 as *mut ffi::sqlite3;
+        let scope = ConnPinScope::new(db);
+        let key = RegistryKey::Private {
+            db: db as usize,
+            database: b"main".to_vec(),
+            table: "dropped".into(),
+            instance: [1; 16],
+        };
+        let other_key = RegistryKey::Private {
+            db: other_db as usize,
+            database: b"main".to_vec(),
+            table: "other".into(),
+            instance: [1; 16],
+        };
+        let engine: Arc<dyn Any + Send + Sync> = Arc::new(7_u64);
+        let other_engine: Arc<dyn Any + Send + Sync> = Arc::new(8_u64);
+        let engine_weak = Arc::downgrade(&engine);
+        let other_weak = Arc::downgrade(&other_engine);
+        {
+            let mut pins = drop_pins_lock();
+            pins.insert(
+                key,
+                DropPin {
+                    connection: db as usize,
+                    _engine: engine,
+                },
+            );
+            pins.insert(
+                other_key.clone(),
+                DropPin {
+                    connection: other_db as usize,
+                    _engine: other_engine,
+                },
+            );
+        }
+
+        drop(scope);
+
+        assert!(engine_weak.upgrade().is_none());
+        assert!(other_weak.upgrade().is_some());
+        drop_pins_lock().remove(&other_key);
+        assert!(other_weak.upgrade().is_none());
     }
 
     #[test]
