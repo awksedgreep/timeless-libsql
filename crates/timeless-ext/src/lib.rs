@@ -236,5 +236,21 @@ mod limit_pushdown_tests {
             !plan(&db, "SELECT * FROM logs WHERE message LIKE '%x%' LIMIT 1")
                 .contains("bounded-any")
         );
+
+        assert!(plan(
+            &db,
+            "SELECT * FROM timeless_raw('metrics','cpu','',0,10) LIMIT 1"
+        )
+        .contains("limit"));
+        assert!(plan(
+            &db,
+            "SELECT * FROM timeless_raw_batches('metrics','cpu','',0,10) LIMIT 1 OFFSET 2"
+        )
+        .contains("limit-offset"));
+        assert!(!plan(
+            &db,
+            "SELECT * FROM timeless_raw('metrics','cpu','',0,10) WHERE value > 0 LIMIT 1"
+        )
+        .contains("limit"));
     }
 }

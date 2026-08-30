@@ -786,12 +786,56 @@ fn best_index_args_with_series_id(
     n_args: c_int,
     series_id_col: Option<c_int>,
 ) -> Result<bool> {
+    best_index_args_with_series_id_options(info, first_arg, n_args, series_id_col, None)
+}
+
+const PLAN_LIMIT: &str = "limit";
+const PLAN_LIMIT_OFFSET: &str = "limit-offset";
+
+fn best_index_args_with_series_id_and_limit(
+    info: &mut IndexInfo,
+    first_arg: c_int,
+    n_args: c_int,
+    series_id_col: Option<c_int>,
+) -> Result<bool> {
+    best_index_args_with_series_id_options(
+        info,
+        first_arg,
+        n_args,
+        series_id_col,
+        Some((PLAN_LIMIT, PLAN_LIMIT_OFFSET)),
+    )
+}
+
+fn best_index_args_with_series_id_options(
+    info: &mut IndexInfo,
+    first_arg: c_int,
+    n_args: c_int,
+    series_id_col: Option<c_int>,
+    limit_plans: Option<(&str, &str)>,
+) -> Result<bool> {
     let mut idx_num: c_int = 0;
     let mut unusable: c_int = 0;
     let mut slots: Vec<Option<usize>> = vec![None; n_args as usize];
     let mut series_slot: Option<usize> = None;
+    let mut limit_slot = None;
+    let mut offset_slot = None;
+    let mut bounded_safe = limit_plans.is_some() && info.num_of_order_by() == 0;
     for (i, constraint) in info.constraints().enumerate() {
         let col = constraint.column();
+        match constraint.operator() {
+            IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_LIMIT if limit_slot.is_none() => {
+                limit_slot = constraint.is_usable().then_some(i);
+                bounded_safe &= constraint.is_usable();
+                continue;
+            }
+            IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_OFFSET if offset_slot.is_none() => {
+                offset_slot = constraint.is_usable().then_some(i);
+                bounded_safe &= constraint.is_usable();
+                continue;
+            }
+            _ => {}
+        }
         if Some(col) == series_id_col
             && constraint.operator() == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
         {
@@ -802,20 +846,26 @@ fn best_index_args_with_series_id(
             // valid outer loop before the other side can use the handle.
             if constraint.is_usable() && series_slot.is_none() {
                 series_slot = Some(i);
+            } else {
+                bounded_safe = false;
             }
             continue;
         }
         if col < first_arg || col >= first_arg + n_args {
+            bounded_safe = false;
             continue;
         }
         let bit = 1 << (col - first_arg);
         if !constraint.is_usable() {
             unusable |= bit;
+            bounded_safe = false;
         } else if constraint.operator() == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
             && slots[(col - first_arg) as usize].is_none()
         {
             idx_num |= bit;
             slots[(col - first_arg) as usize] = Some(i);
+        } else {
+            bounded_safe = false;
         }
     }
     // An arg constrained only unusably: reject this plan so the planner
@@ -842,8 +892,53 @@ fn best_index_args_with_series_id(
         info.set_estimated_cost(1000.0);
         info.set_estimated_rows(1000);
     }
+    if let (true, Some(limit_slot), Some((limit, limit_offset))) =
+        (bounded_safe, limit_slot, limit_plans)
+    {
+        n_arg += 1;
+        info.constraint_usage(limit_slot).set_argv_index(n_arg);
+        if let Some(slot) = offset_slot {
+            n_arg += 1;
+            info.constraint_usage(slot).set_argv_index(n_arg);
+        }
+        info.set_idx_str(if offset_slot.is_some() {
+            limit_offset
+        } else {
+            limit
+        });
+        info.set_estimated_rows(100);
+    }
     info.set_idx_num(idx_num);
     Ok(true)
+}
+
+fn pushed_limit_capacity(
+    idx_num: c_int,
+    n_args: usize,
+    idx_str: Option<&str>,
+    args: &Filters<'_>,
+) -> Result<Option<usize>> {
+    if !matches!(idx_str, Some(PLAN_LIMIT | PLAN_LIMIT_OFFSET)) {
+        return Ok(None);
+    }
+    let arg_mask = (1u32 << n_args) - 1;
+    let mut slot = ((idx_num as u32) & arg_mask).count_ones() as usize;
+    if idx_num & PLAN_SERIES_ID_EQ != 0 {
+        slot += 1;
+    }
+    let limit: Option<i64> = args.get(slot)?;
+    let offset: Option<i64> = if idx_str == Some(PLAN_LIMIT_OFFSET) {
+        args.get(slot + 1)?
+    } else {
+        Some(0)
+    };
+    Ok(match (limit, offset) {
+        (Some(0), _) => Some(0),
+        (Some(limit), Some(offset)) if limit > 0 => limit
+            .checked_add(offset.max(0))
+            .and_then(|value| usize::try_from(value).ok()),
+        _ => None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2119,7 +2214,12 @@ unsafe impl<'vtab> VTab<'vtab> for RawTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args_with_series_id(info, RAW_FIRST_ARG, RAW_ARGS.len() as c_int, Some(0))
+        best_index_args_with_series_id_and_limit(
+            info,
+            RAW_FIRST_ARG,
+            RAW_ARGS.len() as c_int,
+            Some(0),
+        )
     }
 
     fn open(&mut self) -> Result<RawCursor<'vtab>> {
@@ -2143,7 +2243,7 @@ pub(crate) struct RawCursor<'vtab> {
 }
 
 unsafe impl VTabCursor for RawCursor<'_> {
-    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+    fn filter(&mut self, idx_num: c_int, idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         const M: &str = "timeless_raw";
         let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
@@ -2166,6 +2266,7 @@ unsafe impl VTabCursor for RawCursor<'_> {
         };
         let (start, stop) = (int(3, "start")?, int(4, "stop")?);
         let selection = decode_series_selection(idx_num, RAW_ARGS.len(), args)?;
+        let capacity = pushed_limit_capacity(idx_num, RAW_ARGS.len(), idx_str, args)?;
         if start > stop {
             self.rows.clear();
             self.pos = 0;
@@ -2183,12 +2284,19 @@ unsafe impl VTabCursor for RawCursor<'_> {
 
         let mut rows = Vec::new();
         for (sid, labels) in candidates {
+            let remaining = capacity.map(|capacity| capacity.saturating_sub(rows.len()));
+            if remaining == Some(0) {
+                break;
+            }
             let labels_json = labels_to_json(&labels);
-            for (ts, value) in shared
-                .engine
-                .query_range_by_id(sid, start, stop)
-                .map_err(module_err)?
-            {
+            let points = match remaining {
+                Some(remaining) => shared
+                    .engine
+                    .query_range_prefix_by_id(sid, start, stop, remaining),
+                None => shared.engine.query_range_by_id(sid, start, stop),
+            }
+            .map_err(module_err)?;
+            for (ts, value) in points {
                 rows.push((sid, labels_json.clone(), ts, value));
             }
         }
@@ -2260,7 +2368,7 @@ unsafe impl<'vtab> VTab<'vtab> for RawBatchTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_args_with_series_id(info, 3, RAW_ARGS.len() as c_int, Some(0))
+        best_index_args_with_series_id_and_limit(info, 3, RAW_ARGS.len() as c_int, Some(0))
     }
 
     fn open(&mut self) -> Result<RawBatchCursor<'vtab>> {
@@ -2284,7 +2392,7 @@ pub(crate) struct RawBatchCursor<'vtab> {
 }
 
 unsafe impl VTabCursor for RawBatchCursor<'_> {
-    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+    fn filter(&mut self, idx_num: c_int, idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         const M: &str = "timeless_raw_batches";
         let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
@@ -2307,6 +2415,7 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
         };
         let (start, stop) = (int(3, "start")?, int(4, "stop")?);
         let selection = decode_series_selection(idx_num, RAW_ARGS.len(), args)?;
+        let capacity = pushed_limit_capacity(idx_num, RAW_ARGS.len(), idx_str, args)?;
         if start > stop {
             self.rows.clear();
             self.pos = 0;
@@ -2322,17 +2431,31 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
             .map_err(module_err)?;
         let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
 
-        let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
-        let batch = shared
-            .engine
-            .query_range_batch_by_id(&series_ids, start, stop)
-            .map_err(module_err)?;
-        validate_batch_series(&table, M, &candidates, &batch)?;
-
         let mut rows = Vec::new();
-        for ((sid, labels), (_, points)) in candidates.into_iter().zip(batch) {
-            if !points.is_empty() {
-                rows.push((sid, labels, encode_raw_points(&points)?));
+        if let Some(capacity) = capacity {
+            for (sid, labels) in candidates {
+                if rows.len() == capacity {
+                    break;
+                }
+                let points = shared
+                    .engine
+                    .query_range_by_id(sid, start, stop)
+                    .map_err(module_err)?;
+                if !points.is_empty() {
+                    rows.push((sid, labels, encode_raw_points(&points)?));
+                }
+            }
+        } else {
+            let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
+            let batch = shared
+                .engine
+                .query_range_batch_by_id(&series_ids, start, stop)
+                .map_err(module_err)?;
+            validate_batch_series(&table, M, &candidates, &batch)?;
+            for ((sid, labels), (_, points)) in candidates.into_iter().zip(batch) {
+                if !points.is_empty() {
+                    rows.push((sid, labels, encode_raw_points(&points)?));
+                }
             }
         }
         rows.sort_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
