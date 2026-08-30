@@ -46,6 +46,20 @@ impl<'a> BatchReader<'a> {
         Ok(s)
     }
 
+    /// Take a fixed-width column without allowing hostile element counts to
+    /// wrap the byte length on narrower hosts.
+    pub(crate) fn take_array(
+        &mut self,
+        count: usize,
+        width: usize,
+        what: &str,
+    ) -> Result<&'a [u8]> {
+        let len = count.checked_mul(width).ok_or_else(|| {
+            module_err(format!("batch blob: element count overflows {what} length"))
+        })?;
+        self.take(len, what)
+    }
+
     pub(crate) fn skip(&mut self, n: usize, what: &str) -> Result<()> {
         self.take(n, what).map(|_| ())
     }
@@ -65,5 +79,25 @@ impl<'a> BatchReader<'a> {
         let bytes = self.take(len, what)?;
         std::str::from_utf8(bytes)
             .map_err(|_| module_err(format!("batch blob: {what} is not valid UTF-8")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BatchReader;
+    use rusqlite::Error;
+
+    #[test]
+    fn fixed_width_columns_reject_length_overflow() {
+        let error = BatchReader::new(&[])
+            .take_array(usize::MAX, 2, "timestamp column")
+            .unwrap_err();
+        let Error::ModuleError(message) = error else {
+            panic!("expected module error");
+        };
+        assert_eq!(
+            message,
+            "batch blob: element count overflows timestamp column length"
+        );
     }
 }

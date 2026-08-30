@@ -528,7 +528,7 @@ impl LogsTab {
         r.skip(2, "reserved header bytes")?;
         let n = r.u32("n_entries")? as usize;
 
-        let ts_bytes = r.take(n * 8, "timestamp column")?;
+        let ts_bytes = r.take_array(n, 8, "timestamp column")?;
         let mut severities = Vec::with_capacity(n);
         let mut levels = Vec::with_capacity(n);
         if version == 0x01 {

@@ -520,9 +520,9 @@ impl MetricsTab {
         // ── 3. The three columnar sections, sized exactly by n_points ─
         // take() bounds-checks each one, so a truncated blob fails with a
         // message naming the section that fell short.
-        let idx_bytes = r.take(n_points * 4, "per-point series index column")?;
-        let ts_bytes = r.take(n_points * 8, "timestamp column")?;
-        let val_bytes = r.take(n_points * 8, "value column")?;
+        let idx_bytes = r.take_array(n_points, 4, "per-point series index column")?;
+        let ts_bytes = r.take_array(n_points, 8, "timestamp column")?;
+        let val_bytes = r.take_array(n_points, 8, "value column")?;
         if r.remaining() != 0 {
             return Err(module_err(format!(
                 "batch blob: {} trailing byte(s) after value column (corrupt or wrong n_points)",
@@ -558,7 +558,15 @@ impl MetricsTab {
         // to a straight copy, but writing it this way stays correct on a
         // big-endian machine too (never assume byte order — read LE
         // explicitly, exactly as PLAN.md says).
-        let mut raw: Vec<u8> = Vec::with_capacity(n_points * 24);
+        let raw_len = n_points.checked_mul(24).ok_or_else(|| {
+            module_err("batch blob: point count overflows raw batch length".into())
+        })?;
+        let mut raw: Vec<u8> = Vec::new();
+        raw.try_reserve_exact(raw_len).map_err(|_| {
+            module_err(format!(
+                "batch blob: cannot allocate raw batch for {n_points} points"
+            ))
+        })?;
         for i in 0..n_points {
             let idx = u32::from_le_bytes(idx_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
             let sid = sids[idx]; // idx proven in-range in step 4
@@ -629,7 +637,15 @@ impl MetricsTab {
             }
         }
 
-        let mut raw = Vec::with_capacity(n_points * 24);
+        let raw_len = n_points.checked_mul(24).ok_or_else(|| {
+            module_err("resolved batch: point count overflows raw batch length".into())
+        })?;
+        let mut raw = Vec::new();
+        raw.try_reserve_exact(raw_len).map_err(|_| {
+            module_err(format!(
+                "resolved batch: cannot allocate raw batch for {n_points} points"
+            ))
+        })?;
         for i in 0..n_points {
             let sid = i64::from_le_bytes(sid_bytes[i * 8..i * 8 + 8].try_into().unwrap());
             let ts = i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap());

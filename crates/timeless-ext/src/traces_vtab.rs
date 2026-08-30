@@ -482,13 +482,9 @@ impl TracesTab {
         r.skip(2, "reserved header bytes")?;
         let n = r.u32("n_spans")? as usize;
 
-        let width = |bytes: usize, label: &str| {
-            n.checked_mul(bytes)
-                .ok_or_else(|| module_err(format!("batch blob: n_spans overflows {label} length")))
-        };
-        let trace_ids = r.take(width(16, "trace_id")?, "trace_id column")?;
-        let span_ids = r.take(width(8, "span_id")?, "span_id column")?;
-        let parent_ids = r.take(width(8, "parent_id")?, "parent_id column")?;
+        let trace_ids = r.take_array(n, 16, "trace_id column")?;
+        let span_ids = r.take_array(n, 8, "span_id column")?;
+        let parent_ids = r.take_array(n, 8, "parent_id column")?;
         let mut names = Vec::with_capacity(n);
         for i in 0..n {
             names.push(r.str(&format!("name {i}"))?.to_owned());
@@ -509,8 +505,8 @@ impl TracesTab {
                 "batch blob: invalid status byte {bad} (0..=2); batch rejected"
             )));
         }
-        let start_bytes = r.take(width(8, "start_ts")?, "start_ts column")?;
-        let dur_bytes = r.take(width(8, "duration")?, "duration column")?;
+        let start_bytes = r.take_array(n, 8, "start_ts column")?;
+        let dur_bytes = r.take_array(n, 8, "duration column")?;
 
         let mut attributes: Vec<Cow<'static, str>> = Vec::with_capacity(n);
         for i in 0..n {
