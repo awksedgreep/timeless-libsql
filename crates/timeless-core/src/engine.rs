@@ -2480,6 +2480,52 @@ impl Engine {
         self.query_range_by_id_inner(series_id, t_start, t_end)
     }
 
+    /// Return any stable prefix of one series for an unordered SQL LIMIT.
+    /// At most one chunk is decoded beyond the requested prefix.
+    pub fn query_range_prefix_by_id(
+        &self,
+        series_id: i64,
+        t_start: i64,
+        t_end: i64,
+        max_points: usize,
+    ) -> EngineResult<Vec<(i64, f64)>> {
+        let _transition = self.transition_read();
+        if max_points == 0 {
+            return Ok(Vec::new());
+        }
+        let pk = PartitionKey { series_id };
+        let matching: Vec<ChunkMeta> = {
+            let index = self.index_read();
+            index
+                .range((pk, i64::MIN, u64::MIN)..)
+                .take_while(|((key, _, _), _)| key == &pk)
+                .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
+                .map(|(_, meta)| meta.clone())
+                .collect()
+        };
+        let mut out = Vec::new();
+        for meta in &matching {
+            for point in self.read_chunk_data(meta, t_start, t_end)? {
+                out.push(point);
+                if out.len() == max_points {
+                    return Ok(out);
+                }
+            }
+        }
+        if let Some(buffer) = self.partitions.get(&pk) {
+            for index in 0..buffer.timestamps.len() {
+                let timestamp = buffer.timestamps[index];
+                if timestamp >= t_start && timestamp <= t_end {
+                    out.push((timestamp, buffer.values[index]));
+                    if out.len() == max_points {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Query an ordered batch of series without Rayon. This is the
     /// callback-safe packed-raw primitive: one transition guard and one store
     /// batch read replace a separate chunk lookup for every series. Results

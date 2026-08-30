@@ -100,6 +100,8 @@ const MEMORY_BUDGET: usize = 256 * 1024 * 1024; // 256 MiB of buffers
 const DEFER_COMPRESSION: bool = false; // compress at flush, not later
 /// F2 retention unit conversion: metrics ts is epoch SECONDS.
 const NATIVE_PER_SECOND: i64 = 1;
+const PLAN_LIMIT: &str = "limit";
+const PLAN_LIMIT_OFFSET: &str = "limit-offset";
 
 /// Map an engine error String into the vtab error type SQLite surfaces
 /// to the user (rusqlite renders ModuleError's message verbatim).
@@ -780,24 +782,37 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
         let mut lo_c: Option<usize> = None;
         let mut hi_c: Option<usize> = None;
         let mut series_c: Option<usize> = None;
+        let mut limit_c: Option<usize> = None;
+        let mut offset_c: Option<usize> = None;
+        let mut bounded_safe = info.num_of_order_by() == 0;
         for (i, c) in info.constraints().enumerate() {
             if !c.is_usable() {
+                if !matches!(
+                    c.operator(),
+                    SQLITE_INDEX_CONSTRAINT_LIMIT | SQLITE_INDEX_CONSTRAINT_OFFSET
+                ) {
+                    bounded_safe = false;
+                }
                 continue;
             }
             match (c.column(), c.operator()) {
+                (_, SQLITE_INDEX_CONSTRAINT_LIMIT) if limit_c.is_none() => limit_c = Some(i),
+                (_, SQLITE_INDEX_CONSTRAINT_OFFSET) if offset_c.is_none() => offset_c = Some(i),
                 (0, SQLITE_INDEX_CONSTRAINT_EQ) if name_c.is_none() => name_c = Some(i),
                 (1, SQLITE_INDEX_CONSTRAINT_GE) | (1, SQLITE_INDEX_CONSTRAINT_GT)
                     if lo_c.is_none() =>
                 {
-                    lo_c = Some(i)
+                    lo_c = Some(i);
+                    bounded_safe &= c.operator() == SQLITE_INDEX_CONSTRAINT_GE;
                 }
                 (1, SQLITE_INDEX_CONSTRAINT_LE) | (1, SQLITE_INDEX_CONSTRAINT_LT)
                     if hi_c.is_none() =>
                 {
-                    hi_c = Some(i)
+                    hi_c = Some(i);
+                    bounded_safe &= c.operator() == SQLITE_INDEX_CONSTRAINT_LE;
                 }
                 (4, SQLITE_INDEX_CONSTRAINT_EQ) if series_c.is_none() => series_c = Some(i),
-                _ => {}
+                _ => bounded_safe = false,
             }
         }
         // Pass 2 (mutable borrows): claim argv slots in canonical order.
@@ -823,6 +838,21 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
             usage.set_argv_index(slot);
             usage.set_omit(true);
             mask |= 8;
+        }
+        if bounded_safe && limit_c.is_some() {
+            if let Some(i) = limit_c {
+                info.constraint_usage(i).set_argv_index(slot);
+                slot += 1;
+            }
+            if let Some(i) = offset_c {
+                info.constraint_usage(i).set_argv_index(slot);
+            }
+            info.set_idx_str(if offset_c.is_some() {
+                PLAN_LIMIT_OFFSET
+            } else {
+                PLAN_LIMIT
+            });
+            info.set_estimated_rows(100);
         }
 
         info.set_idx_num(mask);
@@ -1186,6 +1216,7 @@ impl MetricsCursor<'_> {
         expected_name: Option<&str>,
         t0: i64,
         t1: i64,
+        capacity: Option<usize>,
     ) -> Result<Vec<OutRow>> {
         let Some((name, labels)) = ({
             let reg = self.shared.engine.series_read();
@@ -1199,22 +1230,25 @@ impl MetricsCursor<'_> {
         };
 
         let labels_json = labels_to_json(&labels);
-        self.shared
-            .engine
-            .query_range_by_id(series_id, t0, t1)
-            .map_err(module_err)
-            .map(|points| {
-                points
-                    .into_iter()
-                    .map(|(ts, value)| OutRow {
-                        series_id,
-                        name: name.clone(),
-                        ts,
-                        value,
-                        labels_json: labels_json.clone(),
-                    })
-                    .collect()
-            })
+        let points = match capacity {
+            Some(capacity) => self
+                .shared
+                .engine
+                .query_range_prefix_by_id(series_id, t0, t1, capacity),
+            None => self.shared.engine.query_range_by_id(series_id, t0, t1),
+        };
+        points.map_err(module_err).map(|points| {
+            points
+                .into_iter()
+                .map(|(ts, value)| OutRow {
+                    series_id,
+                    name: name.clone(),
+                    ts,
+                    value,
+                    labels_json: labels_json.clone(),
+                })
+                .collect()
+        })
     }
 
     /// Query every series of one metric SEQUENTIALLY on this thread.
@@ -1226,7 +1260,13 @@ impl MetricsCursor<'_> {
     /// inside xFilter). Workers would block on that mutex while we block
     /// on the workers: deadlock. query_range_by_id is rayon-free, so
     /// looping it here keeps every SQLite call on the mutex-owning thread.
-    fn collect_metric(&self, metric: &str, t0: i64, t1: i64) -> Result<Vec<OutRow>> {
+    fn collect_metric(
+        &self,
+        metric: &str,
+        t0: i64,
+        t1: i64,
+        capacity: Option<usize>,
+    ) -> Result<Vec<OutRow>> {
         // Snapshot (series_id, labels) pairs, then drop the registry lock
         // before querying (queries take their own locks).
         let candidates: Vec<(i64, Labels)> = {
@@ -1239,11 +1279,18 @@ impl MetricsCursor<'_> {
 
         let mut out = Vec::new();
         for (sid, labels) in candidates {
-            let points = self
-                .shared
-                .engine
-                .query_range_by_id(sid, t0, t1)
-                .map_err(module_err)?;
+            let remaining = capacity.map(|capacity| capacity.saturating_sub(out.len()));
+            if remaining == Some(0) {
+                break;
+            }
+            let points = match remaining {
+                Some(remaining) => self
+                    .shared
+                    .engine
+                    .query_range_prefix_by_id(sid, t0, t1, remaining),
+                None => self.shared.engine.query_range_by_id(sid, t0, t1),
+            }
+            .map_err(module_err)?;
             if points.is_empty() {
                 continue;
             }
@@ -1265,7 +1312,7 @@ impl MetricsCursor<'_> {
 unsafe impl VTabCursor for MetricsCursor<'_> {
     /// Start of a scan: decode the pushed-down constraints per the
     /// best_index bitmask, materialize all matching rows, iterate.
-    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+    fn filter(&mut self, idx_num: c_int, idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         // Route chunk reads to the connection running this SELECT.
         let _bind = DbGuard::bind(self.db);
         let _read = self
@@ -1318,7 +1365,9 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
             i64::MAX
         };
         let series_id = if idx_num & 8 != 0 {
-            match integer_affinity(args.get::<Value>(arg)?) {
+            let value = args.get::<Value>(arg)?;
+            arg += 1;
+            match integer_affinity(value) {
                 Some(series_id) => Some(series_id),
                 None => {
                     impossible = true;
@@ -1328,21 +1377,43 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
         } else {
             None
         };
+        let capacity = if matches!(idx_str, Some(PLAN_LIMIT | PLAN_LIMIT_OFFSET)) {
+            let limit: Option<i64> = args.get(arg)?;
+            arg += 1;
+            let offset: Option<i64> = if idx_str == Some(PLAN_LIMIT_OFFSET) {
+                args.get(arg)?
+            } else {
+                Some(0)
+            };
+            match (limit, offset) {
+                (Some(0), _) => Some(0),
+                (Some(limit), Some(offset)) if limit > 0 => limit
+                    .checked_add(offset.max(0))
+                    .and_then(|value| usize::try_from(value).ok()),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let mut rows = Vec::new();
         if !impossible {
             if let Some(series_id) = series_id {
-                rows = self.collect_series(series_id, name.as_deref(), t0, t1)?;
+                rows = self.collect_series(series_id, name.as_deref(), t0, t1, capacity)?;
             } else if idx_num & 1 != 0 {
                 // Name pushdown: only this metric's series.
                 if let Some(name) = name {
-                    rows = self.collect_metric(&name, t0, t1)?;
+                    rows = self.collect_metric(&name, t0, t1, capacity)?;
                 }
             } else {
                 // Full scan: every metric the registry knows about.
                 let metrics = self.shared.engine.series_read().list_metrics();
                 for metric in metrics {
-                    rows.extend(self.collect_metric(&metric, t0, t1)?);
+                    let remaining = capacity.map(|capacity| capacity.saturating_sub(rows.len()));
+                    if remaining == Some(0) {
+                        break;
+                    }
+                    rows.extend(self.collect_metric(&metric, t0, t1, remaining)?);
                 }
             }
         }

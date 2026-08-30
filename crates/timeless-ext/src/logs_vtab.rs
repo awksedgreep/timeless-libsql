@@ -141,6 +141,8 @@ const PLAN_BOUNDED_TS_ASC: &str = "bounded-ts-asc";
 const PLAN_BOUNDED_TS_ASC_OFFSET: &str = "bounded-ts-asc-offset";
 const PLAN_BOUNDED_TS_DESC: &str = "bounded-ts-desc";
 const PLAN_BOUNDED_TS_DESC_OFFSET: &str = "bounded-ts-desc-offset";
+const PLAN_BOUNDED_ANY: &str = "bounded-any";
+const PLAN_BOUNDED_ANY_OFFSET: &str = "bounded-any-offset";
 const PLAN_WORK_LIMIT: &str = "work-limit";
 const PLAN_WORK_LIMIT_SUFFIX: &str = "+work-limit";
 
@@ -875,6 +877,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         } else {
             None
         };
+        let bounded_any = bounded_safe && limit_c.is_some() && info.num_of_order_by() == 0;
 
         // Pass 2 (mutable): claim argv slots in canonical order.
         let mut mask: c_int = 0;
@@ -894,19 +897,27 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             claim(info, *c, 1 << (FIRST_KEY_BIT_SHIFT + k));
         }
         claim(info, contains_c, BIT_MSG_CONTAINS);
-        if bounded_order.is_some() {
+        if bounded_order.is_some() || bounded_any {
             claim(info, limit_c, 0);
             claim(info, offset_c, 0);
         }
         claim(info, work_limit_c, 0);
 
         info.set_idx_num(mask);
-        let bounded_plan = bounded_order.map(|order| match (order, offset_c.is_some()) {
-            (LogQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
-            (LogQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
-            (LogQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
-            (LogQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
-        });
+        let bounded_plan = bounded_order
+            .map(|order| match (order, offset_c.is_some()) {
+                (LogQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
+                (LogQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
+                (LogQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
+                (LogQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
+            })
+            .or_else(|| {
+                bounded_any.then_some(if offset_c.is_some() {
+                    PLAN_BOUNDED_ANY_OFFSET
+                } else {
+                    PLAN_BOUNDED_ANY
+                })
+            });
         if let Some(plan) = bounded_plan {
             let plan = if work_limit_c.is_some() {
                 format!("{plan}{PLAN_WORK_LIMIT_SUFFIX}")
@@ -914,7 +925,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
                 plan.to_owned()
             };
             info.set_idx_str(&plan);
-            info.set_order_by_consumed(true);
+            info.set_order_by_consumed(bounded_order.is_some());
             info.set_estimated_rows(100);
         } else if work_limit_c.is_some() {
             info.set_idx_str(PLAN_WORK_LIMIT);
@@ -1316,6 +1327,8 @@ unsafe impl VTabCursor for LogsCursor<'_> {
             Some(PLAN_BOUNDED_TS_ASC_OFFSET) => Some((LogQueryOrder::Asc, true)),
             Some(PLAN_BOUNDED_TS_DESC) => Some((LogQueryOrder::Desc, false)),
             Some(PLAN_BOUNDED_TS_DESC_OFFSET) => Some((LogQueryOrder::Desc, true)),
+            Some(PLAN_BOUNDED_ANY) => Some((LogQueryOrder::Asc, false)),
+            Some(PLAN_BOUNDED_ANY_OFFSET) => Some((LogQueryOrder::Asc, true)),
             _ => None,
         };
         let bounded = if let Some((order, has_offset)) = bounded_order {

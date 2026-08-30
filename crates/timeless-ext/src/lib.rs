@@ -206,3 +206,35 @@ fn extension_init(db: Connection) -> Result<bool> {
     // connection anyway).
     Ok(false)
 }
+
+#[cfg(all(test, feature = "embedded"))]
+mod limit_pushdown_tests {
+    use super::*;
+
+    fn plan(db: &Connection, sql: &str) -> String {
+        db.query_row(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get(3))
+            .unwrap()
+    }
+
+    #[test]
+    fn plain_limits_are_bounded_but_rechecked_predicates_are_not() {
+        let db = Connection::open_in_memory().unwrap();
+        register_telemetry(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE metrics USING timeless_metrics;
+             CREATE VIRTUAL TABLE logs USING timeless_logs;",
+        )
+        .unwrap();
+
+        assert!(plan(&db, "SELECT * FROM metrics LIMIT 1").contains("limit"));
+        assert!(plan(&db, "SELECT * FROM metrics LIMIT 1 OFFSET 2").contains("limit-offset"));
+        assert!(!plan(&db, "SELECT * FROM metrics WHERE ts > 0 LIMIT 1").contains("limit"));
+
+        assert!(plan(&db, "SELECT * FROM logs LIMIT 1").contains("bounded-any"));
+        assert!(plan(&db, "SELECT * FROM logs LIMIT 1 OFFSET 2").contains("bounded-any-offset"));
+        assert!(
+            !plan(&db, "SELECT * FROM logs WHERE message LIKE '%x%' LIMIT 1")
+                .contains("bounded-any")
+        );
+    }
+}
