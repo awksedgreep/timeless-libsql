@@ -1406,12 +1406,17 @@ unsafe impl VTabCursor for TracesCursor<'_> {
             || idx_str.is_some_and(|plan| plan.ends_with(PLAN_ATTRIBUTE_SUFFIX));
         let attribute = if has_attribute {
             let encoded: Option<String> = args.get(next())?;
-            let encoded = encoded.ok_or_else(|| {
-                module_err("attribute_filter must be a non-NULL JSON object".into())
-            })?;
-            let filter = SpanAttributeFilter::parse(&encoded).map_err(module_err)?;
-            self.attribute_filter = Some(encoded);
-            Some(filter)
+            match encoded {
+                Some(encoded) => {
+                    let filter = SpanAttributeFilter::parse(&encoded).map_err(module_err)?;
+                    self.attribute_filter = Some(encoded);
+                    Some(filter)
+                }
+                None => {
+                    impossible = true;
+                    None
+                }
+            }
         } else {
             None
         };

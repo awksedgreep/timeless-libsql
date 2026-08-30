@@ -758,6 +758,7 @@ SELECT 'maint',
        (SELECT value FROM timeless_stats('traces') WHERE key='optimize_pending_raw_entries'),
        (SELECT value FROM timeless_stats('traces') WHERE key='optimize_merge_deferred_entries');
 SELECT 'opt', hex(trace_id), name, kind, status FROM traces ORDER BY start_ts;
+SELECT 'null_filter', COUNT(*) FROM traces WHERE attribute_filter = NULL;
 SQL
 )
 # Block counts: the 3 buffered spans span 3 statuses (ok/unset/error),
@@ -776,7 +777,8 @@ codecs|0|3
 maint|1|8192|3|3|0|3
 opt|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|GET /checkout|server|ok
 opt|BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|cache.get|internal|unset
-opt|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|db.query|client|error'
+opt|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|db.query|client|error
+null_filter|0'
 check_eq "traces insert/flush/optimize round-trip (hex + blob ids)" "$got" "$expected"
 
 # Reopen in a NEW process: xConnect recovers the block index via scan()
