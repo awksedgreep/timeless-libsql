@@ -922,6 +922,29 @@ fn metric_candidate_ids(
         .collect()
 }
 
+fn validate_batch_series<L, R>(
+    table: &str,
+    operation: &str,
+    candidates: &[(i64, L)],
+    results: &[(i64, R)],
+) -> Result<()> {
+    if results.len() != candidates.len() {
+        return Err(module_err(format!(
+            "{table}: {operation} returned {} series for {} candidates",
+            results.len(),
+            candidates.len()
+        )));
+    }
+    for ((expected, _), (actual, _)) in candidates.iter().zip(results) {
+        if expected != actual {
+            return Err(module_err(format!(
+                "{table}: {operation} order mismatch (expected series {expected}, got {actual})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the engine and run one kernel scan into materialized rows.
 fn run_kernel(
     db: *mut ffi::sqlite3,
@@ -951,23 +974,10 @@ fn run_kernel(
     );
     let sids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
     let results = kernel(&shared.engine, &sids)?;
-    if results.len() != candidates.len() {
-        return Err(module_err(format!(
-            "{}: batch kernel returned {} series for {} candidates",
-            ka.table,
-            results.len(),
-            candidates.len()
-        )));
-    }
+    validate_batch_series(&ka.table, "batch kernel", &candidates, &results)?;
 
     let mut rows = Vec::new();
-    for ((sid, labels), (result_sid, points)) in candidates.into_iter().zip(results) {
-        if sid != result_sid {
-            return Err(module_err(format!(
-                "{}: batch kernel order mismatch (expected series {sid}, got {result_sid})",
-                ka.table
-            )));
-        }
+    for ((sid, labels), (_, points)) in candidates.into_iter().zip(results) {
         // Per-series absence rule (matches query_multi's omission): a
         // series with NO points on the grid emits nothing, fill or not.
         // Labels render lazily — only for series that emit rows.
@@ -1271,10 +1281,10 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
             ),
         }
         .map_err(module_err)?;
+        validate_batch_series(&ka.table, M, &candidates, &batch)?;
 
         let mut rows = Vec::new();
-        for ((sid, labels), (result_sid, points)) in candidates.into_iter().zip(batch) {
-            debug_assert_eq!(sid, result_sid);
+        for ((sid, labels), (_, points)) in candidates.into_iter().zip(batch) {
             if points.is_empty() {
                 continue;
             }
@@ -1312,6 +1322,35 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
 
     fn rowid(&self) -> Result<i64> {
         Ok(self.pos as i64)
+    }
+}
+
+#[cfg(test)]
+mod batch_contract_tests {
+    use super::validate_batch_series;
+    use rusqlite::Error;
+
+    fn message(error: Error) -> String {
+        let Error::ModuleError(message) = error else {
+            panic!("expected module error");
+        };
+        message
+    }
+
+    #[test]
+    fn rejects_count_and_order_mismatches() {
+        let candidates = vec![(1, ()), (2, ())];
+        let short = vec![(1, ())];
+        assert!(
+            message(validate_batch_series("m", "latest", &candidates, &short).unwrap_err())
+                .contains("returned 1 series for 2 candidates")
+        );
+
+        let reordered = vec![(2, ()), (1, ())];
+        assert!(message(
+            validate_batch_series("m", "latest", &candidates, &reordered).unwrap_err()
+        )
+        .contains("order mismatch (expected series 1, got 2)"));
     }
 }
 
@@ -1564,9 +1603,9 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
             .engine
             .query_aggregate_summary_batch_by_id(&series_ids, start, stop)
             .map_err(module_err)?;
+        validate_batch_series(&table, M, &candidates, &batch)?;
         let mut rows = Vec::new();
-        for ((sid, labels), (result_sid, summary)) in candidates.into_iter().zip(batch) {
-            debug_assert_eq!(sid, result_sid);
+        for ((sid, labels), (_, summary)) in candidates.into_iter().zip(batch) {
             let Some(summary) = summary else {
                 continue;
             };
@@ -1857,9 +1896,9 @@ unsafe impl VTabCursor for LatestCursor<'_> {
             .engine
             .query_latest_batch_by_id(&series_ids, start, stop)
             .map_err(module_err)?;
+        validate_batch_series(&table, M, &candidates, &batch)?;
         let mut rows = Vec::new();
-        for ((sid, labels), (result_sid, point)) in candidates.into_iter().zip(batch) {
-            debug_assert_eq!(sid, result_sid);
+        for ((sid, labels), (_, point)) in candidates.into_iter().zip(batch) {
             let Some((ts, value)) = point else {
                 continue;
             };
@@ -2288,10 +2327,10 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
             .engine
             .query_range_batch_by_id(&series_ids, start, stop)
             .map_err(module_err)?;
+        validate_batch_series(&table, M, &candidates, &batch)?;
 
         let mut rows = Vec::new();
-        for ((sid, labels), (result_sid, points)) in candidates.into_iter().zip(batch) {
-            debug_assert_eq!(sid, result_sid);
+        for ((sid, labels), (_, points)) in candidates.into_iter().zip(batch) {
             if !points.is_empty() {
                 rows.push((sid, labels, encode_raw_points(&points)?));
             }
@@ -2913,10 +2952,10 @@ unsafe impl VTabCursor for RollupBatchCursor<'_> {
             .engine
             .query_rollup_batch_by_id(&series_ids, ka.width, ka.start, ka.stop)
             .map_err(module_err)?;
+        validate_batch_series(&ka.table, M, &candidates, &batch)?;
 
         let mut rows = Vec::new();
-        for ((series_id, labels), (result_id, buckets)) in candidates.into_iter().zip(batch) {
-            debug_assert_eq!(series_id, result_id);
+        for ((series_id, labels), (_, buckets)) in candidates.into_iter().zip(batch) {
             if buckets.is_empty() {
                 continue;
             }
