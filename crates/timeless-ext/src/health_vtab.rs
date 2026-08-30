@@ -40,7 +40,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{c_int, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
 use rusqlite::ffi;
@@ -222,8 +222,28 @@ fn schedulers() -> &'static Mutex<HashMap<String, SchedulerSlot>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn schedulers_lock() -> MutexGuard<'static, HashMap<String, SchedulerSlot>> {
+    schedulers()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 fn scheduler_key(file: &str, table: &str) -> String {
-    format!("{file}\u{1}{table}")
+    let canonical = std::fs::canonicalize(file)
+        .unwrap_or_else(|_| std::path::PathBuf::from(file))
+        .to_string_lossy()
+        .into_owned();
+    format!("{canonical}\u{1}{table}")
+}
+
+fn remove_scheduler_if_owner(key: &str, stop: &Arc<AtomicBool>) {
+    let mut map = schedulers_lock();
+    if map
+        .get(key)
+        .is_some_and(|slot| Arc::ptr_eq(&slot.stop, stop))
+    {
+        map.remove(key);
+    }
 }
 
 /// Idempotently start the sampler thread for (db file, table). The
@@ -251,7 +271,7 @@ fn ensure_scheduler(
         return;
     }
     let key = scheduler_key(&file, table);
-    let mut map = schedulers().lock().unwrap();
+    let mut map = schedulers_lock();
     if map.contains_key(&key) {
         return;
     }
@@ -266,16 +286,20 @@ fn ensure_scheduler(
 
     let weak: Weak<SharedEngine<Engine>> = Arc::downgrade(engine);
     let table = table.to_owned();
-    std::thread::Builder::new()
+    let thread_stop = Arc::clone(&stop);
+    if std::thread::Builder::new()
         .name(format!("dbhealth:{table}"))
-        .spawn(move || scheduler_main(file, table, every_secs, weak, stop))
-        .ok();
+        .spawn(move || scheduler_main(file, table, every_secs, weak, thread_stop))
+        .is_err()
+    {
+        remove_scheduler_if_owner(&key, &stop);
+    }
 }
 
 fn stop_scheduler(file: Option<&str>, table: &str) {
     if let Some(file) = file {
         let key = scheduler_key(file, table);
-        if let Some(slot) = schedulers().lock().unwrap().remove(&key) {
+        if let Some(slot) = schedulers_lock().remove(&key) {
             slot.stop.store(true, Ordering::Relaxed);
         }
     }
@@ -339,7 +363,7 @@ fn scheduler_main(
             }
         }
     }
-    schedulers().lock().unwrap().remove(&key);
+    remove_scheduler_if_owner(&key, &stop);
 }
 
 // ---------------------------------------------------------------------------
@@ -867,5 +891,41 @@ impl SavepointVTab for HealthTab {
 
     fn rollback_to(&mut self, id: c_int) {
         self.inner.rollback_to(id)
+    }
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::{
+        remove_scheduler_if_owner, scheduler_key, schedulers_lock, Arc, AtomicBool, SchedulerSlot,
+    };
+
+    #[test]
+    fn scheduler_keys_canonicalize_path_aliases() {
+        let root = std::env::current_dir().unwrap();
+        let direct = root.join("Cargo.toml");
+        let alias = root.join(".").join("Cargo.toml");
+        assert_eq!(
+            scheduler_key(direct.to_str().unwrap(), "health"),
+            scheduler_key(alias.to_str().unwrap(), "health")
+        );
+    }
+
+    #[test]
+    fn stale_scheduler_cannot_remove_rearmed_slot() {
+        let key = "test-stale-scheduler\u{1}health";
+        let old = Arc::new(AtomicBool::new(false));
+        let current = Arc::new(AtomicBool::new(false));
+        schedulers_lock().insert(
+            key.to_owned(),
+            SchedulerSlot {
+                stop: Arc::clone(&current),
+            },
+        );
+
+        remove_scheduler_if_owner(key, &old);
+        assert!(schedulers_lock().contains_key(key));
+        remove_scheduler_if_owner(key, &current);
+        assert!(!schedulers_lock().contains_key(key));
     }
 }
