@@ -81,6 +81,13 @@ pub(crate) const MERGE_TARGET_ENTRIES: usize = 8192;
 /// depend on the host knowing to schedule it). 30 flushes ≈ the API
 /// services' 30s optimize cadence; the budget bounds each pause and doubles
 /// as the raw-backlog size that triggers a pass immediately.
+/// Cap on how far a compressed merge may widen a block's ts span, as a
+/// multiple of the span its sources cover. Range pruning pays for block
+/// width, and the merge planner pairs blocks by SIZE, so without this it
+/// welds time-distant blocks together. 2 tolerates a gap as wide as the
+/// data itself. Closed windows are exempt, so stragglers still coalesce.
+const MERGE_SPAN_GROWTH_LIMIT: i64 = 2;
+
 const AUTO_OPTIMIZE_INTERVAL_FLUSHES: usize = 30;
 const AUTO_OPTIMIZE_BUDGET_ENTRIES: usize = 32_768;
 /// HARD CAP on merged-block ts span: 1 hour in the table's declared unit.
@@ -283,6 +290,7 @@ impl LogsTab {
                     zstd_level: ZSTD_LEVEL,
                     merge_target_entries: MERGE_TARGET_ENTRIES,
                     merge_max_ts_span: timestamp_unit.hour,
+                    merge_span_growth_limit: MERGE_SPAN_GROWTH_LIMIT,
                     message_trigrams,
                     index_keys,
                     auto_optimize_interval_flushes: AUTO_OPTIMIZE_INTERVAL_FLUSHES,
@@ -445,6 +453,7 @@ impl LogsTab {
                     zstd_level: ZSTD_LEVEL,
                     merge_target_entries: MERGE_TARGET_ENTRIES,
                     merge_max_ts_span: timestamp_unit.hour,
+                    merge_span_growth_limit: MERGE_SPAN_GROWTH_LIMIT,
                     message_trigrams,
                     index_keys: index_keys_for_engine,
                     auto_optimize_interval_flushes: AUTO_OPTIMIZE_INTERVAL_FLUSHES,

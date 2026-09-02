@@ -46,6 +46,27 @@ pub struct BlockEngineConfig {
     /// keeps prune effective. Default i64::MAX = uncapped (unit-agnostic
     /// engine can't pick a sane default); the logs vtab passes 1h in ms.
     pub merge_max_ts_span: i64,
+    /// Maximum growth a COMPRESSED MERGE may cause in block ts span,
+    /// as a multiple of the span the sources actually cover.
+    ///
+    /// Range pruning pays for block WIDTH: a query decodes every block
+    /// whose ts range overlaps its window. Merging two blocks that sit
+    /// next to each other in time costs roughly the sum of their spans;
+    /// merging two blocks that are far apart yields a block spanning the
+    /// UNION, including the empty gap between them. The second trade buys
+    /// a few bytes and permanently widens a block, so it is refused.
+    ///
+    /// Necessary because plan_compressed_segment sorts by entry_count to
+    /// pair similar-sized tiers (the 2x growth rule) — good for
+    /// amplification, blind to time locality. Under incremental
+    /// compaction that pairing repeatedly welds distant blocks together.
+    ///
+    /// This is a DEFERRAL, not a refusal: closed windows (see
+    /// push_compressed_group) still coalesce unconditionally, so nothing
+    /// is stranded — a straggler waits for its window to close instead of
+    /// widening a live block. 1 = merged span may not exceed the covered
+    /// span at all; 2 = tolerate gaps up to the data's own width.
+    pub merge_span_growth_limit: i64,
     /// F6: index message TRIGRAMS per block (`tg:<hex>` terms + the
     /// `tg:` marker), enabling sound block pruning for substring LIKE.
     /// Opt-in — the index costs term-table space.
@@ -78,6 +99,7 @@ impl Default for BlockEngineConfig {
             zstd_level: 7,
             merge_target_entries: 8192,
             merge_max_ts_span: i64::MAX,
+            merge_span_growth_limit: 2,
             message_trigrams: false,
             index_keys: Vec::new(),
             auto_optimize_interval_flushes: 30,
@@ -1632,12 +1654,43 @@ impl BlockEngine {
             if entries < minimum_fill || entries < largest.saturating_mul(2) {
                 return;
             }
+            // Time locality (merge_span_growth_limit). The sort above pairs
+            // similar-SIZED tiers, which is blind to where they sit in time:
+            // under incremental compaction it happily welds distant blocks
+            // together, and the merged block spans the union INCLUDING the
+            // gap. Range pruning then pays that width on every query that
+            // overlaps it. Refuse a merge that widens the block far past the
+            // span its sources actually cover. Deferral only — a closed
+            // window still coalesces unconditionally above.
+            if !Self::merge_span_growth_ok(&sources, self.config.merge_span_growth_limit) {
+                return;
+            }
         }
         groups.push(OptimizeGroup {
             sources,
             partition,
             kind: OptimizeKind::CompressedMerge,
         });
+    }
+
+    /// Would merging `sources` widen the block far past the span its
+    /// sources actually cover? Compares the union span against the SUM of
+    /// the source spans: time-adjacent blocks sum to roughly their union,
+    /// while distant blocks have a union dominated by the empty gap.
+    /// Zero-covered-span sources (every entry on one timestamp) may still
+    /// merge with each other, but never across a gap.
+    fn merge_span_growth_ok(sources: &[IndexEntry], limit: i64) -> bool {
+        let covered: i64 = sources
+            .iter()
+            .map(|entry| entry.meta.ts_max.saturating_sub(entry.meta.ts_min))
+            .fold(0i64, |acc, span| acc.saturating_add(span));
+        let union_min = sources.iter().map(|entry| entry.meta.ts_min).min();
+        let union_max = sources.iter().map(|entry| entry.meta.ts_max).max();
+        let (Some(union_min), Some(union_max)) = (union_min, union_max) else {
+            return true;
+        };
+        let union = union_max.saturating_sub(union_min);
+        union <= covered.saturating_mul(limit.max(1))
     }
 
     fn merged_span_fits(
@@ -2978,6 +3031,44 @@ impl BlockEngine {
     /// debugging; cheap and payload-free.
     pub fn stats(&self) -> (usize, usize, usize) {
         self.stats_with_after_index(|| {})
+    }
+
+    /// Block ts-span shape, payload-free (index metadata only).
+    ///
+    /// Block pruning is by ts range, so the WIDTH of a block decides how
+    /// often a range query must decode it. Incremental compaction can
+    /// merge blocks that are adjacent but not contiguous in time, and the
+    /// merged block spans the UNION of its sources — repeated, that
+    /// widens spans and silently degrades pruning while every other
+    /// counter (block count, bytes, entry count) looks healthy. Nothing
+    /// else in the stats surface reports it, so this is the observable
+    /// that makes that regression visible.
+    ///
+    /// Returns (blocks, mean_span, max_span, over_target_blocks) where
+    /// over_target counts blocks holding more than merge_target_entries
+    /// (the merge overshoot allowance, so a non-zero value means the
+    /// compressed-merge path has been re-merging already-compressed
+    /// blocks). Spans are in the engine's timestamp unit.
+    pub fn block_span_stats(&self) -> (usize, i64, i64, usize) {
+        let index = self.index_lock();
+        let mut total: i128 = 0;
+        let mut max_span = 0i64;
+        let mut over_target = 0usize;
+        for entry in index.iter() {
+            let span = entry.meta.ts_max.saturating_sub(entry.meta.ts_min);
+            total += i128::from(span);
+            max_span = max_span.max(span);
+            if (entry.meta.entry_count as usize) > self.config.merge_target_entries {
+                over_target += 1;
+            }
+        }
+        let blocks = index.len();
+        let mean = if blocks == 0 {
+            0
+        } else {
+            i64::try_from(total / blocks as i128).unwrap_or(i64::MAX)
+        };
+        (blocks, mean, max_span, over_target)
     }
 
     /// Queryable ts range (blocks + buffer), payload-free. Same lock

@@ -2781,3 +2781,171 @@ fn legacy_codec_feasibility_gate_is_sound_across_codecs() {
         );
     }
 }
+
+#[test]
+fn block_span_stats_report_width_not_just_count() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+
+    // Empty store: no blocks, no spans, nothing over target.
+    assert_eq!(engine.block_span_stats(), (0, 0, 0, 0));
+
+    // Two flushed blocks with known widths. Flushing between them keeps
+    // them separate (one raw block per flush, one level partition).
+    for ts in [1_000i64, 1_100, 1_400] {
+        engine.push(entry(ts, 1, "a", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+    for ts in [10_000i64, 10_050] {
+        engine.push(entry(ts, 1, "b", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+
+    let (blocks, mean, max, over_target) = engine.block_span_stats();
+    assert_eq!(blocks, 2, "one block per flush");
+    // Spans are 400 and 50: the mean is over BLOCKS, not entries.
+    assert_eq!(max, 400, "max span is the widest block");
+    assert_eq!(mean, 225);
+    assert_eq!(over_target, 0, "no block exceeds merge_target_entries");
+
+    // The store's overall ts range is far wider than any single block.
+    // The observable exists precisely because these two differ: pruning
+    // pays for block width, not for the store's range.
+    assert_eq!(engine.ts_range(), (Some(1_000), Some(10_050)));
+}
+
+#[test]
+fn block_span_stats_expose_merge_widening() {
+    // A merge of two time-separated blocks produces a block spanning the
+    // UNION of their ranges. That widening is invisible in block counts
+    // and byte totals, so it must be visible here.
+    let engine = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            merge_target_entries: 16,
+            ..config(&[])
+        },
+    )
+    .unwrap();
+
+    // Two narrow blocks, far apart in time, each well under the merge
+    // target so the compressed-merge path will consider them.
+    for ts in [1_000i64, 1_010, 1_020, 1_030] {
+        engine.push(entry(ts, 1, "a", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    for ts in [900_000i64, 900_010, 900_020, 900_030] {
+        engine.push(entry(ts, 1, "b", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+
+    let (_, _, max_before, _) = engine.block_span_stats();
+    assert_eq!(max_before, 30, "each block still spans only its own window");
+
+    // First pass compresses the raw block, second merges the two
+    // compressed blocks — the default growth limit refuses that weld.
+    engine.optimize().unwrap();
+    engine.optimize().unwrap();
+    let (_, _, max_after, _) = engine.block_span_stats();
+    assert_eq!(
+        max_after, 30,
+        "the span guard keeps blocks at their own window width"
+    );
+}
+
+#[test]
+fn open_window_merges_refuse_to_weld_distant_blocks() {
+    // The compressed-merge planner sorts by entry_count to pair
+    // similar-sized tiers, which is blind to time. Two small blocks far
+    // apart in time satisfy the fill and 2x-growth rules, so without the
+    // span guard they merge into one block spanning the whole gap — and
+    // every range query overlapping that gap then decodes it.
+    let cfg = || BlockEngineConfig {
+        merge_target_entries: 16,
+        ..config(&[])
+    };
+
+    // Same data, same plan, only the growth limit differs.
+    let guarded = BlockEngine::new(Box::new(MemBlockStore::new()), cfg()).unwrap();
+    let unguarded = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            merge_span_growth_limit: i64::MAX,
+            ..cfg()
+        },
+    )
+    .unwrap();
+
+    for engine in [&guarded, &unguarded] {
+        for ts in [1_000i64, 1_010, 1_020, 1_030] {
+            engine.push(entry(ts, 1, "a", &[])).unwrap();
+        }
+        engine.flush().unwrap();
+        engine.optimize().unwrap();
+        for ts in [900_000i64, 900_010, 900_020, 900_030] {
+            engine.push(entry(ts, 1, "b", &[])).unwrap();
+        }
+        engine.flush().unwrap();
+        // First pass compresses the new raw block; the compressed-merge
+        // path only sees two compressed blocks on the pass after that.
+        engine.optimize().unwrap();
+        engine.optimize().unwrap();
+    }
+
+    let (_, _, guarded_max, _) = guarded.block_span_stats();
+    let (_, _, unguarded_max, _) = unguarded.block_span_stats();
+    assert_eq!(
+        guarded_max, 30,
+        "guarded blocks keep the span of their own window"
+    );
+    assert_eq!(
+        unguarded_max, 899_030,
+        "unguarded merge spans the union, gap included"
+    );
+
+    // The guard DEFERS, it does not lose data: both stores answer the
+    // same queries with the same rows.
+    assert_eq!(
+        guarded.query(&full_range_query()).unwrap(),
+        unguarded.query(&full_range_query()).unwrap(),
+    );
+}
+
+#[test]
+fn closed_windows_still_coalesce_past_the_span_guard() {
+    // The guard must never strand stragglers: once a window is closed
+    // (no further arrivals expected) coalescing is final and correct,
+    // and the span guard is skipped. Without that exemption, low-volume
+    // partitions accumulate tiny blocks forever.
+    let engine = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            merge_target_entries: 16,
+            merge_max_ts_span: 10_000,
+            merge_span_growth_limit: 1,
+            ..config(&[])
+        },
+    )
+    .unwrap();
+
+    // Two tiny, time-separated blocks inside one closed window...
+    for ts in [1_000i64, 1_001] {
+        engine.push(entry(ts, 1, "a", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+    for ts in [6_000i64, 6_001] {
+        engine.push(entry(ts, 1, "b", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+    // ...and much later data, which closes that window.
+    engine.push(entry(500_000, 1, "later", &[])).unwrap();
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+
+    let (blocks, _, _, _) = engine.block_span_stats();
+    assert!(
+        blocks <= 2,
+        "closed-window stragglers must coalesce despite the span guard (got {blocks} blocks)"
+    );
+    assert_eq!(engine.query(&full_range_query()).unwrap().len(), 5);
+}

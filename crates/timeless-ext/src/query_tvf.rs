@@ -4843,6 +4843,8 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 let profile = shared.engine.profile();
                 let optimize_backlog = shared.engine.optimize_backlog();
+                let (_, block_mean_span, block_max_span, block_over_target) =
+                    shared.engine.block_span_stats();
                 let compression_totals = shared
                     .engine
                     .load_compression_totals()
@@ -4865,6 +4867,12 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "compressed_blocks",
                         Value::Integer(blocks.saturating_sub(raw_blocks) as i64),
+                    ),
+                    ("block_mean_ts_span", Value::Integer(block_mean_span)),
+                    ("block_max_ts_span", Value::Integer(block_max_span)),
+                    (
+                        "block_over_target_count",
+                        Value::Integer(block_over_target as i64),
                     ),
                     ("buffered_entries", Value::Integer(buffered as i64)),
                     ("disk_entries", Value::Integer(storage.disk_entries)),
@@ -5202,6 +5210,8 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let gate = shared.write_gate.profile();
                 let storage = trace_storage_summary(&database, &table)?;
                 let attribute_index_fields = shared.engine.config().attribute_indexes.len();
+                let (_, block_mean_span, block_max_span, block_over_target) =
+                    shared.engine.block_span_stats();
                 debug_assert_eq!(buffered as u64, counted_buffered);
                 let (ts_min, ts_max) = shared.engine.ts_range();
                 rows.extend([
@@ -5210,6 +5220,12 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "compressed_blocks",
                         Value::Integer(blocks.saturating_sub(raw_blocks) as i64),
+                    ),
+                    ("block_mean_ts_span", Value::Integer(block_mean_span)),
+                    ("block_max_ts_span", Value::Integer(block_max_span)),
+                    (
+                        "block_over_target_count",
+                        Value::Integer(block_over_target as i64),
                     ),
                     ("buffered_spans", Value::Integer(buffered as i64)),
                     ("disk_spans", Value::Integer(disk_spans as i64)),
