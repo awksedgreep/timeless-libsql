@@ -10,9 +10,11 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.7.8 -->
+<!-- release-target: 0.7.9 -->
 
 ## [Unreleased]
+
+## [0.7.9] — 2026-09-02
 
 ### Added
 
@@ -640,6 +642,9 @@ attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
 [Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.6...HEAD
+[0.7.9]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.8...v0.7.9
+[0.7.8]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.7...v0.7.8
+[0.7.7]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.3...v0.7.4
