@@ -2781,3 +2781,75 @@ fn legacy_codec_feasibility_gate_is_sound_across_codecs() {
         );
     }
 }
+
+#[test]
+fn block_span_stats_report_width_not_just_count() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), config(&[])).unwrap();
+
+    // Empty store: no blocks, no spans, nothing over target.
+    assert_eq!(engine.block_span_stats(), (0, 0, 0, 0));
+
+    // Two flushed blocks with known widths. Flushing between them keeps
+    // them separate (one raw block per flush, one level partition).
+    for ts in [1_000i64, 1_100, 1_400] {
+        engine.push(entry(ts, 1, "a", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+    for ts in [10_000i64, 10_050] {
+        engine.push(entry(ts, 1, "b", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+
+    let (blocks, mean, max, over_target) = engine.block_span_stats();
+    assert_eq!(blocks, 2, "one block per flush");
+    // Spans are 400 and 50: the mean is over BLOCKS, not entries.
+    assert_eq!(max, 400, "max span is the widest block");
+    assert_eq!(mean, 225);
+    assert_eq!(over_target, 0, "no block exceeds merge_target_entries");
+
+    // The store's overall ts range is far wider than any single block.
+    // The observable exists precisely because these two differ: pruning
+    // pays for block width, not for the store's range.
+    assert_eq!(engine.ts_range(), (Some(1_000), Some(10_050)));
+}
+
+#[test]
+fn block_span_stats_expose_merge_widening() {
+    // A merge of two time-separated blocks produces a block spanning the
+    // UNION of their ranges. That widening is invisible in block counts
+    // and byte totals, so it must be visible here.
+    let engine = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            merge_target_entries: 16,
+            ..config(&[])
+        },
+    )
+    .unwrap();
+
+    // Two narrow blocks, far apart in time, each well under the merge
+    // target so the compressed-merge path will consider them.
+    for ts in [1_000i64, 1_010, 1_020, 1_030] {
+        engine.push(entry(ts, 1, "a", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+    engine.optimize().unwrap();
+    for ts in [900_000i64, 900_010, 900_020, 900_030] {
+        engine.push(entry(ts, 1, "b", &[])).unwrap();
+    }
+    engine.flush().unwrap();
+
+    let (_, _, max_before, _) = engine.block_span_stats();
+    assert_eq!(max_before, 30, "each block still spans only its own window");
+
+    engine.optimize().unwrap();
+    let (blocks_after, _, max_after, _) = engine.block_span_stats();
+    if blocks_after == 1 {
+        assert_eq!(
+            max_after, 899_030,
+            "a merged block spans the union of its sources"
+        );
+    } else {
+        assert_eq!(max_after, 30, "unmerged blocks keep their narrow spans");
+    }
+}

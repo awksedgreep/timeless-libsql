@@ -2578,6 +2578,44 @@ impl SpanBlockEngine {
         (persisted, buffered)
     }
 
+    /// Block ts-span shape, payload-free (index metadata only).
+    ///
+    /// Block pruning is by ts range, so the WIDTH of a block decides how
+    /// often a range query must decode it. Incremental compaction can
+    /// merge blocks that are adjacent but not contiguous in time, and the
+    /// merged block spans the UNION of its sources — repeated, that
+    /// widens spans and silently degrades pruning while every other
+    /// counter (block count, bytes, span count) looks healthy. Nothing
+    /// else in the stats surface reports it, so this is the observable
+    /// that makes that regression visible.
+    ///
+    /// Returns (blocks, mean_span, max_span, over_target_blocks) where
+    /// over_target counts blocks holding more than merge_target_entries
+    /// (the merge overshoot allowance, so a non-zero value means the
+    /// compressed-merge path has been re-merging already-compressed
+    /// blocks). Spans are in the engine's timestamp unit.
+    pub fn block_span_stats(&self) -> (usize, i64, i64, usize) {
+        let index = self.index_lock();
+        let mut total: i128 = 0;
+        let mut max_span = 0i64;
+        let mut over_target = 0usize;
+        for entry in index.iter() {
+            let span = entry.meta.ts_max.saturating_sub(entry.meta.ts_min);
+            total += i128::from(span);
+            max_span = max_span.max(span);
+            if (entry.meta.entry_count as usize) > self.config.merge_target_entries {
+                over_target += 1;
+            }
+        }
+        let blocks = index.len();
+        let mean = if blocks == 0 {
+            0
+        } else {
+            i64::try_from(total / blocks as i128).unwrap_or(i64::MAX)
+        };
+        (blocks, mean, max_span, over_target)
+    }
+
     /// Queryable start_ts range (blocks + buffer), payload-free. Same
     /// lock discipline as stats(): index scope dropped before the buffer
     /// is read (R7 — flush acquires buffer then index).
