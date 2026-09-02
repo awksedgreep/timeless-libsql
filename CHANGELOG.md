@@ -14,6 +14,38 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- **`timeless_stats` reports block ts-span shape for logs and traces.**
+  New keys `block_mean_ts_span`, `block_max_ts_span` and
+  `block_over_target_count`. Block pruning is by ts range, so block WIDTH —
+  not block count — decides how many blocks a range query must decode.
+  Nothing in the stats surface reported width, so a pruning regression was
+  invisible while block counts, byte totals and the optimize counters all
+  looked healthy. A rising `block_over_target_count` means the
+  compressed-merge path is re-merging already-compressed blocks. Additive:
+  existing consumers select stats keys by name.
+
+### Fixed
+
+- **Incremental log compaction no longer welds time-distant blocks
+  together.** `plan_compressed_segment` sorts candidates by entry count so
+  similar-sized tiers pair up and satisfy the 2x growth rule; that pairing
+  is blind to time, and merging two blocks an hour apart produced one block
+  spanning the union of their ranges, gap included. Range pruning then paid
+  that width on every overlapping query. Open-window merges now also
+  require the merged span to stay within `merge_span_growth_limit` (2x) of
+  the span the sources actually cover. Closed windows remain exempt and
+  still coalesce unconditionally, so a straggler is deferred to its
+  window's close rather than stranded. On the 1M-entry `bench-logs`
+  fixture: mean block span 198,935 ms -> 55,777 ms, max 2,948,717 ms ->
+  98,635 ms, blocks over target 15 -> 0, the service+level+range query
+  15.9 ms -> 6.9 ms, and `optimize` 263.8 ms -> 29.6 ms, for +0.7%
+  storage (9.03 -> 9.09 B/entry). Ingest throughput is unchanged. Traces
+  is deliberately untouched: `SpanEngine` has no closed-window exemption,
+  so the same guard could strand blocks there, and its queries never
+  regressed.
+
 ## [0.7.8] — 2026-08-30
 
 ### Changed
