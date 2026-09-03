@@ -2553,6 +2553,11 @@ reopen|{"env":"prod","host":"a"}|40|6.0'
 
 # Simulate a database created before max_ts_val existed. Reads must fail with
 # an actionable upgrade command without silently altering the schema.
+# Companion views are dropped first: a genuine pre-schema database has
+# none, and SQLite rewrites dependent view definitions during ALTER TABLE
+# DROP COLUMN, which cannot resolve TVF-backed views without the extension
+# (and must not run against a half-migrated schema with it).
+sqlite3 "$E36DB" "DROP VIEW timeless_latest_series; DROP VIEW timeless_latest_latest; DELETE FROM timeless_schema_inventory;"
 sqlite3 "$E36DB" "ALTER TABLE latest_chunks DROP COLUMN max_ts_val;"
 set +e
 legacy_err=$(sqlite3 "$E36DB" ".load $EXT" \

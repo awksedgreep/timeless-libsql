@@ -301,6 +301,11 @@ impl TracesTab {
     ) -> Result<(Cow<'static, CStr>, Self)> {
         let table = String::from_utf8_lossy(table_name).into_owned();
         let database = String::from_utf8_lossy(database_name).into_owned();
+        // Innocuous (the FTS5 precedent, same as metrics): reads have no
+        // side effects, so companion views may reference this vtab under
+        // trusted_schema=off — which is exactly how the observability
+        // schema reaches ordinary sqlite3 CLI users.
+        db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
         // Bind the calling connection for every store operation below
         // (DDL, _meta writes, recovery scans). RAII unbind.
@@ -2334,5 +2339,65 @@ mod schema_spike_tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(columns, TRACE_SPAN_COLUMNS);
+    }
+
+    #[test]
+    fn views_survive_foreign_alias_and_direct_open() {
+        // Portability rule (r3 regression): view bodies never qualify
+        // their sources, so the installed surface works when the file
+        // opens directly or attached under any alias — not just the
+        // schema name present at install time.
+        let path = std::env::temp_dir().join(format!(
+            "timeless_schema_spike_portable_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = Connection::open(&path).unwrap();
+            register(&db).unwrap();
+            db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+                .unwrap();
+            db.execute(SPAN_INSERT, []).unwrap();
+            db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+                .unwrap();
+        }
+        // Direct open: no alias attached at all.
+        {
+            let db = Connection::open(&path).unwrap();
+            register(&db).unwrap();
+            let count: i64 = db
+                .query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+        // Foreign alias: the install-time schema name is nowhere around.
+        {
+            let db = Connection::open_in_memory().unwrap();
+            register(&db).unwrap();
+            db.execute_batch(&format!(
+                "ATTACH DATABASE '{}' AS data;",
+                path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+            let count: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM data.timeless_traces_spans;",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            let summaries: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM data.timeless_traces_summary;",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(summaries, 1);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

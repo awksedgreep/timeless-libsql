@@ -322,6 +322,11 @@ impl LogsTab {
         })?;
         let table = String::from_utf8_lossy(table_name).into_owned();
         let database = String::from_utf8_lossy(database_name).into_owned();
+        // Innocuous (the FTS5 precedent, same as metrics): reads have no
+        // side effects, so companion views may reference this vtab under
+        // trusted_schema=off — which is exactly how the observability
+        // schema reaches ordinary sqlite3 CLI users.
+        db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
         // Bind the calling connection for every store operation below
         // (DDL, _meta reads/writes, recovery scans). RAII unbind.

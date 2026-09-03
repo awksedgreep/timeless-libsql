@@ -44,6 +44,10 @@ metrics, and logs companion views (no evaluators).
 - `DROP TABLE` on a source table removes exactly the objects the
   inventory attributes to it, in the same transaction. User objects are
   never touched; the shared inventory table itself stays.
+- The empty inventory table is deliberately never dropped: removing
+  shared infrastructure from a per-source `DROP` would race concurrent
+  installs (deleted rows, dropped table, orphaned views). Reinstalling
+  into the schema reuses it; nothing redundant accumulates.
 - Upgrades are per-object `DROP` + `CREATE` at the recorded version
   boundary — migrations in the web-framework sense, executed
   automatically on a writable open. There is no separate upgrade
@@ -51,6 +55,23 @@ metrics, and logs companion views (no evaluators).
 - Downgrade direction: an older binary leaves newer-versioned objects
   alone and keeps serving the base tables. Newer shapes may error when
   queried (unknown columns), which is loud, not wrong.
+
+## Schema migrations and the extension
+
+Companion views reference TVFs and base vtabs, so SQLite schema
+rewrites that re-resolve view definitions (`ALTER TABLE ... DROP
+COLUMN`, `RENAME COLUMN`) require the extension loaded — the same
+standing rule as any TVF-dependent schema (and as FTS5-style shadow
+triggers). `ADD COLUMN`, `VACUUM`, backup, and `DROP TABLE` are
+unaffected. Databases created before companions existed have none, so
+legacy upgrade flows are unchanged.
+
+View bodies never schema-qualify their sources: unqualified names in a
+stored view resolve to the view's home database, so installed views
+survive direct opens, backup copies, and `ATTACH` under any alias.
+(Qualifying bodies bricks all three — schema validation fails when the
+file opens without that alias attached.) Only `CREATE`/`DROP` targets
+and installer bookkeeping queries carry schema qualifiers.
 
 ## Inventory
 
@@ -121,3 +142,48 @@ source table owns the same shapes under its own derived names.
 | `timeless_logs_entries` | view | `logs` | `SQL-LOG-001` | One row per log entry: native timestamp plus human-readable UTC, severity level, message, and verbatim typed metadata JSON. |
 | `timeless_logs_services` | view | `logs` | `SQL-LOG-004` | Distinct service values retained in this table, ordered. Only installed when service is a declared index key. |
 | `timeless_logs_fields` | view | `logs` | `SQL-LOG-010` | Declared index keys of this table, in declaration order: the fields that filter efficiently. |
+
+## Query examples
+
+Every statement below was executed against real databases through a
+stock `sqlite3` shell (no extensions beyond `libtimeless_ext`). The
+companion views require no special host: the signal vtabs are marked
+innocuous, so views resolve under `trusted_schema=off`.
+
+```sql
+.load target/release/libtimeless_ext
+
+-- What is installed, and at which versions.
+SELECT object_name, schema_version FROM timeless_schema_inventory
+ ORDER BY object_name;
+
+-- Traces: friendly spans, then the incident summary.
+SELECT trace_id, name, start_time, duration_ms
+  FROM timeless_traces_spans;
+SELECT trace_id, span_rows, error_rows, root_state, services,
+       completeness
+  FROM timeless_traces_summary;
+SELECT service FROM timeless_traces_services;
+SELECT service, operation FROM timeless_traces_operations;
+SELECT name FROM timeless_traces_errors;
+SELECT name FROM timeless_traces_roots;
+
+-- Logs: entries with receipt-style UTC, discovery without memorized keys.
+SELECT ts, ts_time, level, message FROM timeless_logs_entries;
+SELECT service FROM timeless_logs_services;
+SELECT field FROM timeless_logs_fields;
+
+-- Metrics: catalog, then current values.
+SELECT name, points FROM timeless_metrics_series;
+SELECT name, labels, ts, value, ts_time FROM timeless_metrics_latest;
+```
+
+Notes:
+
+- `start_time`, `ts_time`, `end_time` are ISO-8601 UTC with millis;
+  the adjacent native columns stay exact for joins and filtering.
+- `completeness` is always `'unknown'`; `root_state` is one of
+  `missing`, `unique`, `ambiguous`, and the scalar root fields are
+  populated only for `unique`.
+- `timeless_metrics_latest` scans: one row per series (all tied
+  duplicates on timestamp ties), ordered by name and labels.

@@ -174,6 +174,20 @@ fn complete_lifecycle(extension: &Path, temporary: &Path) -> Result<()> {
         ("table".into(), "traces_attribute_blooms".into()),
         ("table".into(), "traces_meta".into()),
         ("index".into(), "traces_blocks_ts".into()),
+        // Observability schema companions (#20): the install hook adds
+        // views plus one shared inventory table per schema.
+        ("table".into(), "timeless_schema_inventory".into()),
+        ("view".into(), "timeless_logs_entries".into()),
+        ("view".into(), "timeless_logs_fields".into()),
+        ("view".into(), "timeless_logs_services".into()),
+        ("view".into(), "timeless_metrics_latest".into()),
+        ("view".into(), "timeless_metrics_series".into()),
+        ("view".into(), "timeless_traces_errors".into()),
+        ("view".into(), "timeless_traces_operations".into()),
+        ("view".into(), "timeless_traces_roots".into()),
+        ("view".into(), "timeless_traces_services".into()),
+        ("view".into(), "timeless_traces_spans".into()),
+        ("view".into(), "timeless_traces_summary".into()),
     ]);
     ensure!(schema_objects(&connection, "aux")? == expected);
     ensure!(schema_objects(&connection, "main")?.is_empty());
@@ -237,7 +251,17 @@ fn complete_lifecycle(extension: &Path, temporary: &Path) -> Result<()> {
     for table in ["metrics", "logs", "traces"] {
         connection.execute(&format!("DROP TABLE {}", qualified("aux", table)), [])?;
     }
-    ensure!(schema_objects(&connection, "aux")?.is_empty());
+    // Owned companions are gone with their vtabs; the shared (now
+    // empty) inventory table stays by design — dropping shared
+    // infrastructure from a per-source DROP would race concurrent
+    // installs, and reinstallation recreates nothing redundant.
+    ensure!(
+        schema_objects(&connection, "aux")?
+            == BTreeSet::from([(
+                "table".into(),
+                "timeless_schema_inventory".into()
+            )])
+    );
     assert_signal_rows(&connection, "main", "main")?;
     Ok(())
 }
@@ -320,7 +344,17 @@ fn quoted_names(extension: &Path, temporary: &Path) -> Result<()> {
     for (_, table) in tables {
         connection.execute(&format!("DROP TABLE {}", qualified(schema, table)), [])?;
     }
-    ensure!(schema_objects(&connection, schema)?.is_empty());
+    // Like the aux lifecycle above: owned companions are gone, the
+    // shared (empty) inventory table stays — dropping shared
+    // infrastructure from a per-source DROP would race concurrent
+    // installs (deleted rows, dropped table, orphaned views).
+    ensure!(
+        schema_objects(&connection, schema)?
+            == BTreeSet::from([(
+                "table".into(),
+                "timeless_schema_inventory".into()
+            )])
+    );
     Ok(())
 }
 

@@ -107,7 +107,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
 /// definition stays inspectable in the view text itself.
 pub(crate) fn trace_services_view_ddl(database: &str, spans: &str, name: &str) -> String {
     let view = sql_ident::qualified(database, name);
-    let spans = sql_ident::qualified(database, spans);
+    let spans = sql_ident::quote(spans);
     format!(
         "CREATE VIEW {view} AS \
          SELECT DISTINCT service FROM {spans} ORDER BY service"
@@ -118,7 +118,7 @@ pub(crate) fn trace_services_view_ddl(database: &str, spans: &str, name: &str) -
 /// ordered. Same plain-SQL rationale as the service catalog.
 pub(crate) fn trace_operations_view_ddl(database: &str, spans: &str, name: &str) -> String {
     let view = sql_ident::qualified(database, name);
-    let spans = sql_ident::qualified(database, spans);
+    let spans = sql_ident::quote(spans);
     format!(
         "CREATE VIEW {view} AS \
          SELECT DISTINCT service, name AS operation FROM {spans} \
@@ -136,7 +136,7 @@ pub(crate) fn trace_filtered_view_ddl(
     predicate: &str,
 ) -> String {
     let view = sql_ident::qualified(database, name);
-    let spans = sql_ident::qualified(database, spans);
+    let spans = sql_ident::quote(spans);
     format!(
         "CREATE VIEW {view} AS SELECT {} FROM {spans} WHERE {predicate}",
         TRACE_SPAN_COLUMNS.join(", ")
@@ -168,10 +168,17 @@ pub(crate) fn inventory_ddl(database: &str) -> String {
 /// SQLite's `hex()` maps NULL to empty). No shadow tables, no lossy
 /// projections: every column is either verbatim or an exact formatting
 /// of a public column.
+///
+/// The `FROM` target is deliberately UNQUALIFIED: unqualified names in a
+/// stored view resolve to the view's home database, so the view survives
+/// direct opens, backup copies, and ATTACH under any alias. A qualified
+/// `"aux"."traces"` would brick all three (verified the hard way: schema
+/// validation fails when the file opens without that alias attached).
+/// Only the `CREATE VIEW` target itself is schema-qualified.
 pub(crate) fn trace_spans_view_ddl(database: &str, table: &str) -> (String, String) {
     let name = spans_view_name(table);
     let view = sql_ident::qualified(database, &name);
-    let source = sql_ident::qualified(database, table);
+    let source = sql_ident::quote(table);
     let ddl = format!(
         "CREATE VIEW {view} AS \
          SELECT lower(hex(trace_id)) AS trace_id, \
@@ -222,7 +229,9 @@ pub(crate) const TRACE_SPAN_COLUMNS: &[&str] = &[
 /// invalid durations NULL the envelope instead of coercing it.
 pub(crate) fn trace_summary_view_ddl(database: &str, spans: &str, name: &str) -> String {
     let view = sql_ident::qualified(database, name);
-    let spans = sql_ident::qualified(database, spans);
+    // Unqualified, like every view body: resolves to the home database
+    // under direct opens, copies, and foreign aliases alike.
+    let spans = sql_ident::quote(spans);
     format!(
         "CREATE VIEW {view} AS \
          WITH retained AS ( \
@@ -370,7 +379,7 @@ pub(crate) fn log_objects(
     index_keys: &[String],
     per_second: i64,
 ) -> Vec<SchemaObject> {
-    let source = sql_ident::qualified(database, table);
+    let source = sql_ident::quote(table);
     let mut objects = Vec::new();
     let entries = format!("timeless_{table}_entries");
     objects.push(SchemaObject {
@@ -428,7 +437,10 @@ pub(crate) fn log_objects(
 /// latest values. Both compose existing public TVFs and base-table SQL
 /// with the source name baked in — no parameters, no new evaluators.
 pub(crate) fn metric_objects(database: &str, table: &str) -> Vec<SchemaObject> {
-    let source = sql_ident::qualified(database, table);
+    // Unqualified bodies (see the spans view): portable across direct
+    // opens, copies, and foreign aliases. TVF arguments are string
+    // literals, which carry no schema at all.
+    let source = sql_ident::quote(table);
     let series = format!("timeless_{table}_series");
     let latest = format!("timeless_{table}_latest");
     vec![
@@ -624,8 +636,15 @@ mod tests {
         );
         let (name, ddl) = trace_spans_view_ddl("main", "odd\"table");
         assert_eq!(name, "timeless_odd\"table_spans");
-        assert!(ddl.contains("\"odd\"\"table\""), "{ddl}");
-        assert!(ddl.contains("\"timeless_odd\"\"table_spans\""), "{ddl}");
+        // CREATE targets stay schema-qualified; bodies never are (a
+        // qualified body bricks direct opens, copies, and foreign
+        // aliases — the view must resolve to its home database).
+        assert!(
+            ddl.starts_with("CREATE VIEW \"main\".\"timeless_odd\"\"table_spans\""),
+            "{ddl}"
+        );
+        assert!(ddl.contains("FROM \"odd\"\"table\""), "{ddl}");
+        assert!(!ddl.contains("\"main\".\"odd\"\"table\""), "{ddl}");
         // The view reads only the public vtab surface.
         for forbidden in ["_shadow", "_chunks", "_blocks", "_terms"] {
             assert!(!ddl.contains(forbidden), "{ddl}");
