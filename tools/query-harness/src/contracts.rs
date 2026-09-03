@@ -1074,9 +1074,7 @@ fn validate_observability_schema_catalog(root: &Path) -> Result<Vec<String>> {
     let section = match text.split("## Object catalog").nth(1) {
         Some(section) => section,
         None => {
-            return Ok(vec![format!(
-                "{relative}: missing Object catalog section"
-            )]);
+            return Ok(vec![format!("{relative}: missing Object catalog section")]);
         }
     };
     let mut rows = section
@@ -1127,18 +1125,14 @@ fn validate_observability_schema_catalog(root: &Path) -> Result<Vec<String>> {
                 .map(|captures| captures[1].to_owned()),
         );
     }
-    let ref_pattern = Regex::new(r"`([A-Z]+-[A-Z]?\d+)`")?;
+    let ref_pattern = Regex::new(r"`((?:[A-Z]+-)?[A-Z]+-\d+)`")?;
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for (index, row) in rows.enumerate() {
         if !row.ends_with('|') {
             break;
         }
-        let cells: Vec<&str> = row
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
+        let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
         if cells.len() != 5 {
             errors.push(format!(
                 "{relative}: catalog row {} has {} cells, expected 5 (object | kind | sources | refs | description)",
@@ -1154,9 +1148,7 @@ fn validate_observability_schema_catalog(root: &Path) -> Result<Vec<String>> {
             ));
         }
         if !seen.insert(name.to_owned()) {
-            errors.push(format!(
-                "{relative}: duplicate catalog object {name:?}"
-            ));
+            errors.push(format!("{relative}: duplicate catalog object {name:?}"));
         }
         if cells[1].trim_matches('`') != "view" {
             errors.push(format!(
@@ -2302,6 +2294,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            fixture.path().join("docs/QUERY_SQL_EQUIVALENTS.md"),
+            "# Equivalents\n\n### SQL-LOG-004: distinct field values\n",
+        )
+        .unwrap();
+        fs::write(
             fixture.path().join("docs/OBSERVABILITY_SCHEMA.md"),
             format!(
                 "# Schema\n\n## Object catalog\n\n\
@@ -2318,16 +2315,15 @@ mod tests {
         validate(root)
             .unwrap()
             .into_iter()
-            .filter(|error| {
-                error.contains("catalog") || error.contains("OBSERVABILITY_SCHEMA")
-            })
+            .filter(|error| error.contains("catalog") || error.contains("OBSERVABILITY_SCHEMA"))
             .collect()
     }
 
     #[test]
     fn observability_catalog_accepts_a_valid_row() {
         let fixture = schema_fixture(
-            "| `timeless_traces_spans` | view | `traces` | `TSQ-01` | Spans. |\n",
+            "| `timeless_traces_spans` | view | `traces` | `TSQ-01` | Spans. |\n\
+             | `timeless_logs_services` | view | `logs` | `SQL-LOG-004` | Services. |\n",
         );
         assert_eq!(schema_errors(fixture.path()), Vec::<String>::new());
     }

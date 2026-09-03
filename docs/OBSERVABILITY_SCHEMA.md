@@ -4,7 +4,8 @@ Friendly query surface over the telemetry virtual tables (#20), in the
 spirit of MySQL Performance Schema: stable output shapes for ordinary
 SQL users, no expert recipes required. This document states the
 lifecycle and compatibility policy (#21). Per-signal objects and query
-examples grow here as phases land; the current MVP is traces-only.
+examples grow here as phases land; the current MVP covers traces,
+metrics, and logs companion views (no evaluators).
 
 ## Version contract
 
@@ -86,6 +87,11 @@ native columns are never replaced, only accompanied.
 | `timeless_<source>_operations` | distinct retained service/operation pairs, ordered | `timeless_<source>_spans` |
 | `timeless_<source>_errors` | spans-view rows with `status = 'error'` | `timeless_<source>_spans` |
 | `timeless_<source>_roots` | spans-view rows with no parent | `timeless_<source>_spans` |
+| `timeless_<source>_entries` | one row per log entry: native timestamp plus human-readable UTC, severity, message, verbatim typed metadata | `timeless_logs` base-table scan |
+| `timeless_<source>_services` | distinct service values, ordered (logs: only when `service` is a declared index key) | spans view / logs base table |
+| `timeless_<source>_fields` | declared logs index keys in declaration order | install-time configuration, no scan |
+| `timeless_<source>_series` | every retained series with counts and span | `timeless_series` TVF (catalog reads only) |
+| `timeless_<source>_latest` | newest sample per series with human-readable UTC; tied timestamps all returned | metrics base-table arg-max self-join |
 
 All columns are verbatim public vtab outputs or exact formattings
 thereof. No shadow tables, no lossy projections, no new evaluators.
@@ -98,9 +104,9 @@ harness validates this table: object names are unique and follow the
 resolves to a matrix row, recipe, or trace contract, and every
 description is non-empty. Code-side installers are pinned by
 exact-inventory-row tests to the same set — an object in either place
-but not the other fails the suite. Rows below use the canonical
-`traces` source; each additional installed source table owns the same
-shapes under its own derived names.
+but not the other fails the suite. Example rows below use the canonical
+`traces`/`metrics`/`logs` source names; each additional installed
+source table owns the same shapes under its own derived names.
 
 | object | kind | source tables | refs | description |
 |---|---|---|---|---|
@@ -110,3 +116,8 @@ shapes under its own derived names.
 | `timeless_traces_operations` | view | `traces` | `TSQ-05` | Distinct retained service/operation pairs, ordered. |
 | `timeless_traces_errors` | view | `traces` | `TSQ-04` | Retained spans whose status is exactly error, in spans shape. |
 | `timeless_traces_roots` | view | `traces` | `TSQ-04` | Retained spans with no parent, in spans shape. |
+| `timeless_metrics_series` | view | `metrics` | `SQL-PROM-001`, `PQL-S04` | Every retained series: metric name, canonical labels, id, span, and point/chunk/buffer counts. Catalog reads only. |
+| `timeless_metrics_latest` | view | `metrics` | `SQL-PROM-001` | Newest sample per series with human-readable UTC. Duplicate timestamps return all tied rows; full scan with documented cost. |
+| `timeless_logs_entries` | view | `logs` | `SQL-LOG-001` | One row per log entry: native timestamp plus human-readable UTC, severity level, message, and verbatim typed metadata JSON. |
+| `timeless_logs_services` | view | `logs` | `SQL-LOG-004` | Distinct service values retained in this table, ordered. Only installed when service is a declared index key. |
+| `timeless_logs_fields` | view | `logs` | `SQL-LOG-010` | Declared index keys of this table, in declaration order: the fields that filter efficiently. |

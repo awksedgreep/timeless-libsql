@@ -349,18 +349,143 @@ fn drop_object(host: &Connection, database: &str, table: &str, name: &str) -> Re
 /// Install the trace companion set for one source table. Fails cleanly
 /// (no user object touched) when any planned name collides with an
 /// object this installation does not own.
-pub(crate) fn install_trace_views(
+/// Escape a TEXT value as a SQL string literal. TVF table arguments
+/// travel as data, never identifiers: a hostile table name must stay
+/// inside its quotes.
+pub(crate) fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Companion set for one logs table (Phase 4). `per_second` bakes the
+/// friendly-timestamp divisor into the entries view — millisecond
+/// tables divide by `1000.0`, microsecond tables by `1000000.0` — so
+/// the view never has to know the unit at query time. The services
+/// view exists only when `service` is a declared index key (otherwise
+/// its hidden column does not exist and the view could never
+/// resolve); the fields view exists only for non-empty key sets.
+/// Partial installs are inventoried exactly.
+pub(crate) fn log_objects(
+    database: &str,
+    table: &str,
+    index_keys: &[String],
+    per_second: i64,
+) -> Vec<SchemaObject> {
+    let source = sql_ident::qualified(database, table);
+    let mut objects = Vec::new();
+    let entries = format!("timeless_{table}_entries");
+    objects.push(SchemaObject {
+        name: entries.clone(),
+        kind: "view",
+        ddl: format!(
+            "CREATE VIEW {} AS \
+             SELECT ts, \
+                    strftime('%Y-%m-%dT%H:%M:%fZ', ts / {per_second}.0, 'unixepoch') AS ts_time, \
+                    level, message, metadata \
+             FROM {source}",
+            sql_ident::qualified(database, &entries)
+        ),
+        description: "One row per log entry: native timestamp plus \
+            human-readable UTC, severity level, message, and verbatim \
+            typed metadata JSON.",
+    });
+    if index_keys.iter().any(|key| key == "service") {
+        let name = format!("timeless_{table}_services");
+        objects.push(SchemaObject {
+            name: name.clone(),
+            kind: "view",
+            ddl: format!(
+                "CREATE VIEW {} AS \
+                 SELECT DISTINCT service FROM {source} ORDER BY service",
+                sql_ident::qualified(database, &name)
+            ),
+            description: "Distinct service values retained in this table, \
+                ordered. Only installed when service is a declared index key.",
+        });
+    }
+    if !index_keys.is_empty() {
+        let name = format!("timeless_{table}_fields");
+        let values = index_keys
+            .iter()
+            .map(|key| format!("({})", sql_literal(key)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        objects.push(SchemaObject {
+            name: name.clone(),
+            kind: "view",
+            ddl: format!(
+                "CREATE VIEW {} AS SELECT column1 AS field FROM (VALUES {values})",
+                sql_ident::qualified(database, &name)
+            ),
+            description: "Declared index keys of this table, in declaration \
+                order: the fields that filter efficiently. Arbitrary JSON \
+                paths stay queryable via json_extract (SQL-LOG-005).",
+        });
+    }
+    objects
+}
+
+/// Companion set for one metrics table (Phase 4): series catalog and
+/// latest values. Both compose existing public TVFs and base-table SQL
+/// with the source name baked in — no parameters, no new evaluators.
+pub(crate) fn metric_objects(database: &str, table: &str) -> Vec<SchemaObject> {
+    let source = sql_ident::qualified(database, table);
+    let series = format!("timeless_{table}_series");
+    let latest = format!("timeless_{table}_latest");
+    vec![
+        SchemaObject {
+            name: series.clone(),
+            kind: "view",
+            ddl: format!(
+                "CREATE VIEW {} AS \
+                 SELECT name, labels, series_id, min_ts, max_ts, points, chunks, buffered \
+                 FROM timeless_series({})",
+                sql_ident::qualified(database, &series),
+                sql_literal(table)
+            ),
+            description: "Every retained series: metric name, canonical \
+                labels, id, span, and point/chunk/buffer counts. Catalog \
+                reads only, never chunk payloads.",
+        },
+        SchemaObject {
+            name: latest.clone(),
+            kind: "view",
+            // Exact arg-max join, not SQLite's bare-column min/max idiom:
+            // duplicate (name, labels, ts) rows are all returned, never
+            // silently deduplicated. Labels group by canonical text.
+            ddl: format!(
+                "CREATE VIEW {} AS \
+                 SELECT m.name, m.labels, m.ts, \
+                        strftime('%Y-%m-%dT%H:%M:%fZ', m.ts, 'unixepoch') AS ts_time, \
+                        m.value \
+                 FROM {source} m \
+                 JOIN (SELECT name, labels, max(ts) AS ts FROM {source} \
+                       GROUP BY name, labels) AS latest \
+                   USING (name, labels, ts) \
+                 ORDER BY m.name, m.labels, m.ts",
+                sql_ident::qualified(database, &latest)
+            ),
+            description: "Newest sample per series with human-readable UTC. \
+                Duplicate timestamps return all tied rows. Full scan with \
+                documented cost.",
+        },
+    ]
+}
+
+/// Install an arbitrary companion set. Fails cleanly (no user object
+/// touched) when any planned name collides with an object this
+/// installation does not own.
+pub(crate) fn install_objects(
     host: &Connection,
     database: &str,
     table: &str,
+    planned: &[SchemaObject],
 ) -> Result<Vec<String>> {
-    let planned = trace_objects(database, table);
     // Collision sweep first: every name must either be absent or already
     // owned by this exact source. Nothing is created before this passes.
     // No inventory table yet is not a collision — it just means a
     // first install into this schema.
     let owned = owned_objects(host, database, table).unwrap_or_default();
-    for object in &planned {
+    for object in planned {
         if !owned.iter().any(|(o, _)| o == &object.name)
             && object_exists(host, database, &object.name)?
         {
@@ -372,10 +497,41 @@ pub(crate) fn install_trace_views(
         }
     }
     host.execute_batch(&inventory_ddl(database))?;
-    for object in &planned {
+    for object in planned {
         install_object(host, database, table, object)?;
     }
-    Ok(planned.into_iter().map(|object| object.name).collect())
+    Ok(planned.iter().map(|object| object.name.clone()).collect())
+}
+
+pub(crate) fn install_trace_views(
+    host: &Connection,
+    database: &str,
+    table: &str,
+) -> Result<Vec<String>> {
+    install_objects(host, database, table, &trace_objects(database, table))
+}
+
+pub(crate) fn install_log_views(
+    host: &Connection,
+    database: &str,
+    table: &str,
+    index_keys: &[String],
+    per_second: i64,
+) -> Result<Vec<String>> {
+    install_objects(
+        host,
+        database,
+        table,
+        &log_objects(database, table, index_keys, per_second),
+    )
+}
+
+pub(crate) fn install_metric_views(
+    host: &Connection,
+    database: &str,
+    table: &str,
+) -> Result<Vec<String>> {
+    install_objects(host, database, table, &metric_objects(database, table))
 }
 
 /// Best-effort refresh on open, per owned object: anything whose
@@ -387,9 +543,50 @@ pub(crate) fn install_trace_views(
 /// views fail loudly at query time (SQLite errors on unknown columns)
 /// rather than returning wrong rows.
 pub(crate) fn refresh_trace_views(host: &Connection, database: &str, table: &str) {
-    let planned = trace_objects(database, table);
+    refresh_objects(host, database, table, &trace_objects(database, table));
+}
+
+pub(crate) fn refresh_log_views(
+    host: &Connection,
+    database: &str,
+    table: &str,
+    index_keys: &[String],
+    per_second: i64,
+) {
+    refresh_objects(
+        host,
+        database,
+        table,
+        &log_objects(database, table, index_keys, per_second),
+    );
+}
+
+pub(crate) fn refresh_metric_views(host: &Connection, database: &str, table: &str) {
+    refresh_objects(host, database, table, &metric_objects(database, table));
+}
+
+/// Best-effort refresh on open, per owned object: anything whose
+/// recorded version differs from [`SCHEMA_VERSION`] is dropped and
+/// reinstalled at today's definition — per-release migration without a
+/// separate step, and a failed object never blocks its siblings.
+/// Missing inventory simply means nothing to drop. Failures are
+/// swallowed — open must succeed on read-only connections, and stale
+/// views fail loudly at query time (SQLite errors on unknown columns)
+/// rather than returning wrong rows.
+///
+/// NOTE: refresh rebuilds the planned set from CURRENT table config
+/// (index keys, timestamp unit). A set that shrinks across versions —
+/// e.g. a view retired upstream — leaves its owned row installed but
+/// stale-versioned; removal of retired companions belongs to an
+/// explicit uninstall, never to a best-effort open.
+pub(crate) fn refresh_objects(
+    host: &Connection,
+    database: &str,
+    table: &str,
+    planned: &[SchemaObject],
+) {
     let owned = owned_objects(host, database, table).unwrap_or_default();
-    for object in &planned {
+    for object in planned {
         let fresh = owned
             .iter()
             .any(|(name, version)| name == &object.name && *version == SCHEMA_VERSION as i64);
@@ -403,7 +600,8 @@ pub(crate) fn refresh_trace_views(host: &Connection, database: &str, table: &str
 
 /// Remove exactly the objects the inventory attributes to one source
 /// table, then forget them. Unknown (user) objects are never touched.
-pub(crate) fn drop_trace_views(host: &Connection, database: &str, table: &str) -> Result<()> {
+/// Signal-agnostic: every vtab's `xDestroy` funnels through here.
+pub(crate) fn drop_objects(host: &Connection, database: &str, table: &str) -> Result<()> {
     let owned = owned_objects(host, database, table).unwrap_or_default();
     for (name, _) in &owned {
         drop_object(host, database, table, name)?;

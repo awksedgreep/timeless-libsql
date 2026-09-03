@@ -976,7 +976,7 @@ impl CreateVTab<'_> for TracesTab {
         // Uninstall owned companions first: removal touches only what
         // the inventory attributes to this source table, then the
         // shadow tables go. All inside DROP TABLE's transaction.
-        schema::drop_trace_views(&host, &self.database_name, &self.table_name)
+        schema::drop_objects(&host, &self.database_name, &self.table_name)
             .map_err(|error| module_err(format!("remove observability schema: {error}")))?;
         host.execute_batch(&shadow_span_store::drop_ddl(
             &self.database_name,
