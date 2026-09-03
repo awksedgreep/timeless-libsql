@@ -12,17 +12,14 @@ metrics, and logs companion views (no evaluators).
 `tools/demogen/schema_screencast.py` drives a real `sqlite3` session
 through the whole story — install, inventory, friendly queries across
 all three signals, owned-only removal — with simulated typing. A
-recorded take ships at
-[`docs/images/schema-demo.cast`](images/schema-demo.cast): play it
-with `asciinema play docs/images/schema-demo.cast`, upload it to
-asciinema.org, or convert to GIF with
-`agg --cols 120 --rows 32 docs/images/schema-demo.cast demo.gif`.
-
-To re-record (or record your own):
+recorded take ships in this directory: `schema-demo.cast` (asciinema
+v3) and `schema-demo.gif`. Play the cast with `asciinema play` or
+asciinema.org; re-record with:
 
 ```sh
 cargo build --release -p timeless-ext
 python3 tools/demogen/schema_screencast.py tour.db --cast schema-demo.cast
+agg --cols 120 --rows 32 schema-demo.cast schema-demo.gif   # optional GIF
 ```
 
 ## Version contract

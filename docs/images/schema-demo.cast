@@ -1,125 +1,122 @@
-{"version": 2, "width": 120, "height": 32, "env": {"TERM": "xterm-256color"}}
-["o", 0.002825, "SQLite version 3.53.4 2026-07-24 19:02:57\r\nEnter \".help\" for usage hints.\r\n"]
-["o", 0.003191, "\u001b[?2004hsqlite> "]
-["o", 0.233421, ".load ./target/release/libtimeless_ext"]
-["o", 0.23359, "\r\n\u001b[?2004l\r"]
-["o", 0.234079, "\u001b[?2004hsqlite> "]
-["o", 0.714378, "PRAGMA journal_mode=WAL;"]
-["o", 0.714728, "\r\n\u001b[?2004l\r"]
-["o", 0.715094, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 journal_mode \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 wal          \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 1.245448, ".mode box"]
-["o", 1.245765, "\r\n\u001b[?2004l\r"]
-["o", 1.245819, "\u001b[?2004hsqlite> "]
-["o", 1.776119, ".print '-- one CREATE per signal. no extra commands, no installer to run'"]
-["o", 1.776331, "\r\n\u001b[?2004l\r-- one CREATE per signal. no extra commands, no installer to run\r\n\u001b[?2004hsqlite> "]
-["o", 4.58445, "CREATE VIRTUAL TABLE metrics USING timeless_metrics;"]
-["o", 4.584684, "\r\n\u001b[?2004l\r"]
-["o", 4.585744, "\u001b[?2004hsqlite> "]
-["o", 8.475066, "CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,host');"]
-["o", 8.475116, "\r\n\u001b[?2004l\r"]
-["o", 8.475727, "\u001b[?2004hsqlite> "]
-["o", 11.860599, "CREATE VIRTUAL TABLE traces USING timeless_traces;"]
-["o", 11.860723, "\r\n\u001b[?2004l\r"]
-["o", 11.861816, "\u001b[?2004hsqlite> "]
-["o", 13.092199, ".print '-- companions installed themselves, and the inventory describes every object'"]
-["o", 13.092605, "\r\n\u001b[?2004l\r-- companions installed themselves, and the inventory describes every object\r\n\u001b[?2004hsqlite> "]
-["o", 17.410678, "SELECT object_name, object_kind, schema_version FROM timeless_schema_inventory ORDER BY object_name;"]
-["o", 17.410873, "\r\n\u001b[?2004l\r"]
-["o", 17.411032, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502        object_name         \u2502 object_kind \u2502 schema_version \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 timeless_logs_entries      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_fields       \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_services     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_latest    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_series    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_errors     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_operations \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_roots      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_services   \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_spans      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_summary    \u2502 view        \u2502              1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 21.641378, ".print '-- seed a tiny incident: a checkout request whose db call failed'"]
-["o", 21.64173, "\r\n\u001b[?2004l\r-- seed a tiny incident: a checkout request whose db call failed\r\n\u001b[?2004hsqlite> "]
-["o", 30.373066, "INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns) VALUE \rS ('aaaa0000000000000000000000000000', '0100000000000000', NULL, 'POST /checkout', 'checkout', 'server', 'ok', 175300000 \r0123000000, 8500000);"]
-["o", 30.373427, "\r\n\u001b[?2004l\r"]
-["o", 30.373449, "\u001b[?2004hsqlite> "]
-["o", 40.625943, "INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns) VALUE \rS ('aaaa0000000000000000000000000000', '0200000000000000', '0100000000000000', 'SELECT items', 'db', 'client', 'error',  \r1753000000200000000, 1200000);"]
-["o", 40.626089, "\r\n"]
-["o", 40.626199, "\u001b[?2004l\r"]
-["o", 40.626206, "\u001b[?2004h"]
-["o", 40.626219, "sqlite> "]
-["o", 47.14292, "INSERT INTO logs(ts, level, message, metadata) VALUES (1753000000456, 'error', 'payment declined', '{\"service\":\" \rpayments\",\"retryable\":false}');"]
-["o", 47.143263, "\r\n\u001b[?2004l\r"]
-["o", 47.143419, "\u001b[?2004hsqlite> "]
-["o", 52.586071, "INSERT INTO metrics(name, ts, value, labels) VALUES ('checkout_errors', 1753000000, 1.0, '{\"host\":\"web1\"}');"]
-["o", 52.586453, "\r\n\u001b[?2004l\r"]
-["o", 52.586658, "\u001b[?2004hsqlite> "]
-["o", 57.887797, "INSERT INTO metrics(name, ts, value, labels) VALUES ('checkout_latency', 1753000000, 0.85, '{\"host\":\"web1\"}');"]
-["o", 57.888186, "\r\n\u001b[?2004l\r"]
-["o", 57.88857, "\u001b[?2004hsqlite> "]
-["o", 61.239957, "INSERT INTO metrics(metrics) VALUES ('flush');"]
-["o", 61.240313, "\r\n\u001b[?2004l\r"]
-["o", 61.240611, "\u001b[?2004hsqlite> "]
-["o", 64.10571, "INSERT INTO logs(logs) VALUES ('flush');"]
-["o", 64.10597, "\r\n\u001b[?2004l\r"]
-["o", 64.106158, "\u001b[?2004hsqlite> "]
-["o", 67.09271, "INSERT INTO traces(traces) VALUES ('flush');\r\n\u001b[?2004l\r"]
-["o", 67.097473, "\u001b[?2004hsqlite> "]
-["o", 68.127946, ".print '-- spans, with ids you can read and times you can read'"]
-["o", 68.128067, "\r\n\u001b[?2004l\r"]
-["o", 68.128094, "-- spans, with ids you can read and times you can read\r\n"]
-["o", 68.128118, "\u001b[?2004h"]
-["o", 68.128129, "sqlite> "]
-["o", 72.012769, "SELECT trace_id, name, service, status, start_time, duration_ms FROM timeless_traces_spans;"]
-["o", 72.013066, "\r\n\u001b[?2004l\r"]
-["o", 72.013348, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502      name      \u2502 service  \u2502 status \u2502        start_time        \u2502 duration_ms \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502 POST /checkout \u2502 checkout \u2502 ok     \u2502 2025-07-20T08:26:40.123Z \u2502         8.5 \u2502\r\n\u2502 aaaa0000000000000000000000000000 \u2502 SELECT items   \u2502 db       \u2502 error  \u2502 2025-07-20T08:26:40.200Z \u2502         1.2 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 75.743703, ".print '-- one row per trace. root state, service set, and completeness never overreach'"]
-["o", 75.744096, "\r\n\u001b[?2004l\r-- one row per trace. root state, service set, and completeness never overreach\r\n\u001b[?2004hsqlite> "]
-["o", 80.268522, "SELECT trace_id, span_rows, error_rows, root_state, root_name, services, completeness FROM timeless_traces_summa \rry;"]
-["o", 80.268821, "\r\n\u001b[?2004l\r"]
-["o", 80.269678, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502 span_rows \u2502 error_rows \u2502 root_state \u2502   root_name    \u2502  services   \u2502 completeness \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502         2 \u2502          1 \u2502 unique     \u2502 POST /checkout \u2502 checkout,db \u2502 unknown      \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 84.500162, ".print '-- the error span, straight from its own view'"]
-["o", 84.500363, "\r\n\u001b[?2004l\r-- the error span, straight from its own view\r\n\u001b[?2004hsqlite> "]
-["o", 87.441014, "SELECT name, service, start_time FROM timeless_traces_errors;"]
-["o", 87.441082, "\r\n\u001b[?2004l\r"]
-["o", 87.441316, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502     name     \u2502 service \u2502        start_time        \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 SELECT items \u2502 db      \u2502 2025-07-20T08:26:40.200Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"]
-["o", 87.441344, "\u001b[?2004hsqlite> "]
-["o", 90.671695, ".print '-- catalogs, for building dropdowns and service maps'"]
-["o", 90.671966, "\r\n\u001b[?2004l\r-- catalogs, for building dropdowns and service maps\r\n\u001b[?2004hsqlite> "]
-["o", 93.702638, "SELECT service, operation FROM timeless_traces_operations;"]
-["o", 93.702921, "\r\n\u001b[?2004l\r"]
-["o", 93.703163, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502   operation    \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout \u2502 POST /checkout \u2502\r\n\u2502 db       \u2502 SELECT items   \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 96.933484, ".print '-- log entries: receipt-style UTC, message, metadata kept as typed JSON'"]
-["o", 96.933699, "\r\n\u001b[?2004l\r-- log entries: receipt-style UTC, message, metadata kept as typed JSON\r\n\u001b[?2004hsqlite> "]
-["o", 101.562711, "SELECT ts_time, level, message, json_extract(metadata, '$.retryable') AS retryable FROM timeless_logs_entries;"]
-["o", 101.562782, "\r\n\u001b[?2004l\r"]
-["o", 101.563047, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502         ts_time          \u2502 level \u2502     message      \u2502 retryable \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 2025-07-20T08:26:40.456Z \u2502 error \u2502 payment declined \u2502         0 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"]
-["o", 101.563073, "\u001b[?2004h"]
-["o", 101.563082, "sqlite> "]
-["o", 105.293427, ".print '-- what you can filter on fast (declared index keys)'"]
-["o", 105.293662, "\r\n\u001b[?2004l\r-- what you can filter on fast (declared index keys)\r\n\u001b[?2004hsqlite> "]
-["o", 107.775603, "SELECT field FROM timeless_logs_fields;"]
-["o", 107.775916, "\r\n\u001b[?2004l\r\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502  field  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 service \u2502\r\n\u2502 host    \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 112.464154, "SELECT service FROM timeless_logs_services;"]
-["o", 112.464473, "\r\n\u001b[?2004l\r"]
-["o", 112.46467, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 payments \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 115.195045, ".print '-- newest value per series, in plain words and plain time'"]
-["o", 115.195227, "\r\n\u001b[?2004l\r-- newest value per series, in plain words and plain time\r\n\u001b[?2004hsqlite> "]
-["o", 118.368358, "SELECT name, labels, value, ts_time FROM timeless_metrics_latest;"]
-["o", 118.368567, "\r\n\u001b[?2004l\r"]
-["o", 118.368773, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502     labels      \u2502 value \u2502         ts_time          \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502 {\"host\":\"web1\"} \u2502   1.0 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2502 checkout_latency \u2502 {\"host\":\"web1\"} \u2502  0.85 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"]
-["o", 118.368806, "\u001b[?2004hsqlite> "]
-["o", 122.09909, ".print '-- and the catalog: what exists, how much of it'"]
-["o", 122.09926, "\r\n\u001b[?2004l\r-- and the catalog: what exists, how much of it\r\n\u001b[?2004hsqlite> "]
-["o", 124.833755, "SELECT name, points FROM timeless_metrics_series;"]
-["o", 124.83381, "\r\n"]
-["o", 124.833827, "\u001b[?2004l\r"]
-["o", 124.834183, "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502 points \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502      1 \u2502\r\n\u2502 checkout_latency \u2502      1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "]
-["o", 128.064525, ".mode list --charlimit 0 --linelimit 0"]
-["o", 128.064589, "\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "]
-["o", 128.494916, ".print '-- dropping a table uninstalls exactly its own objects -- nothing else is touched'"]
-["o", 128.495298, "\r\n\u001b[?2004l\r-- dropping a table uninstalls exactly its own objects -- nothing else is touched\r\n\u001b[?2004hsqlite> "]
-["o", 130.327674, "DROP TABLE traces;"]
-["o", 130.327986, "\r\n\u001b[?2004l\r"]
-["o", 130.328617, "\u001b[?2004hsqlite> "]
-["o", 134.479863, "SELECT object_name FROM timeless_schema_inventory WHERE source_table = 'traces';"]
-["o", 134.480254, "\r\n\u001b[?2004l\r"]
-["o", 134.480308, "\u001b[?2004hsqlite> "]
-["o", 137.210647, ".print '-- (no rows: the traces companions left with their table)'"]
-["o", 137.21096, "\r\n\u001b[?2004l\r-- (no rows: the traces companions left with their table)\r\n\u001b[?2004hsqlite> "]
-["o", 140.978829, "SELECT object_name FROM timeless_schema_inventory WHERE source_table = 'logs';"]
-["o", 140.97914, "\r\n\u001b[?2004l\rtimeless_logs_entries\r\ntimeless_logs_fields\r\ntimeless_logs_services\r\n\u001b[?2004hsqlite> "]
-["o", 143.709438, ".print '-- logs companions untouched. that is the whole contract.'"]
-["o", 143.709505, "\r\n\u001b[?2004l\r"]
-["o", 143.709531, "-- logs companions untouched. that is the whole contract.\r\n"]
-["o", 143.709539, "\u001b[?2004h"]
-["o", 143.709547, "sqlite> "]
-["o", 145.310039, ".quit\r\n\u001b[?2004l\r"]
+{"version": 3, "term": {"cols": 120, "rows": 32}, "env": {"TERM": "xterm-256color"}}
+{"time":0.002899,"code":"o","data":"SQLite version 3.53.4 2026-07-24 19:02:57\r\nEnter \".help\" for usage hints.\r\n"}
+{"time":0.003174,"code":"o","data":"\u001b[?2004h"}
+{"time":0.003247,"code":"o","data":"sqlite> "}
+{"time":0.233484,"code":"o","data":".load ./target/release/libtimeless_ext"}
+{"time":0.233786,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.234181,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.714492,"code":"o","data":"PRAGMA journal_mode=WAL;"}
+{"time":0.714819,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.714914,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 journal_mode \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 wal          \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"}
+{"time":0.714934,"code":"o","data":"\u001b[?2004h"}
+{"time":0.714942,"code":"o","data":"sqlite> "}
+{"time":1.245428,"code":"o","data":".mode box"}
+{"time":1.245781,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":1.776084,"code":"o","data":".print '-- one CREATE per signal. no extra commands, no installer to run'"}
+{"time":1.776443,"code":"o","data":"\r\n\u001b[?2004l\r-- one CREATE per signal. no extra commands, no installer to run\r\n\u001b[?2004hsqlite> "}
+{"time":4.668433,"code":"o","data":"CREATE VIRTUAL TABLE metrics USING timeless_metrics;"}
+{"time":4.668609,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":4.669555,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":8.657222,"code":"o","data":"CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,host');"}
+{"time":8.657469,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":8.658061,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":11.88413,"code":"o","data":"CREATE VIRTUAL TABLE traces USING timeless_traces;"}
+{"time":11.884387,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":11.885338,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":13.115672,"code":"o","data":".print '-- companions installed themselves, and the inventory describes every object'"}
+{"time":13.115987,"code":"o","data":"\r\n\u001b[?2004l\r-- companions installed themselves, and the inventory describes every object\r\n\u001b[?2004hsqlite> "}
+{"time":17.453202,"code":"o","data":"SELECT object_name, object_kind, schema_version FROM timeless_schema_inventory ORDER BY object_name;"}
+{"time":17.453536,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":17.453789,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502        object_name         \u2502 object_kind \u2502 schema_version \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 timeless_logs_entries      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_fields       \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_services     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_latest    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_series    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_errors     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_operations \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_roots      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_services   \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_spans      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_summary    \u2502 view        \u2502              1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":21.684212,"code":"o","data":".print '-- seed a tiny incident: a checkout request whose db call failed'"}
+{"time":21.684554,"code":"o","data":"\r\n\u001b[?2004l\r-- seed a tiny incident: a checkout request whose db call failed\r\n\u001b[?2004hsqlite> "}
+{"time":30.89755,"code":"o","data":"INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns) VALUE \rS ('aaaa0000000000000000000000000000', '0100000000000000', NULL, 'POST /checkout', 'checkout', 'server', 'ok', 175300000 \r0123000000, 8500000);"}
+{"time":30.897797,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":30.897849,"code":"o","data":"\u001b[?2004h"}
+{"time":30.897864,"code":"o","data":"sqlite> "}
+{"time":40.840894,"code":"o","data":"INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns) VALUE \rS ('aaaa0000000000000000000000000000', '0200000000000000', '0100000000000000', 'SELECT items', 'db', 'client', 'error',  \r1753000000200000000, 1200000);"}
+{"time":40.841206,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":40.841344,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":47.278506,"code":"o","data":"INSERT INTO logs(ts, level, message, metadata) VALUES (1753000000456, 'error', 'payment declined', '{\"service\":\" \rpayments\",\"retryable\":false}');"}
+{"time":47.278752,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":52.584857,"code":"o","data":"INSERT INTO metrics(name, ts, value, labels) VALUES ('checkout_errors', 1753000000, 1.0, '{\"host\":\"web1\"}');"}
+{"time":52.585076,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":52.585465,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":58.011506,"code":"o","data":"INSERT INTO metrics(name, ts, value, labels) VALUES ('checkout_latency', 1753000000, 0.85, '{\"host\":\"web1\"}');"}
+{"time":58.011784,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":58.012062,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":61.467652,"code":"o","data":"INSERT INTO metrics(metrics) VALUES ('flush');"}
+{"time":61.468022,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":61.468507,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":64.348134,"code":"o","data":"INSERT INTO logs(logs) VALUES ('flush');"}
+{"time":64.348522,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":64.348741,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":67.251901,"code":"o","data":"INSERT INTO traces(traces) VALUES ('flush');"}
+{"time":67.2522,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":67.252549,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":68.282844,"code":"o","data":".print '-- spans, with ids you can read and times you can read'"}
+{"time":68.283115,"code":"o","data":"\r\n\u001b[?2004l\r-- spans, with ids you can read and times you can read\r\n\u001b[?2004hsqlite> "}
+{"time":72.390748,"code":"o","data":"SELECT trace_id, name, service, status, start_time, duration_ms FROM timeless_traces_spans;"}
+{"time":72.390912,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":72.39122,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502      name      \u2502 service  \u2502 status \u2502        start_time        \u2502 duration_ms \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502 POST /checkout \u2502 checkout \u2502 ok     \u2502 2025-07-20T08:26:40.123Z \u2502         8.5 \u2502\r\n\u2502 aaaa0000000000000000000000000000 \u2502 SELECT items   \u2502 db       \u2502 error  \u2502 2025-07-20T08:26:40.200Z \u2502         1.2 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":76.121539,"code":"o","data":".print '-- one row per trace. root state, service set, and completeness never overreach'"}
+{"time":76.121987,"code":"o","data":"\r\n\u001b[?2004l\r-- one row per trace. root state, service set, and completeness never overreach\r\n\u001b[?2004hsqlite> "}
+{"time":80.955572,"code":"o","data":"SELECT trace_id, span_rows, error_rows, root_state, root_name, services, completeness FROM timeless_traces_summa \rry;"}
+{"time":80.955679,"code":"o","data":"\r\n"}
+{"time":80.955692,"code":"o","data":"\u001b[?2004l\r"}
+{"time":80.956491,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502 span_rows \u2502 error_rows \u2502 root_state \u2502   root_name    \u2502  services   \u2502 completeness \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502         2 \u2502          1 \u2502 unique     \u2502 POST /checkout \u2502 checkout,db \u2502 unknown      \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":85.186834,"code":"o","data":".print '-- the error span, straight from its own view'"}
+{"time":85.186999,"code":"o","data":"\r\n\u001b[?2004l\r-- the error span, straight from its own view\r\n\u001b[?2004hsqlite> "}
+{"time":88.247906,"code":"o","data":"SELECT name, service, start_time FROM timeless_traces_errors;"}
+{"time":88.248115,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":88.248444,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502     name     \u2502 service \u2502        start_time        \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 SELECT items \u2502 db      \u2502 2025-07-20T08:26:40.200Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":91.478776,"code":"o","data":".print '-- catalogs, for building dropdowns and service maps'"}
+{"time":91.47895,"code":"o","data":"\r\n\u001b[?2004l\r-- catalogs, for building dropdowns and service maps\r\n\u001b[?2004hsqlite> "}
+{"time":94.450189,"code":"o","data":"SELECT service, operation FROM timeless_traces_operations;"}
+{"time":94.450577,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":94.450779,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502   operation    \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout \u2502 POST /checkout \u2502\r\n\u2502 db       \u2502 SELECT items   \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":97.681353,"code":"o","data":".print '-- log entries: receipt-style UTC, message, metadata kept as typed JSON'"}
+{"time":97.681607,"code":"o","data":"\r\n\u001b[?2004l\r-- log entries: receipt-style UTC, message, metadata kept as typed JSON\r\n\u001b[?2004hsqlite> "}
+{"time":102.295752,"code":"o","data":"SELECT ts_time, level, message, json_extract(metadata, '$.retryable') AS retryable FROM timeless_logs_entries;"}
+{"time":102.296051,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":102.296275,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502         ts_time          \u2502 level \u2502     message      \u2502 retryable \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 2025-07-20T08:26:40.456Z \u2502 error \u2502 payment declined \u2502         0 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":106.026607,"code":"o","data":".print '-- what you can filter on fast (declared index keys)'"}
+{"time":106.026882,"code":"o","data":"\r\n\u001b[?2004l\r-- what you can filter on fast (declared index keys)\r\n\u001b[?2004hsqlite> "}
+{"time":108.408545,"code":"o","data":"SELECT field FROM timeless_logs_fields;"}
+{"time":108.408738,"code":"o","data":"\r\n\u001b[?2004l\r\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502  field  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 service \u2502\r\n\u2502 host    \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"}
+{"time":108.408782,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":113.121665,"code":"o","data":"SELECT service FROM timeless_logs_services;"}
+{"time":113.121932,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":113.122117,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 payments \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":115.852567,"code":"o","data":".print '-- newest value per series, in plain words and plain time'"}
+{"time":115.852886,"code":"o","data":"\r\n\u001b[?2004l\r-- newest value per series, in plain words and plain time\r\n\u001b[?2004hsqlite> "}
+{"time":119.178941,"code":"o","data":"SELECT name, labels, value, ts_time FROM timeless_metrics_latest;"}
+{"time":119.179116,"code":"o","data":"\r\n"}
+{"time":119.179126,"code":"o","data":"\u001b[?2004l\r"}
+{"time":119.179592,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502     labels      \u2502 value \u2502         ts_time          \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502 {\"host\":\"web1\"} \u2502   1.0 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2502 checkout_latency \u2502 {\"host\":\"web1\"} \u2502  0.85 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":122.909874,"code":"o","data":".print '-- and the catalog: what exists, how much of it'"}
+{"time":122.910108,"code":"o","data":"\r\n\u001b[?2004l\r-- and the catalog: what exists, how much of it\r\n\u001b[?2004hsqlite> "}
+{"time":125.667345,"code":"o","data":"SELECT name, points FROM timeless_metrics_series;"}
+{"time":125.667774,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":125.667929,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502 points \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502      1 \u2502\r\n\u2502 checkout_latency \u2502      1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"}
+{"time":125.667957,"code":"o","data":"\u001b[?2004h"}
+{"time":125.667964,"code":"o","data":"sqlite> "}
+{"time":128.898233,"code":"o","data":".mode list --charlimit 0 --linelimit 0"}
+{"time":128.898564,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":129.328942,"code":"o","data":".print '-- dropping a table uninstalls exactly its own objects -- nothing else is touched'"}
+{"time":129.329179,"code":"o","data":"\r\n\u001b[?2004l\r-- dropping a table uninstalls exactly its own objects -- nothing else is touched\r\n\u001b[?2004hsqlite> "}
+{"time":131.148086,"code":"o","data":"DROP TABLE traces;"}
+{"time":131.148312,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":131.149143,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":135.453214,"code":"o","data":"SELECT object_name FROM timeless_schema_inventory WHERE source_table = 'traces';"}
+{"time":135.453565,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":135.453586,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":138.184132,"code":"o","data":".print '-- (no rows: the traces companions left with their table)'"}
+{"time":138.184311,"code":"o","data":"\r\n\u001b[?2004l\r-- (no rows: the traces companions left with their table)\r\n\u001b[?2004hsqlite> "}
+{"time":141.978996,"code":"o","data":"SELECT object_name FROM timeless_schema_inventory WHERE source_table = 'logs';"}
+{"time":141.979109,"code":"o","data":"\r\n"}
+{"time":141.979125,"code":"o","data":"\u001b[?2004l\r"}
+{"time":141.979255,"code":"o","data":"timeless_logs_entries\r\ntimeless_logs_fields\r\ntimeless_logs_services\r\n\u001b[?2004hsqlite> "}
+{"time":144.70965,"code":"o","data":".print '-- logs companions untouched. that is the whole contract.'"}
+{"time":144.709876,"code":"o","data":"\r\n\u001b[?2004l\r-- logs companions untouched. that is the whole contract.\r\n\u001b[?2004hsqlite> "}
+{"time":146.310412,"code":"o","data":".quit\r\n\u001b[?2004l\r"}

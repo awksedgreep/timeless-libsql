@@ -115,9 +115,10 @@ python3 tools/demogen/schema_screencast.py schema-tour.db                  # reh
 python3 tools/demogen/schema_screencast.py schema-tour.db --cast schema.cast
 ```
 
-`--cast` records an asciinema-v2 file directly — no asciinema install
+`--cast` records an asciinema-v3 file directly — no asciinema install
 required. Play it with `asciinema play schema.cast`, upload it to
-asciinema.org, or convert to GIF with `agg` (`cargo install agg` or AUR):
+asciinema.org, or convert to GIF with `agg` (already available via
+`cargo install --git https://github.com/asciinema/agg`):
 
 ```sh
 agg --cols 120 --rows 32 schema.cast schema-demo.gif

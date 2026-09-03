@@ -11,9 +11,9 @@ readable on screen.
     python3 tools/demogen/schema_screencast.py tour.db     # rehearsal
     python3 tools/demogen/schema_screencast.py tour.db --cast schema.cast
 
-`--cast` records an asciinema-v2 file directly — no asciinema install
+`--cast` records an asciinema-v3 file directly — no asciinema install
 needed, and the file plays on asciinema.org, in asciinema, or converts
-to GIF with agg (cargo install agg / AUR):
+to GIF with agg (cargo install --git https://github.com/asciinema/agg):
 
     agg --cols 120 --rows 32 schema.cast schema-demo.gif
 
@@ -135,10 +135,13 @@ def type_line(fd, line, pace=1.0):
     os.write(fd, b"\r")
 
 
-# ── built-in asciinema-v2 recorder ────────────────────────────────
+# ── built-in asciinema-v3 recorder ────────────────────────────────
 # The pty echoes everything we type, so capturing the output stream
 # captures the whole session. Each frame gets its own relative
 # timestamp, which preserves the pacing exactly as it played.
+#
+# v3 shape (what agg and asciinema 3.x consume): header with a `term`
+# object, and events as {"time", "code", "data"} objects.
 
 CAST_START = None
 CAST_FILE = None
@@ -150,10 +153,12 @@ def emit(frame: bytes):
     os.write(1, frame)
     if CAST_FILE is not None:
         elapsed = time.monotonic() - CAST_START
-        CAST_FILE.write(
-            json.dumps(["o", round(elapsed, 6), frame.decode("utf-8", "replace")])
-            + "\n"
-        )
+        event = {
+            "time": round(elapsed, 6),
+            "code": "o",
+            "data": frame.decode("utf-8", "replace"),
+        }
+        CAST_FILE.write(json.dumps(event, separators=(",", ":")) + "\n")
 
 
 def pump_until_prompt(fd):
@@ -195,9 +200,8 @@ def main():
         CAST_FILE.write(
             json.dumps(
                 {
-                    "version": 2,
-                    "width": 120,
-                    "height": 32,
+                    "version": 3,
+                    "term": {"cols": 120, "rows": 32},
                     "env": {"TERM": os.environ.get("TERM", "xterm-256color")},
                 }
             )
