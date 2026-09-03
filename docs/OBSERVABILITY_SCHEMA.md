@@ -7,6 +7,20 @@ lifecycle and compatibility policy (#21). Per-signal objects and query
 examples grow here as phases land; the current MVP covers traces,
 metrics, and logs companion views (no evaluators).
 
+## Visual tour
+
+`tools/demogen/schema_screencast.py` drives a real `sqlite3` session
+through the whole story — install, inventory, friendly queries across
+all three signals, owned-only removal — with simulated typing, ready
+for `asciinema rec`:
+
+```sh
+cargo build --release -p timeless-ext
+python3 tools/demogen/schema_screencast.py tour.db        # rehearsal
+asciinema rec -c 'python3 tools/demogen/schema_screencast.py tour.db' \
+    schema-demo.cast
+```
+
 ## Version contract
 
 - The binary advertises `observability_schema` in `timeless_capabilities()`
