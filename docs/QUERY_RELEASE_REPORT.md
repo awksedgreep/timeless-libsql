@@ -1,5 +1,12 @@
 # Query and public-surface release report
 
+> Archived point-in-time report. Captured 2026-08-07 against the pre-tag
+> `0.4.0` line; its "current published release" statements below are frozen
+> at capture time and stale by design. For the live channel, see the
+> [artifact inventory](ARTIFACTS.md), [compatibility](COMPATIBILITY.md),
+> and [changelog](../CHANGELOG.md). Do not update the verdict section —
+> write a new dated report instead.
+
 Date: 2026-08-07
 
 Release line at capture: pre-tag `0.4.0`; subsequently tagged as `v0.4.0`

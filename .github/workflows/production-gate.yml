@@ -35,13 +35,20 @@ jobs:
           cargo build --manifest-path servers/Cargo.toml --workspace --release --locked
       - name: Unit, contract, and lint gates
         run: |
+          cargo fmt --all -- --check
           cargo test --workspace --locked
+          cargo clippy --workspace --locked -- -D warnings
           cargo test --manifest-path servers/Cargo.toml --workspace --all-targets --locked
           cargo clippy --manifest-path servers/Cargo.toml --workspace --all-targets --locked -- -D warnings
+          cargo test --manifest-path tools/query-harness/Cargo.toml --locked
+          cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- contracts
+          cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle validate
       - name: Exact real-extension storage contracts
         run: |
           cargo test --manifest-path servers/Cargo.toml -p timeless-metrics-api --test storage_contract -- --ignored
           cargo test --manifest-path servers/Cargo.toml -p timeless-logs-api --test api_e2e -- --ignored
+          cargo test --manifest-path servers/Cargo.toml -p timeless-traces-api --test storage_contract -- --ignored
+          cargo test --manifest-path servers/Cargo.toml -p timeless-traces-api --test jaeger_contract -- --ignored
       - name: Two-minute mixed fault gate
         run: >-
           cargo run --release --manifest-path tools/query-harness/Cargo.toml --locked -- production

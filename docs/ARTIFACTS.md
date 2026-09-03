@@ -9,17 +9,17 @@ reachable from `main`.
 
 ## Current publication status
 
-`v0.7.6` was tagged from `main` at
-`507fb861a261d33f4be0c4302eb3f6e63647cbe1` on 2026-08-21 (UTC). GitHub
-Actions run `32441629720` built, identity-checked, install/remove-drilled,
+`v0.7.9` was tagged from `main` at
+`1b1e9baea2720acac13c5035039b6334392d45bf` on 2026-09-02 (UTC). GitHub
+Actions run `33600923739` built, identity-checked, install/remove-drilled,
 and uploaded all four intended Linux/macOS archives; its checksum job
 downloaded the whole matrix, produced and verified the complete outer
 `SHA256SUMS`; and the workflow published the
-[`v0.7.6` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.7.6)
+[`v0.7.9` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.7.9)
 with the four archives plus `SHA256SUMS` as permanent release assets. This is
 the current download channel. Complete published releases also exist for
-`v0.7.5` back through `v0.7.1`, `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`,
-`v0.5.0`, and `v0.4.2`.
+`v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`, `v0.6.4`,
+`v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
 
 For history: some tags record source only, because their artifact runs failed
 and the fix became the next patch — `v0.7.0` (authctl missed the `--version`

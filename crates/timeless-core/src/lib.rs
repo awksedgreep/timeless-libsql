@@ -14,6 +14,7 @@
 
 pub mod blocks;
 mod engine;
+mod prom_text;
 pub mod rollup;
 pub mod spans;
 pub mod store;

@@ -54,8 +54,9 @@ bounded sessions. Their replacement commands and this inventory must change
 in the same commit:
 
 - `servers/crates/timeless-metrics-api/bench_shell.py`;
-- `servers/crates/timeless-traces-api/bench/*.py`; and
-- `tools/bench/session6_log_compaction.py`.
+- `servers/crates/timeless-traces-api/bench/*.py` (7 files);
+- `tools/bench/session6_log_compaction.py`; and
+- `tools/demogen/screencast.py`.
 
 Do not describe the complete repository as Python-free until
 `git ls-files '*.py'` returns no paths and the final command below passes:
