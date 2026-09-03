@@ -111,11 +111,21 @@ rows so every output stays readable:
 
 ```sh
 rm -f schema-tour.db
-python3 tools/demogen/schema_screencast.py schema-tour.db          # rehearse
-rm -f schema-tour.db
-asciinema rec --window-size 120x32 \
-  -c 'python3 tools/demogen/schema_screencast.py schema-tour.db' schema.cast
+python3 tools/demogen/schema_screencast.py schema-tour.db                  # rehearse
+python3 tools/demogen/schema_screencast.py schema-tour.db --cast schema.cast
 ```
+
+`--cast` records an asciinema-v2 file directly — no asciinema install
+required. Play it with `asciinema play schema.cast`, upload it to
+asciinema.org, or convert to GIF with `agg` (`cargo install agg` or AUR):
+
+```sh
+agg --cols 120 --rows 32 schema.cast schema-demo.gif
+```
+
+(Or record with asciinema itself, same as the tour above:
+`asciinema rec --window-size 120x32 -c 'python3
+tools/demogen/schema_screencast.py schema-tour.db' schema.cast`.)
 
 For a take that includes the dashboards in a browser, use any screen
 recorder and run `timeless_demo('follow', 120)` in the terminal while

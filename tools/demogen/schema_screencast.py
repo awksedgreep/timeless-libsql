@@ -9,14 +9,19 @@ module — and hand-seeds a handful of rows so every output stays
 readable on screen.
 
     python3 tools/demogen/schema_screencast.py tour.db     # rehearsal
-    asciinema rec -c 'python3 tools/demogen/schema_screencast.py tour.db' schema.cast
+    python3 tools/demogen/schema_screencast.py tour.db --cast schema.cast
+
+`--cast` records an asciinema-v2 file directly — no asciinema install
+needed, and the file plays on asciinema.org, in asciinema, or converts
+to GIF with agg (cargo install agg / AUR):
+
+    agg --cols 120 --rows 32 schema.cast schema-demo.gif
 
 Run from the repo root with the extension built (see QUICKSTART.md).
-Convert a recording to a GIF with agg:
-    agg --cols 120 --rows 32 schema.cast schema-demo.gif
 """
 
 import fcntl
+import json
 import os
 import pty
 import random
@@ -26,7 +31,9 @@ import sys
 import termios
 import time
 
-DB = sys.argv[1] if len(sys.argv) > 1 else "schema-tour.db"
+ARGS = [arg for arg in sys.argv[1:] if arg != "--cast"]
+CAST_PATH = sys.argv[sys.argv.index("--cast") + 1] if "--cast" in sys.argv else None
+DB = ARGS[0] if ARGS else "schema-tour.db"
 PROMPT = b"sqlite> "
 
 # (command, seconds to let the result sit on screen[, typing pace])
@@ -128,6 +135,27 @@ def type_line(fd, line, pace=1.0):
     os.write(fd, b"\r")
 
 
+# ── built-in asciinema-v2 recorder ────────────────────────────────
+# The pty echoes everything we type, so capturing the output stream
+# captures the whole session. Each frame gets its own relative
+# timestamp, which preserves the pacing exactly as it played.
+
+CAST_START = None
+CAST_FILE = None
+
+
+def emit(frame: bytes):
+    """Write one output frame to stdout and, when recording, to the cast."""
+    global CAST_START
+    os.write(1, frame)
+    if CAST_FILE is not None:
+        elapsed = time.monotonic() - CAST_START
+        CAST_FILE.write(
+            json.dumps(["o", round(elapsed, 6), frame.decode("utf-8", "replace")])
+            + "\n"
+        )
+
+
 def pump_until_prompt(fd):
     """Stream sqlite3 output to our stdout until the prompt returns."""
     tail = b""
@@ -141,13 +169,14 @@ def pump_until_prompt(fd):
             return False
         if not chunk:
             return False
-        os.write(1, chunk)
+        emit(chunk)
         tail = (tail + chunk)[-64:]
         if tail.endswith(PROMPT):
             return True
 
 
 def main():
+    global CAST_START, CAST_FILE
     # Pristine takes: a leftover database would fail the CREATEs.
     for suffix in ["", "-wal", "-shm"]:
         try:
@@ -160,6 +189,20 @@ def main():
     # A pty starts with no size; sqlite3 clips output to its guess. 120x32
     # is also the geometry the recording should use.
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
+    if CAST_PATH is not None:
+        CAST_START = time.monotonic()
+        CAST_FILE = open(CAST_PATH, "w")
+        CAST_FILE.write(
+            json.dumps(
+                {
+                    "version": 2,
+                    "width": 120,
+                    "height": 32,
+                    "env": {"TERM": os.environ.get("TERM", "xterm-256color")},
+                }
+            )
+            + "\n"
+        )
     try:
         pump_until_prompt(fd)
         for command, dwell, *rest in SCRIPT:
@@ -173,6 +216,9 @@ def main():
         pump_until_prompt(fd)
     finally:
         os.waitpid(pid, 0)
+        if CAST_FILE is not None:
+            CAST_FILE.close()
+            print(f"\ncast written: {CAST_PATH}")
 
 
 if __name__ == "__main__":
