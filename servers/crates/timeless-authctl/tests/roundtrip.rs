@@ -125,6 +125,11 @@ fn ttl_parsing_and_policy_cap() {
     assert_eq!(timeless_authctl::parse_ttl("2d").unwrap(), 172_800);
     assert_eq!(timeless_authctl::parse_ttl("45").unwrap(), 45);
     assert!(timeless_authctl::parse_ttl("1w").is_err());
+    // Overflow and non-positive quantities are clean errors, never a
+    // wrapped ttl (release) or a panic (debug).
+    assert!(timeless_authctl::parse_ttl("0s").is_err());
+    assert!(timeless_authctl::parse_ttl("106751991167301d").is_err());
+    assert!(timeless_authctl::parse_ttl("9999999999999999999d").is_err());
 
     let dir = tempfile::tempdir().unwrap();
     let keypair = timeless_authctl::keygen(dir.path()).unwrap();
@@ -148,4 +153,50 @@ fn ttl_parsing_and_policy_cap() {
     )
     .unwrap_err();
     assert!(error.contains("max_token_seconds"), "{error}");
+}
+
+#[test]
+fn add_subject_reports_created_vs_replaced_and_rejects_malformed_scopes() {
+    let dir = tempfile::tempdir().unwrap();
+    let keypair = timeless_authctl::keygen(dir.path()).unwrap();
+    let policy_path = dir.path().join("policy.json");
+    timeless_authctl::policy_init(
+        "metrics",
+        &keypair.public_key,
+        "default",
+        "default",
+        &policy_path,
+    )
+    .unwrap();
+    assert!(!timeless_authctl::policy_add_subject(
+        &policy_path,
+        "reader",
+        &["metrics:read".to_owned()]
+    )
+    .unwrap());
+    assert!(timeless_authctl::policy_add_subject(
+        &policy_path,
+        "reader",
+        &["metrics:read".to_owned(), "metrics:write".to_owned()]
+    )
+    .unwrap());
+    assert!(timeless_authctl::policy_add_subject(&policy_path, "bad", &[]).is_err());
+    for scopes in [
+        vec!["metricsread".to_owned()],
+        vec!["metrics:".to_owned()],
+        vec![":read".to_owned()],
+    ] {
+        assert!(
+            timeless_authctl::policy_add_subject(&policy_path, "bad", &scopes).is_err(),
+            "{scopes:?} must be rejected"
+        );
+    }
+    // Well-formed but unknown scopes stay accepted: the verifier fails
+    // closed on those, and an old CLI must not block future scopes.
+    assert!(!timeless_authctl::policy_add_subject(
+        &policy_path,
+        "future",
+        &["metrics:fly".to_owned()]
+    )
+    .unwrap());
 }

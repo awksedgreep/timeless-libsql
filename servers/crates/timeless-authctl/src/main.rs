@@ -105,7 +105,20 @@ fn main() -> ExitCode {
                     &subject,
                     &scopes,
                 ) {
-                    Ok(()) => ExitCode::SUCCESS,
+                    Ok(false) => {
+                        println!(
+                            "added subject {subject:?} with {} scope(s)",
+                            scopes.len()
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Ok(true) => {
+                        println!(
+                            "replaced subject {subject:?} with {} scope(s)",
+                            scopes.len()
+                        );
+                        ExitCode::SUCCESS
+                    }
                     Err(error) => fail(error),
                 }
             }

@@ -988,7 +988,10 @@ struct QueueProfile {
 }
 
 enum WriteCommand {
-    Ingest(Vec<LogEntry>),
+    Ingest {
+        entries: Vec<LogEntry>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Flush(Option<oneshot::Sender<Result<(), String>>>),
     Optimize,
     Barrier(oneshot::Sender<()>),
@@ -1121,6 +1124,8 @@ impl Storage {
         let writer_profile = Arc::clone(&profile);
         let writer_db = database_path.clone();
         let writer_ext = extension_path.clone();
+        let tail = crate::tail::TailHub::new();
+        let writer_tail = Arc::clone(&tail);
         let writer_join = thread::Builder::new()
             .name("timeless-logs-writer".into())
             .spawn(move || {
@@ -1131,6 +1136,7 @@ impl Storage {
                     ready_tx,
                     writer_profile,
                     timestamp_unit,
+                    writer_tail,
                 )
             })
             .map_err(|e| format!("spawn SQLite writer: {e}"))?;
@@ -1178,7 +1184,7 @@ impl Storage {
             timestamp_unit,
             database_path,
             queue_capacity: queue_batches,
-            tail: crate::tail::TailHub::new(),
+            tail,
         })))
     }
 
@@ -1196,6 +1202,7 @@ impl Storage {
             return Err("logs data plane is shutting down".into());
         }
         let count = entries.len();
+        let (reply_tx, reply_rx) = oneshot::channel();
         let permit = self
             .0
             .writer
@@ -1208,11 +1215,18 @@ impl Storage {
             profile.admitted_batches = profile.admitted_batches.saturating_add(1);
             profile.admitted_entries = profile.admitted_entries.saturating_add(count as u64);
         }
-        // Live tail sees exactly what was admitted, published before the
-        // entries move into the writer command. An idle hub costs one
-        // atomic load.
-        self.0.tail.publish(&entries, self.0.timestamp_unit);
-        permit.send(WriteCommand::Ingest(entries));
+        permit.send(WriteCommand::Ingest {
+            entries,
+            reply: reply_tx,
+        });
+        // Wait for the writer to apply the batch: the writer publishes
+        // to the live tail itself on success, so a subscriber never sees
+        // an entry a search would not return (the traces server already
+        // keeps this contract — see its ingest path). On writer failure
+        // nothing is published and the error propagates instead.
+        reply_rx
+            .await
+            .map_err(|_| "SQLite writer stopped before ingest completed".to_string())??;
         Ok(count)
     }
 
@@ -1651,6 +1665,7 @@ fn writer_main(
     ready: std_mpsc::Sender<Result<(), String>>,
     profile: Arc<StdMutex<QueueProfile>>,
     timestamp_unit: TimestampUnit,
+    tail: Arc<crate::tail::TailHub>,
 ) -> Result<(), String> {
     let conn = match open_connection(&database_path, &extension_path, Some(timestamp_unit)) {
         Ok(conn) => {
@@ -1664,11 +1679,18 @@ fn writer_main(
     };
     while let Some(command) = commands.blocking_recv() {
         match command {
-            WriteCommand::Ingest(entries) => {
+            WriteCommand::Ingest { entries, reply } => {
                 let count = entries.len();
                 record_queue_start(&profile);
                 let result = insert_batch(&conn, &entries, &profile);
                 record_queue_completion(&profile, count, result.is_ok());
+                if result.is_ok() {
+                    // Publish only after the batch is applied: a live
+                    // subscriber never sees an entry a search would not
+                    // return. An idle hub costs one atomic load.
+                    tail.publish(&entries, timestamp_unit);
+                }
+                let _ = reply.send(result.clone());
                 result?;
             }
             WriteCommand::Flush(reply) => {

@@ -41,9 +41,12 @@ fn unix_now() -> Result<i64, String> {
         .as_secs() as i64)
 }
 
-/// The key id is the first 16 hex characters of the SHA-256 of the public
-/// key bytes — stable, collision-resistant at this scale, and derivable from
-/// the public key alone.
+/// The key id is the first 8 bytes of the raw public key, hex-encoded
+/// (16 characters) — stable and derivable from the public key alone.
+/// (An earlier docstring claimed SHA-256 here; the code always used the
+/// key bytes themselves, which are already uniformly random. The hash
+/// framing in the comment below explains why no new dependency was
+/// pulled in for this.)
 fn derive_kid(public: &VerifyingKey) -> String {
     // A tiny SHA-256 would be another dependency; SQLite-style FNV/DJB hashes
     // are too weak for an identifier. ed25519-dalek re-exports sha2 via its
@@ -167,12 +170,34 @@ pub fn policy_init(
     Ok(policy)
 }
 
-/// Adds or replaces a subject in an existing policy file.
+/// Adds or replaces a subject in an existing policy file. Returns
+/// whether a subject of that name already existed: overwriting a
+/// subject silently (notably narrowing its scopes) used to be
+/// invisible, so the CLI reports created-vs-replaced explicitly.
+/// Scopes must be shaped `signal:scope` with both parts nonempty —
+/// anything else can never match a route's required scope, so it is
+/// rejected here instead of failing closed (and confusingly) at use
+/// time. Well-formed but unknown scopes are still accepted: the
+/// verifier fails closed on those, and a future signal/scope must not
+/// be blocked by an old CLI allowlist.
 pub fn policy_add_subject(
     policy_path: &Path,
     subject: &str,
     scopes: &[String],
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    if scopes.is_empty() {
+        return Err("subject must have at least one scope".into());
+    }
+    for scope in scopes {
+        let well_formed = scope
+            .split_once(':')
+            .is_some_and(|(signal, name)| !signal.is_empty() && !name.is_empty());
+        if !well_formed {
+            return Err(format!(
+                "scope {scope:?} must be shaped `signal:scope` (e.g. `metrics:read`)"
+            ));
+        }
+    }
     let mut policy: Value = serde_json::from_str(
         &fs::read_to_string(policy_path)
             .map_err(|error| format!("read policy {}: {error}", policy_path.display()))?,
@@ -182,10 +207,11 @@ pub fn policy_add_subject(
         .get_mut("subjects")
         .and_then(Value::as_object_mut)
         .ok_or("policy has no subjects object")?;
+    let replaced = subjects.contains_key(subject);
     subjects.insert(subject.to_owned(), json!({ "scopes": scopes }));
     fs::write(policy_path, serde_json::to_string_pretty(&policy).unwrap())
         .map_err(|error| format!("write policy {}: {error}", policy_path.display()))?;
-    Ok(())
+    Ok(replaced)
 }
 
 /// Mints a signed compact JWS the servers' verifier accepts: claims are
@@ -271,7 +297,10 @@ pub fn mint_at(
     claims.insert("auth_version".into(), json!(auth_version));
     claims.insert("iat".into(), json!(issued_at));
     claims.insert("nbf".into(), json!(issued_at));
-    claims.insert("exp".into(), json!(issued_at + ttl_seconds));
+    let expires_at = issued_at
+        .checked_add(ttl_seconds)
+        .ok_or_else(|| format!("token expiry overflows for ttl {ttl_seconds}s"))?;
+    claims.insert("exp".into(), json!(expires_at));
     if let Some(limits) = subject_policy
         .get("maximum_limits")
         .or_else(|| policy.get("maximum_limits"))
@@ -319,11 +348,20 @@ pub fn parse_ttl(value: &str) -> Result<i64, String> {
     let quantity: i64 = digits
         .parse()
         .map_err(|_| format!("invalid ttl {value:?}"))?;
+    if quantity <= 0 {
+        return Err(format!("invalid ttl {value:?}: quantity must be positive"));
+    }
     let seconds = match unit {
         "s" => quantity,
-        "m" => quantity * 60,
-        "h" => quantity * 3_600,
-        "d" => quantity * 86_400,
+        "m" => quantity
+            .checked_mul(60)
+            .ok_or_else(|| format!("ttl {value:?} overflows"))?,
+        "h" => quantity
+            .checked_mul(3_600)
+            .ok_or_else(|| format!("ttl {value:?} overflows"))?,
+        "d" => quantity
+            .checked_mul(86_400)
+            .ok_or_else(|| format!("ttl {value:?} overflows"))?,
         other => return Err(format!("invalid ttl unit {other:?}; use s, m, h, or d")),
     };
     Ok(seconds)

@@ -1621,6 +1621,10 @@ fn parse_line(
         .as_ref()
         .map(|value| parse_ingest_time(value, timestamp_unit))
         .unwrap_or_else(|| now(timestamp_unit));
+    // Open vocabulary collapses to "info" (documented): severities
+    // outside the eight Timeless values — "trace", "verbose", typos —
+    // stay queryable instead of dropping the row. Only exact matches
+    // round-trip; use the typed metadata for anything finer.
     let severity = object
         .remove("level")
         .map(value_to_string)
@@ -1673,6 +1677,9 @@ fn canonical_severity(level: &str) -> &'static str {
 }
 
 fn parse_ingest_time(value: &Value, timestamp_unit: TimestampUnit) -> i64 {
+    // Unparseable timestamps fall back to receipt time: the row's
+    // message and metadata are preserved and stay queryable instead of
+    // dropping the line. Absent and garbage timestamps behave alike.
     match value {
         Value::Number(number) => number
             .as_i64()
@@ -1730,6 +1737,30 @@ fn micros_to_native(micros: i64, timestamp_unit: TimestampUnit) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unparseable_timestamps_fall_back_to_receipt_time() {
+        // Missing AND garbage timestamps file under receipt time: the
+        // row is preserved and queryable, never dropped. Only
+        // structurally invalid lines count as errors.
+        let body = "{\"_time\":\"yesterday\",\"_msg\":\"bad\"}\n\
+                    {\"_time\":1700000000.5,\"_msg\":\"fractional\"}\n\
+                    {\"_time\":null,\"_msg\":\"null\"}\n\
+                    {\"_msg\":\"missing\",\"level\":\"eror\"}\n\
+                    not json\n";
+        let (entries, errors) = parse_ndjson(body, "_msg", "_time", TimestampUnit::Microseconds);
+        assert_eq!(errors, 1, "only the non-JSON line counts as an error");
+        assert_eq!(entries.len(), 4);
+        let fresh = now(TimestampUnit::Microseconds);
+        for entry in &entries {
+            assert!(
+                (fresh - entry.ts).abs() < 60_000_000,
+                "fallback must be ~now, got {}",
+                entry.ts
+            );
+        }
+        assert_eq!(entries[3].severity, "info", "unknown level stays info");
+    }
 
     #[test]
     fn ndjson_preserves_product_microseconds_severity_and_typed_metadata() {

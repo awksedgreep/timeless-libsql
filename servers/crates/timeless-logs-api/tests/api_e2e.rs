@@ -19918,3 +19918,75 @@ async fn logsql_phrase_filters_ride_the_clp_pushdown() {
 
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn tail_published_entries_are_immediately_searchable() {
+    // Contract (issue #46): the hub publishes only after the writer
+    // applies the batch, so anything a subscriber sees, a search
+    // returns. Subscribe, ingest one entry, read the frame, then search
+    // for it — no sleep, no retry. (Under publish-before-apply this
+    // search could miss; the assertion is the regression net.)
+    use http_body_util::BodyExt;
+
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start(temp.path().join("logs.db"), extension.into(), 1, 8).unwrap();
+    let app = router(storage.clone());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/select/logsql/tail?query=level:error")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+
+    let probe = "contract-probe-tail-before-search";
+    let ingest = app
+        .clone()
+        .oneshot(ingest_request(format!(
+            "{{\"_msg\":\"{probe}\",\"level\":\"error\"}}\n"
+        )))
+        .await
+        .unwrap();
+    assert!(ingest.status().is_success());
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+        .await
+        .expect("a tail frame arrives")
+        .expect("stream stays open")
+        .expect("frame is not an error");
+    let line = String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap();
+    assert!(line.contains(probe), "{line}");
+
+    // The published entry must already be searchable: ingest only
+    // returns after the writer applies the batch.
+    let search = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/select/logsql/query?level=error&limit=10000&order=asc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(search.status(), StatusCode::OK);
+    let found = to_bytes(search.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        found
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .any(|line| line.windows(probe.len()).any(|w| w == probe.as_bytes())),
+        "published entry missing from search"
+    );
+    storage.shutdown().await.unwrap();
+}
