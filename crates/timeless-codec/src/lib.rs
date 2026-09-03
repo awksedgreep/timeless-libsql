@@ -180,11 +180,92 @@ pub fn zstd_compress(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
     zstd::bulk::compress(data, level).map_err(|e| format!("zstd compress failed: {e}"))
 }
 
+/// Ceiling for entry counts read from untrusted container headers
+/// (block `entry_count`, chunk `point_count`). Flush/merge thresholds
+/// keep honest blocks at ≤8192 entries, so anything past 2^20 is
+/// corruption, not a workload — and every downstream `Vec::with_capacity`
+/// or caller-sized buffer keys off this count. Checked at the container
+/// layer (blocks/spans/chunks), never in the column decoders, which
+/// stay agnostic to engine sizing.
+pub const MAX_BLOCK_ENTRIES: usize = 1 << 20;
+
+/// Absolute ceiling for any single variable-width decompression
+/// (string/dictionary/codes/metadata blobs whose exact output size is
+/// not knowable before decode). 64 MiB matches the rollup payload cap:
+/// at the engines' ≤8192-entry blocks a legitimate column never
+/// approaches it, while a corrupt row can no longer turn kilobytes of
+/// compressed input into gigabytes of output. Fixed-width columns use
+/// exact `n * width` caps instead — see each decoder.
+pub const DECOMPRESS_MAX_BYTES: usize = 64 << 20;
+
+/// Bounded zstd decompression: output past `cap` bytes is an error,
+/// never an allocation. `zstd::bulk::decompress` pre-sizes to
+/// `min(frame_hint, cap)`, so a bomb cannot even drive the initial
+/// allocation — the failure happens before the host feels it.
+pub fn zstd_decompress_capped(data: &[u8], what: &str, cap: usize) -> Result<Vec<u8>, String> {
+    zstd::bulk::decompress(data, cap).map_err(|e| format!("zstd decompress of {what} failed: {e}"))
+}
+
+/// Variable-width column decompression, bounded at
+/// [`DECOMPRESS_MAX_BYTES`]. All block/span metadata, message, and
+/// shredded-column paths route through here, so no corrupt row can
+/// turn kilobytes of stored bytes into gigabytes of output. Callers
+/// with an exact expected size (numeric columns) use
+/// [`zstd_decompress_capped`] with `n * width` instead.
 pub fn zstd_decompress(data: &[u8], what: &str) -> Result<Vec<u8>, String> {
-    // decompress() needs a capacity hint; decode_all streams instead and
-    // handles any size without us trusting an attacker-controlled header
-    // field for the allocation.
-    zstd::stream::decode_all(data).map_err(|e| format!("zstd decompress of {what} failed: {e}"))
+    zstd_decompress_capped(data, what, DECOMPRESS_MAX_BYTES)
+}
+
+/// Exact output-size cap for fixed-width columns: `n` values of
+/// `width` bytes. Checked so a corrupt count is an error before any
+/// allocation, on every pointer width.
+fn exact_cap(n: usize, width: usize, what: &str) -> Result<usize, String> {
+    n.checked_mul(width)
+        .ok_or_else(|| format!("{what}: count {n} x width {width} overflows usize"))
+}
+
+/// Reject absurd entry counts read from untrusted container headers
+/// (block `entry_count`, chunk `point_count`). Checked at the
+/// container layer, before any `Vec::with_capacity(n)`, caller-sized
+/// pco buffer, or exact `n * width` cap runs — a corrupt count must
+/// fail here, never drive an allocation.
+pub fn check_entry_count(n: usize, what: &str) -> Result<(), String> {
+    if n > MAX_BLOCK_ENTRIES {
+        return Err(format!(
+            "{what}: entry count {n} exceeds limit {MAX_BLOCK_ENTRIES}"
+        ));
+    }
+    Ok(())
+}
+
+/// Verify a fully decoded container against its header range claims.
+/// Pruning elsewhere trusts header metadata, so a corrupt header that
+/// disagrees with its own payload must be an error — never silently
+/// wrong query results. (A row corrupt enough to be skipped by pruning
+/// never reaches this check; see the block/span codec headers for that
+/// residual.)
+pub fn check_block_range(
+    what: &str,
+    n: usize,
+    ts_min: i64,
+    ts_max: i64,
+    timestamps: &[i64],
+) -> Result<(), String> {
+    if timestamps.len() != n {
+        return Err(format!(
+            "{what}: decoded {} entries, header claims {n}",
+            timestamps.len()
+        ));
+    }
+    let (lo, hi) = timestamps
+        .iter()
+        .fold((i64::MAX, i64::MIN), |(a, b), &t| (a.min(t), b.max(t)));
+    if lo != ts_min || hi != ts_max {
+        return Err(format!(
+            "{what}: payload range [{lo}, {hi}] disagrees with header [{ts_min}, {ts_max}]"
+        ));
+    }
+    Ok(())
 }
 
 /// Checked `usize -> u32` length prefix. Every on-wire length field in
@@ -324,9 +405,27 @@ fn pco_compress<T: pco::data_types::Number>(nums: &[T]) -> Result<Vec<u8>, Strin
         .map_err(|e| format!("pco compress failed: {e}"))
 }
 
-fn pco_decompress<T: pco::data_types::Number>(bytes: &[u8], what: &str) -> Result<Vec<T>, String> {
-    pco::standalone::simple_decompress(bytes)
-        .map_err(|e| format!("pco decompress of {what} failed: {e}"))
+/// Bounded pco decompression into a caller-sized destination.
+pub fn pco_decompress_capped<T: pco::data_types::Number>(
+    bytes: &[u8],
+    n: usize,
+    what: &str,
+) -> Result<Vec<T>, String> {
+    // Bounded by construction: the destination is sized from the
+    // caller-known count, never from the payload's own header claim
+    // (which `simple_decompress` would trust for its allocation — a
+    // corrupt header alone could OOM the host). A payload holding more
+    // or fewer values than `n` fails the progress check below.
+    let mut out = vec![T::default(); n];
+    let progress = pco::standalone::simple_decompress_into(bytes, &mut out)
+        .map_err(|e| format!("pco decompress of {what} failed: {e}"))?;
+    if !progress.finished || progress.n_processed != n {
+        return Err(format!(
+            "pco decompress of {what}: stream holds {} values, expected {n}",
+            progress.n_processed
+        ));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -405,9 +504,10 @@ pub fn encode_i64(values: &[i64], zstd_level: i32) -> Result<ColumnEnc, String> 
 pub fn decode_i64(bytes: &[u8], n: usize) -> Result<Vec<i64>, String> {
     let (enc, payload) = read_column_frame(bytes, "i64 column")?;
     let deltas: Vec<i64> = match enc {
-        ENC_I64_DELTA_PCO => pco_decompress(payload, "i64 column")?,
+        ENC_I64_DELTA_PCO => pco_decompress_capped(payload, n, "i64 column")?,
         ENC_I64_DELTA_ZSTD => {
-            let raw = zstd_decompress(payload, "i64 column")?;
+            let raw =
+                zstd_decompress_capped(payload, "i64 column", exact_cap(n, 8, "i64 column")?)?;
             if raw.len() % 8 != 0 {
                 return Err(format!(
                     "i64 column: {} bytes is not a multiple of 8",
@@ -499,9 +599,10 @@ pub fn encode_f64(values: &[f64], zstd_level: i32) -> Result<ColumnEnc, String> 
 pub fn decode_f64(bytes: &[u8], n: usize) -> Result<Vec<f64>, String> {
     let (enc, payload) = read_column_frame(bytes, "f64 column")?;
     let out: Vec<f64> = match enc {
-        ENC_F64_PCO => pco_decompress(payload, "f64 column")?,
+        ENC_F64_PCO => pco_decompress_capped(payload, n, "f64 column")?,
         ENC_F64_ZSTD => {
-            let raw = zstd_decompress(payload, "f64 column")?;
+            let raw =
+                zstd_decompress_capped(payload, "f64 column", exact_cap(n, 8, "f64 column")?)?;
             if raw.len() % 8 != 0 {
                 return Err(format!(
                     "f64 column: {} bytes is not a multiple of 8",
@@ -672,7 +773,7 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
     let (enc, payload) = read_column_frame(bytes, "string column")?;
     match enc {
         ENC_STR_ZSTD => {
-            let raw = zstd_decompress(payload, "string column")?;
+            let raw = zstd_decompress_capped(payload, "string column", DECOMPRESS_MAX_BYTES)?;
             let mut r = Reader::new(&raw);
             validate_minimum_encoded_len(n, size_of::<u32>(), raw.len(), "string column")?;
             let mut out = Vec::new();
@@ -697,7 +798,8 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
             let codes_zstd = r.take(r.remaining(), "code bytes")?;
 
             // Dictionary table.
-            let dict_raw = zstd_decompress(dict_zstd, "string dictionary")?;
+            let dict_raw =
+                zstd_decompress_capped(dict_zstd, "string dictionary", DECOMPRESS_MAX_BYTES)?;
             let mut dr = Reader::new(&dict_raw);
             validate_minimum_encoded_len(
                 dict_count,
@@ -720,7 +822,8 @@ pub fn decode_str(bytes: &[u8], n: usize) -> Result<Vec<String>, String> {
 
             // RLE codes. Total is validated INCREMENTALLY against n so a
             // corrupt run length can't drive a huge allocation.
-            let codes_raw = zstd_decompress(codes_zstd, "string codes")?;
+            let codes_raw =
+                zstd_decompress_capped(codes_zstd, "string codes", DECOMPRESS_MAX_BYTES)?;
             if codes_raw.len() % 8 != 0 {
                 return Err("string column: RLE stream is not (u32,u32) pairs".into());
             }
@@ -781,7 +884,7 @@ pub fn decode_str_selected(
     let mut out = Vec::with_capacity(selected.len());
     match enc {
         ENC_STR_ZSTD => {
-            let raw = zstd_decompress(payload, "string column")?;
+            let raw = zstd_decompress_capped(payload, "string column", DECOMPRESS_MAX_BYTES)?;
             let mut reader = Reader::new(&raw);
             let mut selected_pos = 0usize;
             for row in 0..n {
@@ -805,7 +908,8 @@ pub fn decode_str_selected(
             let dict_zstd = reader.take(dict_zstd_len, "dict bytes")?;
             let codes_zstd = reader.take(reader.remaining(), "code bytes")?;
 
-            let dict_raw = zstd_decompress(dict_zstd, "string dictionary")?;
+            let dict_raw =
+                zstd_decompress_capped(dict_zstd, "string dictionary", DECOMPRESS_MAX_BYTES)?;
             let mut dict_reader = Reader::new(&dict_raw);
             validate_minimum_encoded_len(
                 dict_count,
@@ -826,7 +930,8 @@ pub fn decode_str_selected(
                 return Err("string column: trailing bytes in dictionary".into());
             }
 
-            let codes_raw = zstd_decompress(codes_zstd, "string codes")?;
+            let codes_raw =
+                zstd_decompress_capped(codes_zstd, "string codes", DECOMPRESS_MAX_BYTES)?;
             if codes_raw.len() % 8 != 0 {
                 return Err("string column: RLE stream is not (u32,u32) pairs".into());
             }
@@ -943,7 +1048,7 @@ pub fn decode_u8(bytes: &[u8], n: usize) -> Result<Vec<u8>, String> {
             Ok(out)
         }
         ENC_U8_ZSTD => {
-            let raw = zstd_decompress(payload, "u8 column")?;
+            let raw = zstd_decompress_capped(payload, "u8 column", n)?;
             if raw.len() != n {
                 return Err(format!("u8 column: {} bytes, expected {n}", raw.len()));
             }
@@ -992,10 +1097,8 @@ pub fn decode_fixed_bytes(bytes: &[u8], n: usize, width: usize) -> Result<Vec<u8
     let (enc, payload) = read_column_frame(bytes, "fixed-bytes column")?;
     match enc {
         ENC_FIXED_ZSTD => {
-            let raw = zstd_decompress(payload, "fixed-bytes column")?;
-            let want = n.checked_mul(width).ok_or_else(|| {
-                format!("fixed-bytes column: count {n} x width {width} overflows usize")
-            })?;
+            let want = exact_cap(n, width, "fixed-bytes column")?;
+            let raw = zstd_decompress_capped(payload, "fixed-bytes column", want)?;
             if raw.len() != want {
                 return Err(format!(
                     "fixed-bytes column: {} bytes, expected {} ({n} x {width})",
@@ -1354,5 +1457,58 @@ mod tests {
         // ... while a merely wrong (non-overflowing) count is still the
         // plain length-mismatch error.
         assert!(decode_fixed_bytes(&enc, 2, 16).is_err());
+    }
+
+    #[test]
+    fn decompression_caps_reject_bombs() {
+        // Regression tests for the decompression-bomb class (issue #41).
+        // Every case below must be a clean Err with no giant allocation;
+        // the old unbounded paths would allocate the full output (or, for
+        // pco, trust the payload's own element count for sizing).
+
+        // Exact cap: 25 ids (200 bytes) decoded with room for 3 → the
+        // bulk bound fails at 24 bytes, before any 200-byte material.
+        let data: Vec<u8> = (0..25u8)
+            .flat_map(|i| [i, i ^ 0x5A, 0, 255, i, 1, 2, 3])
+            .collect();
+        let enc = encode_fixed_bytes(&data, 8, LVL)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let err = decode_fixed_bytes(&enc, 3, 8).expect_err("over-cap content must fail");
+        assert!(err.contains("failed"), "unexpected error: {err}");
+
+        // Absolute cap: well-formed strings totaling past 64 MiB.
+        // Framed by hand (not via encode_str) so no strategy heuristic
+        // is involved: 17M one-byte strings, ~85 MB raw.
+        let mut raw = Vec::new();
+        for _ in 0..17_000_000 {
+            raw.extend_from_slice(&1u32.to_le_bytes());
+            raw.push(b'a');
+        }
+        let payload = zstd_compress(&raw, LVL).unwrap();
+        drop(raw);
+        let frame = ColumnEnc {
+            encoding: ENC_STR_ZSTD,
+            payload,
+        }
+        .to_bytes()
+        .unwrap();
+        let err = decode_str(&frame, 17_000_000).expect_err("over-cap column must fail");
+        assert!(err.contains("failed"), "unexpected error: {err}");
+
+        // Entry-count ceiling: the column layer stays agnostic, but the
+        // container helper pins the contract.
+        assert!(check_entry_count(MAX_BLOCK_ENTRIES, "t").is_ok());
+        assert!(check_entry_count(MAX_BLOCK_ENTRIES + 1, "t").is_err());
+
+        // Bounded pco: exact round-trip, short/long/garbage payloads.
+        let nums: Vec<i64> = (0..50).collect();
+        let comp = pco::standalone::simple_compress(&nums, &pco::ChunkConfig::default()).unwrap();
+        assert_eq!(pco_decompress_capped::<i64>(&comp, 50, "t").unwrap(), nums);
+        assert!(pco_decompress_capped::<i64>(&comp, 49, "t").is_err());
+        assert!(pco_decompress_capped::<i64>(&comp, 51, "t").is_err());
+        assert!(pco_decompress_capped::<i64>(&[0u8; 8], 4, "t").is_err());
+        assert!(pco_decompress_capped::<i64>(&[], 0, "t").is_err());
     }
 }

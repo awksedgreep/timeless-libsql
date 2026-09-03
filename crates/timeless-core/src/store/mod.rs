@@ -2,6 +2,14 @@
 //! so chunks can live in filesystem files (`FsStore`) today and SQLite
 //! shadow tables (rowid-addressed) later. The engine owns encoding,
 //! decoding, and the in-memory index; the store owns bytes-at-rest.
+//!
+//! BYTE ORDER is split by layer, deliberately: metrics chunks, the
+//! `FsStore` file framing, and the series registry are big-endian;
+//! logs/span containers, `timeless-codec` columns, and rollup payloads
+//! are little-endian. Every decoder matches its own encoder, so this
+//! is not a live bug — but it is a trap for cross-store migration or
+//! byte-level reuse (e.g. `ChunkMeta` floats): always convert at the
+//! seam, never reinterpret foreign bytes.
 
 pub mod fs;
 

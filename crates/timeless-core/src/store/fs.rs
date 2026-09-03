@@ -23,6 +23,12 @@ use super::{
 /// How long a compressed chunk file stays in the read cache.
 const FILE_CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// Files bigger than this bypass the read cache: retaining a huge
+/// batch file for 60 s for one query's sake is pure memory pressure
+/// with no reuse story. Normal batch files (1000 chunks of a few KB)
+/// sit far below this line.
+const MAX_CACHED_FILE_BYTES: usize = 64 << 20;
+
 #[cfg(test)]
 static FAIL_COMPACTION_DELETE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -40,6 +46,11 @@ pub struct FsStore {
     batch_counter: AtomicUsize,
     instance_id: u128,
     file_cache: DashMap<PathBuf, (Instant, Arc<Vec<u8>>)>,
+    /// Chunk files quarantined as corrupt by recovery scans, cumulative
+    /// for the store's lifetime. Quarantine (rename aside + exclude from
+    /// the index) preserves availability; this counter is the in-band
+    /// signal that it happened — silent skips were the old behavior.
+    quarantined_files: AtomicUsize,
 }
 
 struct CompactionManifest {
@@ -62,6 +73,7 @@ impl FsStore {
             batch_counter: AtomicUsize::new(0),
             instance_id,
             file_cache: DashMap::new(),
+            quarantined_files: AtomicUsize::new(0),
         })
     }
 
@@ -75,6 +87,13 @@ impl FsStore {
 
     fn series_path(data_dir: &std::path::Path) -> PathBuf {
         data_dir.join("series.bin")
+    }
+
+    /// Chunk files quarantined as corrupt by recovery scans, cumulative
+    /// for the store's lifetime. A nonzero count means data was
+    /// excluded from the index — inspect the `.corrupt` files.
+    pub fn quarantined_file_count(&self) -> usize {
+        self.quarantined_files.load(Ordering::Relaxed)
     }
 
     fn manifest_path(data_dir: &std::path::Path) -> PathBuf {
@@ -555,7 +574,10 @@ impl FsStore {
     // ── Reading ──────────────────────────────────────────────────────
 
     /// Whole-file read through the TTL cache (queries touch the same
-    /// chunk files repeatedly; batch files carry many chunks).
+    /// chunk files repeatedly; batch files carry many chunks). Files
+    /// past [`MAX_CACHED_FILE_BYTES`] are read through without
+    /// retaining: caching them would pin tens of megabytes for a TTL
+    /// with no reuse story.
     fn read_file_cached(&self, path: &PathBuf) -> Result<Arc<Vec<u8>>, String> {
         if let Some(entry) = self.file_cache.get(path) {
             if entry.0.elapsed() < FILE_CACHE_TTL {
@@ -565,8 +587,10 @@ impl FsStore {
             self.file_cache.remove(path);
         }
         let data: Arc<Vec<u8>> = Arc::new(fs::read(path).map_err(|e| e.to_string())?);
-        self.file_cache
-            .insert(path.clone(), (Instant::now(), Arc::clone(&data)));
+        if data.len() <= MAX_CACHED_FILE_BYTES {
+            self.file_cache
+                .insert(path.clone(), (Instant::now(), Arc::clone(&data)));
+        }
         Ok(data)
     }
 
@@ -621,7 +645,26 @@ impl FsStore {
 
     // ── Recovery scan ────────────────────────────────────────────────
 
-    fn scan_dir_recursive(dir: &PathBuf, out: &mut Vec<StoredChunk>) {
+    /// Move a corrupt chunk file aside so later scans (and storage
+    /// accounting) never see it again. The `.pco1.corrupt` suffix keeps
+    /// the origin visible to the operator. A failed rename still
+    /// excludes the file from this scan's index; the next scan retries.
+    fn quarantine(path: &PathBuf) -> PathBuf {
+        let aside = path.with_extension(
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!("{e}.corrupt"))
+                .unwrap_or_else(|| "corrupt".to_string()),
+        );
+        let _ = fs::rename(path, &aside);
+        aside
+    }
+
+    fn scan_dir_recursive(
+        dir: &PathBuf,
+        out: &mut Vec<StoredChunk>,
+        quarantined: &mut Vec<PathBuf>,
+    ) {
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -629,19 +672,17 @@ impl FsStore {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                Self::scan_dir_recursive(&path, out);
+                Self::scan_dir_recursive(&path, out, quarantined);
             } else {
                 match path.extension().and_then(|e| e.to_str()) {
-                    Some("pco1") => {
-                        if let Ok(chunks) = Self::read_pco1_header(&path) {
-                            out.extend(chunks);
-                        }
-                    }
-                    Some("pcb1") => {
-                        if let Ok(chunks) = Self::read_pcb1_headers(&path) {
-                            out.extend(chunks);
-                        }
-                    }
+                    Some("pco1") => match Self::read_pco1_header(&path) {
+                        Ok(chunks) => out.extend(chunks),
+                        Err(_) => quarantined.push(Self::quarantine(&path)),
+                    },
+                    Some("pcb1") => match Self::read_pcb1_headers(&path) {
+                        Ok(chunks) => out.extend(chunks),
+                        Err(_) => quarantined.push(Self::quarantine(&path)),
+                    },
                     // tmp: interrupted chunk write; pending: compaction
                     // that crashed before its manifest — old chunks are
                     // still intact, so dropping the orphan is correct.
@@ -680,8 +721,12 @@ impl FsStore {
         pos += 8;
         let sum_val = f64::from_be_bytes(variable[pos..pos + 8].try_into().unwrap());
 
-        // pk_str is the series_id as a string
-        let series_id = pk_str.parse::<i64>().unwrap_or(0);
+        // pk_str is the series_id as a string. A corrupt key must fail
+        // the header (and quarantine the file at scan), never silently
+        // attach the chunk to series 0.
+        let series_id: i64 = pk_str
+            .parse()
+            .map_err(|_| format!("PCO1 header has non-numeric partition key {pk_str:?}"))?;
 
         Ok(vec![StoredChunk {
             series_id,
@@ -938,12 +983,18 @@ impl ChunkStore for FsStore {
 
     fn scan(&self) -> Result<Vec<StoredChunk>, String> {
         let mut out = Vec::new();
+        let mut quarantined = Vec::new();
         for dir_name in &["chunks", "batches"] {
             let dir = self.data_dir.join(dir_name);
             if dir.exists() {
-                Self::scan_dir_recursive(&dir, &mut out);
+                Self::scan_dir_recursive(&dir, &mut out, &mut quarantined);
             }
         }
+        // Availability first: corrupt files are already renamed aside,
+        // so the index stays healthy — but the skip is now counted,
+        // never silent.
+        self.quarantined_files
+            .fetch_add(quarantined.len(), Ordering::Relaxed);
         Ok(out)
     }
 
@@ -1213,6 +1264,57 @@ mod tests {
             !FsStore::manifest_path(&dir).exists(),
             "successful recovery did not clear its manifest"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn bad_pk_header() -> Vec<u8> {
+        // Well-formed PCO1 framing, non-numeric partition key: reaches
+        // the key check, which must fail (never map to series 0).
+        let mut out = Vec::new();
+        out.extend_from_slice(b"PCO1");
+        out.push(1u8);
+        out.extend_from_slice(&1u32.to_be_bytes());
+        out.extend_from_slice(&1_000i64.to_be_bytes());
+        out.extend_from_slice(&1_000i64.to_be_bytes());
+        out.extend_from_slice(&3u16.to_be_bytes());
+        out.extend_from_slice(b"abc");
+        out.extend_from_slice(&0f64.to_be_bytes());
+        out.extend_from_slice(&0f64.to_be_bytes());
+        out.extend_from_slice(&0f64.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn corrupt_files_are_quarantined_not_silently_skipped() {
+        // Regression test (issue #41): corrupt chunk files must be
+        // renamed aside and counted, while healthy files keep indexing.
+        let dir = temp_dir("quarantine");
+        let store = FsStore::new(dir.clone()).unwrap();
+        store.put_chunks(&[raw_chunk(7, 1_000)]).unwrap();
+
+        let chunks_dir = dir.join("chunks");
+        let garbage = chunks_dir.join("junk.pco1");
+        fs::write(&garbage, b"far too short for any header").unwrap();
+        let bad_pk = chunks_dir.join("badpk.pco1");
+        fs::write(&bad_pk, bad_pk_header()).unwrap();
+
+        let chunks = store.scan().unwrap();
+        assert_eq!(chunks.len(), 1, "healthy chunk must still index");
+        assert_eq!(chunks[0].series_id, 7);
+        assert_eq!(store.quarantined_file_count(), 2);
+
+        let aside_garbage = chunks_dir.join("junk.pco1.corrupt");
+        let aside_pk = chunks_dir.join("badpk.pco1.corrupt");
+        assert!(aside_garbage.exists(), "garbage file must be renamed aside");
+        assert!(aside_pk.exists(), "bad partition key must be renamed aside");
+        assert!(!garbage.exists() && !bad_pk.exists());
+
+        // Idempotent: quarantined files are invisible to later scans,
+        // so the count does not grow and the index is unchanged.
+        let chunks = store.scan().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(store.quarantined_file_count(), 2);
+
         let _ = fs::remove_dir_all(dir);
     }
 }

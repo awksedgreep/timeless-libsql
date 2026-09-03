@@ -2096,6 +2096,28 @@ impl Engine {
         }
     }
 
+    /// Fold values into (min, max, sum) with explicit NaN semantics:
+    /// min/max ignore NaN (IEEE minNum behavior, matching the
+    /// `f64::min`/`f64::max` folds in the rollup kernel), while sum
+    /// propagates it (IEEE addition, matching PromQL). A chunk holding
+    /// `[1.0, NaN]` therefore reports `min = 1.0, sum = NaN` — pinned
+    /// by unit tests, relied upon by `ChunkMeta` consumers. An empty
+    /// slice yields `(NaN, NaN, 0.0)`; callers that forbid empty
+    /// partitions validate beforehand.
+    fn fold_min_max_sum(values: &[f64]) -> (f64, f64, f64) {
+        let (mut min_val, mut max_val, mut sum_val) = (f64::NAN, f64::NAN, 0.0f64);
+        for &v in values {
+            if min_val.is_nan() || v < min_val {
+                min_val = v;
+            }
+            if max_val.is_nan() || v > max_val {
+                max_val = v;
+            }
+            sum_val += v;
+        }
+        (min_val, max_val, sum_val)
+    }
+
     fn encode_partition(
         &self,
         key: &PartitionKey,
@@ -2169,16 +2191,7 @@ impl Engine {
                 ts_slice.len()
             )
         })?;
-        let (mut min_val, mut max_val, mut sum_val) = (f64::NAN, f64::NAN, 0.0f64);
-        for &v in val_slice {
-            if min_val.is_nan() || v < min_val {
-                min_val = v;
-            }
-            if max_val.is_nan() || v > max_val {
-                max_val = v;
-            }
-            sum_val += v;
-        }
+        let (min_val, max_val, sum_val) = Self::fold_min_max_sum(val_slice);
 
         Ok(EncodedChunk {
             series_id: key.series_id,
@@ -4082,7 +4095,7 @@ impl Engine {
                 if samples.is_empty() {
                     continue;
                 }
-                let buckets = rollup_buckets(&samples, r);
+                let buckets = rollup_buckets(&samples, r)?;
                 let payload = encode_rollup_payload(&buckets)?;
                 // encode_rollup_payload already rejected counts over
                 // u32::MAX, so this cannot wrap.
@@ -4333,9 +4346,22 @@ impl Engine {
                     .collect(),
             )
         } else {
+            // Bounded by the index's point count (checked below): a
+            // corrupt payload cannot drive the allocation, and a payload
+            // holding anything but exactly point_count values fails the
+            // length checks that follow.
+            let n = meta.point_count as usize;
+            if meta.point_count as usize > timeless_codec::MAX_BLOCK_ENTRIES {
+                return Err(format!(
+                    "chunk claims {} points in {:?} (limit {})",
+                    meta.point_count,
+                    meta.loc,
+                    timeless_codec::MAX_BLOCK_ENTRIES
+                ));
+            }
             (
-                pco::standalone::simple_decompress(ts_data).map_err(|e| e.to_string())?,
-                pco::standalone::simple_decompress(val_data).map_err(|e| e.to_string())?,
+                timeless_codec::pco_decompress_capped(ts_data, n, "chunk timestamps")?,
+                timeless_codec::pco_decompress_capped(val_data, n, "chunk values")?,
             )
         };
         if timestamps.len() != values.len() {
@@ -4344,6 +4370,14 @@ impl Engine {
                 meta.loc,
                 timestamps.len(),
                 values.len()
+            ));
+        }
+        if timestamps.len() != meta.point_count as usize {
+            return Err(format!(
+                "chunk holds {} points but index claims {} in {:?}",
+                timestamps.len(),
+                meta.point_count,
+                meta.loc
             ));
         }
 
@@ -5343,4 +5377,116 @@ where
         }
     }
     (count, errors)
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests (issue #41): chunk payloads are untrusted input.
+// A point count that disagrees with the payload — or a corrupt pco
+// stream — must be a clean error, never an over-allocation or a
+// silently short read.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn pco_chunk_meta(point_count: u32, n: usize) -> (ChunkMeta, ChunkBytes) {
+        let ts: Vec<i64> = (0..n as i64).map(|i| 1_000 + i).collect();
+        let vs: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
+        let config = pco::ChunkConfig::default();
+        let ts_bytes = pco::standalone::simple_compress(&ts, &config).unwrap();
+        let val_bytes = pco::standalone::simple_compress(&vs, &config).unwrap();
+        let data = [ts_bytes.clone(), val_bytes.clone()].concat();
+        let meta = ChunkMeta {
+            min_ts: 1_000,
+            max_ts: 1_000 + n as i64,
+            max_ts_val: None,
+            point_count,
+            min_val: 0.0,
+            max_val: 0.0,
+            sum_val: 0.0,
+            loc: ChunkLoc::Row { rowid: 1 },
+            encoding: crate::store::ENC_PCO,
+        };
+        let bytes = ChunkBytes {
+            data: Arc::new(data.clone()),
+            ts_range: 0..ts_bytes.len(),
+            val_range: ts_bytes.len()..data.len(),
+        };
+        (meta, bytes)
+    }
+
+    #[test]
+    fn chunk_point_count_mismatch_is_an_error() {
+        let (meta, bytes) = pco_chunk_meta(3, 3);
+        let pts = Engine::decode_chunk_data(&meta, &bytes, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(pts.len(), 3);
+        // Index claims 5, payload holds 3: fail loudly, not short-read.
+        // (The bounded pco stage fires first here; a same-sized corrupt
+        // payload would fail the explicit count check instead.)
+        let (mut meta5, _) = pco_chunk_meta(5, 3);
+        meta5.loc = ChunkLoc::Row { rowid: 1 };
+        let err = Engine::decode_chunk_data(&meta5, &bytes, i64::MIN, i64::MAX)
+            .expect_err("count mismatch must fail");
+        assert!(err.contains("expected 5"), "unexpected error: {err}");
+
+        // Same mismatch on the RAW path, where no bounded pco stage
+        // runs: the explicit count check fires instead.
+        let mut ts_raw = Vec::new();
+        let mut val_raw = Vec::new();
+        for i in 0..3i64 {
+            ts_raw.extend_from_slice(&(1_000 + i).to_be_bytes());
+            val_raw.extend_from_slice(&((i as f64) * 0.5).to_be_bytes());
+        }
+        let data = [ts_raw.clone(), val_raw.clone()].concat();
+        let raw_meta = ChunkMeta {
+            point_count: 5,
+            encoding: crate::store::ENC_RAW,
+            ..meta5
+        };
+        let raw_bytes = ChunkBytes {
+            data: Arc::new(data.clone()),
+            ts_range: 0..ts_raw.len(),
+            val_range: ts_raw.len()..data.len(),
+        };
+        let err = Engine::decode_chunk_data(&raw_meta, &raw_bytes, i64::MIN, i64::MAX)
+            .expect_err("raw count mismatch must fail");
+        assert!(err.contains("claims 5"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn fold_min_max_sum_pins_nan_semantics() {
+        // Contract (issue #42): min/max ignore NaN (IEEE minNum, same
+        // as the rollup kernel's f64::min/f64::max folds), sum
+        // propagates it (IEEE addition, same as PromQL). Bit-compared:
+        // NaN != NaN would lie with assert_eq.
+        let (min, max, sum) = Engine::fold_min_max_sum(&[1.0, f64::NAN]);
+        assert_eq!((min, max), (1.0, 1.0));
+        assert!(sum.is_nan());
+        let (min, max, sum) = Engine::fold_min_max_sum(&[f64::NAN, 2.0, f64::NAN]);
+        assert_eq!((min, max), (2.0, 2.0));
+        assert!(sum.is_nan());
+        let (min, max, sum) = Engine::fold_min_max_sum(&[f64::NAN]);
+        assert!(min.is_nan() && max.is_nan() && sum.is_nan());
+        let (min, max, sum) = Engine::fold_min_max_sum(&[]);
+        assert!(min.is_nan() && max.is_nan());
+        assert_eq!(sum, 0.0);
+        let (min, max, sum) = Engine::fold_min_max_sum(&[3.0, -1.5, 7.25]);
+        assert_eq!((min, max, sum), (-1.5, 7.25, 8.75));
+    }
+
+    #[test]
+    fn corrupt_chunk_payload_is_an_error() {
+        let (meta, _) = pco_chunk_meta(3, 3);
+        let bytes = ChunkBytes {
+            data: Arc::new(vec![0u8; 32]),
+            ts_range: 0..16,
+            val_range: 16..32,
+        };
+        assert!(
+            Engine::decode_chunk_data(&meta, &bytes, i64::MIN, i64::MAX).is_err(),
+            "corrupt pco payload must fail"
+        );
+    }
 }

@@ -91,8 +91,9 @@
 //! panic or garbage spans.
 
 use timeless_codec::{
-    decode_fixed_bytes, decode_i64, decode_str, decode_str_selected, decode_u8, encode_fixed_bytes,
-    encode_i64, encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
+    check_block_range, check_entry_count, decode_fixed_bytes, decode_i64, decode_str,
+    decode_str_selected, decode_u8, encode_fixed_bytes, encode_i64, encode_str, encode_u8,
+    zstd_compress, zstd_decompress, Reader,
 };
 
 pub use crate::blocks::codec::{CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_ZSTD};
@@ -739,6 +740,9 @@ fn parse_columnar(bytes: &[u8]) -> Result<Option<(usize, usize, Vec<&[u8]>)>, St
         return Ok(None);
     }
     let n = reader.u32("entry_count")? as usize;
+    // Ceiling only: the projected path returns slices, but every
+    // downstream sized decode keys off this count.
+    check_entry_count(n, "span block")?;
     let _ts_min = reader.i64("ts_min")?;
     let _ts_max = reader.i64("ts_max")?;
     let mut lengths = vec![0usize; physical_columns];
@@ -1062,8 +1066,8 @@ fn decode_span_block_v2_v3(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         return Err(format!("span block: unknown codec {codec}"));
     }
     let n = r.u32("entry_count")? as usize;
-    let _ts_min = r.i64("ts_min")?;
-    let _ts_max = r.i64("ts_max")?;
+    check_entry_count(n, "span block")?;
+    let (ts_min, ts_max) = (r.i64("ts_min")?, r.i64("ts_max")?);
     let mut lens = vec![0usize; physical_columns];
     for (i, len) in lens.iter_mut().enumerate() {
         *len = r.u32(COLUMN_NAMES[i])? as usize;
@@ -1290,6 +1294,9 @@ fn decode_span_block_v2_v3(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
             entry.scope_dropped_attributes_count = scope_dropped_attributes[index];
         }
     }
+    // The header's range claims feed pruning elsewhere: prove them
+    // against the payload before returning spans.
+    check_block_range("span block", n, ts_min, ts_max, &timestamps)?;
     Ok(out)
 }
 
@@ -1302,8 +1309,8 @@ fn decode_span_block_v1(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
         return Err(format!("span block: unknown codec {codec}"));
     }
     let n = r.u32("entry_count")? as usize;
-    let _ts_min = r.i64("ts_min")?;
-    let _ts_max = r.i64("ts_max")?;
+    check_entry_count(n, "span block")?;
+    let (ts_min, ts_max) = (r.i64("ts_min")?, r.i64("ts_max")?);
     let mut lens = [0usize; V1_N_COLUMNS];
     for (i, len) in lens.iter_mut().enumerate() {
         *len = r.u32(V1_COLUMN_NAMES[i])? as usize;
@@ -1381,6 +1388,7 @@ fn decode_span_block_v1(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
                 scope_dropped_attributes_count: 0,
             });
         }
+        check_block_range("span block", n, ts_min, ts_max, &timestamps)?;
         return Ok(out);
     }
 
@@ -1505,6 +1513,7 @@ fn decode_span_block_v1(bytes: &[u8]) -> Result<Vec<SpanEntry>, String> {
             scope_dropped_attributes_count: 0,
         });
     }
+    check_block_range("span block", n, ts_min, ts_max, &timestamps)?;
     Ok(out)
 }
 

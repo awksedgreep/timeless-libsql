@@ -83,8 +83,9 @@
 use std::collections::BTreeSet;
 
 use timeless_codec::{
-    bitmap_len, decode_bitmap, decode_i64, decode_str, decode_u8, encode_bitmap, encode_i64,
-    encode_str, encode_u8, zstd_compress, zstd_decompress, Reader,
+    bitmap_len, check_block_range, check_entry_count, decode_bitmap, decode_i64, decode_str,
+    decode_u8, encode_bitmap, encode_i64, encode_str, encode_u8, zstd_compress, zstd_decompress,
+    Reader,
 };
 
 use super::{template, BlockMeta, LogEntry};
@@ -323,8 +324,8 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
         return Err(format!("block: unknown codec {codec}"));
     }
     let n = r.u32("entry_count")? as usize;
-    let _ts_min = r.i64("ts_min")?;
-    let _ts_max = r.i64("ts_max")?;
+    check_entry_count(n, "block")?;
+    let (ts_min, ts_max) = (r.i64("ts_min")?, r.i64("ts_max")?);
     let lens = [
         r.u32("ts column length")? as usize,
         r.u32("level column length")? as usize,
@@ -396,11 +397,15 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
                 metadata_json,
             });
         }
+        // The header's range claims feed pruning elsewhere: prove them
+        // against the payload before returning rows.
+        check_block_range("block", n, ts_min, ts_max, &timestamps)?;
         return Ok(out);
     }
 
     // ── Codecs 1/2 — the Session 5 decode path, byte-for-byte ────────
-    decode_block_legacy(codec, n, stored)
+    let entries = decode_block_legacy(codec, n, stored, ts_min, ts_max)?;
+    Ok(entries)
 }
 
 /// A block decoded through a `message_contains` filter: only rows whose
@@ -467,8 +472,8 @@ pub fn decode_block_filtered(bytes: &[u8], needle: &str) -> Result<FilteredBlock
         return full_fallback(bytes);
     }
     let n = r.u32("entry_count")? as usize;
-    let _ts_min = r.i64("ts_min")?;
-    let _ts_max = r.i64("ts_max")?;
+    check_entry_count(n, "block")?;
+    let (ts_min, ts_max) = (r.i64("ts_min")?, r.i64("ts_max")?);
     let lens = [
         r.u32("ts column length")? as usize,
         r.u32("level column length")? as usize,
@@ -544,6 +549,11 @@ pub fn decode_block_filtered(bytes: &[u8], needle: &str) -> Result<FilteredBlock
     if reader.remaining() != 0 {
         return Err("block: trailing bytes in rich metadata column".into());
     }
+    // The timestamps column decoded in full above: prove the header's
+    // range claims before returning rows. (The no-match early exit
+    // returns no rows, so there is nothing to prove there — and
+    // total_rows is header-derived either way.)
+    check_block_range("block", n, ts_min, ts_max, &timestamps)?;
     Ok(FilteredBlockRows {
         rows,
         total_rows: n,
@@ -571,10 +581,15 @@ pub fn block_message_feasible(bytes: &[u8], needle: &str) -> Result<bool, String
         ));
     }
     let codec = r.u8("codec")?;
+    // Unknown codecs fail LOUDLY: per this function's contract, `Err`
+    // falls through to `decode_block`, which reports the corruption
+    // from the path that owns it. Returning `Ok(true)` here would mask
+    // corruption as "feasible, go decode elsewhere".
     if !known_codec(codec) {
-        return Ok(true);
+        return Err(format!("block: unknown codec {codec}"));
     }
     let n = r.u32("entry_count")? as usize;
+    check_entry_count(n, "block")?;
     let _ts_min = r.i64("ts_min")?;
     let _ts_max = r.i64("ts_max")?;
     let lens = [
@@ -614,7 +629,13 @@ pub fn block_message_feasible(bytes: &[u8], needle: &str) -> Result<bool, String
     }
 }
 
-fn decode_block_legacy(codec: u8, n: usize, stored: Vec<&[u8]>) -> Result<Vec<LogEntry>, String> {
+fn decode_block_legacy(
+    codec: u8,
+    n: usize,
+    stored: Vec<&[u8]>,
+    ts_min: i64,
+    ts_max: i64,
+) -> Result<Vec<LogEntry>, String> {
     // Decompress columns for codec 2. `Cow`-style: raw columns borrow,
     // zstd columns own — a Vec<u8> per column either way keeps it simple
     // (blocks are a few hundred KB at most).
@@ -710,6 +731,7 @@ fn decode_block_legacy(codec: u8, n: usize, stored: Vec<&[u8]>) -> Result<Vec<Lo
             metadata_json,
         });
     }
+    check_block_range("block", n, ts_min, ts_max, &timestamps)?;
     Ok(out)
 }
 
@@ -824,6 +846,12 @@ fn pairs_metadata_json(metadata: &[(String, String)]) -> Result<String, String> 
 }
 
 fn metadata_pairs_from_json(json: &str) -> Result<Vec<(String, String)>, String> {
+    // Lossy projection, by design: non-string values render to their
+    // JSON text, so `{"n": 1}` and `{"n": "1"}` collapse to the same
+    // pair. These pairs feed posting-list pruning only — a negative
+    // filter where over-matching is sound because surviving rows are
+    // rechecked against the verbatim `metadata_json`, which is always
+    // stored alongside. Never treat pairs as authoritative typed data.
     let serde_json::Value::Object(object) = serde_json::from_str::<serde_json::Value>(json)
         .map_err(|error| format!("metadata JSON: {error}"))?
     else {

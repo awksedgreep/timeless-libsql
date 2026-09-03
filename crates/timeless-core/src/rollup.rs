@@ -9,6 +9,8 @@
 //!   - count:    samples in the bucket (u64)
 //!   - sum:      f64 fold, LEFT-TO-RIGHT in ascending engine ts order
 //!   - min/max:  f64::min / f64::max folds, seeded by the first sample
+//!     (NaN-ignoring, matching the engine chunk fold; sum propagates
+//!     NaN per IEEE addition — see `fold_min_max_sum`'s contract)
 //!   - last_ts/last_val: the max-ts sample; ties resolved by engine
 //!     order (the LATER element wins, same rule as the Q2 grid kernel)
 //!     `avg` is sum/count computed at READ time, never stored.
@@ -49,11 +51,22 @@ pub struct RollupBucket {
 /// validates resolution > 0 and supplies samples in engine order (the
 /// order query_range_by_id returns). Output buckets are ascending and
 /// contain at least one sample each (empty buckets do not exist).
-pub fn rollup_buckets(samples: &[(i64, f64)], resolution: i64) -> Vec<RollupBucket> {
+/// Timestamps near the i64 extremes with resolution > 1 would wrap the
+/// bucket multiplication silently — those error instead (reachable via
+/// hostile SQL timestamps, not via real clocks).
+pub fn rollup_buckets(
+    samples: &[(i64, f64)],
+    resolution: i64,
+) -> Result<Vec<RollupBucket>, String> {
     debug_assert!(resolution > 0, "caller validates resolution");
     let mut out: Vec<RollupBucket> = Vec::new();
     for &(ts, val) in samples {
-        let bucket_ts = ts.div_euclid(resolution).wrapping_mul(resolution);
+        let bucket_ts = ts
+            .div_euclid(resolution)
+            .checked_mul(resolution)
+            .ok_or_else(|| {
+                format!("rollup bucket timestamp overflows for ts {ts} at resolution {resolution}")
+            })?;
         match out.last_mut() {
             Some(b) if b.bucket_ts == bucket_ts => {
                 b.count += 1;
@@ -76,7 +89,7 @@ pub fn rollup_buckets(samples: &[(i64, f64)], resolution: i64) -> Vec<RollupBuck
             }),
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn encode_rollup_payload(buckets: &[RollupBucket]) -> Result<Vec<u8>, String> {
@@ -277,6 +290,26 @@ mod tests {
         let short = zstd::bulk::compress(&one, ROLLUP_ZSTD_LEVEL).unwrap();
         let err = decode_rollup_payload(&short).expect_err("short body must fail");
         assert!(err.contains("require"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn kernel_nan_and_extreme_ts() {
+        // NaN contract (issue #42), same as the engine chunk fold:
+        // min/max ignore NaN, sum propagates it.
+        let buckets = rollup_buckets(&[(0, 1.0), (1, f64::NAN)], 60).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!((buckets[0].min, buckets[0].max), (1.0, 1.0));
+        assert!(buckets[0].sum.is_nan());
+        // Hostile timestamps would wrap the bucket multiplication
+        // silently — they error instead. Only the negative extreme can
+        // overflow (Euclidean floor pushes past MIN; on the positive
+        // side q*R <= ts always holds).
+        assert!(rollup_buckets(&[(i64::MIN, 1.0)], 300).is_err());
+        // Ordinary extremes still bucket exactly.
+        let buckets = rollup_buckets(&[(i64::MAX, 1.0)], 300).unwrap();
+        assert_eq!(buckets[0].bucket_ts, i64::MAX - i64::MAX % 300);
+        let buckets = rollup_buckets(&[(i64::MAX, 1.0)], 1).unwrap();
+        assert_eq!(buckets[0].bucket_ts, i64::MAX);
     }
 
     #[test]

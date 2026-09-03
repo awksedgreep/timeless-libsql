@@ -171,8 +171,10 @@ fn tokenize(msg: &str, split_runs: bool) -> (String, Vec<Var<'_>>) {
             // Non-token byte: copy the whole (possibly multi-byte) char
             // verbatim. Non-ASCII never starts a token, so char
             // boundaries are respected by construction.
+            debug_assert!(msg.is_char_boundary(i));
             let ch_len = utf8_char_len(b);
             let end = (i + ch_len).min(bytes.len());
+            debug_assert!(msg.is_char_boundary(end));
             template.push_str(&msg[i..end]);
             i = end;
         }
@@ -263,8 +265,10 @@ fn detokenize(
             }
             i += 2;
         } else {
+            debug_assert!(template.is_char_boundary(i));
             let ch_len = utf8_char_len(bytes[i]);
             let end = (i + ch_len).min(bytes.len());
+            debug_assert!(template.is_char_boundary(end));
             out.push_str(&template[i..end]);
             i = end;
         }
@@ -662,8 +666,10 @@ fn template_segments(template: &str, out: &mut Vec<String>) {
                 }
             }
         } else {
+            debug_assert!(template.is_char_boundary(i));
             let ch_len = utf8_char_len(bytes[i]);
             let end = (i + ch_len).min(bytes.len());
+            debug_assert!(template.is_char_boundary(end));
             seg.push_str(&template[i..end]);
             i = end;
         }

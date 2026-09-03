@@ -114,7 +114,7 @@ fn kernel_matches_naive_randomized() {
             let val = (rng.next() as f64) / (u64::MAX as f64) * 2000.0 - 1000.0;
             samples.push((ts, val));
         }
-        let kernel = rollup_buckets(&samples, resolution);
+        let kernel = rollup_buckets(&samples, resolution).unwrap();
         let naive = naive_buckets(&samples, resolution);
         assert_buckets_bit_eq(&kernel, &naive, &format!("round {round} res {resolution}"));
     }
@@ -123,28 +123,28 @@ fn kernel_matches_naive_randomized() {
 #[test]
 fn kernel_edges() {
     // Empty input → no buckets.
-    assert!(rollup_buckets(&[], 60).is_empty());
+    assert!(rollup_buckets(&[], 60).unwrap().is_empty());
 
     // Samples exactly ON bucket boundaries belong to the bucket they
     // start: [B, B+R).
-    let buckets = rollup_buckets(&[(0, 1.0), (59, 2.0), (60, 3.0)], 60);
+    let buckets = rollup_buckets(&[(0, 1.0), (59, 2.0), (60, 3.0)], 60).unwrap();
     assert_eq!(buckets.len(), 2);
     assert_eq!((buckets[0].bucket_ts, buckets[0].count), (0, 2));
     assert_eq!((buckets[1].bucket_ts, buckets[1].count), (60, 1));
 
     // Negative ts: Euclidean floor, so -1 lands in bucket -60, not 0.
-    let buckets = rollup_buckets(&[(-1, 5.0), (-60, 6.0), (-61, 7.0)], 60);
+    let buckets = rollup_buckets(&[(-1, 5.0), (-60, 6.0), (-61, 7.0)], 60).unwrap();
     // Input must be ascending for the kernel; re-sort as the engine does.
     let mut samples = vec![(-61i64, 7.0f64), (-60, 6.0), (-1, 5.0)];
     samples.sort_by_key(|&(ts, _)| ts);
-    let buckets2 = rollup_buckets(&samples, 60);
+    let buckets2 = rollup_buckets(&samples, 60).unwrap();
     assert_eq!(buckets2.len(), 2);
     assert_eq!((buckets2[0].bucket_ts, buckets2[0].count), (-120, 1)); // -61
     assert_eq!((buckets2[1].bucket_ts, buckets2[1].count), (-60, 2)); // -60, -1
     let _ = buckets;
 
     // Duplicate max-ts: the LATER element wins last_val (engine order).
-    let buckets = rollup_buckets(&[(10, 1.0), (10, 2.0)], 60);
+    let buckets = rollup_buckets(&[(10, 1.0), (10, 2.0)], 60).unwrap();
     assert_eq!(buckets[0].last_val, 2.0);
     assert_eq!(buckets[0].count, 2);
 }

@@ -2949,3 +2949,36 @@ fn closed_windows_still_coalesce_past_the_span_guard() {
     );
     assert_eq!(engine.query(&full_range_query()).unwrap().len(), 5);
 }
+
+#[test]
+fn corrupt_header_count_and_range_fail_decode() {
+    // Regression tests (issue #41): the container header is untrusted
+    // input. An over-wide count must fail at the ceiling before any
+    // allocation; a lying ts range must fail against the payload —
+    // never wrong rows. Header layout: version:1, codec:1, n:u32,
+    // ts_min:i64, ts_max:i64.
+    let entries = vec![
+        entry(1_000, 1, "one", &[]),
+        entry(2_000, 2, "two", &[("k", "v")]),
+    ];
+    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR, CODEC_COLUMNAR_V2] {
+        let (bytes, _) = encode_block(&entries, codec, 3).unwrap();
+        // The honest header validates (this also proves every codec's
+        // recorded range is exact, or the suite would fail here).
+        assert_eq!(decode_block(&bytes).unwrap().len(), 2);
+        let mut bad = bytes.clone();
+        bad[2..6].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = decode_block(&bad).expect_err("over-wide count must fail");
+        assert!(
+            err.contains("exceeds limit"),
+            "codec {codec}: unexpected error: {err}"
+        );
+        let mut bad = bytes.clone();
+        bad[6..14].copy_from_slice(&0i64.to_le_bytes());
+        let err = decode_block(&bad).expect_err("lying range must fail");
+        assert!(
+            err.contains("disagrees"),
+            "codec {codec}: unexpected error: {err}"
+        );
+    }
+}

@@ -2125,3 +2125,32 @@ fn ingest_raw_bytes_total_counts_flushed_spans_exactly_and_persists() {
     let reopened = SpanBlockEngine::new(Box::new(spy(&shared)), auto_config(0, 100)).unwrap();
     assert_eq!(reopened.load_ingest_raw_total().unwrap(), expected);
 }
+
+#[test]
+fn corrupt_span_header_count_and_range_fail_decode() {
+    // Regression tests (issue #41): same contract as the logs blocks —
+    // over-wide counts fail at the ceiling, lying ranges fail against
+    // the payload. Header layout matches the logs container.
+    let entries = vec![
+        span(1, 1, None, "op", "svc", 1, 1, 1_000, &[]),
+        span(1, 2, Some(1), "op", "svc", 1, 1, 2_000, &[("k", "v")]),
+    ];
+    for codec in [CODEC_RAW, CODEC_ZSTD, CODEC_COLUMNAR, CODEC_COLUMNAR_V2] {
+        let (bytes, _) = encode_span_block(&entries, codec, 7).unwrap();
+        assert_eq!(decode_span_block(&bytes).unwrap().len(), 2);
+        let mut bad = bytes.clone();
+        bad[2..6].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = decode_span_block(&bad).expect_err("over-wide count must fail");
+        assert!(
+            err.contains("exceeds limit"),
+            "codec {codec}: unexpected error: {err}"
+        );
+        let mut bad = bytes.clone();
+        bad[6..14].copy_from_slice(&0i64.to_le_bytes());
+        let err = decode_span_block(&bad).expect_err("lying range must fail");
+        assert!(
+            err.contains("disagrees"),
+            "codec {codec}: unexpected error: {err}"
+        );
+    }
+}
