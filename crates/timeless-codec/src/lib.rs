@@ -1291,7 +1291,8 @@ mod tests {
             encoding: ENC_STR_DICT,
             payload: dict_payload,
         }
-        .to_bytes();
+        .to_bytes()
+        .unwrap();
 
         for error in [
             decode_str(&dict_frame, 0).unwrap_err(),
@@ -1309,7 +1310,8 @@ mod tests {
             encoding: ENC_STR_ZSTD,
             payload: empty_zstd,
         }
-        .to_bytes();
+        .to_bytes()
+        .unwrap();
         let error = decode_str(&concat_frame, u32::MAX as usize).unwrap_err();
         assert!(error.contains("string column"), "{error}");
         assert!(
