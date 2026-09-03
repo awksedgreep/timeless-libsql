@@ -14,6 +14,49 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- **Observability schema v1: friendly companion views install with every
+  signal table.** Creating a `timeless_metrics`, `timeless_logs`, or
+  `timeless_traces` virtual table now installs a family of public views in
+  the same transaction, so ordinary SQL users get stable, readable shapes
+  without reproducing expert recipes (MySQL Performance Schema spirit;
+  #20, #21, #27). Naming is deterministic — `timeless_<source>_<kind>` —
+  and every object is recorded with its schema version and a human
+  description in a shared `timeless_schema_inventory` table, which is the
+  source of truth for removal and the capability query for what is
+  installed. Traces: `_spans` (hex IDs, native plus human-readable UTC
+  timing), `_summary` (per-trace counts, envelope timing, root
+  rows/state, ordered service set, `completeness` always `'unknown'` —
+  the exact `TSQ-04`/`TSQ-05` retained-snapshot semantics), `_services`,
+  `_operations`, `_errors`, `_roots`. Logs: `_entries` (verbatim typed
+  metadata, unit-baked friendly time), `_services` and `_fields` (only
+  for declared index keys). Metrics: `_series` (catalog reads only) and
+  `_latest` (exact arg-max join; tied timestamps return all tied rows).
+  Every body reads only public surfaces — no shadow tables, no new
+  evaluators — and is validated against the object catalog in
+  `docs/OBSERVABILITY_SCHEMA.md` by the query-contract harness.
+
+### Changed
+
+- **Companion-view lifecycle.** Installs are collision-safe (a foreign
+  object at a derived name fails the `CREATE` before anything is
+  touched), idempotent, and rollback-safe; `DROP TABLE` removes exactly
+  the objects the inventory attributes to that source. Opening a
+  database refreshes stale definitions best-effort — per object, by
+  version — so releases migrate views automatically with no separate
+  upgrade step; read-only opens keep working with what is installed,
+  and stale shapes fail loudly at query time rather than returning
+  wrong rows. View bodies never schema-qualify their sources, so
+  installed views survive direct opens, backup copies, and `ATTACH`
+  under any alias. All three signal vtabs are now marked Innocuous
+  (metrics already was), so companion views resolve under
+  `trusted_schema=off` in a stock `sqlite3` shell. Traces and logs
+  base-table reads through the views are vtab scans with their existing
+  pushdowns; `timeless_capabilities()` gains an `observability_schema`
+  key. Lifecycle and compatibility policy:
+  `docs/OBSERVABILITY_SCHEMA.md`.
+
 ## [0.7.9] — 2026-09-02
 
 ### Added
