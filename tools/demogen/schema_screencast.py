@@ -43,95 +43,95 @@ PROMPT = b"sqlite> "
 # the reader's time. Every result below was verified against a real
 # database; timestamps are fixed so takes are identical.
 SCRIPT = [
-    (".load ./target/release/libtimeless_ext", 0.25, 0),
-    ("PRAGMA journal_mode=WAL;", 0.3, 0),
-    (".mode box", 0.3, 0),
+    (".load ./target/release/libtimeless_ext", 0.15, 0),
+    ("PRAGMA journal_mode=WAL;", 0.15, 0),
+    (".mode box", 0.15, 0),
     (".print '-- one CREATE per signal. no extra commands, no installer to run'",
-     0.4, 0),
-    ("CREATE VIRTUAL TABLE metrics USING timeless_metrics;", 1.0),
+     0.3, 0),
+    ("CREATE VIRTUAL TABLE metrics USING timeless_metrics;", 0.6),
     ("CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,host');",
-     1.0),
-    ("CREATE VIRTUAL TABLE traces USING timeless_traces;", 1.0),
+     0.6),
+    ("CREATE VIRTUAL TABLE traces USING timeless_traces;", 0.6),
     (".print '-- companions installed themselves, and the inventory "
-     "describes every object'", 0.4, 0),
+     "describes every object'", 0.3, 0),
     ("SELECT object_name, object_kind, schema_version "
-     "FROM timeless_schema_inventory ORDER BY object_name;", 4.0),
+     "FROM timeless_schema_inventory ORDER BY object_name;", 1.5),
     # ── seed a small, readable incident ─────────────────────────────
     (".print '-- seed a tiny incident: a checkout request whose db call failed'",
-     0.4, 0),
+     0.3, 0),
     ("INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, "
      "kind, status, start_ts, duration_ns) VALUES "
      "('aaaa0000000000000000000000000000', '0100000000000000', NULL, "
      "'POST /checkout', 'checkout', 'server', 'ok', 1753000000123000000, 8500000);",
-     1.4),
+     0.5),
     ("INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, "
      "kind, status, start_ts, duration_ns) VALUES "
      "('aaaa0000000000000000000000000000', '0200000000000000', "
      "'0100000000000000', 'SELECT items', 'db', 'client', 'error', "
-     "1753000000200000000, 1200000);", 1.4),
+     "1753000000200000000, 1200000);", 0.5),
     ("INSERT INTO logs(ts, level, message, metadata) VALUES "
      "(1753000000456, 'error', 'payment declined', "
-     "'{\"service\":\"payments\",\"retryable\":false}');", 1.2),
+     "'{\"service\":\"payments\",\"retryable\":false}');", 0.4),
     ("INSERT INTO metrics(name, ts, value, labels) VALUES "
-     "('checkout_errors', 1753000000, 1.0, '{\"host\":\"web1\"}');", 1.2),
+     "('checkout_errors', 1753000000, 1.0, '{\"host\":\"web1\"}');", 0.4),
     ("INSERT INTO metrics(name, ts, value, labels) VALUES "
-     "('checkout_latency', 1753000000, 0.85, '{\"host\":\"web1\"}');", 1.2),
-    ("INSERT INTO metrics(metrics) VALUES ('flush');", 0.8),
-    ("INSERT INTO logs(logs) VALUES ('flush');", 0.8),
-    ("INSERT INTO traces(traces) VALUES ('flush');", 0.8),
+     "('checkout_latency', 1753000000, 0.85, '{\"host\":\"web1\"}');", 0.4),
+    ("INSERT INTO metrics(metrics) VALUES ('flush');", 0.3),
+    ("INSERT INTO logs(logs) VALUES ('flush');", 0.3),
+    ("INSERT INTO traces(traces) VALUES ('flush');", 0.3),
     # ── traces ──────────────────────────────────────────────────────
     (".print '-- spans, with ids you can read and times you can read'",
-     0.4, 0),
+     0.3, 0),
     ("SELECT trace_id, name, service, status, start_time, duration_ms "
-     "FROM timeless_traces_spans;", 3.5),
+     "FROM timeless_traces_spans;", 1.3),
     (".print '-- one row per trace. root state, service set, and "
-     "completeness never overreach'", 0.4, 0),
+     "completeness never overreach'", 0.3, 0),
     ("SELECT trace_id, span_rows, error_rows, root_state, root_name, "
-     "services, completeness FROM timeless_traces_summary;", 4.0),
-    (".print '-- the error span, straight from its own view'", 0.4, 0),
-    ("SELECT name, service, start_time FROM timeless_traces_errors;", 3.0),
+     "services, completeness FROM timeless_traces_summary;", 1.5),
+    (".print '-- the error span, straight from its own view'", 0.3, 0),
+    ("SELECT name, service, start_time FROM timeless_traces_errors;", 1.0),
     (".print '-- catalogs, for building dropdowns and service maps'",
-     0.4, 0),
-    ("SELECT service, operation FROM timeless_traces_operations;", 3.0),
+     0.3, 0),
+    ("SELECT service, operation FROM timeless_traces_operations;", 1.0),
     # ── logs ────────────────────────────────────────────────────────
     (".print '-- log entries: receipt-style UTC, message, metadata kept as "
-     "typed JSON'", 0.4, 0),
+     "typed JSON'", 0.3, 0),
     ("SELECT ts_time, level, message, json_extract(metadata, '$.retryable') "
-     "AS retryable FROM timeless_logs_entries;", 3.5),
-    (".print '-- what you can filter on fast (declared index keys)'", 0.4, 0),
-    ("SELECT field FROM timeless_logs_fields;", 2.5),
-    ("SELECT service FROM timeless_logs_services;", 2.5),
+     "AS retryable FROM timeless_logs_entries;", 1.3),
+    (".print '-- what you can filter on fast (declared index keys)'", 0.3, 0),
+    ("SELECT field FROM timeless_logs_fields;", 0.9),
+    ("SELECT service FROM timeless_logs_services;", 0.9),
     # ── metrics ─────────────────────────────────────────────────────
     (".print '-- newest value per series, in plain words and plain time'",
-     0.4, 0),
-    ("SELECT name, labels, value, ts_time FROM timeless_metrics_latest;", 3.5),
-    (".print '-- and the catalog: what exists, how much of it'", 0.4, 0),
-    ("SELECT name, points FROM timeless_metrics_series;", 3.0),
+     0.3, 0),
+    ("SELECT name, labels, value, ts_time FROM timeless_metrics_latest;", 1.3),
+    (".print '-- and the catalog: what exists, how much of it'", 0.3, 0),
+    ("SELECT name, points FROM timeless_metrics_series;", 1.0),
     # ── lifecycle ───────────────────────────────────────────────────
-    (".mode list --charlimit 0 --linelimit 0", 0.2, 0),
+    (".mode list --charlimit 0 --linelimit 0", 0.15, 0),
     (".print '-- dropping a table uninstalls exactly its own objects -- "
-     "nothing else is touched'", 0.4, 0),
-    ("DROP TABLE traces;", 1.0),
+     "nothing else is touched'", 0.3, 0),
+    ("DROP TABLE traces;", 0.5),
     ("SELECT object_name FROM timeless_schema_inventory "
-     "WHERE source_table = 'traces';", 2.5),
+     "WHERE source_table = 'traces';", 1.0),
     (".print '-- (no rows: the traces companions left with their table)'",
-     0.6, 0),
+     0.4, 0),
     ("SELECT object_name FROM timeless_schema_inventory "
-     "WHERE source_table = 'logs';", 2.5),
+     "WHERE source_table = 'logs';", 1.0),
     (".print '-- logs companions untouched. that is the whole contract.'",
-     0.6, 0),
+     0.5, 0),
 ]
 
 
 def type_line(fd, line, pace=1.0):
     if pace <= 0:
         os.write(fd, line.encode())
-        time.sleep(0.08)
+        time.sleep(0.06)
     else:
         for ch in line:
             os.write(fd, ch.encode())
-            time.sleep(random.uniform(0.015, 0.045) * pace)
-        time.sleep(0.25)
+            time.sleep(random.uniform(0.006, 0.016) * pace)
+        time.sleep(0.08)
     os.write(fd, b"\r")
 
 
@@ -211,11 +211,11 @@ def main():
         pump_until_prompt(fd)
         for command, dwell, *rest in SCRIPT:
             pace = rest[0] if rest else 1.0
-            time.sleep(0.6 if pace else 0.15)
+            time.sleep(0.25 if pace else 0.1)
             type_line(fd, command, pace)
             pump_until_prompt(fd)
             time.sleep(dwell)
-        time.sleep(1.0)
+        time.sleep(0.6)
         os.write(fd, b".quit\r")
         pump_until_prompt(fd)
     finally:
