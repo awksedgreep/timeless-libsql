@@ -166,24 +166,29 @@ def type_line(fd, line, pace=1.0):
 
 # ── built-in asciinema-v3 recorder ────────────────────────────────
 # The pty echoes everything we type, so capturing the output stream
-# captures the whole session. Each frame gets its own relative
-# timestamp, which preserves the pacing exactly as it played.
+# captures the whole session.
 #
 # v3 shape (what agg and asciinema 3.x consume): header with a `term`
-# object, and events as {"time", "code", "data"} objects.
+# object, and events as {"time", "code", "data"} objects — where `time`
+# is the INTERVAL since the previous event, not an absolute timestamp.
+# agg literally accumulates these into its timeline, so writing absolute
+# times here made every GIF frame wait ~5s (the idle cap).
 
 CAST_START = None
+CAST_LAST = None
 CAST_FILE = None
 
 
 def emit(frame: bytes):
     """Write one output frame to stdout and, when recording, to the cast."""
-    global CAST_START
+    global CAST_LAST
     os.write(1, frame)
     if CAST_FILE is not None:
-        elapsed = time.monotonic() - CAST_START
+        now = time.monotonic()
+        delta = now - (CAST_LAST if CAST_LAST is not None else CAST_START)
+        CAST_LAST = now
         event = {
-            "time": round(elapsed, 6),
+            "time": round(delta, 6),
             "code": "o",
             "data": frame.decode("utf-8", "replace"),
         }

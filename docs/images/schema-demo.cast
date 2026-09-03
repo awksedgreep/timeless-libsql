@@ -1,633 +1,633 @@
 {"version": 3, "term": {"cols": 120, "rows": 32}, "env": {"TERM": "xterm-256color"}}
-{"time":0.002856,"code":"o","data":"SQLite version 3.53.4 2026-07-24 19:02:57\r\nEnter \".help\" for usage hints.\r\n"}
-{"time":0.003046,"code":"o","data":"\u001b[?2004h"}
-{"time":0.003062,"code":"o","data":"sqlite> "}
-{"time":0.163354,"code":"o","data":".load ./target/release/libtimeless_ext"}
-{"time":0.16374,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":0.164019,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":0.474439,"code":"o","data":"PRAGMA journal_mode=WAL;"}
-{"time":0.474734,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":0.474973,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 journal_mode \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 wal          \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":0.785372,"code":"o","data":".mode box"}
-{"time":0.785658,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
-{"time":1.095981,"code":"o","data":".print '-- one CREATE per signal. no extra commands, no installer to run'"}
-{"time":1.09628,"code":"o","data":"\r\n\u001b[?2004l\r-- one CREATE per signal. no extra commands, no installer to run\r\n\u001b[?2004hsqlite> "}
-{"time":1.665408,"code":"o","data":"CREATE"}
-{"time":1.693747,"code":"o","data":" V"}
-{"time":1.723871,"code":"o","data":"IR"}
-{"time":1.741603,"code":"o","data":"TUAL"}
-{"time":1.766024,"code":"o","data":" T"}
-{"time":1.791478,"code":"o","data":"ABLE"}
-{"time":1.811026,"code":"o","data":" metri"}
-{"time":1.836845,"code":"o","data":"cs U"}
-{"time":1.859154,"code":"o","data":"SIN"}
-{"time":1.883157,"code":"o","data":"G time"}
-{"time":1.912347,"code":"o","data":"less"}
-{"time":1.924836,"code":"o","data":"_me"}
-{"time":1.9497,"code":"o","data":"tri"}
-{"time":2.055648,"code":"o","data":"cs;"}
-{"time":2.056029,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":2.057251,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":2.925497,"code":"o","data":"CR"}
-{"time":2.946911,"code":"o","data":"EA"}
-{"time":2.975349,"code":"o","data":"TE "}
-{"time":2.998721,"code":"o","data":"VIRT"}
-{"time":3.018763,"code":"o","data":"UAL "}
-{"time":3.044826,"code":"o","data":"TABLE"}
-{"time":3.06264,"code":"o","data":" logs"}
-{"time":3.088357,"code":"o","data":" USING"}
-{"time":3.109374,"code":"o","data":" tim"}
-{"time":3.132525,"code":"o","data":"eless_"}
-{"time":3.153301,"code":"o","data":"lo"}
-{"time":3.183222,"code":"o","data":"gs("}
-{"time":3.183276,"code":"o","data":"inde"}
-{"time":3.232336,"code":"o","data":"x_"}
-{"time":3.255951,"code":"o","data":"ke"}
-{"time":3.272477,"code":"o","data":"ys="}
-{"time":3.293843,"code":"o","data":"'servi"}
-{"time":3.315077,"code":"o","data":"ce,"}
-{"time":3.329926,"code":"o","data":"host'"}
-{"time":3.438921,"code":"o","data":");"}
-{"time":3.439296,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":3.440233,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":4.306195,"code":"o","data":"CRE"}
-{"time":4.332107,"code":"o","data":"ATE"}
-{"time":4.353657,"code":"o","data":" VI"}
-{"time":4.368824,"code":"o","data":"RTU"}
-{"time":4.392251,"code":"o","data":"AL T"}
-{"time":4.392299,"code":"o","data":"ABLE t"}
-{"time":4.446657,"code":"o","data":"race"}
-{"time":4.465853,"code":"o","data":"s US"}
-{"time":4.479332,"code":"o","data":"ING "}
-{"time":4.479381,"code":"o","data":"timele"}
-{"time":4.517835,"code":"o","data":"ss"}
-{"time":4.5423,"code":"o","data":"_trac"}
-{"time":4.634629,"code":"o","data":"es;"}
-{"time":4.63492,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":4.636085,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":5.396428,"code":"o","data":".print '-- companions installed themselves, and the inventory describes every object'"}
-{"time":5.396783,"code":"o","data":"\r\n\u001b[?2004l\r-- companions installed themselves, and the inventory describes every object\r\n\u001b[?2004hsqlite> "}
-{"time":5.959377,"code":"o","data":"SELE"}
-{"time":5.980207,"code":"o","data":"CT o"}
-{"time":5.99429,"code":"o","data":"bject"}
-{"time":6.007298,"code":"o","data":"_nam"}
-{"time":6.035694,"code":"o","data":"e,"}
-{"time":6.048634,"code":"o","data":" o"}
-{"time":6.073834,"code":"o","data":"bject_"}
-{"time":6.102481,"code":"o","data":"ki"}
-{"time":6.116792,"code":"o","data":"nd, s"}
-{"time":6.138221,"code":"o","data":"che"}
-{"time":6.138468,"code":"o","data":"ma"}
-{"time":6.177071,"code":"o","data":"_ver"}
-{"time":6.206526,"code":"o","data":"sio"}
-{"time":6.232415,"code":"o","data":"n "}
-{"time":6.249139,"code":"o","data":"FR"}
-{"time":6.278779,"code":"o","data":"OM"}
-{"time":6.297174,"code":"o","data":" ti"}
-{"time":6.322326,"code":"o","data":"mel"}
-{"time":6.351018,"code":"o","data":"ess_sc"}
-{"time":6.372267,"code":"o","data":"hema_i"}
-{"time":6.397919,"code":"o","data":"nv"}
-{"time":6.427232,"code":"o","data":"ent"}
-{"time":6.427286,"code":"o","data":"ory OR"}
-{"time":6.474086,"code":"o","data":"DER B"}
-{"time":6.488919,"code":"o","data":"Y obj"}
-{"time":6.508964,"code":"o","data":"ect_"}
-{"time":6.526884,"code":"o","data":"nam"}
-{"time":6.62819,"code":"o","data":"e;"}
-{"time":6.628674,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":6.628829,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502        object_name         \u2502 object_kind \u2502 schema_version \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 timeless_logs_entries      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_fields       \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_services     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_latest    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_series    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_errors     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_operations \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_roots      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_services   \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_spans      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_summary    \u2502 view        \u2502              1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":8.289381,"code":"o","data":".print '-- seed a tiny incident: a checkout request whose db call failed'"}
-{"time":8.289647,"code":"o","data":"\r\n\u001b[?2004l\r-- seed a tiny incident: a checkout request whose db call failed\r\n\u001b[?2004hsqlite> "}
-{"time":8.852355,"code":"o","data":"INSERT"}
-{"time":8.869214,"code":"o","data":" INTO"}
-{"time":8.883344,"code":"o","data":" trac"}
-{"time":8.902147,"code":"o","data":"es (t"}
-{"time":8.922768,"code":"o","data":"race_"}
-{"time":8.944812,"code":"o","data":"id, s"}
-{"time":8.967141,"code":"o","data":"pa"}
-{"time":8.994441,"code":"o","data":"n_"}
-{"time":9.016701,"code":"o","data":"id, "}
-{"time":9.037522,"code":"o","data":"par"}
-{"time":9.037604,"code":"o","data":"en"}
-{"time":9.078603,"code":"o","data":"t_spa"}
-{"time":9.078666,"code":"o","data":"n_id, "}
-{"time":9.123625,"code":"o","data":"na"}
-{"time":9.123801,"code":"o","data":"me, "}
-{"time":9.166973,"code":"o","data":"servic"}
-{"time":9.19583,"code":"o","data":"e, kin"}
-{"time":9.213324,"code":"o","data":"d, st"}
-{"time":9.237709,"code":"o","data":"atus"}
-{"time":9.262489,"code":"o","data":", st"}
-{"time":9.289384,"code":"o","data":"ar"}
-{"time":9.305726,"code":"o","data":"t_ts"}
-{"time":9.321512,"code":"o","data":", du"}
-{"time":9.334754,"code":"o","data":"rat"}
-{"time":9.350767,"code":"o","data":"ion"}
-{"time":9.362981,"code":"o","data":"_ns)"}
-{"time":9.375904,"code":"o","data":" VALU"}
-{"time":9.391962,"code":"o","data":"ES "}
-{"time":9.420056,"code":"o","data":"('aaa"}
-{"time":9.440236,"code":"o","data":"a0"}
-{"time":9.45401,"code":"o","data":"00"}
-{"time":9.48378,"code":"o","data":"000000"}
-{"time":9.497586,"code":"o","data":"000"}
-{"time":9.519622,"code":"o","data":"000000"}
-{"time":9.537449,"code":"o","data":"000"}
-{"time":9.567307,"code":"o","data":"00"}
-{"time":9.567523,"code":"o","data":"0000"}
-{"time":9.606258,"code":"o","data":"0', "}
-{"time":9.635395,"code":"o","data":"'0"}
-{"time":9.659387,"code":"o","data":"1000"}
-{"time":9.659584,"code":"o","data":"0000"}
-{"time":9.699912,"code":"o","data":"000"}
-{"time":9.714523,"code":"o","data":"00"}
-{"time":9.734061,"code":"o","data":"00'"}
-{"time":9.749237,"code":"o","data":", N"}
-{"time":9.763323,"code":"o","data":"ULL, "}
-{"time":9.793359,"code":"o","data":"'PO"}
-{"time":9.809756,"code":"o","data":"ST "}
-{"time":9.825679,"code":"o","data":"/c"}
-{"time":9.848407,"code":"o","data":"heckou"}
-{"time":9.862541,"code":"o","data":"t'"}
-{"time":9.886423,"code":"o","data":", 'ch"}
-{"time":9.898943,"code":"o","data":"ecko"}
-{"time":9.927578,"code":"o","data":"ut'"}
-{"time":9.94964,"code":"o","data":", '"}
-{"time":9.9632,"code":"o","data":"ser"}
-{"time":9.983321,"code":"o","data":"ver', "}
-{"time":10.00989,"code":"o","data":"'ok'"}
-{"time":10.038066,"code":"o","data":", 175"}
-{"time":10.05602,"code":"o","data":"300000 \r"}
-{"time":10.071124,"code":"o","data":"01230"}
-{"time":10.099442,"code":"o","data":"00"}
-{"time":10.120699,"code":"o","data":"00"}
-{"time":10.136242,"code":"o","data":"0, 850"}
-{"time":10.150067,"code":"o","data":"00"}
-{"time":10.166218,"code":"o","data":"00)"}
-{"time":10.264425,"code":"o","data":";"}
-{"time":10.264661,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":10.264699,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":11.033304,"code":"o","data":"INSE"}
-{"time":11.055508,"code":"o","data":"RT INT"}
-{"time":11.083981,"code":"o","data":"O t"}
-{"time":11.105673,"code":"o","data":"ra"}
-{"time":11.105725,"code":"o","data":"ces ("}
-{"time":11.149368,"code":"o","data":"trac"}
-{"time":11.177833,"code":"o","data":"e_id,"}
-{"time":11.207561,"code":"o","data":" s"}
-{"time":11.225895,"code":"o","data":"pan_i"}
-{"time":11.238771,"code":"o","data":"d, pa"}
-{"time":11.258487,"code":"o","data":"re"}
-{"time":11.282822,"code":"o","data":"nt"}
-{"time":11.308983,"code":"o","data":"_s"}
-{"time":11.338891,"code":"o","data":"pan_"}
-{"time":11.365733,"code":"o","data":"id,"}
-{"time":11.394377,"code":"o","data":" name,"}
-{"time":11.409296,"code":"o","data":" s"}
-{"time":11.437974,"code":"o","data":"erv"}
-{"time":11.455531,"code":"o","data":"ic"}
-{"time":11.471543,"code":"o","data":"e,"}
-{"time":11.499966,"code":"o","data":" k"}
-{"time":11.515694,"code":"o","data":"ind, s"}
-{"time":11.541632,"code":"o","data":"ta"}
-{"time":11.571742,"code":"o","data":"tu"}
-{"time":11.587989,"code":"o","data":"s, s"}
-{"time":11.60518,"code":"o","data":"ta"}
-{"time":11.618332,"code":"o","data":"rt_ts"}
-{"time":11.645393,"code":"o","data":", d"}
-{"time":11.665384,"code":"o","data":"ura"}
-{"time":11.688868,"code":"o","data":"tion_"}
-{"time":11.688938,"code":"o","data":"ns) VA"}
-{"time":11.7308,"code":"o","data":"LUES ("}
-{"time":11.730849,"code":"o","data":"'aa"}
-{"time":11.772375,"code":"o","data":"aa"}
-{"time":11.791406,"code":"o","data":"000"}
-{"time":11.804854,"code":"o","data":"000"}
-{"time":11.820447,"code":"o","data":"000"}
-{"time":11.842069,"code":"o","data":"000000"}
-{"time":11.864687,"code":"o","data":"00"}
-{"time":11.889762,"code":"o","data":"00"}
-{"time":11.905636,"code":"o","data":"00000"}
-{"time":11.921217,"code":"o","data":"0000',"}
-{"time":11.940135,"code":"o","data":" '0200"}
-{"time":11.961298,"code":"o","data":"00000"}
-{"time":11.985212,"code":"o","data":"0000"}
-{"time":12.003402,"code":"o","data":"000"}
-{"time":12.020939,"code":"o","data":"', '"}
-{"time":12.020976,"code":"o","data":"010000"}
-{"time":12.067207,"code":"o","data":"000"}
-{"time":12.067257,"code":"o","data":"00000"}
-{"time":12.106063,"code":"o","data":"00"}
-{"time":12.122851,"code":"o","data":"',"}
-{"time":12.148127,"code":"o","data":" '"}
-{"time":12.160931,"code":"o","data":"SELE"}
-{"time":12.161004,"code":"o","data":"CT ite"}
-{"time":12.210943,"code":"o","data":"ms',"}
-{"time":12.238209,"code":"o","data":" '"}
-{"time":12.26047,"code":"o","data":"db"}
-{"time":12.275946,"code":"o","data":"',"}
-{"time":12.292368,"code":"o","data":" '"}
-{"time":12.306553,"code":"o","data":"cli"}
-{"time":12.306589,"code":"o","data":"ent'"}
-{"time":12.336027,"code":"o","data":", '"}
-{"time":12.336077,"code":"o","data":"error'"}
-{"time":12.378809,"code":"o","data":", 1"}
-{"time":12.400193,"code":"o","data":"753"}
-{"time":12.414689,"code":"o","data":"0000"}
-{"time":12.438273,"code":"o","data":"0020"}
-{"time":12.456904,"code":"o","data":"00"}
-{"time":12.476389,"code":"o","data":"00000,"}
-{"time":12.492757,"code":"o","data":" 12"}
-{"time":12.522748,"code":"o","data":"00"}
-{"time":12.618552,"code":"o","data":"000);"}
-{"time":12.618944,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":12.619104,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":13.39068,"code":"o","data":"INSE"}
-{"time":13.406181,"code":"o","data":"RT IN"}
-{"time":13.424805,"code":"o","data":"TO log"}
-{"time":13.448726,"code":"o","data":"s("}
-{"time":13.462038,"code":"o","data":"ts, "}
-{"time":13.474534,"code":"o","data":"le"}
-{"time":13.487109,"code":"o","data":"vel, m"}
-{"time":13.503653,"code":"o","data":"essage"}
-{"time":13.533814,"code":"o","data":", m"}
-{"time":13.547635,"code":"o","data":"etadat"}
-{"time":13.561724,"code":"o","data":"a) VAL"}
-{"time":13.584875,"code":"o","data":"UES "}
-{"time":13.606677,"code":"o","data":"(1753"}
-{"time":13.631816,"code":"o","data":"000000"}
-{"time":13.648796,"code":"o","data":"456"}
-{"time":13.661622,"code":"o","data":", 'err"}
-{"time":13.674726,"code":"o","data":"or',"}
-{"time":13.691713,"code":"o","data":" 'paym"}
-{"time":13.712354,"code":"o","data":"ent de"}
-{"time":13.735407,"code":"o","data":"clin"}
-{"time":13.757094,"code":"o","data":"ed"}
-{"time":13.77897,"code":"o","data":"', "}
-{"time":13.804917,"code":"o","data":"'{\"s"}
-{"time":13.832889,"code":"o","data":"erv"}
-{"time":13.854377,"code":"o","data":"ic"}
-{"time":13.88146,"code":"o","data":"e\":\" \r"}
-{"time":13.898964,"code":"o","data":"pa"}
-{"time":13.925898,"code":"o","data":"yme"}
-{"time":13.94999,"code":"o","data":"nts\","}
-{"time":13.975817,"code":"o","data":"\"ret"}
-{"time":13.988934,"code":"o","data":"ryab"}
-{"time":14.010673,"code":"o","data":"le\":f"}
-{"time":14.025643,"code":"o","data":"alse}"}
-{"time":14.13558,"code":"o","data":"');"}
-{"time":14.135906,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":14.136037,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":14.801135,"code":"o","data":"INS"}
-{"time":14.827712,"code":"o","data":"ER"}
-{"time":14.844323,"code":"o","data":"T I"}
-{"time":14.8621,"code":"o","data":"NTO me"}
-{"time":14.884442,"code":"o","data":"trics("}
-{"time":14.904237,"code":"o","data":"nam"}
-{"time":14.921706,"code":"o","data":"e,"}
-{"time":14.948792,"code":"o","data":" t"}
-{"time":14.961474,"code":"o","data":"s, v"}
-{"time":14.981278,"code":"o","data":"alue,"}
-{"time":14.981509,"code":"o","data":" label"}
-{"time":15.016153,"code":"o","data":"s) VAL"}
-{"time":15.035714,"code":"o","data":"UES ("}
-{"time":15.052239,"code":"o","data":"'ch"}
-{"time":15.065785,"code":"o","data":"ec"}
-{"time":15.094198,"code":"o","data":"kout_e"}
-{"time":15.110696,"code":"o","data":"rr"}
-{"time":15.136629,"code":"o","data":"ors'"}
-{"time":15.160758,"code":"o","data":", 175"}
-{"time":15.179585,"code":"o","data":"30000"}
-{"time":15.206552,"code":"o","data":"00, 1."}
-{"time":15.219762,"code":"o","data":"0, '"}
-{"time":15.241283,"code":"o","data":"{\"ho"}
-{"time":15.25652,"code":"o","data":"st"}
-{"time":15.28653,"code":"o","data":"\":\""}
-{"time":15.286601,"code":"o","data":"web1\"}"}
-{"time":15.410154,"code":"o","data":"');"}
-{"time":15.410685,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":15.410944,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":16.08432,"code":"o","data":"INSER"}
-{"time":16.102588,"code":"o","data":"T IN"}
-{"time":16.12636,"code":"o","data":"TO met"}
-{"time":16.152943,"code":"o","data":"rics"}
-{"time":16.183248,"code":"o","data":"(n"}
-{"time":16.205419,"code":"o","data":"am"}
-{"time":16.219675,"code":"o","data":"e, ts,"}
-{"time":16.243779,"code":"o","data":" value"}
-{"time":16.256275,"code":"o","data":", "}
-{"time":16.27604,"code":"o","data":"label"}
-{"time":16.290702,"code":"o","data":"s) "}
-{"time":16.307456,"code":"o","data":"VA"}
-{"time":16.32888,"code":"o","data":"LUES ("}
-{"time":16.342971,"code":"o","data":"'chec"}
-{"time":16.370889,"code":"o","data":"kout_"}
-{"time":16.397574,"code":"o","data":"late"}
-{"time":16.415536,"code":"o","data":"ncy"}
-{"time":16.445364,"code":"o","data":"', 17"}
-{"time":16.474894,"code":"o","data":"5300"}
-{"time":16.487159,"code":"o","data":"0000,"}
-{"time":16.503571,"code":"o","data":" 0."}
-{"time":16.518326,"code":"o","data":"85"}
-{"time":16.533794,"code":"o","data":", "}
-{"time":16.563574,"code":"o","data":"'{\"h"}
-{"time":16.582364,"code":"o","data":"ost"}
-{"time":16.597569,"code":"o","data":"\":\""}
-{"time":16.624546,"code":"o","data":"web1"}
-{"time":16.642384,"code":"o","data":"\"}')"}
-{"time":16.745253,"code":"o","data":";"}
-{"time":16.745599,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":16.74583,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":17.414425,"code":"o","data":"INSER"}
-{"time":17.435648,"code":"o","data":"T INT"}
-{"time":17.452441,"code":"o","data":"O m"}
-{"time":17.471572,"code":"o","data":"etri"}
-{"time":17.491581,"code":"o","data":"cs(met"}
-{"time":17.520332,"code":"o","data":"rics) "}
-{"time":17.534397,"code":"o","data":"VALUE"}
-{"time":17.560248,"code":"o","data":"S ('fl"}
-{"time":17.576232,"code":"o","data":"ush"}
-{"time":17.670232,"code":"o","data":"');"}
-{"time":17.6706,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":17.671052,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":18.237621,"code":"o","data":"IN"}
-{"time":18.267645,"code":"o","data":"SERT "}
-{"time":18.280359,"code":"o","data":"INTO "}
-{"time":18.299725,"code":"o","data":"lo"}
-{"time":18.325177,"code":"o","data":"gs"}
-{"time":18.347962,"code":"o","data":"(log"}
-{"time":18.371049,"code":"o","data":"s) VA"}
-{"time":18.396149,"code":"o","data":"LU"}
-{"time":18.423676,"code":"o","data":"ES ("}
-{"time":18.45206,"code":"o","data":"'flus"}
-{"time":18.561563,"code":"o","data":"h');"}
-{"time":18.562022,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":18.562374,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":19.1405,"code":"o","data":"IN"}
-{"time":19.156459,"code":"o","data":"SERT "}
-{"time":19.17801,"code":"o","data":"INTO t"}
-{"time":19.202425,"code":"o","data":"ra"}
-{"time":19.21624,"code":"o","data":"ces"}
-{"time":19.242736,"code":"o","data":"(trac"}
-{"time":19.262281,"code":"o","data":"es) VA"}
-{"time":19.287846,"code":"o","data":"LU"}
-{"time":19.316718,"code":"o","data":"ES"}
-{"time":19.331751,"code":"o","data":" ('flu"}
-{"time":19.351689,"code":"o","data":"sh"}
-{"time":19.367475,"code":"o","data":"')"}
-{"time":19.469227,"code":"o","data":";"}
-{"time":19.469574,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":19.470024,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":19.930371,"code":"o","data":".print '-- spans, with ids you can read and times you can read'"}
-{"time":19.930802,"code":"o","data":"\r\n\u001b[?2004l\r-- spans, with ids you can read and times you can read\r\n\u001b[?2004hsqlite> "}
-{"time":20.49912,"code":"o","data":"SEL"}
-{"time":20.518526,"code":"o","data":"ECT"}
-{"time":20.539415,"code":"o","data":" t"}
-{"time":20.555709,"code":"o","data":"race"}
-{"time":20.569514,"code":"o","data":"_id, "}
-{"time":20.595926,"code":"o","data":"nam"}
-{"time":20.611481,"code":"o","data":"e, s"}
-{"time":20.629249,"code":"o","data":"erv"}
-{"time":20.652089,"code":"o","data":"ice, "}
-{"time":20.675334,"code":"o","data":"status"}
-{"time":20.689729,"code":"o","data":", st"}
-{"time":20.711301,"code":"o","data":"art_ti"}
-{"time":20.734548,"code":"o","data":"me, du"}
-{"time":20.76229,"code":"o","data":"ra"}
-{"time":20.785348,"code":"o","data":"tio"}
-{"time":20.805568,"code":"o","data":"n_ms "}
-{"time":20.823503,"code":"o","data":"FR"}
-{"time":20.842279,"code":"o","data":"OM "}
-{"time":20.859872,"code":"o","data":"time"}
-{"time":20.885248,"code":"o","data":"less"}
-{"time":20.90867,"code":"o","data":"_t"}
-{"time":20.928504,"code":"o","data":"rac"}
-{"time":20.94307,"code":"o","data":"es"}
-{"time":20.965349,"code":"o","data":"_s"}
-{"time":21.061299,"code":"o","data":"pans;"}
-{"time":21.061731,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":21.062315,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502      name      \u2502 service  \u2502 status \u2502        start_time        \u2502 duration_ms \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502 POST /checkout \u2502 checkout \u2502 ok     \u2502 2025-07-20T08:26:40.123Z \u2502         8.5 \u2502\r\n\u2502 aaaa0000000000000000000000000000 \u2502 SELECT items   \u2502 db       \u2502 error  \u2502 2025-07-20T08:26:40.200Z \u2502         1.2 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":22.522646,"code":"o","data":".print '-- one row per trace. root state, service set, and completeness never overreach'"}
-{"time":22.523082,"code":"o","data":"\r\n\u001b[?2004l\r-- one row per trace. root state, service set, and completeness never overreach\r\n\u001b[?2004hsqlite> "}
-{"time":23.103323,"code":"o","data":"SELEC"}
-{"time":23.120555,"code":"o","data":"T tra"}
-{"time":23.138372,"code":"o","data":"ce"}
-{"time":23.166872,"code":"o","data":"_id, "}
-{"time":23.193,"code":"o","data":"span_r"}
-{"time":23.21345,"code":"o","data":"ows, e"}
-{"time":23.240274,"code":"o","data":"rror"}
-{"time":23.264822,"code":"o","data":"_rows"}
-{"time":23.27966,"code":"o","data":", roo"}
-{"time":23.299438,"code":"o","data":"t_stat"}
-{"time":23.316989,"code":"o","data":"e, r"}
-{"time":23.345467,"code":"o","data":"oot_na"}
-{"time":23.374403,"code":"o","data":"me, se"}
-{"time":23.404155,"code":"o","data":"rvi"}
-{"time":23.422523,"code":"o","data":"ces,"}
-{"time":23.447229,"code":"o","data":" co"}
-{"time":23.463099,"code":"o","data":"mple"}
-{"time":23.480885,"code":"o","data":"te"}
-{"time":23.497914,"code":"o","data":"ness F"}
-{"time":23.52061,"code":"o","data":"ROM t"}
-{"time":23.541653,"code":"o","data":"im"}
-{"time":23.559933,"code":"o","data":"eles"}
-{"time":23.574114,"code":"o","data":"s_t"}
-{"time":23.60207,"code":"o","data":"race"}
-{"time":23.63225,"code":"o","data":"s_"}
-{"time":23.654311,"code":"o","data":"summ"}
-{"time":23.756573,"code":"o","data":"ary;"}
-{"time":23.756991,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":23.757864,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502 span_rows \u2502 error_rows \u2502 root_state \u2502   root_name    \u2502  services   \u2502 completeness \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502         2 \u2502          1 \u2502 unique     \u2502 POST /checkout \u2502 checkout,db \u2502 unknown      \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":25.418204,"code":"o","data":".print '-- the error span, straight from its own view'"}
-{"time":25.418644,"code":"o","data":"\r\n\u001b[?2004l\r-- the error span, straight from its own view\r\n\u001b[?2004hsqlite> "}
-{"time":25.988109,"code":"o","data":"SE"}
-{"time":26.006109,"code":"o","data":"LECT "}
-{"time":26.030244,"code":"o","data":"name, "}
-{"time":26.051805,"code":"o","data":"serv"}
-{"time":26.070074,"code":"o","data":"ice, s"}
-{"time":26.089647,"code":"o","data":"ta"}
-{"time":26.106947,"code":"o","data":"rt_ti"}
-{"time":26.126492,"code":"o","data":"me FRO"}
-{"time":26.155793,"code":"o","data":"M t"}
-{"time":26.177026,"code":"o","data":"imele"}
-{"time":26.189471,"code":"o","data":"ss_tr"}
-{"time":26.214166,"code":"o","data":"aces_e"}
-{"time":26.315039,"code":"o","data":"rrors;"}
-{"time":26.315525,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":26.315807,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502     name     \u2502 service \u2502        start_time        \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 SELECT items \u2502 db      \u2502 2025-07-20T08:26:40.200Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":27.476091,"code":"o","data":".print '-- catalogs, for building dropdowns and service maps'"}
-{"time":27.476518,"code":"o","data":"\r\n\u001b[?2004l\r-- catalogs, for building dropdowns and service maps\r\n\u001b[?2004hsqlite> "}
-{"time":28.054495,"code":"o","data":"SE"}
-{"time":28.083977,"code":"o","data":"LEC"}
-{"time":28.107633,"code":"o","data":"T "}
-{"time":28.131897,"code":"o","data":"servi"}
-{"time":28.154333,"code":"o","data":"ce, o"}
-{"time":28.173036,"code":"o","data":"perati"}
-{"time":28.189567,"code":"o","data":"on F"}
-{"time":28.208554,"code":"o","data":"ROM t"}
-{"time":28.234417,"code":"o","data":"imeles"}
-{"time":28.261347,"code":"o","data":"s_trace"}
-{"time":28.305405,"code":"o","data":"s_oper"}
-{"time":28.333746,"code":"o","data":"ati"}
-{"time":28.428595,"code":"o","data":"ons;"}
-{"time":28.428863,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":28.429371,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502   operation    \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout \u2502 POST /checkout \u2502\r\n\u2502 db       \u2502 SELECT items   \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":29.589717,"code":"o","data":".print '-- log entries: receipt-style UTC, message, metadata kept as typed JSON'"}
-{"time":29.590151,"code":"o","data":"\r\n\u001b[?2004l\r-- log entries: receipt-style UTC, message, metadata kept as typed JSON\r\n\u001b[?2004hsqlite> "}
-{"time":30.157689,"code":"o","data":"SE"}
-{"time":30.172998,"code":"o","data":"LECT t"}
-{"time":30.186495,"code":"o","data":"s_time"}
-{"time":30.215087,"code":"o","data":", "}
-{"time":30.228677,"code":"o","data":"lev"}
-{"time":30.250814,"code":"o","data":"el, m"}
-{"time":30.263521,"code":"o","data":"essa"}
-{"time":30.278669,"code":"o","data":"ge, "}
-{"time":30.305091,"code":"o","data":"json"}
-{"time":30.33388,"code":"o","data":"_extra"}
-{"time":30.358252,"code":"o","data":"ct"}
-{"time":30.380819,"code":"o","data":"(meta"}
-{"time":30.399028,"code":"o","data":"dat"}
-{"time":30.427554,"code":"o","data":"a, '$."}
-{"time":30.455408,"code":"o","data":"retr"}
-{"time":30.470869,"code":"o","data":"yab"}
-{"time":30.487307,"code":"o","data":"le')"}
-{"time":30.501333,"code":"o","data":" AS r"}
-{"time":30.51765,"code":"o","data":"etr"}
-{"time":30.533246,"code":"o","data":"yabl"}
-{"time":30.55564,"code":"o","data":"e FROM"}
-{"time":30.568015,"code":"o","data":" tim"}
-{"time":30.590689,"code":"o","data":"eles"}
-{"time":30.607722,"code":"o","data":"s_lo"}
-{"time":30.62085,"code":"o","data":"gs_"}
-{"time":30.63604,"code":"o","data":"entrie"}
-{"time":30.736176,"code":"o","data":"s;"}
-{"time":30.736565,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":30.736933,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502         ts_time          \u2502 level \u2502     message      \u2502 retryable \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 2025-07-20T08:26:40.456Z \u2502 error \u2502 payment declined \u2502         0 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":32.19722,"code":"o","data":".print '-- what you can filter on fast (declared index keys)'"}
-{"time":32.197636,"code":"o","data":"\r\n\u001b[?2004l\r-- what you can filter on fast (declared index keys)\r\n\u001b[?2004hsqlite> "}
-{"time":32.761136,"code":"o","data":"SEL"}
-{"time":32.790913,"code":"o","data":"ECT"}
-{"time":32.814524,"code":"o","data":" fi"}
-{"time":32.827912,"code":"o","data":"eld"}
-{"time":32.843174,"code":"o","data":" F"}
-{"time":32.872499,"code":"o","data":"ROM "}
-{"time":32.886546,"code":"o","data":"time"}
-{"time":32.902692,"code":"o","data":"les"}
-{"time":32.919649,"code":"o","data":"s_logs"}
-{"time":32.935442,"code":"o","data":"_fie"}
-{"time":33.032936,"code":"o","data":"lds;"}
-{"time":33.033368,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":33.033573,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502  field  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 service \u2502\r\n\u2502 host    \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":34.199755,"code":"o","data":"SELEC"}
-{"time":34.217982,"code":"o","data":"T ser"}
-{"time":34.243592,"code":"o","data":"vi"}
-{"time":34.260957,"code":"o","data":"ce"}
-{"time":34.281987,"code":"o","data":" FRO"}
-{"time":34.310115,"code":"o","data":"M "}
-{"time":34.340186,"code":"o","data":"timele"}
-{"time":34.365083,"code":"o","data":"ss_lo"}
-{"time":34.381829,"code":"o","data":"gs_"}
-{"time":34.40661,"code":"o","data":"servi"}
-{"time":34.42048,"code":"o","data":"ces"}
-{"time":34.514334,"code":"o","data":";"}
-{"time":34.514729,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":34.514946,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 payments \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":35.575357,"code":"o","data":".print '-- newest value per series, in plain words and plain time'"}
-{"time":35.575753,"code":"o","data":"\r\n\u001b[?2004l\r-- newest value per series, in plain words and plain time\r\n\u001b[?2004hsqlite> "}
-{"time":36.149731,"code":"o","data":"SELEC"}
-{"time":36.17986,"code":"o","data":"T na"}
-{"time":36.193715,"code":"o","data":"me, l"}
-{"time":36.206101,"code":"o","data":"ab"}
-{"time":36.231243,"code":"o","data":"els, "}
-{"time":36.259014,"code":"o","data":"value,"}
-{"time":36.273624,"code":"o","data":" ts_t"}
-{"time":36.29559,"code":"o","data":"ime FR"}
-{"time":36.320699,"code":"o","data":"OM"}
-{"time":36.334623,"code":"o","data":" timel"}
-{"time":36.355385,"code":"o","data":"ess_"}
-{"time":36.37322,"code":"o","data":"met"}
-{"time":36.388307,"code":"o","data":"ri"}
-{"time":36.413889,"code":"o","data":"cs_l"}
-{"time":36.429784,"code":"o","data":"ates"}
-{"time":36.533119,"code":"o","data":"t;"}
-{"time":36.533479,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":36.533785,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502     labels      \u2502 value \u2502         ts_time          \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502 {\"host\":\"web1\"} \u2502   1.0 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2502 checkout_latency \u2502 {\"host\":\"web1\"} \u2502  0.85 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":37.994319,"code":"o","data":".print '-- and the catalog: what exists, how much of it'"}
-{"time":37.994618,"code":"o","data":"\r\n\u001b[?2004l\r-- and the catalog: what exists, how much of it\r\n\u001b[?2004hsqlite> "}
-{"time":38.574933,"code":"o","data":"SE"}
-{"time":38.601368,"code":"o","data":"LECT n"}
-{"time":38.62369,"code":"o","data":"ame, "}
-{"time":38.640286,"code":"o","data":"points"}
-{"time":38.65986,"code":"o","data":" FROM "}
-{"time":38.68198,"code":"o","data":"ti"}
-{"time":38.68205,"code":"o","data":"mele"}
-{"time":38.719831,"code":"o","data":"ss_met"}
-{"time":38.737379,"code":"o","data":"ri"}
-{"time":38.76557,"code":"o","data":"cs_ser"}
-{"time":38.795395,"code":"o","data":"ies"}
-{"time":38.897186,"code":"o","data":";"}
-{"time":38.897565,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":38.897756,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502 points \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502      1 \u2502\r\n\u2502 checkout_latency \u2502      1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":40.058239,"code":"o","data":".mode list --charlimit 0 --linelimit 0"}
-{"time":40.058593,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
-{"time":40.368921,"code":"o","data":".print '-- dropping a table uninstalls exactly its own objects -- nothing else is touched'"}
-{"time":40.369111,"code":"o","data":"\r\n"}
-{"time":40.36915,"code":"o","data":"\u001b[?2004l\r-- dropping a table uninstalls exactly its own objects -- nothing else is touched\r\n\u001b[?2004hsqlite> "}
-{"time":40.934361,"code":"o","data":"DROP "}
-{"time":40.959465,"code":"o","data":"TABLE"}
-{"time":40.986726,"code":"o","data":" trace"}
-{"time":41.085522,"code":"o","data":"s;"}
-{"time":41.085973,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":41.086701,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":41.859007,"code":"o","data":"SELEC"}
-{"time":41.871563,"code":"o","data":"T obje"}
-{"time":41.892159,"code":"o","data":"ct"}
-{"time":41.915001,"code":"o","data":"_name"}
-{"time":41.943991,"code":"o","data":" FROM"}
-{"time":41.970158,"code":"o","data":" time"}
-{"time":42.000363,"code":"o","data":"less_"}
-{"time":42.024766,"code":"o","data":"sc"}
-{"time":42.048132,"code":"o","data":"he"}
-{"time":42.072518,"code":"o","data":"ma_in"}
-{"time":42.089164,"code":"o","data":"ven"}
-{"time":42.113546,"code":"o","data":"tory W"}
-{"time":42.12721,"code":"o","data":"HER"}
-{"time":42.143195,"code":"o","data":"E "}
-{"time":42.159821,"code":"o","data":"sourc"}
-{"time":42.178334,"code":"o","data":"e_tabl"}
-{"time":42.19541,"code":"o","data":"e "}
-{"time":42.224027,"code":"o","data":"= '"}
-{"time":42.243524,"code":"o","data":"trace"}
-{"time":42.346099,"code":"o","data":"s';"}
-{"time":42.346508,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":42.346679,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":43.506967,"code":"o","data":".print '-- (no rows: the traces companions left with their table)'"}
-{"time":43.507362,"code":"o","data":"\r\n\u001b[?2004l\r-- (no rows: the traces companions left with their table)\r\n\u001b[?2004hsqlite> "}
-{"time":44.180955,"code":"o","data":"SEL"}
-{"time":44.207274,"code":"o","data":"ECT"}
-{"time":44.227196,"code":"o","data":" obj"}
-{"time":44.243514,"code":"o","data":"ect_"}
-{"time":44.264658,"code":"o","data":"name"}
-{"time":44.264712,"code":"o","data":" FROM"}
-{"time":44.303891,"code":"o","data":" tim"}
-{"time":44.317995,"code":"o","data":"el"}
-{"time":44.346628,"code":"o","data":"es"}
-{"time":44.373941,"code":"o","data":"s_"}
-{"time":44.397164,"code":"o","data":"sche"}
-{"time":44.397245,"code":"o","data":"ma"}
-{"time":44.439544,"code":"o","data":"_in"}
-{"time":44.453952,"code":"o","data":"ventor"}
-{"time":44.480752,"code":"o","data":"y WHER"}
-{"time":44.502595,"code":"o","data":"E sou"}
-{"time":44.530464,"code":"o","data":"rc"}
-{"time":44.55449,"code":"o","data":"e_tab"}
-{"time":44.583364,"code":"o","data":"le "}
-{"time":44.604773,"code":"o","data":"= '"}
-{"time":44.622587,"code":"o","data":"logs'"}
-{"time":44.622646,"code":"o","data":";"}
-{"time":44.727659,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":44.727772,"code":"o","data":"timeless_logs_entries\r\ntimeless_logs_fields\r\ntimeless_logs_services\r\n\u001b[?2004hsqlite> "}
-{"time":45.888089,"code":"o","data":".print '-- logs companions untouched. that is the whole contract.'"}
-{"time":45.888471,"code":"o","data":"\r\n\u001b[?2004l\r-- logs companions untouched. that is the whole contract.\r\n\u001b[?2004hsqlite> "}
-{"time":46.988924,"code":"o","data":".quit\r\n\u001b[?2004l\r"}
+{"time":0.002904,"code":"o","data":"SQLite version 3.53.4 2026-07-24 19:02:57\r\nEnter \".help\" for usage hints.\r\n"}
+{"time":0.000416,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.160225,"code":"o","data":".load ./target/release/libtimeless_ext"}
+{"time":0.000337,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000596,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.31033,"code":"o","data":"PRAGMA journal_mode=WAL;"}
+{"time":0.000422,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000621,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 journal_mode \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 wal          \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":0.310356,"code":"o","data":".mode box"}
+{"time":0.000449,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":0.310343,"code":"o","data":".print '-- one CREATE per signal. no extra commands, no installer to run'"}
+{"time":0.000408,"code":"o","data":"\r\n\u001b[?2004l\r-- one CREATE per signal. no extra commands, no installer to run\r\n\u001b[?2004hsqlite> "}
+{"time":0.565145,"code":"o","data":"CREA"}
+{"time":0.01573,"code":"o","data":"TE VIR"}
+{"time":0.018853,"code":"o","data":"TUAL T"}
+{"time":0.029941,"code":"o","data":"AB"}
+{"time":0.017877,"code":"o","data":"LE"}
+{"time":0.027787,"code":"o","data":" met"}
+{"time":0.024963,"code":"o","data":"ric"}
+{"time":0.019189,"code":"o","data":"s U"}
+{"time":0.027669,"code":"o","data":"SING t"}
+{"time":0.028629,"code":"o","data":"imel"}
+{"time":0.022747,"code":"o","data":"ess_"}
+{"time":0.012717,"code":"o","data":"me"}
+{"time":0.015885,"code":"o","data":"tri"}
+{"time":0.022833,"code":"o","data":"cs"}
+{"time":0.094699,"code":"o","data":";"}
+{"time":0.000401,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.001233,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.868524,"code":"o","data":"CRE"}
+{"time":0.014469,"code":"o","data":"ATE VI"}
+{"time":0.028009,"code":"o","data":"RTUAL "}
+{"time":0.012746,"code":"o","data":"TABL"}
+{"time":0.015284,"code":"o","data":"E logs"}
+{"time":0.028313,"code":"o","data":" USI"}
+{"time":0.012687,"code":"o","data":"NG t"}
+{"time":0.021397,"code":"o","data":"imele"}
+{"time":0.02607,"code":"o","data":"ss_"}
+{"time":0.028773,"code":"o","data":"logs("}
+{"time":0.026685,"code":"o","data":"inde"}
+{"time":0.015146,"code":"o","data":"x_k"}
+{"time":0.019052,"code":"o","data":"eys='s"}
+{"time":0.028768,"code":"o","data":"ervi"}
+{"time":0.020132,"code":"o","data":"ce,"}
+{"time":0.029071,"code":"o","data":"ho"}
+{"time":0.10684,"code":"o","data":"st');"}
+{"time":0.00025,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000817,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.874219,"code":"o","data":"CREATE"}
+{"time":5.7e-05,"code":"o","data":" VIR"}
+{"time":0.050301,"code":"o","data":"TUAL "}
+{"time":0.020375,"code":"o","data":"TAB"}
+{"time":0.01408,"code":"o","data":"LE tr"}
+{"time":0.01655,"code":"o","data":"ace"}
+{"time":0.013984,"code":"o","data":"s "}
+{"time":0.023545,"code":"o","data":"USIN"}
+{"time":0.024292,"code":"o","data":"G tim"}
+{"time":0.022861,"code":"o","data":"el"}
+{"time":0.028383,"code":"o","data":"ess_tr"}
+{"time":0.014767,"code":"o","data":"ace"}
+{"time":0.110211,"code":"o","data":"s;"}
+{"time":0.000372,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000943,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.760647,"code":"o","data":".print '-- companions installed themselves, and the inventory describes every object'"}
+{"time":0.000269,"code":"o","data":"\r\n\u001b[?2004l\r-- companions installed themselves, and the inventory describes every object\r\n\u001b[?2004hsqlite> "}
+{"time":0.570067,"code":"o","data":"SELEC"}
+{"time":0.023057,"code":"o","data":"T ob"}
+{"time":0.018533,"code":"o","data":"ject"}
+{"time":0.02655,"code":"o","data":"_na"}
+{"time":0.014673,"code":"o","data":"me"}
+{"time":0.023079,"code":"o","data":", o"}
+{"time":0.018806,"code":"o","data":"bject"}
+{"time":0.017346,"code":"o","data":"_kin"}
+{"time":0.024483,"code":"o","data":"d, sc"}
+{"time":0.014948,"code":"o","data":"hema_v"}
+{"time":0.018091,"code":"o","data":"ersi"}
+{"time":0.012286,"code":"o","data":"on "}
+{"time":0.020755,"code":"o","data":"FRO"}
+{"time":0.027843,"code":"o","data":"M t"}
+{"time":0.023946,"code":"o","data":"ime"}
+{"time":0.017513,"code":"o","data":"les"}
+{"time":0.015956,"code":"o","data":"s_s"}
+{"time":0.027997,"code":"o","data":"chema"}
+{"time":0.027661,"code":"o","data":"_inv"}
+{"time":0.017618,"code":"o","data":"entory"}
+{"time":0.024321,"code":"o","data":" ORDE"}
+{"time":0.014201,"code":"o","data":"R BY "}
+{"time":0.020068,"code":"o","data":"obj"}
+{"time":0.025939,"code":"o","data":"ect_n"}
+{"time":0.105843,"code":"o","data":"ame;"}
+{"time":0.00024,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":4.3e-05,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502        object_name         \u2502 object_kind \u2502 schema_version \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 timeless_logs_entries      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_fields       \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_services     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_latest    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_series    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_errors     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_operations \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_roots      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_services   \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_spans      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_summary    \u2502 view        \u2502              1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"}
+{"time":2.7e-05,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":1.66033,"code":"o","data":".print '-- seed a tiny incident: a checkout request whose db call failed'"}
+{"time":0.00033,"code":"o","data":"\r\n\u001b[?2004l\r-- seed a tiny incident: a checkout request whose db call failed\r\n\u001b[?2004hsqlite> "}
+{"time":0.575433,"code":"o","data":"IN"}
+{"time":0.024717,"code":"o","data":"SE"}
+{"time":0.019191,"code":"o","data":"RT INT"}
+{"time":0.01805,"code":"o","data":"O trac"}
+{"time":0.017883,"code":"o","data":"es "}
+{"time":0.013079,"code":"o","data":"(tra"}
+{"time":0.030093,"code":"o","data":"ce_"}
+{"time":0.025818,"code":"o","data":"id,"}
+{"time":0.014696,"code":"o","data":" span_"}
+{"time":0.015299,"code":"o","data":"id"}
+{"time":0.019193,"code":"o","data":", pare"}
+{"time":0.018944,"code":"o","data":"nt"}
+{"time":0.021792,"code":"o","data":"_span_"}
+{"time":0.025362,"code":"o","data":"id"}
+{"time":0.021809,"code":"o","data":", n"}
+{"time":0.024017,"code":"o","data":"ame, "}
+{"time":0.01842,"code":"o","data":"se"}
+{"time":0.012806,"code":"o","data":"rv"}
+{"time":0.020887,"code":"o","data":"ice, k"}
+{"time":0.014292,"code":"o","data":"ind, s"}
+{"time":0.023327,"code":"o","data":"ta"}
+{"time":0.018639,"code":"o","data":"tus, "}
+{"time":0.027552,"code":"o","data":"sta"}
+{"time":0.018715,"code":"o","data":"rt_t"}
+{"time":0.017169,"code":"o","data":"s, du"}
+{"time":0.028958,"code":"o","data":"rati"}
+{"time":0.014123,"code":"o","data":"on_n"}
+{"time":0.020749,"code":"o","data":"s) VAL"}
+{"time":0.025259,"code":"o","data":"UES "}
+{"time":0.021897,"code":"o","data":"('"}
+{"time":0.018643,"code":"o","data":"aaa"}
+{"time":0.020102,"code":"o","data":"a00"}
+{"time":0.025397,"code":"o","data":"0000"}
+{"time":0.022546,"code":"o","data":"00000"}
+{"time":0.024701,"code":"o","data":"00"}
+{"time":0.012755,"code":"o","data":"00"}
+{"time":0.029651,"code":"o","data":"000"}
+{"time":0.01625,"code":"o","data":"00000"}
+{"time":0.018243,"code":"o","data":"00000'"}
+{"time":0.029575,"code":"o","data":", '01"}
+{"time":0.020251,"code":"o","data":"000000"}
+{"time":0.012793,"code":"o","data":"000"}
+{"time":0.019354,"code":"o","data":"000"}
+{"time":0.022124,"code":"o","data":"00',"}
+{"time":0.024803,"code":"o","data":" NUL"}
+{"time":0.02904,"code":"o","data":"L, "}
+{"time":0.012578,"code":"o","data":"'POST "}
+{"time":0.017665,"code":"o","data":"/c"}
+{"time":0.024431,"code":"o","data":"hec"}
+{"time":0.019856,"code":"o","data":"kout"}
+{"time":0.016677,"code":"o","data":"', 'ch"}
+{"time":0.023666,"code":"o","data":"eckout"}
+{"time":0.02181,"code":"o","data":"', "}
+{"time":0.018818,"code":"o","data":"'s"}
+{"time":0.022049,"code":"o","data":"erver'"}
+{"time":0.018085,"code":"o","data":", "}
+{"time":0.020688,"code":"o","data":"'ok"}
+{"time":0.015493,"code":"o","data":"', 1"}
+{"time":0.015102,"code":"o","data":"75300"}
+{"time":0.029048,"code":"o","data":"0000"}
+{"time":5.3e-05,"code":"o","data":"123000"}
+{"time":0.043955,"code":"o","data":"000, "}
+{"time":0.020283,"code":"o","data":"85"}
+{"time":0.023205,"code":"o","data":"000"}
+{"time":0.108236,"code":"o","data":"00);"}
+{"time":0.000411,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":5.3e-05,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.779016,"code":"o","data":"INSER"}
+{"time":0.017303,"code":"o","data":"T INT"}
+{"time":0.025265,"code":"o","data":"O t"}
+{"time":0.019033,"code":"o","data":"races"}
+{"time":0.017672,"code":"o","data":" (tr"}
+{"time":0.013095,"code":"o","data":"ace_i"}
+{"time":0.03034,"code":"o","data":"d, spa"}
+{"time":0.0125,"code":"o","data":"n_i"}
+{"time":0.022812,"code":"o","data":"d, p"}
+{"time":0.029037,"code":"o","data":"are"}
+{"time":0.026708,"code":"o","data":"nt_s"}
+{"time":0.023961,"code":"o","data":"pan_"}
+{"time":0.018538,"code":"o","data":"id, n"}
+{"time":0.013983,"code":"o","data":"ame"}
+{"time":0.016296,"code":"o","data":", s"}
+{"time":0.024991,"code":"o","data":"erv"}
+{"time":0.027882,"code":"o","data":"ice, "}
+{"time":0.018153,"code":"o","data":"kind, "}
+{"time":0.019221,"code":"o","data":"status"}
+{"time":0.012991,"code":"o","data":", sta"}
+{"time":0.015436,"code":"o","data":"rt_ts"}
+{"time":0.017454,"code":"o","data":", "}
+{"time":0.024967,"code":"o","data":"dur"}
+{"time":0.016915,"code":"o","data":"atio"}
+{"time":0.030026,"code":"o","data":"n_n"}
+{"time":0.021377,"code":"o","data":"s) "}
+{"time":0.021911,"code":"o","data":"VALUE \r"}
+{"time":0.024849,"code":"o","data":"S ('a"}
+{"time":0.021831,"code":"o","data":"aaa000"}
+{"time":0.030015,"code":"o","data":"00000"}
+{"time":0.018808,"code":"o","data":"00"}
+{"time":0.019316,"code":"o","data":"000"}
+{"time":0.02799,"code":"o","data":"000000"}
+{"time":0.017605,"code":"o","data":"0000"}
+{"time":0.028572,"code":"o","data":"00"}
+{"time":0.019707,"code":"o","data":"000', "}
+{"time":0.024512,"code":"o","data":"'02"}
+{"time":0.017525,"code":"o","data":"00000"}
+{"time":0.016618,"code":"o","data":"000000"}
+{"time":0.024757,"code":"o","data":"000',"}
+{"time":0.024197,"code":"o","data":" '010"}
+{"time":0.000331,"code":"o","data":"0000"}
+{"time":0.041248,"code":"o","data":"000"}
+{"time":0.014578,"code":"o","data":"000"}
+{"time":0.02227,"code":"o","data":"000', "}
+{"time":0.012289,"code":"o","data":"'SE"}
+{"time":0.016664,"code":"o","data":"LEC"}
+{"time":0.013402,"code":"o","data":"T item"}
+{"time":0.028626,"code":"o","data":"s', 'd"}
+{"time":0.022975,"code":"o","data":"b'"}
+{"time":0.020081,"code":"o","data":", 'c"}
+{"time":0.026117,"code":"o","data":"lien"}
+{"time":0.023096,"code":"o","data":"t'"}
+{"time":0.017173,"code":"o","data":", '"}
+{"time":0.016515,"code":"o","data":"erro"}
+{"time":0.024079,"code":"o","data":"r', 1"}
+{"time":0.021472,"code":"o","data":"753"}
+{"time":0.013182,"code":"o","data":"0000"}
+{"time":0.020925,"code":"o","data":"0020"}
+{"time":0.020571,"code":"o","data":"000"}
+{"time":0.019539,"code":"o","data":"0000,"}
+{"time":0.016628,"code":"o","data":" 12000"}
+{"time":0.013063,"code":"o","data":"00"}
+{"time":0.093285,"code":"o","data":");"}
+{"time":0.000713,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":0.774217,"code":"o","data":"INS"}
+{"time":0.02199,"code":"o","data":"ERT"}
+{"time":0.02511,"code":"o","data":" INT"}
+{"time":0.024769,"code":"o","data":"O "}
+{"time":0.029908,"code":"o","data":"logs"}
+{"time":0.017391,"code":"o","data":"(ts, l"}
+{"time":0.026627,"code":"o","data":"evel, "}
+{"time":0.029185,"code":"o","data":"me"}
+{"time":0.02143,"code":"o","data":"ss"}
+{"time":0.025031,"code":"o","data":"age,"}
+{"time":0.024703,"code":"o","data":" metad"}
+{"time":0.020726,"code":"o","data":"ata) "}
+{"time":0.017419,"code":"o","data":"VALUE"}
+{"time":0.026925,"code":"o","data":"S (1"}
+{"time":0.028946,"code":"o","data":"7530"}
+{"time":0.012754,"code":"o","data":"00000"}
+{"time":0.016971,"code":"o","data":"456, "}
+{"time":0.025003,"code":"o","data":"'err"}
+{"time":0.022345,"code":"o","data":"or"}
+{"time":0.017147,"code":"o","data":"', 'pa"}
+{"time":0.013089,"code":"o","data":"yment "}
+{"time":0.015557,"code":"o","data":"decl"}
+{"time":0.028584,"code":"o","data":"in"}
+{"time":0.026291,"code":"o","data":"ed"}
+{"time":0.018661,"code":"o","data":"', '{"}
+{"time":0.019639,"code":"o","data":"\"ser"}
+{"time":0.025345,"code":"o","data":"vi"}
+{"time":0.020741,"code":"o","data":"ce\":\" \r"}
+{"time":0.029283,"code":"o","data":"paym"}
+{"time":0.025451,"code":"o","data":"ents"}
+{"time":0.012852,"code":"o","data":"\",\"r"}
+{"time":0.021251,"code":"o","data":"etry"}
+{"time":0.024049,"code":"o","data":"able\":"}
+{"time":0.014745,"code":"o","data":"fal"}
+{"time":0.015008,"code":"o","data":"se"}
+{"time":0.013629,"code":"o","data":"}')"}
+{"time":0.104764,"code":"o","data":";"}
+{"time":0.000514,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":5.5e-05,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.664171,"code":"o","data":"INSE"}
+{"time":0.027196,"code":"o","data":"RT I"}
+{"time":0.018878,"code":"o","data":"NTO m"}
+{"time":0.022085,"code":"o","data":"etri"}
+{"time":0.02022,"code":"o","data":"cs(n"}
+{"time":0.01863,"code":"o","data":"ame, t"}
+{"time":0.023908,"code":"o","data":"s,"}
+{"time":0.025102,"code":"o","data":" va"}
+{"time":0.014136,"code":"o","data":"lu"}
+{"time":0.019301,"code":"o","data":"e, la"}
+{"time":0.025642,"code":"o","data":"bels) "}
+{"time":0.022789,"code":"o","data":"VALUES"}
+{"time":0.02005,"code":"o","data":" ('che"}
+{"time":0.02739,"code":"o","data":"ckout"}
+{"time":0.025455,"code":"o","data":"_e"}
+{"time":0.017414,"code":"o","data":"rrors'"}
+{"time":0.016112,"code":"o","data":", 175"}
+{"time":0.025251,"code":"o","data":"30"}
+{"time":0.02629,"code":"o","data":"000"}
+{"time":0.027802,"code":"o","data":"00,"}
+{"time":0.012503,"code":"o","data":" 1"}
+{"time":4.9e-05,"code":"o","data":".0, "}
+{"time":0.055429,"code":"o","data":"'{"}
+{"time":0.014501,"code":"o","data":"\"hos"}
+{"time":0.014876,"code":"o","data":"t\":"}
+{"time":0.013999,"code":"o","data":"\"web1"}
+{"time":0.029933,"code":"o","data":"\"}"}
+{"time":0.102411,"code":"o","data":"');"}
+{"time":0.000357,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000281,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.663381,"code":"o","data":"INSERT"}
+{"time":0.027583,"code":"o","data":" INT"}
+{"time":0.020639,"code":"o","data":"O me"}
+{"time":0.026631,"code":"o","data":"trics"}
+{"time":0.02631,"code":"o","data":"(name,"}
+{"time":0.013952,"code":"o","data":" ts"}
+{"time":0.020644,"code":"o","data":", va"}
+{"time":0.017738,"code":"o","data":"lue, l"}
+{"time":0.014255,"code":"o","data":"abe"}
+{"time":0.020875,"code":"o","data":"ls)"}
+{"time":0.019131,"code":"o","data":" V"}
+{"time":0.02608,"code":"o","data":"ALU"}
+{"time":0.028529,"code":"o","data":"ES ('c"}
+{"time":0.029284,"code":"o","data":"hecko"}
+{"time":0.028794,"code":"o","data":"ut"}
+{"time":0.020044,"code":"o","data":"_la"}
+{"time":0.029974,"code":"o","data":"te"}
+{"time":0.019537,"code":"o","data":"nc"}
+{"time":0.021894,"code":"o","data":"y', 1"}
+{"time":0.019437,"code":"o","data":"753000"}
+{"time":0.015436,"code":"o","data":"000"}
+{"time":0.028578,"code":"o","data":", 0.8"}
+{"time":0.025444,"code":"o","data":"5, '"}
+{"time":0.029726,"code":"o","data":"{\""}
+{"time":0.016767,"code":"o","data":"host\":"}
+{"time":0.022212,"code":"o","data":"\"w"}
+{"time":0.015338,"code":"o","data":"eb"}
+{"time":0.101022,"code":"o","data":"1\"}');"}
+{"time":0.000332,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000163,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.677322,"code":"o","data":"INS"}
+{"time":0.023157,"code":"o","data":"ERT "}
+{"time":0.018132,"code":"o","data":"IN"}
+{"time":0.021786,"code":"o","data":"TO"}
+{"time":0.015665,"code":"o","data":" metr"}
+{"time":0.016697,"code":"o","data":"ics(me"}
+{"time":0.027808,"code":"o","data":"trics)"}
+{"time":0.012449,"code":"o","data":" VA"}
+{"time":2.1e-05,"code":"o","data":"LUE"}
+{"time":0.050326,"code":"o","data":"S ('f"}
+{"time":0.019023,"code":"o","data":"lush"}
+{"time":0.020888,"code":"o","data":"')"}
+{"time":0.098436,"code":"o","data":";"}
+{"time":0.000402,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000312,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.579661,"code":"o","data":"INS"}
+{"time":0.017106,"code":"o","data":"ER"}
+{"time":0.017559,"code":"o","data":"T "}
+{"time":0.024177,"code":"o","data":"INT"}
+{"time":0.020128,"code":"o","data":"O lo"}
+{"time":0.01612,"code":"o","data":"gs("}
+{"time":0.019146,"code":"o","data":"lo"}
+{"time":0.019738,"code":"o","data":"gs) V"}
+{"time":0.027372,"code":"o","data":"ALUES"}
+{"time":7.1e-05,"code":"o","data":" ('flu"}
+{"time":0.131427,"code":"o","data":"sh');"}
+{"time":0.000538,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000292,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.577166,"code":"o","data":"INSERT"}
+{"time":0.0274,"code":"o","data":" IN"}
+{"time":0.021527,"code":"o","data":"TO "}
+{"time":0.024405,"code":"o","data":"trac"}
+{"time":0.013956,"code":"o","data":"es("}
+{"time":0.021191,"code":"o","data":"traces"}
+{"time":0.01628,"code":"o","data":") VAL"}
+{"time":0.020349,"code":"o","data":"UES "}
+{"time":0.020136,"code":"o","data":"('flus"}
+{"time":0.097718,"code":"o","data":"h');"}
+{"time":0.000318,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000334,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.46038,"code":"o","data":".print '-- spans, with ids you can read and times you can read'"}
+{"time":0.000216,"code":"o","data":"\r\n\u001b[?2004l\r-- spans, with ids you can read and times you can read\r\n\u001b[?2004hsqlite> "}
+{"time":0.574387,"code":"o","data":"SELEC"}
+{"time":0.013169,"code":"o","data":"T tra"}
+{"time":0.025243,"code":"o","data":"ce_i"}
+{"time":0.014881,"code":"o","data":"d,"}
+{"time":0.018795,"code":"o","data":" name"}
+{"time":0.015663,"code":"o","data":", se"}
+{"time":0.027566,"code":"o","data":"rvice,"}
+{"time":0.027694,"code":"o","data":" st"}
+{"time":0.015121,"code":"o","data":"at"}
+{"time":0.018589,"code":"o","data":"us,"}
+{"time":0.028047,"code":"o","data":" st"}
+{"time":0.013348,"code":"o","data":"art"}
+{"time":0.017333,"code":"o","data":"_time,"}
+{"time":0.01493,"code":"o","data":" du"}
+{"time":0.017148,"code":"o","data":"rat"}
+{"time":0.025186,"code":"o","data":"ion_m"}
+{"time":0.012559,"code":"o","data":"s FR"}
+{"time":0.027477,"code":"o","data":"OM tim"}
+{"time":0.028038,"code":"o","data":"eless"}
+{"time":0.017767,"code":"o","data":"_trace"}
+{"time":0.017179,"code":"o","data":"s_span"}
+{"time":0.097788,"code":"o","data":"s;"}
+{"time":0.000354,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000447,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502      name      \u2502 service  \u2502 status \u2502        start_time        \u2502 duration_ms \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502 POST /checkout \u2502 checkout \u2502 ok     \u2502 2025-07-20T08:26:40.123Z \u2502         8.5 \u2502\r\n\u2502 aaaa0000000000000000000000000000 \u2502 SELECT items   \u2502 db       \u2502 error  \u2502 2025-07-20T08:26:40.200Z \u2502         1.2 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.460639,"code":"o","data":".print '-- one row per trace. root state, service set, and completeness never overreach'"}
+{"time":0.000576,"code":"o","data":"\r\n\u001b[?2004l\r-- one row per trace. root state, service set, and completeness never overreach\r\n\u001b[?2004hsqlite> "}
+{"time":0.570348,"code":"o","data":"SELECT"}
+{"time":0.018052,"code":"o","data":" tra"}
+{"time":0.017748,"code":"o","data":"ce_id"}
+{"time":0.025338,"code":"o","data":", span"}
+{"time":0.023095,"code":"o","data":"_r"}
+{"time":0.0216,"code":"o","data":"ow"}
+{"time":0.024181,"code":"o","data":"s, e"}
+{"time":0.028099,"code":"o","data":"rror"}
+{"time":0.025252,"code":"o","data":"_rows"}
+{"time":0.013623,"code":"o","data":", "}
+{"time":0.013897,"code":"o","data":"root_s"}
+{"time":0.023155,"code":"o","data":"tate"}
+{"time":0.025407,"code":"o","data":", roo"}
+{"time":0.029237,"code":"o","data":"t_"}
+{"time":0.016059,"code":"o","data":"name, "}
+{"time":0.014379,"code":"o","data":"se"}
+{"time":0.012588,"code":"o","data":"rvi"}
+{"time":0.019418,"code":"o","data":"ces"}
+{"time":0.029134,"code":"o","data":", "}
+{"time":0.012548,"code":"o","data":"comp"}
+{"time":0.029443,"code":"o","data":"let"}
+{"time":0.024264,"code":"o","data":"ene"}
+{"time":0.023252,"code":"o","data":"ss "}
+{"time":0.014754,"code":"o","data":"FROM t"}
+{"time":0.023944,"code":"o","data":"ime"}
+{"time":0.025242,"code":"o","data":"less_"}
+{"time":0.014946,"code":"o","data":"trac"}
+{"time":0.014857,"code":"o","data":"es"}
+{"time":0.021303,"code":"o","data":"_s"}
+{"time":0.029073,"code":"o","data":"um"}
+{"time":0.019067,"code":"o","data":"ma \r"}
+{"time":0.103741,"code":"o","data":"ry;"}
+{"time":0.000442,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000625,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502 span_rows \u2502 error_rows \u2502 root_state \u2502   root_name    \u2502  services   \u2502 completeness \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502         2 \u2502          1 \u2502 unique     \u2502 POST /checkout \u2502 checkout,db \u2502 unknown      \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.660351,"code":"o","data":".print '-- the error span, straight from its own view'"}
+{"time":0.000221,"code":"o","data":"\r\n\u001b[?2004l\r-- the error span, straight from its own view\r\n\u001b[?2004hsqlite> "}
+{"time":0.562738,"code":"o","data":"SELEC"}
+{"time":0.018395,"code":"o","data":"T na"}
+{"time":0.017478,"code":"o","data":"me, "}
+{"time":0.017318,"code":"o","data":"servic"}
+{"time":0.01812,"code":"o","data":"e, st"}
+{"time":0.022755,"code":"o","data":"ar"}
+{"time":0.03021,"code":"o","data":"t_tim"}
+{"time":0.015295,"code":"o","data":"e "}
+{"time":0.012212,"code":"o","data":"FROM"}
+{"time":0.023923,"code":"o","data":" time"}
+{"time":0.012261,"code":"o","data":"le"}
+{"time":0.021512,"code":"o","data":"ss_tra"}
+{"time":0.021426,"code":"o","data":"ces_e"}
+{"time":0.105853,"code":"o","data":"rrors;"}
+{"time":0.000412,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.00023,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502     name     \u2502 service \u2502        start_time        \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 SELECT items \u2502 db      \u2502 2025-07-20T08:26:40.200Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.160435,"code":"o","data":".print '-- catalogs, for building dropdowns and service maps'"}
+{"time":0.000346,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":5.9e-05,"code":"o","data":"-- catalogs, for building dropdowns and service maps\r\n\u001b[?2004hsqlite> "}
+{"time":0.574533,"code":"o","data":"SELECT"}
+{"time":0.02349,"code":"o","data":" s"}
+{"time":0.015142,"code":"o","data":"ervi"}
+{"time":0.029832,"code":"o","data":"ce, o"}
+{"time":0.027878,"code":"o","data":"pe"}
+{"time":0.028505,"code":"o","data":"ra"}
+{"time":0.02672,"code":"o","data":"tion"}
+{"time":0.0162,"code":"o","data":" FR"}
+{"time":0.021886,"code":"o","data":"OM t"}
+{"time":0.026466,"code":"o","data":"imeles"}
+{"time":0.027307,"code":"o","data":"s_trac"}
+{"time":0.019055,"code":"o","data":"es_o"}
+{"time":0.018951,"code":"o","data":"per"}
+{"time":0.013154,"code":"o","data":"at"}
+{"time":0.021136,"code":"o","data":"io"}
+{"time":0.101087,"code":"o","data":"ns;"}
+{"time":0.000242,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000282,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502   operation    \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout \u2502 POST /checkout \u2502\r\n\u2502 db       \u2502 SELECT items   \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.160349,"code":"o","data":".print '-- log entries: receipt-style UTC, message, metadata kept as typed JSON'"}
+{"time":0.000377,"code":"o","data":"\r\n\u001b[?2004l\r-- log entries: receipt-style UTC, message, metadata kept as typed JSON\r\n\u001b[?2004hsqlite> "}
+{"time":0.570955,"code":"o","data":"SELEC"}
+{"time":0.018065,"code":"o","data":"T "}
+{"time":0.016428,"code":"o","data":"ts_"}
+{"time":0.025846,"code":"o","data":"time"}
+{"time":0.018161,"code":"o","data":", l"}
+{"time":0.023423,"code":"o","data":"evel"}
+{"time":0.020818,"code":"o","data":", "}
+{"time":0.01318,"code":"o","data":"mes"}
+{"time":0.028277,"code":"o","data":"sage,"}
+{"time":0.022535,"code":"o","data":" j"}
+{"time":0.024632,"code":"o","data":"son_e"}
+{"time":0.026067,"code":"o","data":"xtr"}
+{"time":0.025325,"code":"o","data":"act("}
+{"time":0.025583,"code":"o","data":"met"}
+{"time":0.014398,"code":"o","data":"ada"}
+{"time":0.024379,"code":"o","data":"ta, '"}
+{"time":0.026267,"code":"o","data":"$.re"}
+{"time":0.012306,"code":"o","data":"try"}
+{"time":0.01957,"code":"o","data":"abl"}
+{"time":0.020677,"code":"o","data":"e') A"}
+{"time":0.012982,"code":"o","data":"S r"}
+{"time":0.029225,"code":"o","data":"etryab"}
+{"time":0.023547,"code":"o","data":"le FRO"}
+{"time":0.02695,"code":"o","data":"M t"}
+{"time":0.016695,"code":"o","data":"imel"}
+{"time":0.024239,"code":"o","data":"ess"}
+{"time":0.026851,"code":"o","data":"_log"}
+{"time":0.017907,"code":"o","data":"s_"}
+{"time":0.020481,"code":"o","data":"en"}
+{"time":0.023603,"code":"o","data":"trie"}
+{"time":0.106319,"code":"o","data":"s;"}
+{"time":0.000442,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000292,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502         ts_time          \u2502 level \u2502     message      \u2502 retryable \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 2025-07-20T08:26:40.456Z \u2502 error \u2502 payment declined \u2502         0 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.460631,"code":"o","data":".print '-- what you can filter on fast (declared index keys)'"}
+{"time":0.000388,"code":"o","data":"\r\n\u001b[?2004l\r-- what you can filter on fast (declared index keys)\r\n\u001b[?2004hsqlite> "}
+{"time":0.574747,"code":"o","data":"SELE"}
+{"time":0.01614,"code":"o","data":"CT"}
+{"time":0.023721,"code":"o","data":" fi"}
+{"time":0.017996,"code":"o","data":"el"}
+{"time":0.01993,"code":"o","data":"d FRO"}
+{"time":0.024204,"code":"o","data":"M time"}
+{"time":0.015819,"code":"o","data":"le"}
+{"time":0.013086,"code":"o","data":"ss_log"}
+{"time":0.01599,"code":"o","data":"s_fiel"}
+{"time":0.109915,"code":"o","data":"ds;"}
+{"time":0.000393,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":3.5e-05,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502  field  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 service \u2502\r\n\u2502 host    \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.172647,"code":"o","data":"SEL"}
+{"time":0.021501,"code":"o","data":"ECT "}
+{"time":0.01782,"code":"o","data":"serv"}
+{"time":0.018366,"code":"o","data":"ice FR"}
+{"time":0.029774,"code":"o","data":"OM"}
+{"time":0.015501,"code":"o","data":" time"}
+{"time":0.028806,"code":"o","data":"le"}
+{"time":0.02088,"code":"o","data":"ss_"}
+{"time":0.029504,"code":"o","data":"log"}
+{"time":0.02157,"code":"o","data":"s_ser"}
+{"time":0.023691,"code":"o","data":"vic"}
+{"time":0.097852,"code":"o","data":"es;"}
+{"time":0.000438,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000235,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 payments \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.060337,"code":"o","data":".print '-- newest value per series, in plain words and plain time'"}
+{"time":0.000425,"code":"o","data":"\r\n\u001b[?2004l\r-- newest value per series, in plain words and plain time\r\n\u001b[?2004hsqlite> "}
+{"time":0.568527,"code":"o","data":"SEL"}
+{"time":0.027496,"code":"o","data":"EC"}
+{"time":0.014215,"code":"o","data":"T na"}
+{"time":0.0221,"code":"o","data":"me, l"}
+{"time":0.015959,"code":"o","data":"abels,"}
+{"time":0.014103,"code":"o","data":" v"}
+{"time":0.023787,"code":"o","data":"al"}
+{"time":0.012309,"code":"o","data":"ue"}
+{"time":0.025684,"code":"o","data":", "}
+{"time":0.012372,"code":"o","data":"ts_t"}
+{"time":0.016402,"code":"o","data":"ime FR"}
+{"time":0.02739,"code":"o","data":"OM"}
+{"time":0.012411,"code":"o","data":" ti"}
+{"time":0.021583,"code":"o","data":"meles"}
+{"time":0.017198,"code":"o","data":"s_metr"}
+{"time":0.016436,"code":"o","data":"ics_l"}
+{"time":0.024397,"code":"o","data":"ate"}
+{"time":0.107115,"code":"o","data":"st;"}
+{"time":0.000348,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000306,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502     labels      \u2502 value \u2502         ts_time          \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502 {\"host\":\"web1\"} \u2502   1.0 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2502 checkout_latency \u2502 {\"host\":\"web1\"} \u2502  0.85 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.460469,"code":"o","data":".print '-- and the catalog: what exists, how much of it'"}
+{"time":0.000504,"code":"o","data":"\r\n\u001b[?2004l\r-- and the catalog: what exists, how much of it\r\n\u001b[?2004hsqlite> "}
+{"time":0.565549,"code":"o","data":"SE"}
+{"time":0.018551,"code":"o","data":"LECT"}
+{"time":0.02018,"code":"o","data":" na"}
+{"time":0.012409,"code":"o","data":"me, po"}
+{"time":0.012621,"code":"o","data":"in"}
+{"time":0.021971,"code":"o","data":"ts FRO"}
+{"time":0.028553,"code":"o","data":"M tim"}
+{"time":0.025332,"code":"o","data":"eless"}
+{"time":0.027975,"code":"o","data":"_metri"}
+{"time":0.016515,"code":"o","data":"cs_se"}
+{"time":5.4e-05,"code":"o","data":"ri"}
+{"time":0.122607,"code":"o","data":"es;"}
+{"time":0.000364,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000274,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502 points \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502      1 \u2502\r\n\u2502 checkout_latency \u2502      1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":1.160323,"code":"o","data":".mode list --charlimit 0 --linelimit 0"}
+{"time":0.000343,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":0.310299,"code":"o","data":".print '-- dropping a table uninstalls exactly its own objects -- nothing else is touched'"}
+{"time":0.000399,"code":"o","data":"\r\n\u001b[?2004l\r-- dropping a table uninstalls exactly its own objects -- nothing else is touched\r\n\u001b[?2004hsqlite> "}
+{"time":0.573817,"code":"o","data":"DROP T"}
+{"time":0.026139,"code":"o","data":"ABLE"}
+{"time":0.017269,"code":"o","data":" t"}
+{"time":0.019548,"code":"o","data":"races"}
+{"time":0.106885,"code":"o","data":";"}
+{"time":0.00043,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000517,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.772899,"code":"o","data":"SELEC"}
+{"time":0.013133,"code":"o","data":"T o"}
+{"time":0.026184,"code":"o","data":"bject"}
+{"time":0.024294,"code":"o","data":"_name "}
+{"time":0.024027,"code":"o","data":"FRO"}
+{"time":0.019629,"code":"o","data":"M "}
+{"time":0.024297,"code":"o","data":"ti"}
+{"time":0.017346,"code":"o","data":"me"}
+{"time":0.015326,"code":"o","data":"les"}
+{"time":0.019233,"code":"o","data":"s_"}
+{"time":0.014309,"code":"o","data":"sc"}
+{"time":0.025663,"code":"o","data":"hema_"}
+{"time":0.015152,"code":"o","data":"in"}
+{"time":0.029645,"code":"o","data":"vento"}
+{"time":0.000252,"code":"o","data":"ry"}
+{"time":0.036381,"code":"o","data":" W"}
+{"time":0.013739,"code":"o","data":"HE"}
+{"time":0.019746,"code":"o","data":"RE s"}
+{"time":0.020578,"code":"o","data":"ourc"}
+{"time":0.016499,"code":"o","data":"e_t"}
+{"time":0.028047,"code":"o","data":"ab"}
+{"time":0.017694,"code":"o","data":"le ="}
+{"time":0.025321,"code":"o","data":" '"}
+{"time":0.029215,"code":"o","data":"trace"}
+{"time":0.095707,"code":"o","data":"s';"}
+{"time":0.000331,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.000188,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":1.160476,"code":"o","data":".print '-- (no rows: the traces companions left with their table)'"}
+{"time":0.000354,"code":"o","data":"\r\n\u001b[?2004l\r-- (no rows: the traces companions left with their table)\r\n\u001b[?2004hsqlite> "}
+{"time":0.677137,"code":"o","data":"SE"}
+{"time":0.019878,"code":"o","data":"LE"}
+{"time":0.023664,"code":"o","data":"CT obj"}
+{"time":0.017436,"code":"o","data":"ect_na"}
+{"time":0.018487,"code":"o","data":"me FRO"}
+{"time":0.018598,"code":"o","data":"M "}
+{"time":0.02407,"code":"o","data":"timel"}
+{"time":0.02642,"code":"o","data":"ess_s"}
+{"time":0.014125,"code":"o","data":"ch"}
+{"time":0.024625,"code":"o","data":"ema_i"}
+{"time":0.022075,"code":"o","data":"nve"}
+{"time":0.023804,"code":"o","data":"ntor"}
+{"time":0.02813,"code":"o","data":"y WHER"}
+{"time":0.013048,"code":"o","data":"E so"}
+{"time":0.02249,"code":"o","data":"urce"}
+{"time":0.022105,"code":"o","data":"_ta"}
+{"time":0.02531,"code":"o","data":"ble ="}
+{"time":0.027689,"code":"o","data":" 'log"}
+{"time":0.093671,"code":"o","data":"s';"}
+{"time":0.000301,"code":"o","data":"\r\n\u001b[?2004l\rtimeless_logs_entries\r\ntimeless_logs_fields\r\ntimeless_logs_services\r\n\u001b[?2004hsqlite> "}
+{"time":1.160377,"code":"o","data":".print '-- logs companions untouched. that is the whole contract.'"}
+{"time":0.000341,"code":"o","data":"\r\n\u001b[?2004l\r-- logs companions untouched. that is the whole contract.\r\n\u001b[?2004hsqlite> "}
+{"time":1.100505,"code":"o","data":".quit\r\n"}
+{"time":5.7e-05,"code":"o","data":"\u001b[?2004l\r"}
