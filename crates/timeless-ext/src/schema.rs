@@ -57,9 +57,11 @@ pub(crate) fn inventory_ddl(database: &str) -> String {
 /// DDL for the spike span view: stable friendly shape over the vtab's
 /// public columns only — hex-encoded IDs, native nanosecond timing kept
 /// exact for joins and filtering, plus human-readable UTC (`start_time`,
-/// ISO-8601 millis) and millisecond durations for people. No shadow
-/// tables, no lossy projections: every column is either verbatim or an
-/// exact formatting of a public column.
+/// ISO-8601 millis) and millisecond durations for people. Absent parents
+/// stay NULL (plain `lower(hex())` would render them as empty strings —
+/// SQLite's `hex()` maps NULL to empty). No shadow tables, no lossy
+/// projections: every column is either verbatim or an exact formatting
+/// of a public column.
 pub(crate) fn trace_spans_view_ddl(database: &str, table: &str) -> (String, String) {
     let name = spans_view_name(table);
     let view = sql_ident::qualified(database, &name);
@@ -68,7 +70,8 @@ pub(crate) fn trace_spans_view_ddl(database: &str, table: &str) -> (String, Stri
         "CREATE VIEW {view} AS \
          SELECT lower(hex(trace_id)) AS trace_id, \
                 lower(hex(span_id)) AS span_id, \
-                lower(hex(parent_span_id)) AS parent_span_id, \
+                CASE WHEN parent_span_id IS NULL THEN NULL \
+                     ELSE lower(hex(parent_span_id)) END AS parent_span_id, \
                 name, service, kind, status, \
                 start_ts, \
                 strftime('%Y-%m-%dT%H:%M:%fZ', start_ts / 1000000000.0, 'unixepoch') AS start_time, \

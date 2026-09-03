@@ -84,3 +84,17 @@ native columns are never replaced, only accompanied.
 
 All columns are verbatim public vtab outputs or exact formattings
 thereof. No shadow tables, no lossy projections, no new evaluators.
+
+## Object catalog
+
+Machine-readable registry of every shipped schema object. The query
+harness validates this table: object names are unique and follow the
+`timeless_<source>_<kind>` convention, every `refs` identifier
+resolves to a matrix row, recipe, or trace contract, and every
+description is non-empty. Code-side installers are pinned by
+exact-inventory-row tests to the same set — an object in either place
+but not the other fails the suite.
+
+| object | kind | source tables | refs | description |
+|---|---|---|---|---|
+| `timeless_traces_spans` | view | `traces` | `TSQ-01` | One row per span: hex trace/span IDs, service and timing (native nanoseconds plus human-readable UTC), and verbatim attributes. |

@@ -1979,4 +1979,120 @@ mod schema_spike_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&copy);
     }
+
+    #[test]
+    fn spans_view_matches_base_table_with_documented_transforms() {
+        // Conformance foundation (#26 slice): every view row must equal
+        // the base vtab row under the documented transforms (hex IDs,
+        // ISO-8601 millis, ms durations), verbatim elsewhere. Three
+        // spans across two traces, one with a parent.
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+            .unwrap();
+        for (trace, span, parent, name, ts) in [
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "0101010101010101",
+                None,
+                "root-a",
+                1_753_000_000_000_000_000i64,
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "0202020202020202",
+                Some("0101010101010101"),
+                "child-a",
+                1_753_000_001_000_000_000i64,
+            ),
+            (
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "0101010101010101",
+                None,
+                "root-b",
+                1_753_000_002_000_000_000i64,
+            ),
+        ] {
+            let parent_sql = parent.map(|p| format!("'{p}'")).unwrap_or_default();
+            let parent_col = parent.map(|_| "parent_span_id, ").unwrap_or_default();
+            db.execute(
+                &format!(
+                    "INSERT INTO traces (trace_id, span_id, {parent_col}name, service, kind, status, start_ts, duration_ns) \
+                     VALUES ('{trace}', '{span}', {parent_sql}{comma} 'op', 'svc', 'server', 'ok', {ts}, 2000000);",
+                    comma = if parent.is_some() { ", " } else { "" }
+                ),
+                [],
+            )
+            .unwrap();
+        }
+        db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+            .unwrap();
+
+        let hex = |bytes: Vec<u8>| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let mut base = db
+            .prepare(
+                "SELECT trace_id, span_id, parent_span_id, name, service, kind, status, \
+                 start_ts, duration_ns, attributes FROM traces ORDER BY trace_id, span_id;",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    hex(row.get::<_, Vec<u8>>(0)?),
+                    hex(row.get::<_, Vec<u8>>(1)?),
+                    row.get::<_, Option<Vec<u8>>>(2)?.map(hex),
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // Parent ordering: roots sort before children within a trace.
+        base.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        let mut view = db
+            .prepare(
+                "SELECT trace_id, span_id, parent_span_id, name, service, \
+                 start_ts, start_time, duration_ns, duration_ms, attributes \
+                 FROM timeless_traces_spans ORDER BY trace_id, span_id;",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, f64>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        view.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        assert_eq!(base.len(), 3);
+        assert_eq!(view.len(), 3);
+        for (b, v) in base.iter().zip(view.iter()) {
+            assert_eq!(v.0, b.0, "trace_id hex");
+            assert_eq!(v.1, b.1, "span_id hex");
+            assert_eq!(v.2, b.2, "parent hex (None for roots)");
+            assert_eq!((&v.3, &v.4), (&b.3, &b.4), "passthrough text");
+            assert_eq!(v.5, b.5, "native ts preserved");
+            assert_eq!(v.7, b.6, "native duration preserved");
+            assert_eq!(v.9, b.7, "attributes verbatim");
+            assert!((v.8 - b.6 as f64 / 1_000_000.0).abs() < 1e-9, "duration_ms");
+            assert!(
+                v.6.ends_with('Z') && v.6.contains('T'),
+                "start_time is ISO-8601 UTC: {}",
+                v.6
+            );
+        }
+    }
 }
