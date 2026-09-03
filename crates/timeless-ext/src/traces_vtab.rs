@@ -1933,4 +1933,50 @@ mod schema_spike_tests {
         drop(db);
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn vacuum_backup_carries_views_and_inventory() {
+        // #21 acceptance: companion views and inventory rows are
+        // ordinary schema objects, so any host backup mechanism carries
+        // them. VACUUM INTO exercises that without extra dependencies.
+        let path = std::env::temp_dir().join(format!(
+            "timeless_schema_spike_backup_{}",
+            std::process::id()
+        ));
+        let copy = std::env::temp_dir().join(format!(
+            "timeless_schema_spike_backup_copy_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&copy);
+        {
+            let db = Connection::open(&path).unwrap();
+            register(&db).unwrap();
+            db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+                .unwrap();
+            db.execute(SPAN_INSERT, []).unwrap();
+            db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+                .unwrap();
+            db.execute_batch(&format!(
+                "VACUUM INTO '{}';",
+                copy.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        }
+        let db = Connection::open(&copy).unwrap();
+        register(&db).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            inventory_rows(&db, "traces"),
+            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&copy);
+    }
 }

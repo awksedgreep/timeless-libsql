@@ -30,6 +30,7 @@ fn document() -> &'static str {
             "extension_version": env!("CARGO_PKG_VERSION"),
             "data_abi": DATA_ABI,
             "sql_surface_version": 1,
+            "observability_schema": crate::schema::SCHEMA_VERSION,
             "minimum_server_version": "0.7.0",
             "build": {
                 "commit": env!("TIMELESS_BUILD_COMMIT_RESOLVED"),
@@ -194,6 +195,7 @@ mod tests {
         );
         assert_eq!(value["data_abi"], 1);
         assert_eq!(value["sql_surface_version"], 1);
+        assert_eq!(value["observability_schema"], crate::schema::SCHEMA_VERSION);
         assert_eq!(value["signals"]["metrics"]["rollups"], true);
         assert_eq!(
             value["signals"]["metrics"]["sample_types"],
