@@ -1155,6 +1155,11 @@ impl TransactionVTab<'_> for LogsTab {
         Ok(())
     }
 
+    // No xSync: unlike MetricsTab, the block engine has no
+    // catalog-generation publication protocol to capture/publish here —
+    // commit goes straight to the engine. If cross-connection catalog
+    // visibility ever needs the metrics-style token optimization, it
+    // belongs here; see issue #44.
     fn commit(&mut self) -> Result<()> {
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {

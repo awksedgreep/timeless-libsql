@@ -1002,8 +1002,18 @@ impl UpdateVTab<'_> for TracesTab {
         }
 
         // Collect the column ValueRefs once (ids need TYPE dispatch,
-        // not just FromSql conversion).
+        // not just FromSql conversion). SQLite guarantees argc for
+        // xUpdate, but index the vector through a checked length anyway:
+        // a short argv must be a clean SQL error, never a Rust panic
+        // across the FFI boundary (which would abort the host).
         let vals: Vec<ValueRef<'_>> = args.iter().collect();
+        if vals.len() < 2 + COL_COMMAND + 1 {
+            return Err(module_err(format!(
+                "traces insert: expected {} argument(s), got {}",
+                2 + COL_COMMAND + 1,
+                vals.len()
+            )));
+        }
         let col = |c: usize| vals[2 + c];
         if !matches!(col(COL_ATTRIBUTE_FILTER), ValueRef::Null) {
             return Err(module_err(
@@ -1211,6 +1221,12 @@ impl TransactionVTab<'_> for TracesTab {
     }
 
     fn commit(&mut self) -> Result<()> {
+        // No xSync: unlike MetricsTab, the span engine has no
+        // catalog-generation publication protocol to capture/publish
+        // here — commit goes straight to the engine. If
+        // cross-connection catalog visibility ever needs the
+        // metrics-style token optimization, it belongs here; see
+        // issue #44.
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
             self.shared.engine.txn_commit();
@@ -1597,5 +1613,48 @@ unsafe impl VTabCursor for TracesCursor<'_> {
 
     fn rowid(&self) -> Result<i64> {
         Ok(self.pos as i64)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Smoke test (issue #44): a normal 26-column INSERT must keep working
+// after the xUpdate argv length guard. The guard's error branch is not
+// reachable through SQL — SQLite always passes full-width argv — so this
+// pins the valid path while the full CLI/crash suites keep covering it
+// through the release `.so`.
+//
+// Embedded-only (see spike.rs): the default `entrypoints` build cannot
+// open connections in-process.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "embedded"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_guarded_path_round_trips_one_span() {
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+            .unwrap();
+        db.execute(
+            "INSERT INTO traces (trace_id, span_id, name, service, kind, status, start_ts, duration_ns) \
+             VALUES ('4bf92f3577b34da6a3ce929d0e0e4736', '00f067aa0ba902b7', \
+             'GET /checkout', 'checkout', 'server', 'ok', 1753000000123000000, 8500000);",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+            .unwrap();
+        let (name, duration): (String, i64) = db
+            .query_row(
+                "SELECT name, duration_ns FROM traces \
+                 WHERE trace_id = x'4bf92f3577b34da6a3ce929d0e0e4736';",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "GET /checkout");
+        assert_eq!(duration, 8500000);
     }
 }
