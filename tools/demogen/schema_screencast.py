@@ -123,15 +123,37 @@ SCRIPT = [
 ]
 
 
+def pump_available(fd):
+    """Drain echo that is ready RIGHT NOW; never blocks.
+
+    Reading during typing is what makes the recording honest: each
+    keystroke's echo lands in the cast as its own frame, so viewers see
+    live typing instead of dead air followed by a burst."""
+    while True:
+        ready, _, _ = select.select([fd], [], [], 0)
+        if not ready:
+            return
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            return
+        if not chunk:
+            return
+        emit(chunk)
+
+
 def type_line(fd, line, pace=1.0):
     if pace <= 0:
         os.write(fd, line.encode())
         time.sleep(0.06)
+        pump_available(fd)
     else:
         for ch in line:
             os.write(fd, ch.encode())
+            pump_available(fd)
             time.sleep(random.uniform(0.006, 0.016) * pace)
         time.sleep(0.08)
+        pump_available(fd)
     os.write(fd, b"\r")
 
 

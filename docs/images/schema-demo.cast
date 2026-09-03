@@ -1,125 +1,2183 @@
 {"version": 3, "term": {"cols": 120, "rows": 32}, "env": {"TERM": "xterm-256color"}}
-{"time":0.002569,"code":"o","data":"SQLite version 3.53.4 2026-07-24 19:02:57\r\nEnter \".help\" for usage hints.\r\n"}
-{"time":0.00265,"code":"o","data":"\u001b[?2004h"}
-{"time":0.002671,"code":"o","data":"sqlite> "}
-{"time":0.162902,"code":"o","data":".load ./target/release/libtimeless_ext"}
-{"time":0.163182,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":0.163643,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":0.473954,"code":"o","data":"PRAGMA journal_mode=WAL;"}
-{"time":0.474244,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":0.474652,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 journal_mode \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 wal          \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":0.785132,"code":"o","data":".mode box"}
-{"time":0.7852,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":0.785226,"code":"o","data":"\u001b[?2004h"}
-{"time":0.785234,"code":"o","data":"sqlite> "}
-{"time":1.095574,"code":"o","data":".print '-- one CREATE per signal. no extra commands, no installer to run'"}
-{"time":1.095759,"code":"o","data":"\r\n\u001b[?2004l\r-- one CREATE per signal. no extra commands, no installer to run\r\n\u001b[?2004hsqlite> "}
-{"time":2.309251,"code":"o","data":"CREATE VIRTUAL TABLE metrics USING timeless_metrics;"}
-{"time":2.309502,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":2.310333,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":4.017331,"code":"o","data":"CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,host');"}
-{"time":4.017634,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":4.018344,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":5.509474,"code":"o","data":"CREATE VIRTUAL TABLE traces USING timeless_traces;"}
-{"time":5.509774,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":5.510683,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":6.270968,"code":"o","data":".print '-- companions installed themselves, and the inventory describes every object'"}
-{"time":6.271131,"code":"o","data":"\r\n\u001b[?2004l\r-- companions installed themselves, and the inventory describes every object\r\n\u001b[?2004hsqlite> "}
-{"time":7.98394,"code":"o","data":"SELECT object_name, object_kind, schema_version FROM timeless_schema_inventory ORDER BY object_name;"}
-{"time":7.984017,"code":"o","data":"\r\n"}
-{"time":7.984028,"code":"o","data":"\u001b[?2004l\r"}
-{"time":7.984199,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502        object_name         \u2502 object_kind \u2502 schema_version \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 timeless_logs_entries      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_fields       \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_services     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_latest    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_series    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_errors     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_operations \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_roots      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_services   \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_spans      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_summary    \u2502 view        \u2502              1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":9.644597,"code":"o","data":".print '-- seed a tiny incident: a checkout request whose db call failed'"}
-{"time":9.644835,"code":"o","data":"\r\n\u001b[?2004l\r-- seed a tiny incident: a checkout request whose db call failed\r\n\u001b[?2004hsqlite> "}
-{"time":13.068254,"code":"o","data":"INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns) VALUE \rS ('aaaa0000000000000000000000000000', '0100000000000000', NULL, 'POST /checkout', 'checkout', 'server', 'ok', 175300000 \r0123000000, 8500000);"}
-{"time":13.068345,"code":"o","data":"\r\n"}
-{"time":13.068356,"code":"o","data":"\u001b[?2004l\r"}
-{"time":13.06845,"code":"o","data":"\u001b[?2004h"}
-{"time":13.068458,"code":"o","data":"sqlite> "}
-{"time":16.79437,"code":"o","data":"INSERT INTO traces (trace_id, span_id, parent_span_id, name, service, kind, status, start_ts, duration_ns) VALUE \rS ('aaaa0000000000000000000000000000', '0200000000000000', '0100000000000000', 'SELECT items', 'db', 'client', 'error',  \r1753000000200000000, 1200000);"}
-{"time":16.794428,"code":"o","data":"\r\n"}
-{"time":16.794438,"code":"o","data":"\u001b[?2004l\r"}
-{"time":16.79463,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":19.141026,"code":"o","data":"INSERT INTO logs(ts, level, message, metadata) VALUES (1753000000456, 'error', 'payment declined', '{\"service\":\" \rpayments\",\"retryable\":false}');"}
-{"time":19.141265,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":19.14143,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":21.080254,"code":"o","data":"INSERT INTO metrics(name, ts, value, labels) VALUES ('checkout_errors', 1753000000, 1.0, '{\"host\":\"web1\"}');"}
-{"time":21.080577,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":21.08082,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":23.028153,"code":"o","data":"INSERT INTO metrics(name, ts, value, labels) VALUES ('checkout_latency', 1753000000, 0.85, '{\"host\":\"web1\"}');"}
-{"time":23.028285,"code":"o","data":"\r\n"}
-{"time":23.028299,"code":"o","data":"\u001b[?2004l\r"}
-{"time":23.028605,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":24.273747,"code":"o","data":"INSERT INTO metrics(metrics) VALUES ('flush');"}
-{"time":24.274018,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":24.274488,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":25.37518,"code":"o","data":"INSERT INTO logs(logs) VALUES ('flush');"}
-{"time":25.375516,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":25.375719,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":26.500593,"code":"o","data":"INSERT INTO traces(traces) VALUES ('flush');"}
-{"time":26.500875,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":26.501167,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":26.961585,"code":"o","data":".print '-- spans, with ids you can read and times you can read'"}
-{"time":26.961843,"code":"o","data":"\r\n\u001b[?2004l\r-- spans, with ids you can read and times you can read\r\n\u001b[?2004hsqlite> "}
-{"time":28.580371,"code":"o","data":"SELECT trace_id, name, service, status, start_time, duration_ms FROM timeless_traces_spans;"}
-{"time":28.580777,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":28.581022,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502      name      \u2502 service  \u2502 status \u2502        start_time        \u2502 duration_ms \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502 POST /checkout \u2502 checkout \u2502 ok     \u2502 2025-07-20T08:26:40.123Z \u2502         8.5 \u2502\r\n\u2502 aaaa0000000000000000000000000000 \u2502 SELECT items   \u2502 db       \u2502 error  \u2502 2025-07-20T08:26:40.200Z \u2502         1.2 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":30.041397,"code":"o","data":".print '-- one row per trace. root state, service set, and completeness never overreach'"}
-{"time":30.041619,"code":"o","data":"\r\n\u001b[?2004l\r-- one row per trace. root state, service set, and completeness never overreach\r\n\u001b[?2004hsqlite> "}
-{"time":31.912443,"code":"o","data":"SELECT trace_id, span_rows, error_rows, root_state, root_name, services, completeness FROM timeless_traces_summa \rry;"}
-{"time":31.912745,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":31.913585,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502 span_rows \u2502 error_rows \u2502 root_state \u2502   root_name    \u2502  services   \u2502 completeness \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502         2 \u2502          1 \u2502 unique     \u2502 POST /checkout \u2502 checkout,db \u2502 unknown      \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":33.573925,"code":"o","data":".print '-- the error span, straight from its own view'"}
-{"time":33.574132,"code":"o","data":"\r\n\u001b[?2004l\r-- the error span, straight from its own view\r\n\u001b[?2004hsqlite> "}
-{"time":34.880776,"code":"o","data":"SELECT name, service, start_time FROM timeless_traces_errors;"}
-{"time":34.881196,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":34.88172,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502     name     \u2502 service \u2502        start_time        \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 SELECT items \u2502 db      \u2502 2025-07-20T08:26:40.200Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":36.042074,"code":"o","data":".print '-- catalogs, for building dropdowns and service maps'"}
-{"time":36.042216,"code":"o","data":"\r\n"}
-{"time":36.042231,"code":"o","data":"\u001b[?2004l\r"}
-{"time":36.04225,"code":"o","data":"-- catalogs, for building dropdowns and service maps\r\n"}
-{"time":36.04226,"code":"o","data":"\u001b[?2004h"}
-{"time":36.04227,"code":"o","data":"sqlite> "}
-{"time":37.312959,"code":"o","data":"SELECT service, operation FROM timeless_traces_operations;"}
-{"time":37.313376,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":37.313797,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502   operation    \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout \u2502 POST /checkout \u2502\r\n\u2502 db       \u2502 SELECT items   \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":38.474194,"code":"o","data":".print '-- log entries: receipt-style UTC, message, metadata kept as typed JSON'"}
-{"time":38.474483,"code":"o","data":"\r\n\u001b[?2004l\r-- log entries: receipt-style UTC, message, metadata kept as typed JSON\r\n\u001b[?2004hsqlite> "}
-{"time":40.312825,"code":"o","data":"SELECT ts_time, level, message, json_extract(metadata, '$.retryable') AS retryable FROM timeless_logs_entries;"}
-{"time":40.312902,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":40.313264,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502         ts_time          \u2502 level \u2502     message      \u2502 retryable \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 2025-07-20T08:26:40.456Z \u2502 error \u2502 payment declined \u2502         0 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":41.773589,"code":"o","data":".print '-- what you can filter on fast (declared index keys)'"}
-{"time":41.773855,"code":"o","data":"\r\n\u001b[?2004l\r-- what you can filter on fast (declared index keys)\r\n\u001b[?2004hsqlite> "}
-{"time":42.839941,"code":"o","data":"SELECT field FROM timeless_logs_fields;"}
-{"time":42.840132,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":42.840242,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502  field  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 service \u2502\r\n\u2502 host    \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":44.561226,"code":"o","data":"SELECT service FROM timeless_logs_services;"}
-{"time":44.561616,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":44.561973,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 payments \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":45.622312,"code":"o","data":".print '-- newest value per series, in plain words and plain time'"}
-{"time":45.622704,"code":"o","data":"\r\n\u001b[?2004l\r-- newest value per series, in plain words and plain time\r\n\u001b[?2004hsqlite> "}
-{"time":46.978176,"code":"o","data":"SELECT name, labels, value, ts_time FROM timeless_metrics_latest;"}
-{"time":46.978531,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":46.979002,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502     labels      \u2502 value \u2502         ts_time          \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502 {\"host\":\"web1\"} \u2502   1.0 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2502 checkout_latency \u2502 {\"host\":\"web1\"} \u2502  0.85 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":48.439404,"code":"o","data":".print '-- and the catalog: what exists, how much of it'"}
-{"time":48.439826,"code":"o","data":"\r\n\u001b[?2004l\r-- and the catalog: what exists, how much of it\r\n\u001b[?2004hsqlite> "}
-{"time":49.590491,"code":"o","data":"SELECT name, points FROM timeless_metrics_series;"}
-{"time":49.590782,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":49.591085,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502 points \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502      1 \u2502\r\n\u2502 checkout_latency \u2502      1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
-{"time":50.751438,"code":"o","data":".mode list --charlimit 0 --linelimit 0"}
-{"time":50.75182,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
-{"time":51.062177,"code":"o","data":".print '-- dropping a table uninstalls exactly its own objects -- nothing else is touched'"}
-{"time":51.062577,"code":"o","data":"\r\n\u001b[?2004l\r-- dropping a table uninstalls exactly its own objects -- nothing else is touched\r\n\u001b[?2004hsqlite> "}
-{"time":51.897836,"code":"o","data":"DROP TABLE traces;"}
-{"time":51.898003,"code":"o","data":"\r\n\u001b[?2004l\r"}
-{"time":51.898653,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":53.630648,"code":"o","data":"SELECT object_name FROM timeless_schema_inventory WHERE source_table = 'traces';"}
-{"time":53.631068,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
-{"time":54.79149,"code":"o","data":".print '-- (no rows: the traces companions left with their table)'"}
-{"time":54.791786,"code":"o","data":"\r\n\u001b[?2004l\r-- (no rows: the traces companions left with their table)\r\n\u001b[?2004hsqlite> "}
-{"time":56.422,"code":"o","data":"SELECT object_name FROM timeless_schema_inventory WHERE source_table = 'logs';"}
-{"time":56.422289,"code":"o","data":"\r\n\u001b[?2004l\rtimeless_logs_entries\r\ntimeless_logs_fields\r\ntimeless_logs_services\r\n"}
-{"time":56.422458,"code":"o","data":"\u001b[?2004hsqlite> "}
-{"time":57.582769,"code":"o","data":".print '-- logs companions untouched. that is the whole contract.'"}
-{"time":57.583037,"code":"o","data":"\r\n\u001b[?2004l\r-- logs companions untouched. that is the whole contract.\r\n\u001b[?2004hsqlite> "}
-{"time":58.683697,"code":"o","data":".quit\r\n\u001b[?2004l\r"}
+{"time":0.002826,"code":"o","data":"SQLite version 3.53.4 2026-07-24 19:02:57\r\nEnter \".help\" for usage hints.\r\n"}
+{"time":0.003271,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.163589,"code":"o","data":".load ./target/release/libtimeless_ext"}
+{"time":0.164013,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.164563,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":0.47501,"code":"o","data":"PRAGMA journal_mode=WAL;"}
+{"time":0.475326,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":0.475619,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 journal_mode \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 wal          \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":0.785917,"code":"o","data":".mode box"}
+{"time":0.786269,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":1.096552,"code":"o","data":".print '-- one CREATE per signal. no extra commands, no installer to run'"}
+{"time":1.096815,"code":"o","data":"\r\n\u001b[?2004l\r-- one CREATE per signal. no extra commands, no installer to run\r\n\u001b[?2004hsqlite> "}
+{"time":1.657283,"code":"o","data":"C"}
+{"time":1.666028,"code":"o","data":"R"}
+{"time":1.678676,"code":"o","data":"E"}
+{"time":1.690558,"code":"o","data":"A"}
+{"time":1.700173,"code":"o","data":"T"}
+{"time":1.714447,"code":"o","data":"E"}
+{"time":1.726785,"code":"o","data":" "}
+{"time":1.740135,"code":"o","data":"V"}
+{"time":1.746689,"code":"o","data":"I"}
+{"time":1.758565,"code":"o","data":"R"}
+{"time":1.771436,"code":"o","data":"T"}
+{"time":1.781246,"code":"o","data":"U"}
+{"time":1.789856,"code":"o","data":"A"}
+{"time":1.804215,"code":"o","data":"L"}
+{"time":1.813596,"code":"o","data":" "}
+{"time":1.827588,"code":"o","data":"T"}
+{"time":1.834745,"code":"o","data":"A"}
+{"time":1.844611,"code":"o","data":"B"}
+{"time":1.851414,"code":"o","data":"L"}
+{"time":1.860529,"code":"o","data":"E"}
+{"time":1.873667,"code":"o","data":" "}
+{"time":1.886613,"code":"o","data":"m"}
+{"time":1.898826,"code":"o","data":"e"}
+{"time":1.913347,"code":"o","data":"t"}
+{"time":1.922291,"code":"o","data":"r"}
+{"time":1.935193,"code":"o","data":"i"}
+{"time":1.951327,"code":"o","data":"c"}
+{"time":1.964965,"code":"o","data":"s"}
+{"time":1.973895,"code":"o","data":" "}
+{"time":1.983953,"code":"o","data":"U"}
+{"time":1.9995,"code":"o","data":"S"}
+{"time":2.007843,"code":"o","data":"I"}
+{"time":2.022196,"code":"o","data":"N"}
+{"time":2.037733,"code":"o","data":"G"}
+{"time":2.049177,"code":"o","data":" "}
+{"time":2.059196,"code":"o","data":"t"}
+{"time":2.066483,"code":"o","data":"i"}
+{"time":2.080414,"code":"o","data":"m"}
+{"time":2.088421,"code":"o","data":"e"}
+{"time":2.097097,"code":"o","data":"l"}
+{"time":2.11238,"code":"o","data":"e"}
+{"time":2.122089,"code":"o","data":"s"}
+{"time":2.136459,"code":"o","data":"s"}
+{"time":2.150023,"code":"o","data":"_"}
+{"time":2.157326,"code":"o","data":"m"}
+{"time":2.171651,"code":"o","data":"e"}
+{"time":2.17913,"code":"o","data":"t"}
+{"time":2.194705,"code":"o","data":"r"}
+{"time":2.201732,"code":"o","data":"i"}
+{"time":2.209195,"code":"o","data":"c"}
+{"time":2.219515,"code":"o","data":"s"}
+{"time":2.306537,"code":"o","data":";"}
+{"time":2.306892,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":2.307929,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":3.171276,"code":"o","data":"C"}
+{"time":3.181996,"code":"o","data":"R"}
+{"time":3.196969,"code":"o","data":"E"}
+{"time":3.204658,"code":"o","data":"A"}
+{"time":3.211278,"code":"o","data":"T"}
+{"time":3.22165,"code":"o","data":"E"}
+{"time":3.233733,"code":"o","data":" "}
+{"time":3.248723,"code":"o","data":"V"}
+{"time":3.261138,"code":"o","data":"I"}
+{"time":3.268724,"code":"o","data":"R"}
+{"time":3.284797,"code":"o","data":"T"}
+{"time":3.297729,"code":"o","data":"U"}
+{"time":3.309704,"code":"o","data":"A"}
+{"time":3.320518,"code":"o","data":"L"}
+{"time":3.3282,"code":"o","data":" "}
+{"time":3.335265,"code":"o","data":"T"}
+{"time":3.351051,"code":"o","data":"A"}
+{"time":3.357875,"code":"o","data":"B"}
+{"time":3.366048,"code":"o","data":"L"}
+{"time":3.381894,"code":"o","data":"E"}
+{"time":3.395526,"code":"o","data":" "}
+{"time":3.402239,"code":"o","data":"l"}
+{"time":3.411588,"code":"o","data":"o"}
+{"time":3.423506,"code":"o","data":"g"}
+{"time":3.430265,"code":"o","data":"s"}
+{"time":3.439086,"code":"o","data":" "}
+{"time":3.450396,"code":"o","data":"U"}
+{"time":3.461641,"code":"o","data":"S"}
+{"time":3.475091,"code":"o","data":"I"}
+{"time":3.485786,"code":"o","data":"N"}
+{"time":3.498107,"code":"o","data":"G"}
+{"time":3.507186,"code":"o","data":" "}
+{"time":3.520857,"code":"o","data":"t"}
+{"time":3.536232,"code":"o","data":"i"}
+{"time":3.549441,"code":"o","data":"m"}
+{"time":3.560616,"code":"o","data":"e"}
+{"time":3.57396,"code":"o","data":"l"}
+{"time":3.586464,"code":"o","data":"e"}
+{"time":3.598148,"code":"o","data":"s"}
+{"time":3.607741,"code":"o","data":"s"}
+{"time":3.623685,"code":"o","data":"_"}
+{"time":3.639693,"code":"o","data":"l"}
+{"time":3.645895,"code":"o","data":"o"}
+{"time":3.659917,"code":"o","data":"g"}
+{"time":3.667708,"code":"o","data":"s"}
+{"time":3.67863,"code":"o","data":"("}
+{"time":3.690573,"code":"o","data":"i"}
+{"time":3.70481,"code":"o","data":"n"}
+{"time":3.712459,"code":"o","data":"d"}
+{"time":3.728367,"code":"o","data":"e"}
+{"time":3.736416,"code":"o","data":"x"}
+{"time":3.751699,"code":"o","data":"_"}
+{"time":3.765466,"code":"o","data":"k"}
+{"time":3.775947,"code":"o","data":"e"}
+{"time":3.786829,"code":"o","data":"y"}
+{"time":3.799763,"code":"o","data":"s"}
+{"time":3.812165,"code":"o","data":"="}
+{"time":3.82457,"code":"o","data":"'"}
+{"time":3.832839,"code":"o","data":"s"}
+{"time":3.841137,"code":"o","data":"e"}
+{"time":3.855779,"code":"o","data":"r"}
+{"time":3.855841,"code":"o","data":"v"}
+{"time":3.884279,"code":"o","data":"i"}
+{"time":3.896901,"code":"o","data":"c"}
+{"time":3.912065,"code":"o","data":"e"}
+{"time":3.918659,"code":"o","data":","}
+{"time":3.927332,"code":"o","data":"h"}
+{"time":3.940125,"code":"o","data":"o"}
+{"time":3.954629,"code":"o","data":"s"}
+{"time":3.966353,"code":"o","data":"t"}
+{"time":3.975884,"code":"o","data":"'"}
+{"time":3.984044,"code":"o","data":")"}
+{"time":4.079652,"code":"o","data":";"}
+{"time":4.079945,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":4.08067,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":4.938998,"code":"o","data":"C"}
+{"time":4.953553,"code":"o","data":"R"}
+{"time":4.962041,"code":"o","data":"E"}
+{"time":4.973612,"code":"o","data":"A"}
+{"time":4.980214,"code":"o","data":"T"}
+{"time":4.996086,"code":"o","data":"E"}
+{"time":5.007411,"code":"o","data":" "}
+{"time":5.016187,"code":"o","data":"V"}
+{"time":5.030362,"code":"o","data":"I"}
+{"time":5.043867,"code":"o","data":"R"}
+{"time":5.055063,"code":"o","data":"T"}
+{"time":5.068799,"code":"o","data":"U"}
+{"time":5.078769,"code":"o","data":"A"}
+{"time":5.094868,"code":"o","data":"L"}
+{"time":5.107018,"code":"o","data":" "}
+{"time":5.113935,"code":"o","data":"T"}
+{"time":5.122421,"code":"o","data":"A"}
+{"time":5.137848,"code":"o","data":"B"}
+{"time":5.153605,"code":"o","data":"L"}
+{"time":5.169487,"code":"o","data":"E"}
+{"time":5.179778,"code":"o","data":" "}
+{"time":5.190308,"code":"o","data":"t"}
+{"time":5.203879,"code":"o","data":"r"}
+{"time":5.214667,"code":"o","data":"a"}
+{"time":5.221094,"code":"o","data":"c"}
+{"time":5.232068,"code":"o","data":"e"}
+{"time":5.246101,"code":"o","data":"s"}
+{"time":5.256866,"code":"o","data":" "}
+{"time":5.266038,"code":"o","data":"U"}
+{"time":5.275245,"code":"o","data":"S"}
+{"time":5.283937,"code":"o","data":"I"}
+{"time":5.295092,"code":"o","data":"N"}
+{"time":5.308931,"code":"o","data":"G"}
+{"time":5.324081,"code":"o","data":" "}
+{"time":5.331073,"code":"o","data":"t"}
+{"time":5.338664,"code":"o","data":"i"}
+{"time":5.350302,"code":"o","data":"m"}
+{"time":5.362185,"code":"o","data":"e"}
+{"time":5.370969,"code":"o","data":"l"}
+{"time":5.381294,"code":"o","data":"e"}
+{"time":5.397065,"code":"o","data":"s"}
+{"time":5.410397,"code":"o","data":"s"}
+{"time":5.41844,"code":"o","data":"_"}
+{"time":5.434221,"code":"o","data":"t"}
+{"time":5.441692,"code":"o","data":"r"}
+{"time":5.449887,"code":"o","data":"a"}
+{"time":5.461845,"code":"o","data":"c"}
+{"time":5.468586,"code":"o","data":"e"}
+{"time":5.476786,"code":"o","data":"s"}
+{"time":5.566826,"code":"o","data":";"}
+{"time":5.567043,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":5.568449,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":6.329052,"code":"o","data":".print '-- companions installed themselves, and the inventory describes every object'"}
+{"time":6.329478,"code":"o","data":"\r\n\u001b[?2004l\r-- companions installed themselves, and the inventory describes every object\r\n\u001b[?2004hsqlite> "}
+{"time":6.886241,"code":"o","data":"S"}
+{"time":6.901419,"code":"o","data":"E"}
+{"time":6.908177,"code":"o","data":"L"}
+{"time":6.923094,"code":"o","data":"E"}
+{"time":6.937784,"code":"o","data":"C"}
+{"time":6.945184,"code":"o","data":"T"}
+{"time":6.951826,"code":"o","data":" "}
+{"time":6.959479,"code":"o","data":"o"}
+{"time":6.974389,"code":"o","data":"b"}
+{"time":6.98784,"code":"o","data":"j"}
+{"time":7.001764,"code":"o","data":"e"}
+{"time":7.017153,"code":"o","data":"c"}
+{"time":7.030795,"code":"o","data":"t"}
+{"time":7.041735,"code":"o","data":"_"}
+{"time":7.05242,"code":"o","data":"n"}
+{"time":7.063548,"code":"o","data":"a"}
+{"time":7.070121,"code":"o","data":"m"}
+{"time":7.070319,"code":"o","data":"e"}
+{"time":7.093415,"code":"o","data":","}
+{"time":7.10394,"code":"o","data":" "}
+{"time":7.114263,"code":"o","data":"o"}
+{"time":7.122341,"code":"o","data":"b"}
+{"time":7.129188,"code":"o","data":"j"}
+{"time":7.140391,"code":"o","data":"e"}
+{"time":7.154835,"code":"o","data":"c"}
+{"time":7.165678,"code":"o","data":"t"}
+{"time":7.17693,"code":"o","data":"_"}
+{"time":7.177343,"code":"o","data":"k"}
+{"time":7.195897,"code":"o","data":"i"}
+{"time":7.209357,"code":"o","data":"n"}
+{"time":7.224534,"code":"o","data":"d"}
+{"time":7.238631,"code":"o","data":","}
+{"time":7.250733,"code":"o","data":" "}
+{"time":7.262642,"code":"o","data":"s"}
+{"time":7.270781,"code":"o","data":"c"}
+{"time":7.284524,"code":"o","data":"h"}
+{"time":7.299405,"code":"o","data":"e"}
+{"time":7.307247,"code":"o","data":"m"}
+{"time":7.320719,"code":"o","data":"a"}
+{"time":7.335952,"code":"o","data":"_"}
+{"time":7.34987,"code":"o","data":"v"}
+{"time":7.362775,"code":"o","data":"e"}
+{"time":7.37121,"code":"o","data":"r"}
+{"time":7.380044,"code":"o","data":"s"}
+{"time":7.393903,"code":"o","data":"i"}
+{"time":7.40286,"code":"o","data":"o"}
+{"time":7.414181,"code":"o","data":"n"}
+{"time":7.428682,"code":"o","data":" "}
+{"time":7.440985,"code":"o","data":"F"}
+{"time":7.453115,"code":"o","data":"R"}
+{"time":7.463977,"code":"o","data":"O"}
+{"time":7.476866,"code":"o","data":"M"}
+{"time":7.490739,"code":"o","data":" "}
+{"time":7.506798,"code":"o","data":"t"}
+{"time":7.522405,"code":"o","data":"i"}
+{"time":7.537529,"code":"o","data":"m"}
+{"time":7.552253,"code":"o","data":"e"}
+{"time":7.559612,"code":"o","data":"l"}
+{"time":7.573253,"code":"o","data":"e"}
+{"time":7.587834,"code":"o","data":"s"}
+{"time":7.598545,"code":"o","data":"s"}
+{"time":7.613231,"code":"o","data":"_"}
+{"time":7.627987,"code":"o","data":"s"}
+{"time":7.635766,"code":"o","data":"c"}
+{"time":7.651862,"code":"o","data":"h"}
+{"time":7.663135,"code":"o","data":"e"}
+{"time":7.670762,"code":"o","data":"m"}
+{"time":7.68224,"code":"o","data":"a"}
+{"time":7.691326,"code":"o","data":"_"}
+{"time":7.699106,"code":"o","data":"i"}
+{"time":7.714167,"code":"o","data":"n"}
+{"time":7.729059,"code":"o","data":"v"}
+{"time":7.729327,"code":"o","data":"e"}
+{"time":7.74648,"code":"o","data":"n"}
+{"time":7.753569,"code":"o","data":"t"}
+{"time":7.760462,"code":"o","data":"o"}
+{"time":7.773216,"code":"o","data":"r"}
+{"time":7.788094,"code":"o","data":"y"}
+{"time":7.80339,"code":"o","data":" "}
+{"time":7.809711,"code":"o","data":"O"}
+{"time":7.816362,"code":"o","data":"R"}
+{"time":7.832345,"code":"o","data":"D"}
+{"time":7.84811,"code":"o","data":"E"}
+{"time":7.86309,"code":"o","data":"R"}
+{"time":7.872631,"code":"o","data":" "}
+{"time":7.872696,"code":"o","data":"B"}
+{"time":7.90361,"code":"o","data":"Y"}
+{"time":7.917853,"code":"o","data":" "}
+{"time":7.929955,"code":"o","data":"o"}
+{"time":7.94385,"code":"o","data":"b"}
+{"time":7.956491,"code":"o","data":"j"}
+{"time":7.96294,"code":"o","data":"e"}
+{"time":7.963149,"code":"o","data":"c"}
+{"time":7.991771,"code":"o","data":"t"}
+{"time":7.9981,"code":"o","data":"_"}
+{"time":7.99832,"code":"o","data":"n"}
+{"time":8.02372,"code":"o","data":"a"}
+{"time":8.023929,"code":"o","data":"m"}
+{"time":8.049489,"code":"o","data":"e"}
+{"time":8.138424,"code":"o","data":";"}
+{"time":8.138868,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":8.139041,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502        object_name         \u2502 object_kind \u2502 schema_version \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 timeless_logs_entries      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_fields       \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_logs_services     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_latest    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_metrics_series    \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_errors     \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_operations \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_roots      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_services   \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_spans      \u2502 view        \u2502              1 \u2502\r\n\u2502 timeless_traces_summary    \u2502 view        \u2502              1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":9.799628,"code":"o","data":".print '-- seed a tiny incident: a checkout request whose db call failed'"}
+{"time":9.800196,"code":"o","data":"\r\n\u001b[?2004l\r-- seed a tiny incident: a checkout request whose db call failed\r\n\u001b[?2004hsqlite> "}
+{"time":10.366339,"code":"o","data":"I"}
+{"time":10.379322,"code":"o","data":"N"}
+{"time":10.387054,"code":"o","data":"S"}
+{"time":10.398971,"code":"o","data":"E"}
+{"time":10.411503,"code":"o","data":"R"}
+{"time":10.426031,"code":"o","data":"T"}
+{"time":10.435169,"code":"o","data":" "}
+{"time":10.44551,"code":"o","data":"I"}
+{"time":10.458186,"code":"o","data":"N"}
+{"time":10.471588,"code":"o","data":"T"}
+{"time":10.483151,"code":"o","data":"O"}
+{"time":10.496157,"code":"o","data":" "}
+{"time":10.511882,"code":"o","data":"t"}
+{"time":10.519503,"code":"o","data":"r"}
+{"time":10.534307,"code":"o","data":"a"}
+{"time":10.54513,"code":"o","data":"c"}
+{"time":10.556853,"code":"o","data":"e"}
+{"time":10.569776,"code":"o","data":"s"}
+{"time":10.578211,"code":"o","data":" "}
+{"time":10.59138,"code":"o","data":"("}
+{"time":10.600336,"code":"o","data":"t"}
+{"time":10.611489,"code":"o","data":"r"}
+{"time":10.622756,"code":"o","data":"a"}
+{"time":10.632606,"code":"o","data":"c"}
+{"time":10.648216,"code":"o","data":"e"}
+{"time":10.66021,"code":"o","data":"_"}
+{"time":10.671868,"code":"o","data":"i"}
+{"time":10.685969,"code":"o","data":"d"}
+{"time":10.697932,"code":"o","data":","}
+{"time":10.709598,"code":"o","data":" "}
+{"time":10.71665,"code":"o","data":"s"}
+{"time":10.730592,"code":"o","data":"p"}
+{"time":10.744249,"code":"o","data":"a"}
+{"time":10.760333,"code":"o","data":"n"}
+{"time":10.768519,"code":"o","data":"_"}
+{"time":10.775145,"code":"o","data":"i"}
+{"time":10.782232,"code":"o","data":"d"}
+{"time":10.789951,"code":"o","data":","}
+{"time":10.797831,"code":"o","data":" "}
+{"time":10.813667,"code":"o","data":"p"}
+{"time":10.820709,"code":"o","data":"a"}
+{"time":10.828024,"code":"o","data":"r"}
+{"time":10.838304,"code":"o","data":"e"}
+{"time":10.846178,"code":"o","data":"n"}
+{"time":10.860611,"code":"o","data":"t"}
+{"time":10.868551,"code":"o","data":"_"}
+{"time":10.883158,"code":"o","data":"s"}
+{"time":10.899007,"code":"o","data":"p"}
+{"time":10.910301,"code":"o","data":"a"}
+{"time":10.920741,"code":"o","data":"n"}
+{"time":10.93353,"code":"o","data":"_"}
+{"time":10.940794,"code":"o","data":"i"}
+{"time":10.952124,"code":"o","data":"d"}
+{"time":10.966497,"code":"o","data":","}
+{"time":10.978566,"code":"o","data":" "}
+{"time":10.986229,"code":"o","data":"n"}
+{"time":10.995496,"code":"o","data":"a"}
+{"time":11.002133,"code":"o","data":"m"}
+{"time":11.012451,"code":"o","data":"e"}
+{"time":11.020013,"code":"o","data":","}
+{"time":11.033471,"code":"o","data":" "}
+{"time":11.049044,"code":"o","data":"s"}
+{"time":11.059364,"code":"o","data":"e"}
+{"time":11.068046,"code":"o","data":"r"}
+{"time":11.080217,"code":"o","data":"v"}
+{"time":11.094699,"code":"o","data":"i"}
+{"time":11.106144,"code":"o","data":"c"}
+{"time":11.113104,"code":"o","data":"e"}
+{"time":11.128733,"code":"o","data":","}
+{"time":11.135273,"code":"o","data":" "}
+{"time":11.151624,"code":"o","data":"k"}
+{"time":11.158657,"code":"o","data":"i"}
+{"time":11.173323,"code":"o","data":"n"}
+{"time":11.187262,"code":"o","data":"d"}
+{"time":11.202203,"code":"o","data":","}
+{"time":11.215461,"code":"o","data":" "}
+{"time":11.222898,"code":"o","data":"s"}
+{"time":11.238977,"code":"o","data":"t"}
+{"time":11.252691,"code":"o","data":"a"}
+{"time":11.265391,"code":"o","data":"t"}
+{"time":11.274994,"code":"o","data":"u"}
+{"time":11.281789,"code":"o","data":"s"}
+{"time":11.289562,"code":"o","data":","}
+{"time":11.302028,"code":"o","data":" "}
+{"time":11.30929,"code":"o","data":"s"}
+{"time":11.315795,"code":"o","data":"t"}
+{"time":11.325233,"code":"o","data":"a"}
+{"time":11.334333,"code":"o","data":"r"}
+{"time":11.345536,"code":"o","data":"t"}
+{"time":11.356889,"code":"o","data":"_"}
+{"time":11.364474,"code":"o","data":"t"}
+{"time":11.370976,"code":"o","data":"s"}
+{"time":11.380134,"code":"o","data":","}
+{"time":11.386836,"code":"o","data":" "}
+{"time":11.397164,"code":"o","data":"d"}
+{"time":11.406947,"code":"o","data":"u"}
+{"time":11.422086,"code":"o","data":"r"}
+{"time":11.437353,"code":"o","data":"a"}
+{"time":11.453466,"code":"o","data":"t"}
+{"time":11.46931,"code":"o","data":"i"}
+{"time":11.475734,"code":"o","data":"o"}
+{"time":11.485675,"code":"o","data":"n"}
+{"time":11.492037,"code":"o","data":"_"}
+{"time":11.498999,"code":"o","data":"n"}
+{"time":11.513276,"code":"o","data":"s"}
+{"time":11.528715,"code":"o","data":")"}
+{"time":11.540954,"code":"o","data":" "}
+{"time":11.549815,"code":"o","data":"V"}
+{"time":11.564505,"code":"o","data":"A"}
+{"time":11.575326,"code":"o","data":"L"}
+{"time":11.587722,"code":"o","data":"U"}
+{"time":11.597,"code":"o","data":"E \r"}
+{"time":11.609376,"code":"o","data":"S"}
+{"time":11.620079,"code":"o","data":" "}
+{"time":11.628874,"code":"o","data":"("}
+{"time":11.628904,"code":"o","data":"'"}
+{"time":11.65232,"code":"o","data":"a"}
+{"time":11.667311,"code":"o","data":"a"}
+{"time":11.678221,"code":"o","data":"a"}
+{"time":11.68451,"code":"o","data":"a"}
+{"time":11.694529,"code":"o","data":"0"}
+{"time":11.707821,"code":"o","data":"0"}
+{"time":11.715295,"code":"o","data":"0"}
+{"time":11.730183,"code":"o","data":"0"}
+{"time":11.738297,"code":"o","data":"0"}
+{"time":11.752554,"code":"o","data":"0"}
+{"time":11.752599,"code":"o","data":"0"}
+{"time":11.778344,"code":"o","data":"0"}
+{"time":11.785785,"code":"o","data":"0"}
+{"time":11.798664,"code":"o","data":"0"}
+{"time":11.808962,"code":"o","data":"0"}
+{"time":11.80902,"code":"o","data":"0"}
+{"time":11.834374,"code":"o","data":"0"}
+{"time":11.846257,"code":"o","data":"0"}
+{"time":11.853754,"code":"o","data":"0"}
+{"time":11.863964,"code":"o","data":"0"}
+{"time":11.879085,"code":"o","data":"0"}
+{"time":11.891465,"code":"o","data":"0"}
+{"time":11.90383,"code":"o","data":"0"}
+{"time":11.91706,"code":"o","data":"0"}
+{"time":11.9317,"code":"o","data":"0"}
+{"time":11.940533,"code":"o","data":"0"}
+{"time":11.949434,"code":"o","data":"0"}
+{"time":11.957657,"code":"o","data":"0"}
+{"time":11.965489,"code":"o","data":"0"}
+{"time":11.980278,"code":"o","data":"0"}
+{"time":11.992196,"code":"o","data":"0"}
+{"time":12.005896,"code":"o","data":"0"}
+{"time":12.014187,"code":"o","data":"'"}
+{"time":12.025341,"code":"o","data":","}
+{"time":12.040962,"code":"o","data":" "}
+{"time":12.049158,"code":"o","data":"'"}
+{"time":12.057772,"code":"o","data":"0"}
+{"time":12.068567,"code":"o","data":"1"}
+{"time":12.081737,"code":"o","data":"0"}
+{"time":12.088606,"code":"o","data":"0"}
+{"time":12.101039,"code":"o","data":"0"}
+{"time":12.113426,"code":"o","data":"0"}
+{"time":12.128135,"code":"o","data":"0"}
+{"time":12.136481,"code":"o","data":"0"}
+{"time":12.146752,"code":"o","data":"0"}
+{"time":12.154353,"code":"o","data":"0"}
+{"time":12.168041,"code":"o","data":"0"}
+{"time":12.178083,"code":"o","data":"0"}
+{"time":12.192499,"code":"o","data":"0"}
+{"time":12.208429,"code":"o","data":"0"}
+{"time":12.220147,"code":"o","data":"0"}
+{"time":12.234288,"code":"o","data":"0"}
+{"time":12.244582,"code":"o","data":"'"}
+{"time":12.255698,"code":"o","data":","}
+{"time":12.269084,"code":"o","data":" "}
+{"time":12.277747,"code":"o","data":"N"}
+{"time":12.284815,"code":"o","data":"U"}
+{"time":12.297056,"code":"o","data":"L"}
+{"time":12.307374,"code":"o","data":"L"}
+{"time":12.316224,"code":"o","data":","}
+{"time":12.323954,"code":"o","data":" "}
+{"time":12.337236,"code":"o","data":"'"}
+{"time":12.344131,"code":"o","data":"P"}
+{"time":12.357418,"code":"o","data":"O"}
+{"time":12.366221,"code":"o","data":"S"}
+{"time":12.375192,"code":"o","data":"T"}
+{"time":12.387427,"code":"o","data":" "}
+{"time":12.395505,"code":"o","data":"/"}
+{"time":12.403986,"code":"o","data":"c"}
+{"time":12.418692,"code":"o","data":"h"}
+{"time":12.433056,"code":"o","data":"e"}
+{"time":12.441073,"code":"o","data":"c"}
+{"time":12.447325,"code":"o","data":"k"}
+{"time":12.460268,"code":"o","data":"o"}
+{"time":12.475645,"code":"o","data":"u"}
+{"time":12.489214,"code":"o","data":"t"}
+{"time":12.500163,"code":"o","data":"'"}
+{"time":12.513656,"code":"o","data":","}
+{"time":12.525524,"code":"o","data":" "}
+{"time":12.533255,"code":"o","data":"'"}
+{"time":12.543512,"code":"o","data":"c"}
+{"time":12.555983,"code":"o","data":"h"}
+{"time":12.568402,"code":"o","data":"e"}
+{"time":12.575972,"code":"o","data":"c"}
+{"time":12.587596,"code":"o","data":"k"}
+{"time":12.594986,"code":"o","data":"o"}
+{"time":12.609831,"code":"o","data":"u"}
+{"time":12.618467,"code":"o","data":"t"}
+{"time":12.634186,"code":"o","data":"'"}
+{"time":12.650035,"code":"o","data":","}
+{"time":12.657513,"code":"o","data":" "}
+{"time":12.666074,"code":"o","data":"'"}
+{"time":12.676095,"code":"o","data":"s"}
+{"time":12.683824,"code":"o","data":"e"}
+{"time":12.692909,"code":"o","data":"r"}
+{"time":12.707335,"code":"o","data":"v"}
+{"time":12.722056,"code":"o","data":"e"}
+{"time":12.728247,"code":"o","data":"r"}
+{"time":12.742927,"code":"o","data":"'"}
+{"time":12.758577,"code":"o","data":","}
+{"time":12.768453,"code":"o","data":" "}
+{"time":12.777063,"code":"o","data":"'"}
+{"time":12.787537,"code":"o","data":"o"}
+{"time":12.795374,"code":"o","data":"k"}
+{"time":12.802752,"code":"o","data":"'"}
+{"time":12.815078,"code":"o","data":","}
+{"time":12.82863,"code":"o","data":" "}
+{"time":12.837042,"code":"o","data":"1"}
+{"time":12.849856,"code":"o","data":"7"}
+{"time":12.864551,"code":"o","data":"5"}
+{"time":12.874971,"code":"o","data":"3"}
+{"time":12.884201,"code":"o","data":"0"}
+{"time":12.897794,"code":"o","data":"0"}
+{"time":12.905277,"code":"o","data":"0"}
+{"time":12.91567,"code":"o","data":"0"}
+{"time":12.926883,"code":"o","data":"0 \r"}
+{"time":12.938652,"code":"o","data":"0"}
+{"time":12.950687,"code":"o","data":"1"}
+{"time":12.957151,"code":"o","data":"2"}
+{"time":12.964613,"code":"o","data":"3"}
+{"time":12.971032,"code":"o","data":"0"}
+{"time":12.983462,"code":"o","data":"0"}
+{"time":12.99823,"code":"o","data":"0"}
+{"time":13.011321,"code":"o","data":"0"}
+{"time":13.027448,"code":"o","data":"0"}
+{"time":13.039395,"code":"o","data":"0"}
+{"time":13.052933,"code":"o","data":","}
+{"time":13.053156,"code":"o","data":" "}
+{"time":13.072959,"code":"o","data":"8"}
+{"time":13.080054,"code":"o","data":"5"}
+{"time":13.094029,"code":"o","data":"0"}
+{"time":13.106711,"code":"o","data":"0"}
+{"time":13.117505,"code":"o","data":"0"}
+{"time":13.124887,"code":"o","data":"0"}
+{"time":13.138119,"code":"o","data":"0"}
+{"time":13.147865,"code":"o","data":")"}
+{"time":13.243563,"code":"o","data":";"}
+{"time":13.243966,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":13.244279,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":14.007909,"code":"o","data":"I"}
+{"time":14.018461,"code":"o","data":"N"}
+{"time":14.02715,"code":"o","data":"S"}
+{"time":14.03777,"code":"o","data":"E"}
+{"time":14.0474,"code":"o","data":"R"}
+{"time":14.058581,"code":"o","data":"T"}
+{"time":14.074806,"code":"o","data":" "}
+{"time":14.084539,"code":"o","data":"I"}
+{"time":14.0985,"code":"o","data":"N"}
+{"time":14.109713,"code":"o","data":"T"}
+{"time":14.120468,"code":"o","data":"O"}
+{"time":14.131536,"code":"o","data":" "}
+{"time":14.143875,"code":"o","data":"t"}
+{"time":14.144129,"code":"o","data":"r"}
+{"time":14.175018,"code":"o","data":"a"}
+{"time":14.185276,"code":"o","data":"c"}
+{"time":14.199845,"code":"o","data":"e"}
+{"time":14.207551,"code":"o","data":"s"}
+{"time":14.221365,"code":"o","data":" "}
+{"time":14.232768,"code":"o","data":"("}
+{"time":14.246953,"code":"o","data":"t"}
+{"time":14.258333,"code":"o","data":"r"}
+{"time":14.269255,"code":"o","data":"a"}
+{"time":14.279774,"code":"o","data":"c"}
+{"time":14.294839,"code":"o","data":"e"}
+{"time":14.304748,"code":"o","data":"_"}
+{"time":14.312649,"code":"o","data":"i"}
+{"time":14.326892,"code":"o","data":"d"}
+{"time":14.341169,"code":"o","data":","}
+{"time":14.356068,"code":"o","data":" "}
+{"time":14.365272,"code":"o","data":"s"}
+{"time":14.376835,"code":"o","data":"p"}
+{"time":14.391757,"code":"o","data":"a"}
+{"time":14.403724,"code":"o","data":"n"}
+{"time":14.413849,"code":"o","data":"_"}
+{"time":14.425845,"code":"o","data":"i"}
+{"time":14.435661,"code":"o","data":"d"}
+{"time":14.445058,"code":"o","data":","}
+{"time":14.459907,"code":"o","data":" "}
+{"time":14.469696,"code":"o","data":"p"}
+{"time":14.479056,"code":"o","data":"a"}
+{"time":14.491226,"code":"o","data":"r"}
+{"time":14.499021,"code":"o","data":"e"}
+{"time":14.50876,"code":"o","data":"n"}
+{"time":14.518036,"code":"o","data":"t"}
+{"time":14.532092,"code":"o","data":"_"}
+{"time":14.5417,"code":"o","data":"s"}
+{"time":14.548054,"code":"o","data":"p"}
+{"time":14.563398,"code":"o","data":"a"}
+{"time":14.575331,"code":"o","data":"n"}
+{"time":14.589844,"code":"o","data":"_"}
+{"time":14.605791,"code":"o","data":"i"}
+{"time":14.620633,"code":"o","data":"d"}
+{"time":14.632795,"code":"o","data":","}
+{"time":14.648142,"code":"o","data":" "}
+{"time":14.656479,"code":"o","data":"n"}
+{"time":14.669654,"code":"o","data":"a"}
+{"time":14.683327,"code":"o","data":"m"}
+{"time":14.696394,"code":"o","data":"e"}
+{"time":14.704827,"code":"o","data":","}
+{"time":14.717008,"code":"o","data":" "}
+{"time":14.732114,"code":"o","data":"s"}
+{"time":14.740827,"code":"o","data":"e"}
+{"time":14.756018,"code":"o","data":"r"}
+{"time":14.769599,"code":"o","data":"v"}
+{"time":14.779231,"code":"o","data":"i"}
+{"time":14.791504,"code":"o","data":"c"}
+{"time":14.802834,"code":"o","data":"e"}
+{"time":14.813158,"code":"o","data":","}
+{"time":14.820896,"code":"o","data":" "}
+{"time":14.828999,"code":"o","data":"k"}
+{"time":14.840479,"code":"o","data":"i"}
+{"time":14.856131,"code":"o","data":"n"}
+{"time":14.862891,"code":"o","data":"d"}
+{"time":14.87801,"code":"o","data":","}
+{"time":14.888583,"code":"o","data":" "}
+{"time":14.904259,"code":"o","data":"s"}
+{"time":14.915122,"code":"o","data":"t"}
+{"time":14.929749,"code":"o","data":"a"}
+{"time":14.945522,"code":"o","data":"t"}
+{"time":14.95271,"code":"o","data":"u"}
+{"time":14.966444,"code":"o","data":"s"}
+{"time":14.976596,"code":"o","data":","}
+{"time":14.990594,"code":"o","data":" "}
+{"time":15.005497,"code":"o","data":"s"}
+{"time":15.015843,"code":"o","data":"t"}
+{"time":15.030018,"code":"o","data":"a"}
+{"time":15.036924,"code":"o","data":"r"}
+{"time":15.049662,"code":"o","data":"t"}
+{"time":15.05967,"code":"o","data":"_"}
+{"time":15.071472,"code":"o","data":"t"}
+{"time":15.084729,"code":"o","data":"s"}
+{"time":15.094717,"code":"o","data":","}
+{"time":15.108123,"code":"o","data":" "}
+{"time":15.115416,"code":"o","data":"d"}
+{"time":15.124956,"code":"o","data":"u"}
+{"time":15.132087,"code":"o","data":"r"}
+{"time":15.145287,"code":"o","data":"a"}
+{"time":15.160675,"code":"o","data":"t"}
+{"time":15.166991,"code":"o","data":"i"}
+{"time":15.180563,"code":"o","data":"o"}
+{"time":15.193767,"code":"o","data":"n"}
+{"time":15.208872,"code":"o","data":"_"}
+{"time":15.219035,"code":"o","data":"n"}
+{"time":15.232982,"code":"o","data":"s"}
+{"time":15.243043,"code":"o","data":")"}
+{"time":15.252957,"code":"o","data":" "}
+{"time":15.259553,"code":"o","data":"V"}
+{"time":15.267147,"code":"o","data":"A"}
+{"time":15.282149,"code":"o","data":"L"}
+{"time":15.291373,"code":"o","data":"U"}
+{"time":15.304946,"code":"o","data":"E \r"}
+{"time":15.311594,"code":"o","data":"S"}
+{"time":15.32298,"code":"o","data":" "}
+{"time":15.337733,"code":"o","data":"("}
+{"time":15.353266,"code":"o","data":"'"}
+{"time":15.361075,"code":"o","data":"a"}
+{"time":15.371594,"code":"o","data":"a"}
+{"time":15.381229,"code":"o","data":"a"}
+{"time":15.395693,"code":"o","data":"a"}
+{"time":15.404318,"code":"o","data":"0"}
+{"time":15.419584,"code":"o","data":"0"}
+{"time":15.433533,"code":"o","data":"0"}
+{"time":15.447428,"code":"o","data":"0"}
+{"time":15.457102,"code":"o","data":"0"}
+{"time":15.465699,"code":"o","data":"0"}
+{"time":15.480086,"code":"o","data":"0"}
+{"time":15.488545,"code":"o","data":"0"}
+{"time":15.499944,"code":"o","data":"0"}
+{"time":15.515085,"code":"o","data":"0"}
+{"time":15.530266,"code":"o","data":"0"}
+{"time":15.540535,"code":"o","data":"0"}
+{"time":15.556243,"code":"o","data":"0"}
+{"time":15.566941,"code":"o","data":"0"}
+{"time":15.578236,"code":"o","data":"0"}
+{"time":15.58605,"code":"o","data":"0"}
+{"time":15.59547,"code":"o","data":"0"}
+{"time":15.603294,"code":"o","data":"0"}
+{"time":15.618473,"code":"o","data":"0"}
+{"time":15.630024,"code":"o","data":"0"}
+{"time":15.643847,"code":"o","data":"0"}
+{"time":15.653185,"code":"o","data":"0"}
+{"time":15.662112,"code":"o","data":"0"}
+{"time":15.673942,"code":"o","data":"0"}
+{"time":15.684838,"code":"o","data":"0"}
+{"time":15.692493,"code":"o","data":"0"}
+{"time":15.702863,"code":"o","data":"0"}
+{"time":15.717334,"code":"o","data":"0"}
+{"time":15.729085,"code":"o","data":"'"}
+{"time":15.735245,"code":"o","data":","}
+{"time":15.747778,"code":"o","data":" "}
+{"time":15.755264,"code":"o","data":"'"}
+{"time":15.767675,"code":"o","data":"0"}
+{"time":15.780552,"code":"o","data":"2"}
+{"time":15.796014,"code":"o","data":"0"}
+{"time":15.809857,"code":"o","data":"0"}
+{"time":15.817758,"code":"o","data":"0"}
+{"time":15.828076,"code":"o","data":"0"}
+{"time":15.84213,"code":"o","data":"0"}
+{"time":15.855472,"code":"o","data":"0"}
+{"time":15.866708,"code":"o","data":"0"}
+{"time":15.881262,"code":"o","data":"0"}
+{"time":15.892658,"code":"o","data":"0"}
+{"time":15.900177,"code":"o","data":"0"}
+{"time":15.915803,"code":"o","data":"0"}
+{"time":15.92955,"code":"o","data":"0"}
+{"time":15.939555,"code":"o","data":"0"}
+{"time":15.951102,"code":"o","data":"0"}
+{"time":15.961051,"code":"o","data":"'"}
+{"time":15.971664,"code":"o","data":","}
+{"time":15.982838,"code":"o","data":" "}
+{"time":15.998785,"code":"o","data":"'"}
+{"time":15.998893,"code":"o","data":"0"}
+{"time":16.02786,"code":"o","data":"1"}
+{"time":16.035386,"code":"o","data":"0"}
+{"time":16.047026,"code":"o","data":"0"}
+{"time":16.062322,"code":"o","data":"0"}
+{"time":16.073345,"code":"o","data":"0"}
+{"time":16.087072,"code":"o","data":"0"}
+{"time":16.099989,"code":"o","data":"0"}
+{"time":16.109571,"code":"o","data":"0"}
+{"time":16.12339,"code":"o","data":"0"}
+{"time":16.130348,"code":"o","data":"0"}
+{"time":16.141693,"code":"o","data":"0"}
+{"time":16.156831,"code":"o","data":"0"}
+{"time":16.170314,"code":"o","data":"0"}
+{"time":16.182441,"code":"o","data":"0"}
+{"time":16.193801,"code":"o","data":"0"}
+{"time":16.204295,"code":"o","data":"'"}
+{"time":16.211348,"code":"o","data":","}
+{"time":16.220131,"code":"o","data":" "}
+{"time":16.226402,"code":"o","data":"'"}
+{"time":16.235928,"code":"o","data":"S"}
+{"time":16.242216,"code":"o","data":"E"}
+{"time":16.256998,"code":"o","data":"L"}
+{"time":16.265459,"code":"o","data":"E"}
+{"time":16.27965,"code":"o","data":"C"}
+{"time":16.279899,"code":"o","data":"T"}
+{"time":16.301566,"code":"o","data":" "}
+{"time":16.31393,"code":"o","data":"i"}
+{"time":16.326302,"code":"o","data":"t"}
+{"time":16.335945,"code":"o","data":"e"}
+{"time":16.345545,"code":"o","data":"m"}
+{"time":16.356333,"code":"o","data":"s"}
+{"time":16.371427,"code":"o","data":"'"}
+{"time":16.384862,"code":"o","data":","}
+{"time":16.399275,"code":"o","data":" "}
+{"time":16.408085,"code":"o","data":"'"}
+{"time":16.422552,"code":"o","data":"d"}
+{"time":16.437627,"code":"o","data":"b"}
+{"time":16.448763,"code":"o","data":"'"}
+{"time":16.464156,"code":"o","data":","}
+{"time":16.476085,"code":"o","data":" "}
+{"time":16.492158,"code":"o","data":"'"}
+{"time":16.504005,"code":"o","data":"c"}
+{"time":16.517152,"code":"o","data":"l"}
+{"time":16.524052,"code":"o","data":"i"}
+{"time":16.532016,"code":"o","data":"e"}
+{"time":16.541086,"code":"o","data":"n"}
+{"time":16.551798,"code":"o","data":"t"}
+{"time":16.560862,"code":"o","data":"'"}
+{"time":16.57237,"code":"o","data":","}
+{"time":16.586848,"code":"o","data":" "}
+{"time":16.593722,"code":"o","data":"'"}
+{"time":16.600089,"code":"o","data":"e"}
+{"time":16.612979,"code":"o","data":"r"}
+{"time":16.619491,"code":"o","data":"r"}
+{"time":16.632482,"code":"o","data":"o"}
+{"time":16.646726,"code":"o","data":"r"}
+{"time":16.654007,"code":"o","data":"'"}
+{"time":16.667417,"code":"o","data":","}
+{"time":16.6776,"code":"o","data":"  \r"}
+{"time":16.692854,"code":"o","data":"1"}
+{"time":16.700346,"code":"o","data":"7"}
+{"time":16.712031,"code":"o","data":"5"}
+{"time":16.725347,"code":"o","data":"3"}
+{"time":16.737408,"code":"o","data":"0"}
+{"time":16.747084,"code":"o","data":"0"}
+{"time":16.7564,"code":"o","data":"0"}
+{"time":16.768768,"code":"o","data":"0"}
+{"time":16.775027,"code":"o","data":"0"}
+{"time":16.781144,"code":"o","data":"0"}
+{"time":16.787939,"code":"o","data":"2"}
+{"time":16.798749,"code":"o","data":"0"}
+{"time":16.813938,"code":"o","data":"0"}
+{"time":16.826814,"code":"o","data":"0"}
+{"time":16.842068,"code":"o","data":"0"}
+{"time":16.852312,"code":"o","data":"0"}
+{"time":16.861305,"code":"o","data":"0"}
+{"time":16.873847,"code":"o","data":"0"}
+{"time":16.886558,"code":"o","data":"0"}
+{"time":16.893617,"code":"o","data":","}
+{"time":16.901304,"code":"o","data":" "}
+{"time":16.917147,"code":"o","data":"1"}
+{"time":16.929416,"code":"o","data":"2"}
+{"time":16.940814,"code":"o","data":"0"}
+{"time":16.953635,"code":"o","data":"0"}
+{"time":16.962211,"code":"o","data":"0"}
+{"time":16.969188,"code":"o","data":"0"}
+{"time":16.979333,"code":"o","data":"0"}
+{"time":16.993628,"code":"o","data":")"}
+{"time":17.084763,"code":"o","data":";"}
+{"time":17.085122,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":17.085155,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":17.848043,"code":"o","data":"I"}
+{"time":17.864122,"code":"o","data":"N"}
+{"time":17.872033,"code":"o","data":"S"}
+{"time":17.881852,"code":"o","data":"E"}
+{"time":17.881934,"code":"o","data":"R"}
+{"time":17.897168,"code":"o","data":"T"}
+{"time":17.911396,"code":"o","data":" "}
+{"time":17.924635,"code":"o","data":"I"}
+{"time":17.940059,"code":"o","data":"N"}
+{"time":17.949707,"code":"o","data":"T"}
+{"time":17.963984,"code":"o","data":"O"}
+{"time":17.975722,"code":"o","data":" "}
+{"time":17.990808,"code":"o","data":"l"}
+{"time":18.005132,"code":"o","data":"o"}
+{"time":18.020476,"code":"o","data":"g"}
+{"time":18.030767,"code":"o","data":"s"}
+{"time":18.043159,"code":"o","data":"("}
+{"time":18.05899,"code":"o","data":"t"}
+{"time":18.073167,"code":"o","data":"s"}
+{"time":18.081017,"code":"o","data":","}
+{"time":18.092241,"code":"o","data":" "}
+{"time":18.104318,"code":"o","data":"l"}
+{"time":18.118464,"code":"o","data":"e"}
+{"time":18.131269,"code":"o","data":"v"}
+{"time":18.144373,"code":"o","data":"e"}
+{"time":18.151522,"code":"o","data":"l"}
+{"time":18.158049,"code":"o","data":","}
+{"time":18.167731,"code":"o","data":" "}
+{"time":18.179134,"code":"o","data":"m"}
+{"time":18.188747,"code":"o","data":"e"}
+{"time":18.198128,"code":"o","data":"s"}
+{"time":18.210565,"code":"o","data":"s"}
+{"time":18.223897,"code":"o","data":"a"}
+{"time":18.231783,"code":"o","data":"g"}
+{"time":18.24756,"code":"o","data":"e"}
+{"time":18.258685,"code":"o","data":","}
+{"time":18.26867,"code":"o","data":" "}
+{"time":18.281768,"code":"o","data":"m"}
+{"time":18.296005,"code":"o","data":"e"}
+{"time":18.303428,"code":"o","data":"t"}
+{"time":18.317118,"code":"o","data":"a"}
+{"time":18.324009,"code":"o","data":"d"}
+{"time":18.339309,"code":"o","data":"a"}
+{"time":18.34606,"code":"o","data":"t"}
+{"time":18.355694,"code":"o","data":"a"}
+{"time":18.365844,"code":"o","data":")"}
+{"time":18.381847,"code":"o","data":" "}
+{"time":18.397013,"code":"o","data":"V"}
+{"time":18.411477,"code":"o","data":"A"}
+{"time":18.425272,"code":"o","data":"L"}
+{"time":18.440457,"code":"o","data":"U"}
+{"time":18.448435,"code":"o","data":"E"}
+{"time":18.461357,"code":"o","data":"S"}
+{"time":18.473131,"code":"o","data":" "}
+{"time":18.483465,"code":"o","data":"("}
+{"time":18.48976,"code":"o","data":"1"}
+{"time":18.502234,"code":"o","data":"7"}
+{"time":18.511208,"code":"o","data":"5"}
+{"time":18.524727,"code":"o","data":"3"}
+{"time":18.532734,"code":"o","data":"0"}
+{"time":18.544562,"code":"o","data":"0"}
+{"time":18.559142,"code":"o","data":"0"}
+{"time":18.57514,"code":"o","data":"0"}
+{"time":18.586353,"code":"o","data":"0"}
+{"time":18.601331,"code":"o","data":"0"}
+{"time":18.609138,"code":"o","data":"4"}
+{"time":18.623462,"code":"o","data":"5"}
+{"time":18.632473,"code":"o","data":"6"}
+{"time":18.641669,"code":"o","data":","}
+{"time":18.657343,"code":"o","data":" "}
+{"time":18.671749,"code":"o","data":"'"}
+{"time":18.687032,"code":"o","data":"e"}
+{"time":18.694173,"code":"o","data":"r"}
+{"time":18.703989,"code":"o","data":"r"}
+{"time":18.714344,"code":"o","data":"o"}
+{"time":18.730022,"code":"o","data":"r"}
+{"time":18.744552,"code":"o","data":"'"}
+{"time":18.757256,"code":"o","data":","}
+{"time":18.769099,"code":"o","data":" "}
+{"time":18.782055,"code":"o","data":"'"}
+{"time":18.79161,"code":"o","data":"p"}
+{"time":18.804166,"code":"o","data":"a"}
+{"time":18.817276,"code":"o","data":"y"}
+{"time":18.827237,"code":"o","data":"m"}
+{"time":18.839713,"code":"o","data":"e"}
+{"time":18.849807,"code":"o","data":"n"}
+{"time":18.862402,"code":"o","data":"t"}
+{"time":18.876149,"code":"o","data":" "}
+{"time":18.891236,"code":"o","data":"d"}
+{"time":18.904879,"code":"o","data":"e"}
+{"time":18.913076,"code":"o","data":"c"}
+{"time":18.920983,"code":"o","data":"l"}
+{"time":18.931511,"code":"o","data":"i"}
+{"time":18.946185,"code":"o","data":"n"}
+{"time":18.961783,"code":"o","data":"e"}
+{"time":18.976872,"code":"o","data":"d"}
+{"time":18.983809,"code":"o","data":"'"}
+{"time":18.9952,"code":"o","data":","}
+{"time":19.010308,"code":"o","data":" "}
+{"time":19.026231,"code":"o","data":"'"}
+{"time":19.033036,"code":"o","data":"{"}
+{"time":19.040567,"code":"o","data":"\""}
+{"time":19.056497,"code":"o","data":"s"}
+{"time":19.06595,"code":"o","data":"e"}
+{"time":19.072969,"code":"o","data":"r"}
+{"time":19.088871,"code":"o","data":"v"}
+{"time":19.101102,"code":"o","data":"i"}
+{"time":19.108936,"code":"o","data":"c"}
+{"time":19.120882,"code":"o","data":"e"}
+{"time":19.134578,"code":"o","data":"\""}
+{"time":19.144253,"code":"o","data":":"}
+{"time":19.151985,"code":"o","data":"\" \r"}
+{"time":19.167242,"code":"o","data":"p"}
+{"time":19.176697,"code":"o","data":"a"}
+{"time":19.192853,"code":"o","data":"y"}
+{"time":19.206953,"code":"o","data":"m"}
+{"time":19.21422,"code":"o","data":"e"}
+{"time":19.227403,"code":"o","data":"n"}
+{"time":19.240764,"code":"o","data":"t"}
+{"time":19.248618,"code":"o","data":"s"}
+{"time":19.260619,"code":"o","data":"\""}
+{"time":19.268537,"code":"o","data":","}
+{"time":19.276035,"code":"o","data":"\""}
+{"time":19.285887,"code":"o","data":"r"}
+{"time":19.297652,"code":"o","data":"e"}
+{"time":19.306699,"code":"o","data":"t"}
+{"time":19.318116,"code":"o","data":"r"}
+{"time":19.331911,"code":"o","data":"y"}
+{"time":19.342685,"code":"o","data":"a"}
+{"time":19.35349,"code":"o","data":"b"}
+{"time":19.368842,"code":"o","data":"l"}
+{"time":19.38333,"code":"o","data":"e"}
+{"time":19.398076,"code":"o","data":"\""}
+{"time":19.408473,"code":"o","data":":"}
+{"time":19.419407,"code":"o","data":"f"}
+{"time":19.431006,"code":"o","data":"a"}
+{"time":19.442487,"code":"o","data":"l"}
+{"time":19.449588,"code":"o","data":"s"}
+{"time":19.46315,"code":"o","data":"e"}
+{"time":19.474266,"code":"o","data":"}"}
+{"time":19.483348,"code":"o","data":"'"}
+{"time":19.493616,"code":"o","data":")"}
+{"time":19.587444,"code":"o","data":";"}
+{"time":19.587738,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":19.587872,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":20.252435,"code":"o","data":"I"}
+{"time":20.264764,"code":"o","data":"N"}
+{"time":20.277827,"code":"o","data":"S"}
+{"time":20.288007,"code":"o","data":"E"}
+{"time":20.296147,"code":"o","data":"R"}
+{"time":20.303605,"code":"o","data":"T"}
+{"time":20.310221,"code":"o","data":" "}
+{"time":20.318294,"code":"o","data":"I"}
+{"time":20.325948,"code":"o","data":"N"}
+{"time":20.340684,"code":"o","data":"T"}
+{"time":20.340742,"code":"o","data":"O"}
+{"time":20.356356,"code":"o","data":" "}
+{"time":20.370652,"code":"o","data":"m"}
+{"time":20.378011,"code":"o","data":"e"}
+{"time":20.389186,"code":"o","data":"t"}
+{"time":20.400293,"code":"o","data":"r"}
+{"time":20.410223,"code":"o","data":"i"}
+{"time":20.417171,"code":"o","data":"c"}
+{"time":20.429676,"code":"o","data":"s"}
+{"time":20.439407,"code":"o","data":"("}
+{"time":20.454625,"code":"o","data":"n"}
+{"time":20.462916,"code":"o","data":"a"}
+{"time":20.469256,"code":"o","data":"m"}
+{"time":20.483113,"code":"o","data":"e"}
+{"time":20.489317,"code":"o","data":","}
+{"time":20.502355,"code":"o","data":" "}
+{"time":20.516425,"code":"o","data":"t"}
+{"time":20.525561,"code":"o","data":"s"}
+{"time":20.538591,"code":"o","data":","}
+{"time":20.554094,"code":"o","data":" "}
+{"time":20.568809,"code":"o","data":"v"}
+{"time":20.583782,"code":"o","data":"a"}
+{"time":20.596241,"code":"o","data":"l"}
+{"time":20.609219,"code":"o","data":"u"}
+{"time":20.621873,"code":"o","data":"e"}
+{"time":20.635213,"code":"o","data":","}
+{"time":20.643197,"code":"o","data":" "}
+{"time":20.654468,"code":"o","data":"l"}
+{"time":20.664933,"code":"o","data":"a"}
+{"time":20.671588,"code":"o","data":"b"}
+{"time":20.682748,"code":"o","data":"e"}
+{"time":20.691452,"code":"o","data":"l"}
+{"time":20.700209,"code":"o","data":"s"}
+{"time":20.708805,"code":"o","data":")"}
+{"time":20.72413,"code":"o","data":" "}
+{"time":20.740119,"code":"o","data":"V"}
+{"time":20.753754,"code":"o","data":"A"}
+{"time":20.766384,"code":"o","data":"L"}
+{"time":20.777327,"code":"o","data":"U"}
+{"time":20.793426,"code":"o","data":"E"}
+{"time":20.802732,"code":"o","data":"S"}
+{"time":20.813393,"code":"o","data":" "}
+{"time":20.821874,"code":"o","data":"("}
+{"time":20.829163,"code":"o","data":"'"}
+{"time":20.83965,"code":"o","data":"c"}
+{"time":20.846557,"code":"o","data":"h"}
+{"time":20.861394,"code":"o","data":"e"}
+{"time":20.869572,"code":"o","data":"c"}
+{"time":20.882292,"code":"o","data":"k"}
+{"time":20.89821,"code":"o","data":"o"}
+{"time":20.908316,"code":"o","data":"u"}
+{"time":20.91494,"code":"o","data":"t"}
+{"time":20.922218,"code":"o","data":"_"}
+{"time":20.930192,"code":"o","data":"e"}
+{"time":20.940916,"code":"o","data":"r"}
+{"time":20.951554,"code":"o","data":"r"}
+{"time":20.961758,"code":"o","data":"o"}
+{"time":20.973653,"code":"o","data":"r"}
+{"time":20.989503,"code":"o","data":"s"}
+{"time":21.00156,"code":"o","data":"'"}
+{"time":21.01447,"code":"o","data":","}
+{"time":21.023616,"code":"o","data":" "}
+{"time":21.030305,"code":"o","data":"1"}
+{"time":21.04609,"code":"o","data":"7"}
+{"time":21.057266,"code":"o","data":"5"}
+{"time":21.072738,"code":"o","data":"3"}
+{"time":21.080287,"code":"o","data":"0"}
+{"time":21.09224,"code":"o","data":"0"}
+{"time":21.107703,"code":"o","data":"0"}
+{"time":21.115379,"code":"o","data":"0"}
+{"time":21.128468,"code":"o","data":"0"}
+{"time":21.139727,"code":"o","data":"0"}
+{"time":21.14738,"code":"o","data":","}
+{"time":21.162774,"code":"o","data":" "}
+{"time":21.176338,"code":"o","data":"1"}
+{"time":21.187808,"code":"o","data":"."}
+{"time":21.198341,"code":"o","data":"0"}
+{"time":21.208478,"code":"o","data":","}
+{"time":21.223796,"code":"o","data":" "}
+{"time":21.231452,"code":"o","data":"'"}
+{"time":21.239906,"code":"o","data":"{"}
+{"time":21.253713,"code":"o","data":"\""}
+{"time":21.266587,"code":"o","data":"h"}
+{"time":21.274517,"code":"o","data":"o"}
+{"time":21.282987,"code":"o","data":"s"}
+{"time":21.292866,"code":"o","data":"t"}
+{"time":21.303024,"code":"o","data":"\""}
+{"time":21.311202,"code":"o","data":":"}
+{"time":21.320461,"code":"o","data":"\""}
+{"time":21.326877,"code":"o","data":"w"}
+{"time":21.339955,"code":"o","data":"e"}
+{"time":21.348057,"code":"o","data":"b"}
+{"time":21.357546,"code":"o","data":"1"}
+{"time":21.373442,"code":"o","data":"\""}
+{"time":21.380795,"code":"o","data":"}"}
+{"time":21.38855,"code":"o","data":"'"}
+{"time":21.399768,"code":"o","data":")"}
+{"time":21.49319,"code":"o","data":";"}
+{"time":21.493546,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":21.49372,"code":"o","data":"\u001b[?2004h"}
+{"time":21.49373,"code":"o","data":"sqlite> "}
+{"time":22.159419,"code":"o","data":"I"}
+{"time":22.171891,"code":"o","data":"N"}
+{"time":22.187501,"code":"o","data":"S"}
+{"time":22.19504,"code":"o","data":"E"}
+{"time":22.209755,"code":"o","data":"R"}
+{"time":22.218163,"code":"o","data":"T"}
+{"time":22.224394,"code":"o","data":" "}
+{"time":22.236702,"code":"o","data":"I"}
+{"time":22.249631,"code":"o","data":"N"}
+{"time":22.256357,"code":"o","data":"T"}
+{"time":22.26551,"code":"o","data":"O"}
+{"time":22.280985,"code":"o","data":" "}
+{"time":22.287813,"code":"o","data":"m"}
+{"time":22.296938,"code":"o","data":"e"}
+{"time":22.310202,"code":"o","data":"t"}
+{"time":22.319383,"code":"o","data":"r"}
+{"time":22.330795,"code":"o","data":"i"}
+{"time":22.343467,"code":"o","data":"c"}
+{"time":22.357649,"code":"o","data":"s"}
+{"time":22.364978,"code":"o","data":"("}
+{"time":22.372607,"code":"o","data":"n"}
+{"time":22.378911,"code":"o","data":"a"}
+{"time":22.386078,"code":"o","data":"m"}
+{"time":22.392562,"code":"o","data":"e"}
+{"time":22.40567,"code":"o","data":","}
+{"time":22.415047,"code":"o","data":" "}
+{"time":22.430411,"code":"o","data":"t"}
+{"time":22.445373,"code":"o","data":"s"}
+{"time":22.456971,"code":"o","data":","}
+{"time":22.472962,"code":"o","data":" "}
+{"time":22.483055,"code":"o","data":"v"}
+{"time":22.48993,"code":"o","data":"a"}
+{"time":22.500309,"code":"o","data":"l"}
+{"time":22.514178,"code":"o","data":"u"}
+{"time":22.530007,"code":"o","data":"e"}
+{"time":22.536682,"code":"o","data":","}
+{"time":22.545231,"code":"o","data":" "}
+{"time":22.556355,"code":"o","data":"l"}
+{"time":22.564058,"code":"o","data":"a"}
+{"time":22.578399,"code":"o","data":"b"}
+{"time":22.585902,"code":"o","data":"e"}
+{"time":22.593381,"code":"o","data":"l"}
+{"time":22.607512,"code":"o","data":"s"}
+{"time":22.621867,"code":"o","data":")"}
+{"time":22.632229,"code":"o","data":" "}
+{"time":22.640283,"code":"o","data":"V"}
+{"time":22.651951,"code":"o","data":"A"}
+{"time":22.663812,"code":"o","data":"L"}
+{"time":22.678163,"code":"o","data":"U"}
+{"time":22.694319,"code":"o","data":"E"}
+{"time":22.707437,"code":"o","data":"S"}
+{"time":22.715028,"code":"o","data":" "}
+{"time":22.729253,"code":"o","data":"("}
+{"time":22.737297,"code":"o","data":"'"}
+{"time":22.747276,"code":"o","data":"c"}
+{"time":22.754615,"code":"o","data":"h"}
+{"time":22.768291,"code":"o","data":"e"}
+{"time":22.780813,"code":"o","data":"c"}
+{"time":22.793156,"code":"o","data":"k"}
+{"time":22.799682,"code":"o","data":"o"}
+{"time":22.809973,"code":"o","data":"u"}
+{"time":22.818046,"code":"o","data":"t"}
+{"time":22.826283,"code":"o","data":"_"}
+{"time":22.839221,"code":"o","data":"l"}
+{"time":22.852531,"code":"o","data":"a"}
+{"time":22.865991,"code":"o","data":"t"}
+{"time":22.87328,"code":"o","data":"e"}
+{"time":22.888116,"code":"o","data":"n"}
+{"time":22.89438,"code":"o","data":"c"}
+{"time":22.906273,"code":"o","data":"y"}
+{"time":22.914719,"code":"o","data":"'"}
+{"time":22.922829,"code":"o","data":","}
+{"time":22.931879,"code":"o","data":" "}
+{"time":22.938523,"code":"o","data":"1"}
+{"time":22.950647,"code":"o","data":"7"}
+{"time":22.960469,"code":"o","data":"5"}
+{"time":22.969113,"code":"o","data":"3"}
+{"time":22.975721,"code":"o","data":"0"}
+{"time":22.986377,"code":"o","data":"0"}
+{"time":22.995556,"code":"o","data":"0"}
+{"time":23.004133,"code":"o","data":"0"}
+{"time":23.01238,"code":"o","data":"0"}
+{"time":23.019431,"code":"o","data":"0"}
+{"time":23.03483,"code":"o","data":","}
+{"time":23.041259,"code":"o","data":" "}
+{"time":23.053637,"code":"o","data":"0"}
+{"time":23.067261,"code":"o","data":"."}
+{"time":23.078716,"code":"o","data":"8"}
+{"time":23.093327,"code":"o","data":"5"}
+{"time":23.107306,"code":"o","data":","}
+{"time":23.117724,"code":"o","data":" "}
+{"time":23.12414,"code":"o","data":"'"}
+{"time":23.138491,"code":"o","data":"{"}
+{"time":23.149973,"code":"o","data":"\""}
+{"time":23.156259,"code":"o","data":"h"}
+{"time":23.167456,"code":"o","data":"o"}
+{"time":23.176287,"code":"o","data":"s"}
+{"time":23.19099,"code":"o","data":"t"}
+{"time":23.19808,"code":"o","data":"\""}
+{"time":23.206803,"code":"o","data":":"}
+{"time":23.221083,"code":"o","data":"\""}
+{"time":23.2367,"code":"o","data":"w"}
+{"time":23.249168,"code":"o","data":"e"}
+{"time":23.26453,"code":"o","data":"b"}
+{"time":23.276523,"code":"o","data":"1"}
+{"time":23.284242,"code":"o","data":"\""}
+{"time":23.296531,"code":"o","data":"}"}
+{"time":23.305764,"code":"o","data":"'"}
+{"time":23.317429,"code":"o","data":")"}
+{"time":23.409504,"code":"o","data":";"}
+{"time":23.409797,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":23.410228,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":24.068943,"code":"o","data":"I"}
+{"time":24.083181,"code":"o","data":"N"}
+{"time":24.097574,"code":"o","data":"S"}
+{"time":24.109172,"code":"o","data":"E"}
+{"time":24.123144,"code":"o","data":"R"}
+{"time":24.13185,"code":"o","data":"T"}
+{"time":24.14659,"code":"o","data":" "}
+{"time":24.158644,"code":"o","data":"I"}
+{"time":24.170067,"code":"o","data":"N"}
+{"time":24.184117,"code":"o","data":"T"}
+{"time":24.196177,"code":"o","data":"O"}
+{"time":24.211281,"code":"o","data":" "}
+{"time":24.221189,"code":"o","data":"m"}
+{"time":24.229817,"code":"o","data":"e"}
+{"time":24.238669,"code":"o","data":"t"}
+{"time":24.253423,"code":"o","data":"r"}
+{"time":24.259795,"code":"o","data":"i"}
+{"time":24.275435,"code":"o","data":"c"}
+{"time":24.290701,"code":"o","data":"s"}
+{"time":24.298346,"code":"o","data":"("}
+{"time":24.307684,"code":"o","data":"m"}
+{"time":24.319524,"code":"o","data":"e"}
+{"time":24.330196,"code":"o","data":"t"}
+{"time":24.343753,"code":"o","data":"r"}
+{"time":24.351673,"code":"o","data":"i"}
+{"time":24.362137,"code":"o","data":"c"}
+{"time":24.368477,"code":"o","data":"s"}
+{"time":24.382468,"code":"o","data":")"}
+{"time":24.394691,"code":"o","data":" "}
+{"time":24.404414,"code":"o","data":"V"}
+{"time":24.414109,"code":"o","data":"A"}
+{"time":24.429548,"code":"o","data":"L"}
+{"time":24.44355,"code":"o","data":"U"}
+{"time":24.45282,"code":"o","data":"E"}
+{"time":24.461952,"code":"o","data":"S"}
+{"time":24.46981,"code":"o","data":" "}
+{"time":24.484856,"code":"o","data":"("}
+{"time":24.500119,"code":"o","data":"'"}
+{"time":24.511314,"code":"o","data":"f"}
+{"time":24.521274,"code":"o","data":"l"}
+{"time":24.521349,"code":"o","data":"u"}
+{"time":24.540314,"code":"o","data":"s"}
+{"time":24.540368,"code":"o","data":"h"}
+{"time":24.563124,"code":"o","data":"'"}
+{"time":24.578358,"code":"o","data":")"}
+{"time":24.671925,"code":"o","data":";"}
+{"time":24.672322,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":24.672638,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":25.23831,"code":"o","data":"I"}
+{"time":25.2491,"code":"o","data":"N"}
+{"time":25.257222,"code":"o","data":"S"}
+{"time":25.264297,"code":"o","data":"E"}
+{"time":25.273406,"code":"o","data":"R"}
+{"time":25.284125,"code":"o","data":"T"}
+{"time":25.290503,"code":"o","data":" "}
+{"time":25.306546,"code":"o","data":"I"}
+{"time":25.315889,"code":"o","data":"N"}
+{"time":25.315959,"code":"o","data":"T"}
+{"time":25.339258,"code":"o","data":"O"}
+{"time":25.353406,"code":"o","data":" "}
+{"time":25.367482,"code":"o","data":"l"}
+{"time":25.378971,"code":"o","data":"o"}
+{"time":25.390659,"code":"o","data":"g"}
+{"time":25.397446,"code":"o","data":"s"}
+{"time":25.404745,"code":"o","data":"("}
+{"time":25.416841,"code":"o","data":"l"}
+{"time":25.432981,"code":"o","data":"o"}
+{"time":25.446301,"code":"o","data":"g"}
+{"time":25.46161,"code":"o","data":"s"}
+{"time":25.461696,"code":"o","data":")"}
+{"time":25.476938,"code":"o","data":" "}
+{"time":25.490081,"code":"o","data":"V"}
+{"time":25.496644,"code":"o","data":"A"}
+{"time":25.508665,"code":"o","data":"L"}
+{"time":25.524381,"code":"o","data":"U"}
+{"time":25.536386,"code":"o","data":"E"}
+{"time":25.551136,"code":"o","data":"S"}
+{"time":25.558487,"code":"o","data":" "}
+{"time":25.569252,"code":"o","data":"("}
+{"time":25.579654,"code":"o","data":"'"}
+{"time":25.57972,"code":"o","data":"f"}
+{"time":25.604527,"code":"o","data":"l"}
+{"time":25.618416,"code":"o","data":"u"}
+{"time":25.631402,"code":"o","data":"s"}
+{"time":25.638095,"code":"o","data":"h"}
+{"time":25.652812,"code":"o","data":"'"}
+{"time":25.667792,"code":"o","data":")"}
+{"time":25.754924,"code":"o","data":";"}
+{"time":25.755347,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":25.755434,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":26.320416,"code":"o","data":"I"}
+{"time":26.32915,"code":"o","data":"N"}
+{"time":26.340878,"code":"o","data":"S"}
+{"time":26.353457,"code":"o","data":"E"}
+{"time":26.364142,"code":"o","data":"R"}
+{"time":26.371336,"code":"o","data":"T"}
+{"time":26.385005,"code":"o","data":" "}
+{"time":26.396954,"code":"o","data":"I"}
+{"time":26.40919,"code":"o","data":"N"}
+{"time":26.416779,"code":"o","data":"T"}
+{"time":26.431616,"code":"o","data":"O"}
+{"time":26.439225,"code":"o","data":" "}
+{"time":26.452357,"code":"o","data":"t"}
+{"time":26.461609,"code":"o","data":"r"}
+{"time":26.468939,"code":"o","data":"a"}
+{"time":26.484428,"code":"o","data":"c"}
+{"time":26.494211,"code":"o","data":"e"}
+{"time":26.505225,"code":"o","data":"s"}
+{"time":26.514473,"code":"o","data":"("}
+{"time":26.521646,"code":"o","data":"t"}
+{"time":26.529866,"code":"o","data":"r"}
+{"time":26.539191,"code":"o","data":"a"}
+{"time":26.553954,"code":"o","data":"c"}
+{"time":26.564501,"code":"o","data":"e"}
+{"time":26.573663,"code":"o","data":"s"}
+{"time":26.580052,"code":"o","data":")"}
+{"time":26.59138,"code":"o","data":" "}
+{"time":26.602956,"code":"o","data":"V"}
+{"time":26.61702,"code":"o","data":"A"}
+{"time":26.624602,"code":"o","data":"L"}
+{"time":26.636399,"code":"o","data":"U"}
+{"time":26.650631,"code":"o","data":"E"}
+{"time":26.658579,"code":"o","data":"S"}
+{"time":26.668784,"code":"o","data":" "}
+{"time":26.683073,"code":"o","data":"("}
+{"time":26.696257,"code":"o","data":"'"}
+{"time":26.706452,"code":"o","data":"f"}
+{"time":26.714038,"code":"o","data":"l"}
+{"time":26.726791,"code":"o","data":"u"}
+{"time":26.740099,"code":"o","data":"s"}
+{"time":26.746397,"code":"o","data":"h"}
+{"time":26.758213,"code":"o","data":"'"}
+{"time":26.767209,"code":"o","data":")"}
+{"time":26.863071,"code":"o","data":";"}
+{"time":26.86333,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":26.863566,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":27.324136,"code":"o","data":".print '-- spans, with ids you can read and times you can read'"}
+{"time":27.324566,"code":"o","data":"\r\n\u001b[?2004l\r-- spans, with ids you can read and times you can read\r\n\u001b[?2004hsqlite> "}
+{"time":27.889311,"code":"o","data":"S"}
+{"time":27.904987,"code":"o","data":"E"}
+{"time":27.918671,"code":"o","data":"L"}
+{"time":27.930286,"code":"o","data":"E"}
+{"time":27.937711,"code":"o","data":"C"}
+{"time":27.94517,"code":"o","data":"T"}
+{"time":27.954353,"code":"o","data":" "}
+{"time":27.970064,"code":"o","data":"t"}
+{"time":27.984071,"code":"o","data":"r"}
+{"time":27.998804,"code":"o","data":"a"}
+{"time":27.999054,"code":"o","data":"c"}
+{"time":28.015935,"code":"o","data":"e"}
+{"time":28.031098,"code":"o","data":"_"}
+{"time":28.037493,"code":"o","data":"i"}
+{"time":28.045319,"code":"o","data":"d"}
+{"time":28.045338,"code":"o","data":","}
+{"time":28.069232,"code":"o","data":" "}
+{"time":28.081504,"code":"o","data":"n"}
+{"time":28.091508,"code":"o","data":"a"}
+{"time":28.098098,"code":"o","data":"m"}
+{"time":28.104873,"code":"o","data":"e"}
+{"time":28.11747,"code":"o","data":","}
+{"time":28.11752,"code":"o","data":" "}
+{"time":28.139994,"code":"o","data":"s"}
+{"time":28.152868,"code":"o","data":"e"}
+{"time":28.166888,"code":"o","data":"r"}
+{"time":28.180747,"code":"o","data":"v"}
+{"time":28.187095,"code":"o","data":"i"}
+{"time":28.199832,"code":"o","data":"c"}
+{"time":28.212221,"code":"o","data":"e"}
+{"time":28.221375,"code":"o","data":","}
+{"time":28.229972,"code":"o","data":" "}
+{"time":28.245444,"code":"o","data":"s"}
+{"time":28.254995,"code":"o","data":"t"}
+{"time":28.262878,"code":"o","data":"a"}
+{"time":28.274822,"code":"o","data":"t"}
+{"time":28.288044,"code":"o","data":"u"}
+{"time":28.298237,"code":"o","data":"s"}
+{"time":28.311489,"code":"o","data":","}
+{"time":28.322073,"code":"o","data":" "}
+{"time":28.336647,"code":"o","data":"s"}
+{"time":28.343321,"code":"o","data":"t"}
+{"time":28.355638,"code":"o","data":"a"}
+{"time":28.363259,"code":"o","data":"r"}
+{"time":28.377698,"code":"o","data":"t"}
+{"time":28.393449,"code":"o","data":"_"}
+{"time":28.400486,"code":"o","data":"t"}
+{"time":28.407886,"code":"o","data":"i"}
+{"time":28.416706,"code":"o","data":"m"}
+{"time":28.427381,"code":"o","data":"e"}
+{"time":28.436489,"code":"o","data":","}
+{"time":28.451446,"code":"o","data":" "}
+{"time":28.462285,"code":"o","data":"d"}
+{"time":28.47212,"code":"o","data":"u"}
+{"time":28.483773,"code":"o","data":"r"}
+{"time":28.493182,"code":"o","data":"a"}
+{"time":28.504303,"code":"o","data":"t"}
+{"time":28.504348,"code":"o","data":"i"}
+{"time":28.52634,"code":"o","data":"o"}
+{"time":28.53968,"code":"o","data":"n"}
+{"time":28.550698,"code":"o","data":"_"}
+{"time":28.564641,"code":"o","data":"m"}
+{"time":28.580702,"code":"o","data":"s"}
+{"time":28.589204,"code":"o","data":" "}
+{"time":28.59691,"code":"o","data":"F"}
+{"time":28.612053,"code":"o","data":"R"}
+{"time":28.619285,"code":"o","data":"O"}
+{"time":28.626876,"code":"o","data":"M"}
+{"time":28.626969,"code":"o","data":" "}
+{"time":28.652468,"code":"o","data":"t"}
+{"time":28.664144,"code":"o","data":"i"}
+{"time":28.671979,"code":"o","data":"m"}
+{"time":28.686209,"code":"o","data":"e"}
+{"time":28.697438,"code":"o","data":"l"}
+{"time":28.706845,"code":"o","data":"e"}
+{"time":28.714274,"code":"o","data":"s"}
+{"time":28.728739,"code":"o","data":"s"}
+{"time":28.74245,"code":"o","data":"_"}
+{"time":28.748733,"code":"o","data":"t"}
+{"time":28.756506,"code":"o","data":"r"}
+{"time":28.769635,"code":"o","data":"a"}
+{"time":28.782363,"code":"o","data":"c"}
+{"time":28.793344,"code":"o","data":"e"}
+{"time":28.804619,"code":"o","data":"s"}
+{"time":28.820078,"code":"o","data":"_"}
+{"time":28.827201,"code":"o","data":"s"}
+{"time":28.843244,"code":"o","data":"p"}
+{"time":28.858521,"code":"o","data":"a"}
+{"time":28.872171,"code":"o","data":"n"}
+{"time":28.885898,"code":"o","data":"s"}
+{"time":28.885967,"code":"o","data":";"}
+{"time":28.976911,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":28.97734,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502      name      \u2502 service  \u2502 status \u2502        start_time        \u2502 duration_ms \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502 POST /checkout \u2502 checkout \u2502 ok     \u2502 2025-07-20T08:26:40.123Z \u2502         8.5 \u2502\r\n\u2502 aaaa0000000000000000000000000000 \u2502 SELECT items   \u2502 db       \u2502 error  \u2502 2025-07-20T08:26:40.200Z \u2502         1.2 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":30.437656,"code":"o","data":".print '-- one row per trace. root state, service set, and completeness never overreach'"}
+{"time":30.437942,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":30.438129,"code":"o","data":"-- one row per trace. root state, service set, and completeness never overreach\r\n\u001b[?2004hsqlite> "}
+{"time":31.003046,"code":"o","data":"S"}
+{"time":31.003106,"code":"o","data":"E"}
+{"time":31.027543,"code":"o","data":"L"}
+{"time":31.040731,"code":"o","data":"E"}
+{"time":31.047059,"code":"o","data":"C"}
+{"time":31.062187,"code":"o","data":"T"}
+{"time":31.072075,"code":"o","data":" "}
+{"time":31.078644,"code":"o","data":"t"}
+{"time":31.093051,"code":"o","data":"r"}
+{"time":31.099209,"code":"o","data":"a"}
+{"time":31.108913,"code":"o","data":"c"}
+{"time":31.116782,"code":"o","data":"e"}
+{"time":31.124891,"code":"o","data":"_"}
+{"time":31.138754,"code":"o","data":"i"}
+{"time":31.147113,"code":"o","data":"d"}
+{"time":31.147149,"code":"o","data":","}
+{"time":31.169083,"code":"o","data":" "}
+{"time":31.176462,"code":"o","data":"s"}
+{"time":31.185521,"code":"o","data":"p"}
+{"time":31.192506,"code":"o","data":"a"}
+{"time":31.203124,"code":"o","data":"n"}
+{"time":31.215671,"code":"o","data":"_"}
+{"time":31.22817,"code":"o","data":"r"}
+{"time":31.234479,"code":"o","data":"o"}
+{"time":31.248317,"code":"o","data":"w"}
+{"time":31.255322,"code":"o","data":"s"}
+{"time":31.263489,"code":"o","data":","}
+{"time":31.269998,"code":"o","data":" "}
+{"time":31.285971,"code":"o","data":"e"}
+{"time":31.292202,"code":"o","data":"r"}
+{"time":31.299864,"code":"o","data":"r"}
+{"time":31.315204,"code":"o","data":"o"}
+{"time":31.31541,"code":"o","data":"r"}
+{"time":31.342098,"code":"o","data":"_"}
+{"time":31.357121,"code":"o","data":"r"}
+{"time":31.365619,"code":"o","data":"o"}
+{"time":31.365641,"code":"o","data":"w"}
+{"time":31.384894,"code":"o","data":"s"}
+{"time":31.384959,"code":"o","data":","}
+{"time":31.405776,"code":"o","data":" "}
+{"time":31.418182,"code":"o","data":"r"}
+{"time":31.418256,"code":"o","data":"o"}
+{"time":31.437484,"code":"o","data":"o"}
+{"time":31.437547,"code":"o","data":"t"}
+{"time":31.455259,"code":"o","data":"_"}
+{"time":31.470393,"code":"o","data":"s"}
+{"time":31.485716,"code":"o","data":"t"}
+{"time":31.497486,"code":"o","data":"a"}
+{"time":31.510794,"code":"o","data":"t"}
+{"time":31.524918,"code":"o","data":"e"}
+{"time":31.535743,"code":"o","data":","}
+{"time":31.550829,"code":"o","data":" "}
+{"time":31.562937,"code":"o","data":"r"}
+{"time":31.578804,"code":"o","data":"o"}
+{"time":31.591585,"code":"o","data":"o"}
+{"time":31.607225,"code":"o","data":"t"}
+{"time":31.616293,"code":"o","data":"_"}
+{"time":31.624314,"code":"o","data":"n"}
+{"time":31.636971,"code":"o","data":"a"}
+{"time":31.650283,"code":"o","data":"m"}
+{"time":31.656807,"code":"o","data":"e"}
+{"time":31.670809,"code":"o","data":","}
+{"time":31.683904,"code":"o","data":" "}
+{"time":31.69511,"code":"o","data":"s"}
+{"time":31.704735,"code":"o","data":"e"}
+{"time":31.720437,"code":"o","data":"r"}
+{"time":31.727052,"code":"o","data":"v"}
+{"time":31.742898,"code":"o","data":"i"}
+{"time":31.757294,"code":"o","data":"c"}
+{"time":31.764848,"code":"o","data":"e"}
+{"time":31.764902,"code":"o","data":"s"}
+{"time":31.787292,"code":"o","data":","}
+{"time":31.802603,"code":"o","data":" "}
+{"time":31.817038,"code":"o","data":"c"}
+{"time":31.824013,"code":"o","data":"o"}
+{"time":31.835358,"code":"o","data":"m"}
+{"time":31.84321,"code":"o","data":"p"}
+{"time":31.850774,"code":"o","data":"l"}
+{"time":31.859393,"code":"o","data":"e"}
+{"time":31.8737,"code":"o","data":"t"}
+{"time":31.885377,"code":"o","data":"e"}
+{"time":31.894034,"code":"o","data":"n"}
+{"time":31.909169,"code":"o","data":"e"}
+{"time":31.922126,"code":"o","data":"s"}
+{"time":31.929472,"code":"o","data":"s"}
+{"time":31.937556,"code":"o","data":" "}
+{"time":31.949761,"code":"o","data":"F"}
+{"time":31.958288,"code":"o","data":"R"}
+{"time":31.968814,"code":"o","data":"O"}
+{"time":31.976159,"code":"o","data":"M"}
+{"time":31.989298,"code":"o","data":" "}
+{"time":32.004543,"code":"o","data":"t"}
+{"time":32.004704,"code":"o","data":"i"}
+{"time":32.026211,"code":"o","data":"m"}
+{"time":32.037898,"code":"o","data":"e"}
+{"time":32.044176,"code":"o","data":"l"}
+{"time":32.051031,"code":"o","data":"e"}
+{"time":32.058048,"code":"o","data":"s"}
+{"time":32.064434,"code":"o","data":"s"}
+{"time":32.076834,"code":"o","data":"_"}
+{"time":32.089823,"code":"o","data":"t"}
+{"time":32.100351,"code":"o","data":"r"}
+{"time":32.114665,"code":"o","data":"a"}
+{"time":32.124328,"code":"o","data":"c"}
+{"time":32.138924,"code":"o","data":"e"}
+{"time":32.154297,"code":"o","data":"s"}
+{"time":32.16988,"code":"o","data":"_"}
+{"time":32.180022,"code":"o","data":"s"}
+{"time":32.188682,"code":"o","data":"u"}
+{"time":32.19709,"code":"o","data":"m"}
+{"time":32.212355,"code":"o","data":"m"}
+{"time":32.224321,"code":"o","data":"a \r"}
+{"time":32.233568,"code":"o","data":"r"}
+{"time":32.245077,"code":"o","data":"y"}
+{"time":32.338649,"code":"o","data":";"}
+{"time":32.339238,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":32.340093,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502             trace_id             \u2502 span_rows \u2502 error_rows \u2502 root_state \u2502   root_name    \u2502  services   \u2502 completeness \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 aaaa0000000000000000000000000000 \u2502         2 \u2502          1 \u2502 unique     \u2502 POST /checkout \u2502 checkout,db \u2502 unknown      \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":34.000462,"code":"o","data":".print '-- the error span, straight from its own view'"}
+{"time":34.000937,"code":"o","data":"\r\n\u001b[?2004l\r-- the error span, straight from its own view\r\n\u001b[?2004hsqlite> "}
+{"time":34.56383,"code":"o","data":"S"}
+{"time":34.563888,"code":"o","data":"E"}
+{"time":34.587455,"code":"o","data":"L"}
+{"time":34.59909,"code":"o","data":"E"}
+{"time":34.599125,"code":"o","data":"C"}
+{"time":34.625367,"code":"o","data":"T"}
+{"time":34.63895,"code":"o","data":" "}
+{"time":34.647837,"code":"o","data":"n"}
+{"time":34.662978,"code":"o","data":"a"}
+{"time":34.676899,"code":"o","data":"m"}
+{"time":34.676954,"code":"o","data":"e"}
+{"time":34.699553,"code":"o","data":","}
+{"time":34.711577,"code":"o","data":" "}
+{"time":34.721815,"code":"o","data":"s"}
+{"time":34.729739,"code":"o","data":"e"}
+{"time":34.738338,"code":"o","data":"r"}
+{"time":34.749483,"code":"o","data":"v"}
+{"time":34.758095,"code":"o","data":"i"}
+{"time":34.758154,"code":"o","data":"c"}
+{"time":34.781845,"code":"o","data":"e"}
+{"time":34.793492,"code":"o","data":","}
+{"time":34.804037,"code":"o","data":" "}
+{"time":34.817281,"code":"o","data":"s"}
+{"time":34.827942,"code":"o","data":"t"}
+{"time":34.84283,"code":"o","data":"a"}
+{"time":34.858535,"code":"o","data":"r"}
+{"time":34.874563,"code":"o","data":"t"}
+{"time":34.887527,"code":"o","data":"_"}
+{"time":34.901123,"code":"o","data":"t"}
+{"time":34.915083,"code":"o","data":"i"}
+{"time":34.926095,"code":"o","data":"m"}
+{"time":34.93478,"code":"o","data":"e"}
+{"time":34.948618,"code":"o","data":" "}
+{"time":34.956477,"code":"o","data":"F"}
+{"time":34.972331,"code":"o","data":"R"}
+{"time":34.979248,"code":"o","data":"O"}
+{"time":34.987254,"code":"o","data":"M"}
+{"time":34.999504,"code":"o","data":" "}
+{"time":35.012863,"code":"o","data":"t"}
+{"time":35.012943,"code":"o","data":"i"}
+{"time":35.034145,"code":"o","data":"m"}
+{"time":35.043851,"code":"o","data":"e"}
+{"time":35.05212,"code":"o","data":"l"}
+{"time":35.065223,"code":"o","data":"e"}
+{"time":35.075072,"code":"o","data":"s"}
+{"time":35.086184,"code":"o","data":"s"}
+{"time":35.095051,"code":"o","data":"_"}
+{"time":35.109075,"code":"o","data":"t"}
+{"time":35.123071,"code":"o","data":"r"}
+{"time":35.136928,"code":"o","data":"a"}
+{"time":35.150415,"code":"o","data":"c"}
+{"time":35.158047,"code":"o","data":"e"}
+{"time":35.168928,"code":"o","data":"s"}
+{"time":35.177827,"code":"o","data":"_"}
+{"time":35.186739,"code":"o","data":"e"}
+{"time":35.199292,"code":"o","data":"r"}
+{"time":35.211458,"code":"o","data":"r"}
+{"time":35.220462,"code":"o","data":"o"}
+{"time":35.230678,"code":"o","data":"r"}
+{"time":35.240558,"code":"o","data":"s"}
+{"time":35.240625,"code":"o","data":";"}
+{"time":35.331685,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":35.331999,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502     name     \u2502 service \u2502        start_time        \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 SELECT items \u2502 db      \u2502 2025-07-20T08:26:40.200Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":36.492385,"code":"o","data":".print '-- catalogs, for building dropdowns and service maps'"}
+{"time":36.492647,"code":"o","data":"\r\n\u001b[?2004l\r-- catalogs, for building dropdowns and service maps\r\n\u001b[?2004hsqlite> "}
+{"time":37.053444,"code":"o","data":"S"}
+{"time":37.063576,"code":"o","data":"E"}
+{"time":37.07147,"code":"o","data":"L"}
+{"time":37.079704,"code":"o","data":"E"}
+{"time":37.094903,"code":"o","data":"C"}
+{"time":37.103386,"code":"o","data":"T"}
+{"time":37.118432,"code":"o","data":" "}
+{"time":37.126894,"code":"o","data":"s"}
+{"time":37.141887,"code":"o","data":"e"}
+{"time":37.148705,"code":"o","data":"r"}
+{"time":37.158094,"code":"o","data":"v"}
+{"time":37.173543,"code":"o","data":"i"}
+{"time":37.182758,"code":"o","data":"c"}
+{"time":37.191756,"code":"o","data":"e"}
+{"time":37.198959,"code":"o","data":","}
+{"time":37.20897,"code":"o","data":" "}
+{"time":37.216563,"code":"o","data":"o"}
+{"time":37.223965,"code":"o","data":"p"}
+{"time":37.231629,"code":"o","data":"e"}
+{"time":37.241377,"code":"o","data":"r"}
+{"time":37.251226,"code":"o","data":"a"}
+{"time":37.257844,"code":"o","data":"t"}
+{"time":37.268675,"code":"o","data":"i"}
+{"time":37.275484,"code":"o","data":"o"}
+{"time":37.281812,"code":"o","data":"n"}
+{"time":37.289393,"code":"o","data":" "}
+{"time":37.303604,"code":"o","data":"F"}
+{"time":37.318092,"code":"o","data":"R"}
+{"time":37.327813,"code":"o","data":"O"}
+{"time":37.341375,"code":"o","data":"M"}
+{"time":37.351831,"code":"o","data":" "}
+{"time":37.365185,"code":"o","data":"t"}
+{"time":37.37315,"code":"o","data":"i"}
+{"time":37.384451,"code":"o","data":"m"}
+{"time":37.394831,"code":"o","data":"e"}
+{"time":37.401912,"code":"o","data":"l"}
+{"time":37.414426,"code":"o","data":"e"}
+{"time":37.426148,"code":"o","data":"s"}
+{"time":37.441752,"code":"o","data":"s"}
+{"time":37.453894,"code":"o","data":"_"}
+{"time":37.463861,"code":"o","data":"t"}
+{"time":37.470845,"code":"o","data":"r"}
+{"time":37.478804,"code":"o","data":"a"}
+{"time":37.490697,"code":"o","data":"c"}
+{"time":37.498694,"code":"o","data":"e"}
+{"time":37.505949,"code":"o","data":"s"}
+{"time":37.516076,"code":"o","data":"_"}
+{"time":37.52572,"code":"o","data":"o"}
+{"time":37.53668,"code":"o","data":"p"}
+{"time":37.549804,"code":"o","data":"e"}
+{"time":37.557869,"code":"o","data":"r"}
+{"time":37.573157,"code":"o","data":"a"}
+{"time":37.582766,"code":"o","data":"t"}
+{"time":37.591375,"code":"o","data":"i"}
+{"time":37.605026,"code":"o","data":"o"}
+{"time":37.613871,"code":"o","data":"n"}
+{"time":37.621688,"code":"o","data":"s"}
+{"time":37.709802,"code":"o","data":";"}
+{"time":37.710291,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":37.710759,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502   operation    \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout \u2502 POST /checkout \u2502\r\n\u2502 db       \u2502 SELECT items   \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":38.871071,"code":"o","data":".print '-- log entries: receipt-style UTC, message, metadata kept as typed JSON'"}
+{"time":38.871496,"code":"o","data":"\r\n\u001b[?2004l\r-- log entries: receipt-style UTC, message, metadata kept as typed JSON\r\n\u001b[?2004hsqlite> "}
+{"time":39.428093,"code":"o","data":"S"}
+{"time":39.44342,"code":"o","data":"E"}
+{"time":39.453073,"code":"o","data":"L"}
+{"time":39.462083,"code":"o","data":"E"}
+{"time":39.468498,"code":"o","data":"C"}
+{"time":39.481582,"code":"o","data":"T"}
+{"time":39.487776,"code":"o","data":" "}
+{"time":39.501607,"code":"o","data":"t"}
+{"time":39.516402,"code":"o","data":"s"}
+{"time":39.526772,"code":"o","data":"_"}
+{"time":39.541307,"code":"o","data":"t"}
+{"time":39.548554,"code":"o","data":"i"}
+{"time":39.557538,"code":"o","data":"m"}
+{"time":39.570408,"code":"o","data":"e"}
+{"time":39.583628,"code":"o","data":","}
+{"time":39.597084,"code":"o","data":" "}
+{"time":39.612743,"code":"o","data":"l"}
+{"time":39.619001,"code":"o","data":"e"}
+{"time":39.630122,"code":"o","data":"v"}
+{"time":39.641236,"code":"o","data":"e"}
+{"time":39.653696,"code":"o","data":"l"}
+{"time":39.666309,"code":"o","data":","}
+{"time":39.679335,"code":"o","data":" "}
+{"time":39.689965,"code":"o","data":"m"}
+{"time":39.704463,"code":"o","data":"e"}
+{"time":39.719446,"code":"o","data":"s"}
+{"time":39.734408,"code":"o","data":"s"}
+{"time":39.742987,"code":"o","data":"a"}
+{"time":39.751534,"code":"o","data":"g"}
+{"time":39.764874,"code":"o","data":"e"}
+{"time":39.777518,"code":"o","data":","}
+{"time":39.785799,"code":"o","data":" "}
+{"time":39.801704,"code":"o","data":"j"}
+{"time":39.808081,"code":"o","data":"s"}
+{"time":39.82191,"code":"o","data":"o"}
+{"time":39.83334,"code":"o","data":"n"}
+{"time":39.842316,"code":"o","data":"_"}
+{"time":39.849507,"code":"o","data":"e"}
+{"time":39.862436,"code":"o","data":"x"}
+{"time":39.871292,"code":"o","data":"t"}
+{"time":39.879263,"code":"o","data":"r"}
+{"time":39.88603,"code":"o","data":"a"}
+{"time":39.901808,"code":"o","data":"c"}
+{"time":39.916074,"code":"o","data":"t"}
+{"time":39.923077,"code":"o","data":"("}
+{"time":39.938948,"code":"o","data":"m"}
+{"time":39.947245,"code":"o","data":"e"}
+{"time":39.963053,"code":"o","data":"t"}
+{"time":39.969756,"code":"o","data":"a"}
+{"time":39.985559,"code":"o","data":"d"}
+{"time":39.993295,"code":"o","data":"a"}
+{"time":40.000946,"code":"o","data":"t"}
+{"time":40.017344,"code":"o","data":"a"}
+{"time":40.023907,"code":"o","data":","}
+{"time":40.039029,"code":"o","data":" "}
+{"time":40.054899,"code":"o","data":"'"}
+{"time":40.065824,"code":"o","data":"$"}
+{"time":40.072097,"code":"o","data":"."}
+{"time":40.083216,"code":"o","data":"r"}
+{"time":40.091143,"code":"o","data":"e"}
+{"time":40.098596,"code":"o","data":"t"}
+{"time":40.112808,"code":"o","data":"r"}
+{"time":40.121974,"code":"o","data":"y"}
+{"time":40.128143,"code":"o","data":"a"}
+{"time":40.135802,"code":"o","data":"b"}
+{"time":40.136054,"code":"o","data":"l"}
+{"time":40.155227,"code":"o","data":"e"}
+{"time":40.170442,"code":"o","data":"'"}
+{"time":40.177649,"code":"o","data":")"}
+{"time":40.191833,"code":"o","data":" "}
+{"time":40.203335,"code":"o","data":"A"}
+{"time":40.216148,"code":"o","data":"S"}
+{"time":40.22621,"code":"o","data":" "}
+{"time":40.233786,"code":"o","data":"r"}
+{"time":40.246714,"code":"o","data":"e"}
+{"time":40.255121,"code":"o","data":"t"}
+{"time":40.262183,"code":"o","data":"r"}
+{"time":40.269753,"code":"o","data":"y"}
+{"time":40.277745,"code":"o","data":"a"}
+{"time":40.289202,"code":"o","data":"b"}
+{"time":40.304395,"code":"o","data":"l"}
+{"time":40.314046,"code":"o","data":"e"}
+{"time":40.321257,"code":"o","data":" "}
+{"time":40.335689,"code":"o","data":"F"}
+{"time":40.343308,"code":"o","data":"R"}
+{"time":40.35494,"code":"o","data":"O"}
+{"time":40.363288,"code":"o","data":"M"}
+{"time":40.37221,"code":"o","data":" "}
+{"time":40.378839,"code":"o","data":"t"}
+{"time":40.390299,"code":"o","data":"i"}
+{"time":40.405405,"code":"o","data":"m"}
+{"time":40.412827,"code":"o","data":"e"}
+{"time":40.42437,"code":"o","data":"l"}
+{"time":40.432341,"code":"o","data":"e"}
+{"time":40.441286,"code":"o","data":"s"}
+{"time":40.448261,"code":"o","data":"s"}
+{"time":40.45541,"code":"o","data":"_"}
+{"time":40.470232,"code":"o","data":"l"}
+{"time":40.486362,"code":"o","data":"o"}
+{"time":40.494595,"code":"o","data":"g"}
+{"time":40.506352,"code":"o","data":"s"}
+{"time":40.520389,"code":"o","data":"_"}
+{"time":40.529936,"code":"o","data":"e"}
+{"time":40.545318,"code":"o","data":"n"}
+{"time":40.560963,"code":"o","data":"t"}
+{"time":40.567783,"code":"o","data":"r"}
+{"time":40.574618,"code":"o","data":"i"}
+{"time":40.58326,"code":"o","data":"e"}
+{"time":40.590774,"code":"o","data":"s"}
+{"time":40.677266,"code":"o","data":";"}
+{"time":40.677592,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":40.677762,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502         ts_time          \u2502 level \u2502     message      \u2502 retryable \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 2025-07-20T08:26:40.456Z \u2502 error \u2502 payment declined \u2502         0 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":42.138056,"code":"o","data":".print '-- what you can filter on fast (declared index keys)'"}
+{"time":42.138473,"code":"o","data":"\r\n\u001b[?2004l\r-- what you can filter on fast (declared index keys)\r\n\u001b[?2004hsqlite> "}
+{"time":42.704332,"code":"o","data":"S"}
+{"time":42.716942,"code":"o","data":"E"}
+{"time":42.731537,"code":"o","data":"L"}
+{"time":42.742655,"code":"o","data":"E"}
+{"time":42.753762,"code":"o","data":"C"}
+{"time":42.762682,"code":"o","data":"T"}
+{"time":42.769855,"code":"o","data":" "}
+{"time":42.777782,"code":"o","data":"f"}
+{"time":42.785672,"code":"o","data":"i"}
+{"time":42.793309,"code":"o","data":"e"}
+{"time":42.804105,"code":"o","data":"l"}
+{"time":42.813318,"code":"o","data":"d"}
+{"time":42.823028,"code":"o","data":" "}
+{"time":42.834406,"code":"o","data":"F"}
+{"time":42.84086,"code":"o","data":"R"}
+{"time":42.855866,"code":"o","data":"O"}
+{"time":42.866377,"code":"o","data":"M"}
+{"time":42.875524,"code":"o","data":" "}
+{"time":42.883337,"code":"o","data":"t"}
+{"time":42.898072,"code":"o","data":"i"}
+{"time":42.905017,"code":"o","data":"m"}
+{"time":42.916709,"code":"o","data":"e"}
+{"time":42.927206,"code":"o","data":"l"}
+{"time":42.937573,"code":"o","data":"e"}
+{"time":42.950192,"code":"o","data":"s"}
+{"time":42.961842,"code":"o","data":"s"}
+{"time":42.972733,"code":"o","data":"_"}
+{"time":42.987588,"code":"o","data":"l"}
+{"time":43.002903,"code":"o","data":"o"}
+{"time":43.009901,"code":"o","data":"g"}
+{"time":43.024094,"code":"o","data":"s"}
+{"time":43.039976,"code":"o","data":"_"}
+{"time":43.048573,"code":"o","data":"f"}
+{"time":43.060703,"code":"o","data":"i"}
+{"time":43.06705,"code":"o","data":"e"}
+{"time":43.079827,"code":"o","data":"l"}
+{"time":43.086152,"code":"o","data":"d"}
+{"time":43.100746,"code":"o","data":"s"}
+{"time":43.191811,"code":"o","data":";"}
+{"time":43.19223,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":43.192274,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502  field  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 service \u2502\r\n\u2502 host    \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":44.353873,"code":"o","data":"S"}
+{"time":44.369646,"code":"o","data":"E"}
+{"time":44.37659,"code":"o","data":"L"}
+{"time":44.389967,"code":"o","data":"E"}
+{"time":44.398385,"code":"o","data":"C"}
+{"time":44.405868,"code":"o","data":"T"}
+{"time":44.421328,"code":"o","data":" "}
+{"time":44.429732,"code":"o","data":"s"}
+{"time":44.444508,"code":"o","data":"e"}
+{"time":44.455935,"code":"o","data":"r"}
+{"time":44.471607,"code":"o","data":"v"}
+{"time":44.484222,"code":"o","data":"i"}
+{"time":44.498597,"code":"o","data":"c"}
+{"time":44.508016,"code":"o","data":"e"}
+{"time":44.516646,"code":"o","data":" "}
+{"time":44.52725,"code":"o","data":"F"}
+{"time":44.534428,"code":"o","data":"R"}
+{"time":44.542836,"code":"o","data":"O"}
+{"time":44.557275,"code":"o","data":"M"}
+{"time":44.571536,"code":"o","data":" "}
+{"time":44.583177,"code":"o","data":"t"}
+{"time":44.597976,"code":"o","data":"i"}
+{"time":44.608169,"code":"o","data":"m"}
+{"time":44.617531,"code":"o","data":"e"}
+{"time":44.627907,"code":"o","data":"l"}
+{"time":44.641511,"code":"o","data":"e"}
+{"time":44.65344,"code":"o","data":"s"}
+{"time":44.665655,"code":"o","data":"s"}
+{"time":44.678494,"code":"o","data":"_"}
+{"time":44.690703,"code":"o","data":"l"}
+{"time":44.703344,"code":"o","data":"o"}
+{"time":44.71938,"code":"o","data":"g"}
+{"time":44.731191,"code":"o","data":"s"}
+{"time":44.74505,"code":"o","data":"_"}
+{"time":44.759154,"code":"o","data":"s"}
+{"time":44.76627,"code":"o","data":"e"}
+{"time":44.776248,"code":"o","data":"r"}
+{"time":44.785502,"code":"o","data":"v"}
+{"time":44.79729,"code":"o","data":"i"}
+{"time":44.807803,"code":"o","data":"c"}
+{"time":44.815777,"code":"o","data":"e"}
+{"time":44.826465,"code":"o","data":"s"}
+{"time":44.919566,"code":"o","data":";"}
+{"time":44.91994,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":44.920148,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502 service  \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 payments \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":45.980501,"code":"o","data":".print '-- newest value per series, in plain words and plain time'"}
+{"time":45.980942,"code":"o","data":"\r\n\u001b[?2004l\r-- newest value per series, in plain words and plain time\r\n\u001b[?2004hsqlite> "}
+{"time":46.54559,"code":"o","data":"S"}
+{"time":46.556925,"code":"o","data":"E"}
+{"time":46.573039,"code":"o","data":"L"}
+{"time":46.580418,"code":"o","data":"E"}
+{"time":46.588664,"code":"o","data":"C"}
+{"time":46.598179,"code":"o","data":"T"}
+{"time":46.606143,"code":"o","data":" "}
+{"time":46.619467,"code":"o","data":"n"}
+{"time":46.626986,"code":"o","data":"a"}
+{"time":46.639958,"code":"o","data":"m"}
+{"time":46.648527,"code":"o","data":"e"}
+{"time":46.661738,"code":"o","data":","}
+{"time":46.670402,"code":"o","data":" "}
+{"time":46.676901,"code":"o","data":"l"}
+{"time":46.683526,"code":"o","data":"a"}
+{"time":46.691139,"code":"o","data":"b"}
+{"time":46.702733,"code":"o","data":"e"}
+{"time":46.716842,"code":"o","data":"l"}
+{"time":46.72533,"code":"o","data":"s"}
+{"time":46.739817,"code":"o","data":","}
+{"time":46.749153,"code":"o","data":" "}
+{"time":46.764938,"code":"o","data":"v"}
+{"time":46.778716,"code":"o","data":"a"}
+{"time":46.785104,"code":"o","data":"l"}
+{"time":46.794974,"code":"o","data":"u"}
+{"time":46.802722,"code":"o","data":"e"}
+{"time":46.815225,"code":"o","data":","}
+{"time":46.822929,"code":"o","data":" "}
+{"time":46.837037,"code":"o","data":"t"}
+{"time":46.844649,"code":"o","data":"s"}
+{"time":46.852235,"code":"o","data":"_"}
+{"time":46.863836,"code":"o","data":"t"}
+{"time":46.878872,"code":"o","data":"i"}
+{"time":46.885144,"code":"o","data":"m"}
+{"time":46.896768,"code":"o","data":"e"}
+{"time":46.909626,"code":"o","data":" "}
+{"time":46.917617,"code":"o","data":"F"}
+{"time":46.928302,"code":"o","data":"R"}
+{"time":46.93687,"code":"o","data":"O"}
+{"time":46.945544,"code":"o","data":"M"}
+{"time":46.953788,"code":"o","data":" "}
+{"time":46.968016,"code":"o","data":"t"}
+{"time":46.974902,"code":"o","data":"i"}
+{"time":46.983159,"code":"o","data":"m"}
+{"time":46.992341,"code":"o","data":"e"}
+{"time":47.002834,"code":"o","data":"l"}
+{"time":47.018525,"code":"o","data":"e"}
+{"time":47.027999,"code":"o","data":"s"}
+{"time":47.039799,"code":"o","data":"s"}
+{"time":47.048034,"code":"o","data":"_"}
+{"time":47.056045,"code":"o","data":"m"}
+{"time":47.068407,"code":"o","data":"e"}
+{"time":47.079614,"code":"o","data":"t"}
+{"time":47.093412,"code":"o","data":"r"}
+{"time":47.107361,"code":"o","data":"i"}
+{"time":47.115656,"code":"o","data":"c"}
+{"time":47.130502,"code":"o","data":"s"}
+{"time":47.145849,"code":"o","data":"_"}
+{"time":47.157384,"code":"o","data":"l"}
+{"time":47.168852,"code":"o","data":"a"}
+{"time":47.183721,"code":"o","data":"t"}
+{"time":47.198875,"code":"o","data":"e"}
+{"time":47.20672,"code":"o","data":"s"}
+{"time":47.215682,"code":"o","data":"t"}
+{"time":47.304159,"code":"o","data":";"}
+{"time":47.304567,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":47.30506,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502     labels      \u2502 value \u2502         ts_time          \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502 {\"host\":\"web1\"} \u2502   1.0 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2502 checkout_latency \u2502 {\"host\":\"web1\"} \u2502  0.85 \u2502 2025-07-20T08:26:40.000Z \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n\u001b[?2004hsqlite> "}
+{"time":48.765404,"code":"o","data":".print '-- and the catalog: what exists, how much of it'"}
+{"time":48.765827,"code":"o","data":"\r\n\u001b[?2004l\r-- and the catalog: what exists, how much of it\r\n\u001b[?2004hsqlite> "}
+{"time":49.330096,"code":"o","data":"S"}
+{"time":49.33029,"code":"o","data":"E"}
+{"time":49.353821,"code":"o","data":"L"}
+{"time":49.363946,"code":"o","data":"E"}
+{"time":49.372371,"code":"o","data":"C"}
+{"time":49.372632,"code":"o","data":"T"}
+{"time":49.393874,"code":"o","data":" "}
+{"time":49.394235,"code":"o","data":"n"}
+{"time":49.415312,"code":"o","data":"a"}
+{"time":49.42633,"code":"o","data":"m"}
+{"time":49.438816,"code":"o","data":"e"}
+{"time":49.44704,"code":"o","data":","}
+{"time":49.457251,"code":"o","data":" "}
+{"time":49.468705,"code":"o","data":"p"}
+{"time":49.482165,"code":"o","data":"o"}
+{"time":49.488665,"code":"o","data":"i"}
+{"time":49.49606,"code":"o","data":"n"}
+{"time":49.510113,"code":"o","data":"t"}
+{"time":49.522532,"code":"o","data":"s"}
+{"time":49.537031,"code":"o","data":" "}
+{"time":49.547991,"code":"o","data":"F"}
+{"time":49.562307,"code":"o","data":"R"}
+{"time":49.575343,"code":"o","data":"O"}
+{"time":49.581564,"code":"o","data":"M"}
+{"time":49.589164,"code":"o","data":" "}
+{"time":49.603713,"code":"o","data":"t"}
+{"time":49.614443,"code":"o","data":"i"}
+{"time":49.62123,"code":"o","data":"m"}
+{"time":49.627531,"code":"o","data":"e"}
+{"time":49.637084,"code":"o","data":"l"}
+{"time":49.643716,"code":"o","data":"e"}
+{"time":49.652855,"code":"o","data":"s"}
+{"time":49.663254,"code":"o","data":"s"}
+{"time":49.670664,"code":"o","data":"_"}
+{"time":49.683048,"code":"o","data":"m"}
+{"time":49.692049,"code":"o","data":"e"}
+{"time":49.705999,"code":"o","data":"t"}
+{"time":49.706236,"code":"o","data":"r"}
+{"time":49.733364,"code":"o","data":"i"}
+{"time":49.747258,"code":"o","data":"c"}
+{"time":49.760975,"code":"o","data":"s"}
+{"time":49.775274,"code":"o","data":"_"}
+{"time":49.787554,"code":"o","data":"s"}
+{"time":49.798549,"code":"o","data":"e"}
+{"time":49.810792,"code":"o","data":"r"}
+{"time":49.818038,"code":"o","data":"i"}
+{"time":49.829263,"code":"o","data":"e"}
+{"time":49.843528,"code":"o","data":"s"}
+{"time":49.933166,"code":"o","data":";"}
+{"time":49.933391,"code":"o","data":"\r\n"}
+{"time":49.933416,"code":"o","data":"\u001b[?2004l\r"}
+{"time":49.933658,"code":"o","data":"\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\r\n\u2502       name       \u2502 points \u2502\r\n\u255e\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u256a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2561\r\n\u2502 checkout_errors  \u2502      1 \u2502\r\n\u2502 checkout_latency \u2502      1 \u2502\r\n\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\r\n"}
+{"time":49.933685,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":51.094337,"code":"o","data":".mode list --charlimit 0 --linelimit 0"}
+{"time":51.094753,"code":"o","data":"\r\n\u001b[?2004l\r\u001b[?2004hsqlite> "}
+{"time":51.405156,"code":"o","data":".print '-- dropping a table uninstalls exactly its own objects -- nothing else is touched'"}
+{"time":51.405565,"code":"o","data":"\r\n\u001b[?2004l\r-- dropping a table uninstalls exactly its own objects -- nothing else is touched\r\n"}
+{"time":51.405618,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":51.964327,"code":"o","data":"D"}
+{"time":51.976217,"code":"o","data":"R"}
+{"time":51.992321,"code":"o","data":"O"}
+{"time":52.005151,"code":"o","data":"P"}
+{"time":52.014502,"code":"o","data":" "}
+{"time":52.022564,"code":"o","data":"T"}
+{"time":52.029099,"code":"o","data":"A"}
+{"time":52.041458,"code":"o","data":"B"}
+{"time":52.052899,"code":"o","data":"L"}
+{"time":52.062867,"code":"o","data":"E"}
+{"time":52.078128,"code":"o","data":" "}
+{"time":52.087502,"code":"o","data":"t"}
+{"time":52.100334,"code":"o","data":"r"}
+{"time":52.1109,"code":"o","data":"a"}
+{"time":52.120176,"code":"o","data":"c"}
+{"time":52.131643,"code":"o","data":"e"}
+{"time":52.146176,"code":"o","data":"s"}
+{"time":52.234979,"code":"o","data":";"}
+{"time":52.235406,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":52.236175,"code":"o","data":"\u001b[?2004hsqlite> "}
+{"time":52.998504,"code":"o","data":"S"}
+{"time":53.010546,"code":"o","data":"E"}
+{"time":53.02242,"code":"o","data":"L"}
+{"time":53.033016,"code":"o","data":"E"}
+{"time":53.042061,"code":"o","data":"C"}
+{"time":53.055337,"code":"o","data":"T"}
+{"time":53.064281,"code":"o","data":" "}
+{"time":53.072084,"code":"o","data":"o"}
+{"time":53.081354,"code":"o","data":"b"}
+{"time":53.090467,"code":"o","data":"j"}
+{"time":53.098204,"code":"o","data":"e"}
+{"time":53.114048,"code":"o","data":"c"}
+{"time":53.12261,"code":"o","data":"t"}
+{"time":53.136404,"code":"o","data":"_"}
+{"time":53.145599,"code":"o","data":"n"}
+{"time":53.154689,"code":"o","data":"a"}
+{"time":53.164694,"code":"o","data":"m"}
+{"time":53.175282,"code":"o","data":"e"}
+{"time":53.182215,"code":"o","data":" "}
+{"time":53.197506,"code":"o","data":"F"}
+{"time":53.207951,"code":"o","data":"R"}
+{"time":53.216045,"code":"o","data":"O"}
+{"time":53.223949,"code":"o","data":"M"}
+{"time":53.237874,"code":"o","data":" "}
+{"time":53.245685,"code":"o","data":"t"}
+{"time":53.253422,"code":"o","data":"i"}
+{"time":53.260253,"code":"o","data":"m"}
+{"time":53.273133,"code":"o","data":"e"}
+{"time":53.286754,"code":"o","data":"l"}
+{"time":53.301516,"code":"o","data":"e"}
+{"time":53.315941,"code":"o","data":"s"}
+{"time":53.324652,"code":"o","data":"s"}
+{"time":53.340197,"code":"o","data":"_"}
+{"time":53.347454,"code":"o","data":"s"}
+{"time":53.35681,"code":"o","data":"c"}
+{"time":53.363314,"code":"o","data":"h"}
+{"time":53.379167,"code":"o","data":"e"}
+{"time":53.39015,"code":"o","data":"m"}
+{"time":53.398519,"code":"o","data":"a"}
+{"time":53.411051,"code":"o","data":"_"}
+{"time":53.42082,"code":"o","data":"i"}
+{"time":53.429965,"code":"o","data":"n"}
+{"time":53.437133,"code":"o","data":"v"}
+{"time":53.451434,"code":"o","data":"e"}
+{"time":53.467289,"code":"o","data":"n"}
+{"time":53.480081,"code":"o","data":"t"}
+{"time":53.48957,"code":"o","data":"o"}
+{"time":53.505246,"code":"o","data":"r"}
+{"time":53.513377,"code":"o","data":"y"}
+{"time":53.527369,"code":"o","data":" "}
+{"time":53.538626,"code":"o","data":"W"}
+{"time":53.553172,"code":"o","data":"H"}
+{"time":53.568335,"code":"o","data":"E"}
+{"time":53.583674,"code":"o","data":"R"}
+{"time":53.5991,"code":"o","data":"E"}
+{"time":53.608299,"code":"o","data":" "}
+{"time":53.620892,"code":"o","data":"s"}
+{"time":53.634031,"code":"o","data":"o"}
+{"time":53.64448,"code":"o","data":"u"}
+{"time":53.650708,"code":"o","data":"r"}
+{"time":53.656956,"code":"o","data":"c"}
+{"time":53.665138,"code":"o","data":"e"}
+{"time":53.676142,"code":"o","data":"_"}
+{"time":53.690238,"code":"o","data":"t"}
+{"time":53.70209,"code":"o","data":"a"}
+{"time":53.715416,"code":"o","data":"b"}
+{"time":53.727664,"code":"o","data":"l"}
+{"time":53.736157,"code":"o","data":"e"}
+{"time":53.74855,"code":"o","data":" "}
+{"time":53.763398,"code":"o","data":"="}
+{"time":53.774426,"code":"o","data":" "}
+{"time":53.788666,"code":"o","data":"'"}
+{"time":53.794929,"code":"o","data":"t"}
+{"time":53.80274,"code":"o","data":"r"}
+{"time":53.812154,"code":"o","data":"a"}
+{"time":53.821325,"code":"o","data":"c"}
+{"time":53.832119,"code":"o","data":"e"}
+{"time":53.841022,"code":"o","data":"s"}
+{"time":53.849356,"code":"o","data":"'"}
+{"time":53.941083,"code":"o","data":";"}
+{"time":53.941544,"code":"o","data":"\r\n\u001b[?2004l\r"}
+{"time":53.941568,"code":"o","data":"\u001b[?2004h"}
+{"time":53.941601,"code":"o","data":"sqlite> "}
+{"time":55.101968,"code":"o","data":".print '-- (no rows: the traces companions left with their table)'"}
+{"time":55.102296,"code":"o","data":"\r\n\u001b[?2004l\r-- (no rows: the traces companions left with their table)\r\n\u001b[?2004hsqlite> "}
+{"time":55.765718,"code":"o","data":"S"}
+{"time":55.773876,"code":"o","data":"E"}
+{"time":55.781903,"code":"o","data":"L"}
+{"time":55.794422,"code":"o","data":"E"}
+{"time":55.807215,"code":"o","data":"C"}
+{"time":55.8159,"code":"o","data":"T"}
+{"time":55.824334,"code":"o","data":" "}
+{"time":55.839582,"code":"o","data":"o"}
+{"time":55.850673,"code":"o","data":"b"}
+{"time":55.862071,"code":"o","data":"j"}
+{"time":55.878196,"code":"o","data":"e"}
+{"time":55.892092,"code":"o","data":"c"}
+{"time":55.903324,"code":"o","data":"t"}
+{"time":55.917491,"code":"o","data":"_"}
+{"time":55.9322,"code":"o","data":"n"}
+{"time":55.946348,"code":"o","data":"a"}
+{"time":55.961762,"code":"o","data":"m"}
+{"time":55.975972,"code":"o","data":"e"}
+{"time":55.990403,"code":"o","data":" "}
+{"time":56.002155,"code":"o","data":"F"}
+{"time":56.010944,"code":"o","data":"R"}
+{"time":56.024007,"code":"o","data":"O"}
+{"time":56.032845,"code":"o","data":"M"}
+{"time":56.042326,"code":"o","data":" "}
+{"time":56.054505,"code":"o","data":"t"}
+{"time":56.063198,"code":"o","data":"i"}
+{"time":56.074599,"code":"o","data":"m"}
+{"time":56.08263,"code":"o","data":"e"}
+{"time":56.097793,"code":"o","data":"l"}
+{"time":56.111257,"code":"o","data":"e"}
+{"time":56.12177,"code":"o","data":"s"}
+{"time":56.130496,"code":"o","data":"s"}
+{"time":56.142466,"code":"o","data":"_"}
+{"time":56.156394,"code":"o","data":"s"}
+{"time":56.162644,"code":"o","data":"c"}
+{"time":56.172146,"code":"o","data":"h"}
+{"time":56.181773,"code":"o","data":"e"}
+{"time":56.196707,"code":"o","data":"m"}
+{"time":56.203992,"code":"o","data":"a"}
+{"time":56.219847,"code":"o","data":"_"}
+{"time":56.230004,"code":"o","data":"i"}
+{"time":56.245744,"code":"o","data":"n"}
+{"time":56.253818,"code":"o","data":"v"}
+{"time":56.265186,"code":"o","data":"e"}
+{"time":56.2742,"code":"o","data":"n"}
+{"time":56.285563,"code":"o","data":"t"}
+{"time":56.297931,"code":"o","data":"o"}
+{"time":56.309115,"code":"o","data":"r"}
+{"time":56.317772,"code":"o","data":"y"}
+{"time":56.330887,"code":"o","data":" "}
+{"time":56.343401,"code":"o","data":"W"}
+{"time":56.358699,"code":"o","data":"H"}
+{"time":56.371626,"code":"o","data":"E"}
+{"time":56.386597,"code":"o","data":"R"}
+{"time":56.400707,"code":"o","data":"E"}
+{"time":56.4134,"code":"o","data":" "}
+{"time":56.427601,"code":"o","data":"s"}
+{"time":56.442254,"code":"o","data":"o"}
+{"time":56.455081,"code":"o","data":"u"}
+{"time":56.470575,"code":"o","data":"r"}
+{"time":56.480436,"code":"o","data":"c"}
+{"time":56.490914,"code":"o","data":"e"}
+{"time":56.498434,"code":"o","data":"_"}
+{"time":56.513599,"code":"o","data":"t"}
+{"time":56.526973,"code":"o","data":"a"}
+{"time":56.541813,"code":"o","data":"b"}
+{"time":56.548516,"code":"o","data":"l"}
+{"time":56.562206,"code":"o","data":"e"}
+{"time":56.57297,"code":"o","data":" "}
+{"time":56.583085,"code":"o","data":"="}
+{"time":56.598094,"code":"o","data":" "}
+{"time":56.614072,"code":"o","data":"'"}
+{"time":56.628714,"code":"o","data":"l"}
+{"time":56.636604,"code":"o","data":"o"}
+{"time":56.649133,"code":"o","data":"g"}
+{"time":56.655368,"code":"o","data":"s"}
+{"time":56.670622,"code":"o","data":"'"}
+{"time":56.757761,"code":"o","data":";"}
+{"time":56.758196,"code":"o","data":"\r\n\u001b[?2004l\rtimeless_logs_entries\r\ntimeless_logs_fields\r\ntimeless_logs_services\r\n\u001b[?2004hsqlite> "}
+{"time":57.918569,"code":"o","data":".print '-- logs companions untouched. that is the whole contract.'"}
+{"time":57.918955,"code":"o","data":"\r\n\u001b[?2004l\r-- logs companions untouched. that is the whole contract.\r\n\u001b[?2004hsqlite> "}
+{"time":59.019747,"code":"o","data":".quit\r\n\u001b[?2004l\r"}
