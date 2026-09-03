@@ -7,6 +7,15 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 const DEFAULT_LIMIT: i64 = 100;
+/// Server-side ceiling for Jaeger search spans: without it a single
+/// `limit=9223372036854775807` forces a full-table scan grouped in
+/// memory. Dashboard search stays 1..=100. The Jaeger ceiling is
+/// deliberately generous, not tight: the contract suite bulk-reads
+/// 131072 spans and the production gate uses 10000, so anything near
+/// those would break established behavior. 1M still rejects the
+/// absurd while the read deadline and response-byte cap bound what a
+/// maxed-out search can cost in time and egress.
+const MAX_SEARCH_LIMIT: i64 = 1_000_000;
 
 #[derive(Clone, Copy)]
 pub(crate) enum ReadKind {
@@ -87,13 +96,25 @@ pub(crate) struct ReadOutput {
 
 impl ReadRequest {
     pub(crate) fn search(params: SearchParams) -> Result<Self, String> {
-        let start_ns = parse_optional_integer(params.start.as_deref())
-            .and_then(|value| value.checked_mul(1_000));
-        let end_ns = parse_optional_integer(params.end.as_deref())
-            .and_then(|value| value.checked_mul(1_000));
-        let limit = parse_optional_integer(params.limit.as_deref()).unwrap_or(DEFAULT_LIMIT);
-        if limit < 0 {
-            return Err("limit must be non-negative".into());
+        // Exact parsing throughout: garbage ("100xyz") and overflowing
+        // values are a 400, never a silent truncation or a downgrade to
+        // an unbounded scan.
+        let start_ns = match params.start.as_deref() {
+            None => None,
+            Some(raw) => Some(parse_time_micros("start", raw)?),
+        };
+        let end_ns = match params.end.as_deref() {
+            None => None,
+            Some(raw) => Some(parse_time_micros("end", raw)?),
+        };
+        let limit = match params.limit.as_deref() {
+            None => DEFAULT_LIMIT,
+            Some(raw) => parse_exact_integer("limit", raw)?,
+        };
+        if !(0..=MAX_SEARCH_LIMIT).contains(&limit) {
+            return Err(format!(
+                "limit must be between 0 and {MAX_SEARCH_LIMIT}"
+            ));
         }
         let min_duration_ns = params
             .min_duration
@@ -772,16 +793,33 @@ fn envelope(
 fn parse_duration(value: &str) -> Result<i64, String> {
     for (suffix, multiplier) in [("ms", 1_000_000), ("us", 1_000), ("s", 1_000_000_000)] {
         if let Some(number) = value.strip_suffix(suffix) {
-            return parse_integer_prefix(number)
-                .and_then(|number| number.checked_mul(multiplier))
-                .ok_or_else(|| format!("invalid Jaeger duration {value:?}"));
+            return parse_exact_integer("duration", number)
+                .and_then(|number| {
+                    number.checked_mul(multiplier).ok_or_else(|| {
+                        format!("invalid Jaeger duration {value:?}")
+                    })
+                });
         }
     }
-    parse_integer_prefix(value).ok_or_else(|| format!("invalid Jaeger duration {value:?}"))
+    parse_exact_integer("duration", value)
 }
 
-fn parse_optional_integer(value: Option<&str>) -> Option<i64> {
-    value.and_then(parse_integer_prefix)
+/// Strict integer parse: no prefixes, no trailing garbage, no silent
+/// truncation. Anything else is a 400 from the caller.
+fn parse_exact_integer(field: &str, value: &str) -> Result<i64, String> {
+    value
+        .parse::<i64>()
+        .map_err(|_| format!("invalid Jaeger {field} {value:?}"))
+}
+
+/// Jaeger timestamps arrive as epoch microseconds; storage speaks
+/// nanoseconds. Overflow past i64 ns is a 400, never an unbounded scan.
+fn parse_time_micros(field: &str, value: &str) -> Result<i64, String> {
+    parse_exact_integer(field, value).and_then(|micros| {
+        micros
+            .checked_mul(1_000)
+            .ok_or_else(|| format!("invalid Jaeger {field} {value:?}"))
+    })
 }
 
 fn optional_exact_integer(field: &str, value: Option<&str>) -> Result<Option<i64>, String> {
@@ -796,18 +834,6 @@ fn optional_exact_integer(field: &str, value: Option<&str>) -> Result<Option<i64
 
 fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
-}
-
-fn parse_integer_prefix(value: &str) -> Option<i64> {
-    let bytes = value.as_bytes();
-    let start = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    let digits = bytes[start..]
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    (digits > 0)
-        .then(|| value[..start + digits].parse().ok())
-        .flatten()
 }
 
 fn json_object(text: String, field: &str) -> Result<Map<String, Value>, String> {
@@ -858,12 +884,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn established_duration_and_partial_integer_rules_are_pinned() {
+    fn established_duration_and_integer_rules_are_pinned() {
         assert_eq!(parse_duration("100us").unwrap(), 100_000);
         assert_eq!(parse_duration("2ms").unwrap(), 2_000_000);
         assert_eq!(parse_duration("3s").unwrap(), 3_000_000_000);
         assert_eq!(parse_duration("42").unwrap(), 42);
-        assert_eq!(parse_optional_integer(Some("17junk")), Some(17));
+        // Strict since the search-bound hardening (issue #47): trailing
+        // garbage used to parse as a prefix ("17junk" → 17) and overflow
+        // silently downgraded to an unbounded scan. Both are 400s now.
+        assert!(parse_exact_integer("limit", "17junk").is_err());
+        assert!(parse_time_micros("start", "17junk").is_err());
+        assert!(parse_time_micros("start", "9223372036854775807").is_err());
         assert!(parse_duration("oops").is_err());
+        assert!(parse_duration("10junkms").is_err());
+    }
+
+    #[test]
+    fn search_rejects_garbage_and_absurd_limits() {
+        let base = SearchParams {
+            service: None,
+            operation: None,
+            start: None,
+            end: None,
+            limit: None,
+            min_duration: None,
+            max_duration: None,
+        };
+        // Default limit when absent.
+        assert!(ReadRequest::search(base.clone()).is_ok());
+        for limit in ["100xyz", "-1", "1000001", "9223372036854775807"] {
+            let params = SearchParams {
+                limit: Some(limit.into()),
+                ..base.clone()
+            };
+            assert!(
+                ReadRequest::search(params).is_err(),
+                "limit {limit:?} must be rejected"
+            );
+        }
+        for bound in ["12x", ""] {
+            for params in [
+                SearchParams {
+                    start: Some(bound.into()),
+                    ..base.clone()
+                },
+                SearchParams {
+                    end: Some(bound.into()),
+                    ..base.clone()
+                },
+            ] {
+                assert!(
+                    ReadRequest::search(params).is_err(),
+                    "bound {bound:?} must be rejected"
+                );
+            }
+        }
     }
 }

@@ -15625,3 +15625,52 @@ async fn compression_reporting_derives_raw_bytes_and_reconciles_index_bytes() {
         .unwrap();
     assert_eq!(engine_disk_points, 4_106);
 }
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn native_export_honors_limits_and_deadline() {
+    // Regression test (issue #47, H2): native /api/v1/* routes used to
+    // bypass PromQueryLimits entirely — no grid enforcement, no
+    // deadline. Seed 20k points so a 1ms deadline cannot win the race.
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("native.db"),
+        extension,
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    for batch in 0..40 {
+        storage
+            .submit_named_batch(named_batch(500, 1_700_000_000 + batch * 500), 500)
+            .await
+            .unwrap();
+    }
+    storage.flush().await.unwrap();
+
+    let app = router(storage.clone());
+    let (status, _) = get_json(
+        &app,
+        "/api/v1/export?metric=session_one_metric&from=1700000000&to=1700020000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            deadline: std::time::Duration::from_millis(1),
+            ..PromQueryLimits::default()
+        },
+    );
+    let (status, body) = get_json(
+        &app,
+        "/api/v1/export?metric=session_one_metric&from=1700000000&to=1700020000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
+    assert_eq!(body["status"], "error");
+    storage.shutdown().await.unwrap();
+}

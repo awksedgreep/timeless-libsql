@@ -5,7 +5,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use serde_json::Value;
 use tempfile::TempDir;
-use timeless_traces_api::{router, Storage};
+use timeless_traces_api::{router, router_with_limits, Storage, TracesQueryLimits};
 use tower::ServiceExt;
 
 const TRACE_ID: &str = "00112233445566778899aabbccddeeff";
@@ -498,4 +498,62 @@ fn text_column<'a>(out: &mut Vec<u8>, values: impl Iterator<Item = &'a str>) {
         out.extend_from_slice(&(value.len() as u32).to_le_bytes());
         out.extend_from_slice(value.as_bytes());
     }
+}
+
+#[tokio::test]
+async fn jaeger_search_rejects_garbage_and_absurd_limits() {
+    // Regression test (issue #47, H1): prefix parsing ("100xyz" → 100)
+    // and overflow downgrades silently widened the scan; unbounded
+    // limits forced full-table in-memory grouping. All are 400s now.
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let storage =
+        Storage::start(directory.path().join("bounds.db"), extension, 2, 16, None).unwrap();
+    let app = router(storage.clone());
+    for uri in [
+        "/select/jaeger/api/traces?limit=100xyz",
+        "/select/jaeger/api/traces?limit=1000001",
+        "/select/jaeger/api/traces?limit=9223372036854775807",
+        "/select/jaeger/api/traces?limit=-1",
+        "/select/jaeger/api/traces?start=yesterday",
+        "/select/jaeger/api/traces?end=",
+        "/select/jaeger/api/traces?start=9223372036854775807",
+        "/select/jaeger/api/traces?minDuration=10junkms",
+    ] {
+        let (status, body) = get_json(&app, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+    }
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn jaeger_search_honors_the_read_deadline() {
+    // Regression test (issue #47, H1): reads had no deadline — one
+    // unbounded search could pin a reader indefinitely. Seed the
+    // fixture repeatedly so a 1ms deadline cannot win the race.
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let storage =
+        Storage::start(directory.path().join("deadline.db"), extension, 2, 16, None).unwrap();
+    let seeded = router(storage.clone());
+    let fixture = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rich_trace.otlp.json"),
+    )
+    .unwrap();
+    for _ in 0..30 {
+        assert_eq!(post_otlp(&seeded, &fixture).await.0, StatusCode::OK);
+    }
+    storage.flush().await.unwrap();
+
+    let app = router_with_limits(
+        storage.clone(),
+        TracesQueryLimits {
+            deadline: Duration::from_millis(1),
+            ..TracesQueryLimits::default()
+        },
+    );
+    let (status, body) = get_json(&app, "/select/jaeger/api/traces?service=contract-svc").await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
+    assert_eq!(body["status"], "error");
+    storage.shutdown().await.unwrap();
 }

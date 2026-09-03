@@ -47,6 +47,14 @@ async fn main() -> ExitCode {
         Ok(auth) => auth,
         Err(error) => return usage_error(error),
     };
+    if auth.is_open() {
+        eprintln!(
+            "WARNING: timeless-metrics-api starting with authentication DISABLED: \
+             ingest, query, and admin routes are open to whoever can reach the listener. \
+             Set TIMELESS_AUTH_MODE=required with TIMELESS_AUTH_POLICY_FILE (and \
+             optionally TIMELESS_ADMIN_KEY) to lock it down."
+        );
+    }
 
     let defaults = Config::default();
     let reader_connections = match positive_usize_from_env(

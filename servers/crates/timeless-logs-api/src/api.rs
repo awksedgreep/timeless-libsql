@@ -1148,9 +1148,14 @@ fn ndjson_response(body: Vec<u8>, rows: usize) -> Response<Body> {
 }
 
 fn server_error(error: String) -> Response<Body> {
+    // Storage and SQLite internals must not reach clients (table/TVF
+    // names, file paths, busy-state detail): log server-side and return
+    // a stable envelope. This crate has no tracing dependency; the
+    // binary's stderr is the log sink.
+    eprintln!("timeless-logs-api: internal error: {error}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": error})),
+        Json(json!({"error": "internal"})),
     )
         .into_response()
 }

@@ -57,6 +57,14 @@ impl AuthConfig {
         }
     }
 
+    /// True when neither token verification nor the admin key is
+    /// configured: every route (ingest, query, admin) is unauthenticated
+    /// for whoever can reach the listener. Intentional for local
+    /// development, but it must be LOUD at startup — never silent.
+    pub fn is_open(&self) -> bool {
+        self.verifier.is_none() && self.admin_key.is_none()
+    }
+
     /// Replace the admin key (library callers; the binaries inherit
     /// `TIMELESS_ADMIN_KEY` through the constructors).
     pub fn with_admin_key(mut self, key: Option<String>) -> Self {

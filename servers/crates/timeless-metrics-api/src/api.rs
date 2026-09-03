@@ -84,16 +84,22 @@ async fn latest(
     if params.get("query").is_some() {
         prometheus_read_route(storage, limits, query::prometheus_instant_request(&params)).await
     } else {
-        read_route(storage, query::latest_request(&params)).await
+        read_route(storage, limits, query::latest_request(&params)).await
     }
 }
 
 async fn export(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    read_route(storage, query::export_request(&params(query, &body))).await
+    read_route(
+        storage,
+        limits,
+        query::export_request(&params(query, &body)),
+    )
+    .await
 }
 
 async fn range(
@@ -106,7 +112,7 @@ async fn range(
     if params.get("query").is_some() {
         prometheus_read_route(storage, limits, query::prometheus_range_request(&params)).await
     } else {
-        read_route(storage, query::range_request(&params)).await
+        read_route(storage, limits, query::range_request(&params)).await
     }
 }
 
@@ -168,20 +174,28 @@ async fn metricsql_range(
 
 async fn labels(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    read_route(storage, query::labels_request(&params(query, &body))).await
+    read_route(
+        storage,
+        limits,
+        query::labels_request(&params(query, &body)),
+    )
+    .await
 }
 
 async fn label_values(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     Path(name): Path<String>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
     read_route(
         storage,
+        limits,
         query::label_values_request(&params(query, &body), name),
     )
     .await
@@ -189,31 +203,62 @@ async fn label_values(
 
 async fn series(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    read_route(storage, query::series_request(&params(query, &body), false)).await
+    read_route(
+        storage,
+        limits,
+        query::series_request(&params(query, &body), false),
+    )
+    .await
 }
 
 async fn prometheus_series(
     State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    read_route(storage, query::series_request(&params(query, &body), true)).await
+    read_route(
+        storage,
+        limits,
+        query::series_request(&params(query, &body), true),
+    )
+    .await
 }
 
 fn params(query: Option<String>, body: &[u8]) -> Params {
     Params::parse(query.as_deref(), body)
 }
 
-async fn read_route(storage: Storage, request: Result<ReadRequest, String>) -> Response {
-    let request = match request {
+async fn read_route(
+    storage: Storage,
+    limits: PromQueryLimits,
+    request: Result<ReadRequest, String>,
+) -> Response {
+    // Native routes used to bypass PromQueryLimits entirely (no grid
+    // enforcement, no deadline): apply both, exactly like the
+    // Prometheus routes. `with_prometheus_limits` is a no-op for native
+    // request shapes beyond validating the limits themselves.
+    let request = match request.and_then(|request| request.with_prometheus_limits(limits)) {
         Ok(request) => request,
         Err(error) => return client_error(error),
     };
-    match storage.read(request).await {
-        Ok(output) => (
+    match tokio::time::timeout(limits.deadline, storage.read(request)).await {
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({
+                "status": "error",
+                "error": format!(
+                    "query exceeded the {}ms execution deadline",
+                    limits.deadline.as_millis()
+                ),
+            })),
+        )
+            .into_response(),
+        Ok(Ok(output)) => (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE.as_str(), "application/json".to_owned()),
@@ -222,7 +267,7 @@ async fn read_route(storage: Storage, request: Result<ReadRequest, String>) -> R
             Bytes::from(output.body),
         )
             .into_response(),
-        Err(error) => server_error(error),
+        Ok(Err(error)) => server_error(error),
     }
 }
 
@@ -532,9 +577,14 @@ fn duration_ns(duration: std::time::Duration) -> u64 {
 }
 
 fn server_error(error: String) -> Response {
+    // Storage and SQLite internals must not reach clients (table/TVF
+    // names, file paths, busy-state detail): log server-side and return
+    // a stable envelope. This crate has no tracing dependency; the
+    // binary's stderr is the log sink.
+    eprintln!("timeless-metrics-api: internal error: {error}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"status": "error", "error": error})),
+        Json(json!({"status": "error", "error": "internal"})),
     )
         .into_response()
 }

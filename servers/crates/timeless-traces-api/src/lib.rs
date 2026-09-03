@@ -20,7 +20,7 @@ use timeless_api_common::{
 };
 use tokio::net::TcpListener;
 
-pub use api::{router, MAX_BODY_BYTES};
+pub use api::{router, router_with_limits, MAX_BODY_BYTES};
 pub use storage::{
     FlushReport, IngestTimings, RuntimeWatermarks, Storage, StorageStats, TRACE_CAPABILITY,
 };
@@ -32,6 +32,39 @@ pub const DEFAULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// WAL file near its configured bound instead of its high-water size; a busy
 /// pass is only reported and the next interval tries again.
 const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Hard read-path execution limits, mirroring the logs/metrics servers'
+/// posture: bounded evaluation even when authentication is disabled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TracesQueryLimits {
+    pub max_response_bytes: usize,
+    pub deadline: Duration,
+}
+
+impl Default for TracesQueryLimits {
+    fn default() -> Self {
+        Self {
+            // Bulk-search contract, not the logs/metrics 16 MiB: the
+            // suite reads 131072 spans in one search (tens of MB of
+            // envelope), so the cap only kills GB-scale egress while
+            // the search limit and deadline bound compute and memory.
+            max_response_bytes: 256 * 1024 * 1024,
+            deadline: Duration::from_secs(30),
+        }
+    }
+}
+
+impl TracesQueryLimits {
+    pub fn validate(self) -> Result<(), String> {
+        if self.max_response_bytes == 0 {
+            return Err("max_response_bytes must be positive".into());
+        }
+        if self.deadline.as_millis() == 0 {
+            return Err("traces query deadline must be at least 1ms".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -46,6 +79,7 @@ pub struct Config {
     pub enforce_retention: bool,
     pub flush_interval: Duration,
     pub optimize_interval: Duration,
+    pub query_limits: TracesQueryLimits,
     pub auth: AuthConfig,
 }
 
@@ -64,6 +98,7 @@ impl Default for Config {
             enforce_retention: false,
             flush_interval: Duration::from_secs(1),
             optimize_interval: Duration::from_secs(30),
+            query_limits: TracesQueryLimits::default(),
             auth: AuthConfig::disabled(),
         }
     }
@@ -108,7 +143,10 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.retention,
         config.enforce_retention,
     )?;
-    let app = protect_router(router(storage.clone()), config.auth.clone());
+    let app = protect_router(
+        router_with_limits(storage.clone(), config.query_limits),
+        config.auth.clone(),
+    );
     let listener = TcpListener::bind(config.listen)
         .await
         .map_err(|error| format!("bind {}: {error}", config.listen))?;

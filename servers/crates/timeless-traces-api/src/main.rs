@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
-use timeless_traces_api::{run, Config};
+use timeless_traces_api::{run, Config, TracesQueryLimits};
 
 const USAGE: &str = "usage: timeless-traces-api <libtimeless_ext.so> <database> [listen-address]";
 
@@ -44,6 +44,14 @@ async fn main() -> ExitCode {
         Ok(auth) => auth,
         Err(error) => return usage_error(error),
     };
+    if auth.is_open() {
+        eprintln!(
+            "WARNING: timeless-traces-api starting with authentication DISABLED: \
+             ingest, query, and admin routes are open to whoever can reach the listener. \
+             Set TIMELESS_AUTH_MODE=required with TIMELESS_AUTH_POLICY_FILE (and \
+             optionally TIMELESS_ADMIN_KEY) to lock it down."
+        );
+    }
 
     let defaults = Config::default();
     let reader_connections = match positive_usize_from_env(
@@ -91,6 +99,7 @@ async fn main() -> ExitCode {
         enforce_retention,
         flush_interval,
         optimize_interval,
+        query_limits: TracesQueryLimits::default(),
         auth,
     };
     match run(config).await {

@@ -16,11 +16,16 @@ use timeless_api_common::{
 use crate::otlp;
 use crate::query::{DashboardSearchParams, ReadRequest, SearchParams};
 use crate::tail::TailParams;
-use crate::{IngestTimings, Storage};
+use crate::{IngestTimings, Storage, TracesQueryLimits};
 
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn router(storage: Storage) -> Router {
+    router_with_limits(storage, TracesQueryLimits::default())
+}
+
+pub fn router_with_limits(storage: Storage, limits: TracesQueryLimits) -> Router {
+    limits.validate().expect("traces router limits must be valid");
     Router::new()
         .route("/live", get(liveness))
         .route("/ready", get(readiness))
@@ -48,6 +53,7 @@ pub fn router(storage: Storage) -> Router {
         .route("/insert/opentelemetry/v1/traces", post(ingest_otlp))
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(Extension(limits))
         .with_state(storage)
 }
 
@@ -274,20 +280,32 @@ async fn stats(State(storage): State<Storage>) -> Response {
     }
 }
 
-async fn services(State(storage): State<Storage>) -> Response {
-    read_response(storage, ReadRequest::Services).await
+async fn services(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<TracesQueryLimits>,
+) -> Response {
+    read_response(storage, limits, ReadRequest::Services).await
 }
 
-async fn operations(State(storage): State<Storage>, Path(service): Path<String>) -> Response {
-    read_response(storage, ReadRequest::Operations { service }).await
+async fn operations(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<TracesQueryLimits>,
+    Path(service): Path<String>,
+) -> Response {
+    read_response(storage, limits, ReadRequest::Operations { service }).await
 }
 
-async fn trace_by_id(State(storage): State<Storage>, Path(trace_id): Path<String>) -> Response {
-    read_response(storage, ReadRequest::Trace { trace_id }).await
+async fn trace_by_id(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<TracesQueryLimits>,
+    Path(trace_id): Path<String>,
+) -> Response {
+    read_response(storage, limits, ReadRequest::Trace { trace_id }).await
 }
 
 async fn search_traces(
     State(storage): State<Storage>,
+    Extension(limits): Extension<TracesQueryLimits>,
     params: Result<Query<SearchParams>, QueryRejection>,
 ) -> Response {
     let Query(params) = match params {
@@ -295,17 +313,27 @@ async fn search_traces(
         Err(_) => return unsupported_query_parameters(),
     };
     match ReadRequest::search(params) {
-        Ok(request) => read_response(storage, request).await,
+        Ok(request) => read_response(storage, limits, request).await,
         Err(error) => client_error(StatusCode::BAD_REQUEST, error),
     }
 }
 
-async fn dashboard_trace(State(storage): State<Storage>, Path(trace_id): Path<String>) -> Response {
-    read_response(storage, ReadRequest::DashboardTrace { trace_id }).await
+async fn dashboard_trace(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<TracesQueryLimits>,
+    Path(trace_id): Path<String>,
+) -> Response {
+    read_response(
+        storage,
+        limits,
+        ReadRequest::DashboardTrace { trace_id },
+    )
+    .await
 }
 
 async fn dashboard_search(
     State(storage): State<Storage>,
+    Extension(limits): Extension<TracesQueryLimits>,
     params: Result<Query<DashboardSearchParams>, QueryRejection>,
 ) -> Response {
     let Query(params) = match params {
@@ -313,24 +341,56 @@ async fn dashboard_search(
         Err(_) => return unsupported_query_parameters(),
     };
     match ReadRequest::dashboard_search(params) {
-        Ok(request) => read_response(storage, request).await,
+        Ok(request) => read_response(storage, limits, request).await,
         Err(error) => client_error(StatusCode::BAD_REQUEST, error),
     }
 }
 
-async fn read_response(storage: Storage, request: ReadRequest) -> Response {
-    match storage.read(request).await {
-        Ok(output) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE.as_str(), "application/json".to_owned()),
-                (RESULT_ROWS_HEADER, output.rows.to_string()),
-            ],
-            Bytes::from(output.body),
-        )
-            .into_response(),
-        Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+async fn read_response(
+    storage: Storage,
+    limits: TracesQueryLimits,
+    request: ReadRequest,
+) -> Response {
+    // The reader actor has no notion of a deadline: bound every search
+    // at the HTTP layer so one unbounded request cannot pin a reader
+    // (and its SQLite connection) indefinitely.
+    let output = match tokio::time::timeout(limits.deadline, storage.read(request)).await {
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({
+                    "status": "error",
+                    "error": format!(
+                        "query exceeded the {}ms execution deadline",
+                        limits.deadline.as_millis()
+                    ),
+                })),
+            )
+                .into_response();
+        }
+        Ok(Err(error)) => {
+            return server_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+        }
+        Ok(Ok(output)) => output,
+    };
+    if output.body.len() > limits.max_response_bytes {
+        return client_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "response exceeds {} bytes",
+                limits.max_response_bytes
+            ),
+        );
     }
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE.as_str(), "application/json".to_owned()),
+            (RESULT_ROWS_HEADER, output.rows.to_string()),
+        ],
+        Bytes::from(output.body),
+    )
+        .into_response()
 }
 
 async fn flush(State(storage): State<Storage>) -> Response {
@@ -561,7 +621,16 @@ fn duration_ns(duration: std::time::Duration) -> u64 {
 }
 
 fn server_error(status: StatusCode, error: String) -> Response {
-    (status, Json(json!({"status": "error", "error": error}))).into_response()
+    // Storage and SQLite internals must not reach clients (table/TVF
+    // names, file paths, busy-state detail): log server-side and return
+    // a stable envelope. This crate has no tracing dependency; the
+    // binary's stderr is the log sink.
+    eprintln!("timeless-traces-api: internal error: {error}");
+    (
+        status,
+        Json(json!({"status": "error", "error": "internal"})),
+    )
+        .into_response()
 }
 
 fn client_error(status: StatusCode, error: String) -> Response {
