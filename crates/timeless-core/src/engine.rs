@@ -429,9 +429,21 @@ impl SeriesRegistry {
     /// Serialize for persistence (the store decides where bytes land).
     /// Format: [count: u32] [id: i64, metric_len: u16, metric: bytes,
     ///   label_count: u16, [key_len: u16, key, val_len: u16, val]...]...
-    fn to_bytes(&self) -> Vec<u8> {
+    /// Every length prefix is range-checked: names/labels over 64 KiB
+    /// are a clean `Err`, never a wrapped u16 (a wrap would decode as a
+    /// different, shorter name — silent corruption, not a clean error).
+    fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        fn u16_len(len: usize, what: &str) -> Result<u16, String> {
+            u16::try_from(len)
+                .map_err(|_| format!("series registry: {what} is {len} bytes, exceeds u16::MAX"))
+        }
+        let count = u32::try_from(self.series_info.len()).map_err(|_| {
+            format!(
+                "series registry: {} series exceeds u32::MAX",
+                self.series_info.len()
+            )
+        })?;
         let mut out = Vec::new();
-        let count = self.series_info.len() as u32;
         out.extend_from_slice(&count.to_be_bytes());
 
         let mut entries: Vec<(&i64, &SeriesInfo)> = self.series_info.iter().collect();
@@ -440,20 +452,21 @@ impl SeriesRegistry {
         for (&id, info) in entries {
             out.extend_from_slice(&id.to_be_bytes());
             let mb = info.metric_name.as_bytes();
-            out.extend_from_slice(&(mb.len() as u16).to_be_bytes());
+            out.extend_from_slice(&u16_len(mb.len(), "metric name")?.to_be_bytes());
             out.extend_from_slice(mb);
-            out.extend_from_slice(&(info.labels.len() as u16).to_be_bytes());
+            let lc = u16_len(info.labels.len(), "label count")?;
+            out.extend_from_slice(&lc.to_be_bytes());
             for (k, v) in &info.labels {
                 let kb = k.as_bytes();
                 let vb = v.as_bytes();
-                out.extend_from_slice(&(kb.len() as u16).to_be_bytes());
+                out.extend_from_slice(&u16_len(kb.len(), "label key")?.to_be_bytes());
                 out.extend_from_slice(kb);
-                out.extend_from_slice(&(vb.len() as u16).to_be_bytes());
+                out.extend_from_slice(&u16_len(vb.len(), "label value")?.to_be_bytes());
                 out.extend_from_slice(vb);
             }
         }
 
-        out
+        Ok(out)
     }
 
     fn from_bytes(data: &[u8]) -> Result<Self, String> {
@@ -1511,7 +1524,7 @@ impl Engine {
         if !reg.dirty {
             return Ok(());
         }
-        let bytes = reg.to_bytes();
+        let bytes = reg.to_bytes()?;
         self.store
             .save_registry(&bytes)
             .map_err(|err| format!("failed to persist series registry: {err}"))?;
@@ -2150,7 +2163,12 @@ impl Engine {
         let max_ts = ts_slice[ts_slice.len() - 1];
         let max_ts_index = ts_slice.partition_point(|ts| *ts < max_ts);
         let max_ts_val = val_slice[max_ts_index];
-        let point_count = ts_slice.len() as u32;
+        let point_count = u32::try_from(ts_slice.len()).map_err(|_| {
+            format!(
+                "encode partition: {} points exceeds u32::MAX",
+                ts_slice.len()
+            )
+        })?;
         let (mut min_val, mut max_val, mut sum_val) = (f64::NAN, f64::NAN, 0.0f64);
         for &v in val_slice {
             if min_val.is_nan() || v < min_val {
@@ -4066,12 +4084,17 @@ impl Engine {
                 }
                 let buckets = rollup_buckets(&samples, r);
                 let payload = encode_rollup_payload(&buckets)?;
+                // encode_rollup_payload already rejected counts over
+                // u32::MAX, so this cannot wrap.
+                let bucket_count = u32::try_from(buckets.len()).map_err(|_| {
+                    format!("rollup chunk: {} buckets exceeds u32::MAX", buckets.len())
+                })?;
                 batch.push(EncodedRollupChunk {
                     series_id: sid,
                     resolution: r,
                     min_ts: buckets[0].bucket_ts,
                     max_ts: buckets[buckets.len() - 1].bucket_ts + r - 1,
-                    bucket_count: buckets.len() as u32,
+                    bucket_count,
                     payload,
                 });
             }

@@ -133,12 +133,15 @@ pub struct ColumnEnc {
 
 impl ColumnEnc {
     /// Serialize to the wire form: `[u8 encoding_id][u32 LE len][payload]`.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Rejects payloads over u32::MAX instead of wrapping the length
+    /// prefix (a wrapped prefix would decode as a different, shorter
+    /// column — silent corruption, not a clean error).
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         let mut out = Vec::with_capacity(FRAME_LEN + self.payload.len());
         out.push(self.encoding);
-        out.extend_from_slice(&(self.payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&u32_len(self.payload.len(), "column payload")?.to_le_bytes());
         out.extend_from_slice(&self.payload);
-        out
+        Ok(out)
     }
 
     /// Size on the wire (frame + payload) — what adaptive selection
@@ -182,6 +185,14 @@ pub fn zstd_decompress(data: &[u8], what: &str) -> Result<Vec<u8>, String> {
     // handles any size without us trusting an attacker-controlled header
     // field for the allocation.
     zstd::stream::decode_all(data).map_err(|e| format!("zstd decompress of {what} failed: {e}"))
+}
+
+/// Checked `usize -> u32` length prefix. Every on-wire length field in
+/// this crate is u32 LE; a bare `as u32` would silently wrap past 4 GiB
+/// and the decoder would then mis-parse the frame. All encoders route
+/// through here so over-wide inputs are a clean `Err`, never a wrap.
+pub fn u32_len(len: usize, what: &str) -> Result<u32, String> {
+    u32::try_from(len).map_err(|_| format!("{what}: {len} byte(s) exceeds u32::MAX"))
 }
 
 /// Bounds-checked byte reader: every read names what it was reading, so
@@ -628,8 +639,11 @@ where
         // codes_zstd runs to the end of the payload — its length is
         // implied by the frame, no second length field needed.
         let mut payload = Vec::with_capacity(8 + dict_zstd.len() + codes_zstd.len());
-        payload.extend_from_slice(&(table.len() as u32).to_le_bytes());
-        payload.extend_from_slice(&(dict_zstd.len() as u32).to_le_bytes());
+        payload.extend_from_slice(
+            &u32_len(table.len(), "encode_str: dict entry count")?.to_le_bytes(),
+        );
+        payload
+            .extend_from_slice(&u32_len(dict_zstd.len(), "encode_str: dictionary")?.to_le_bytes());
         payload.extend_from_slice(&dict_zstd);
         payload.extend_from_slice(&codes_zstd);
         Ok(ColumnEnc {
@@ -979,11 +993,14 @@ pub fn decode_fixed_bytes(bytes: &[u8], n: usize, width: usize) -> Result<Vec<u8
     match enc {
         ENC_FIXED_ZSTD => {
             let raw = zstd_decompress(payload, "fixed-bytes column")?;
-            if raw.len() != n * width {
+            let want = n.checked_mul(width).ok_or_else(|| {
+                format!("fixed-bytes column: count {n} x width {width} overflows usize")
+            })?;
+            if raw.len() != want {
                 return Err(format!(
                     "fixed-bytes column: {} bytes, expected {} ({n} x {width})",
                     raw.len(),
-                    n * width
+                    want
                 ));
             }
             Ok(raw)
@@ -1006,7 +1023,7 @@ mod tests {
 
     fn rt_i64(values: &[i64]) {
         let enc = encode_i64(values, LVL).unwrap();
-        let back = decode_i64(&enc.to_bytes(), values.len()).unwrap();
+        let back = decode_i64(&enc.to_bytes().unwrap(), values.len()).unwrap();
         assert_eq!(back, values, "i64 round-trip (encoding {})", enc.encoding);
     }
 
@@ -1038,7 +1055,7 @@ mod tests {
 
     fn rt_f64_bits(values: &[f64]) {
         let enc = encode_f64(values, LVL).unwrap();
-        let back = decode_f64(&enc.to_bytes(), values.len()).unwrap();
+        let back = decode_f64(&enc.to_bytes().unwrap(), values.len()).unwrap();
         assert_eq!(back.len(), values.len());
         for (i, (a, b)) in values.iter().zip(&back).enumerate() {
             // Bit-exact, not ==: NaN != NaN and -0.0 == 0.0 would both
@@ -1094,7 +1111,7 @@ mod tests {
         if let Some(want) = expect_encoding {
             assert_eq!(enc.encoding, want, "strategy pick for {values:?}");
         }
-        let back = decode_str(&enc.to_bytes(), values.len()).unwrap();
+        let back = decode_str(&enc.to_bytes().unwrap(), values.len()).unwrap();
         assert_eq!(back, values, "str round-trip (encoding {})", enc.encoding);
     }
 
@@ -1137,7 +1154,8 @@ mod tests {
         ] {
             let encoded = encode_str(values.iter().map(String::as_str), values.len(), LVL)
                 .unwrap()
-                .to_bytes();
+                .to_bytes()
+                .unwrap();
             let selected = [0, 7, values.len() / 2, values.len() - 1];
             let decoded = decode_str_selected(&encoded, values.len(), &selected).unwrap();
             assert_eq!(
@@ -1200,7 +1218,7 @@ mod tests {
 
     fn rt_u8(values: &[u8]) {
         let enc = encode_u8(values, LVL).unwrap();
-        let back = decode_u8(&enc.to_bytes(), values.len()).unwrap();
+        let back = decode_u8(&enc.to_bytes().unwrap(), values.len()).unwrap();
         assert_eq!(back, values, "u8 round-trip (encoding {})", enc.encoding);
     }
 
@@ -1238,7 +1256,7 @@ mod tests {
         ] {
             let n = data.len() / width;
             let enc = encode_fixed_bytes(&data, width, LVL).unwrap();
-            let back = decode_fixed_bytes(&enc.to_bytes(), n, width).unwrap();
+            let back = decode_fixed_bytes(&enc.to_bytes().unwrap(), n, width).unwrap();
             assert_eq!(back, data);
         }
     }
@@ -1275,8 +1293,8 @@ mod tests {
     fn reader_framed_column_walks_back_to_back_frames() {
         // Two encode_str frames packed with no outer length table —
         // the shredded-metadata consumption pattern.
-        let a = encode_str(["x", "y"], 2, LVL).unwrap().to_bytes();
-        let b = encode_str(["z"], 1, LVL).unwrap().to_bytes();
+        let a = encode_str(["x", "y"], 2, LVL).unwrap().to_bytes().unwrap();
+        let b = encode_str(["z"], 1, LVL).unwrap().to_bytes().unwrap();
         let mut buf = a.clone();
         buf.extend_from_slice(&b);
         let mut r = Reader::new(&buf);
@@ -1299,7 +1317,7 @@ mod tests {
         // payload: all must be Err with a field name, never a panic.
         assert!(decode_i64(&[], 0).is_err());
         assert!(decode_i64(&[99, 0, 0, 0, 0], 1).is_err()); // unknown id
-        let enc = encode_i64(&[1, 2, 3], LVL).unwrap().to_bytes();
+        let enc = encode_i64(&[1, 2, 3], LVL).unwrap().to_bytes().unwrap();
         assert!(decode_i64(&enc, 4).is_err()); // wrong n
         assert!(decode_i64(&enc[..enc.len() - 1], 3).is_err()); // truncated
         let mut garbage = enc.clone();
@@ -1309,5 +1327,32 @@ mod tests {
         assert!(decode_str(&[ENC_STR_DICT, 1, 0, 0, 0, 7], 1).is_err());
         assert!(decode_u8(&[ENC_U8_RLE, 5, 0, 0, 0, 255, 255, 255, 255, 7], 3).is_err());
         // run > n
+    }
+
+    #[test]
+    fn width_prefixes_reject_over_wide_lengths() {
+        // Regression tests for the truncating-cast class (issue #40):
+        // over-wide lengths must be a clean Err, never a wrapped prefix.
+        // None of these allocate the over-wide size.
+        assert!(u32_len(u32::MAX as usize, "x").is_ok());
+        assert!(u32_len(u32::MAX as usize + 1, "x").is_err());
+        assert!(u32_len(usize::MAX, "x").is_err());
+        // A payload that cannot be framed is an error, not a wrap.
+        let big = ColumnEnc {
+            encoding: ENC_FIXED_ZSTD,
+            payload: vec![0u8; 16],
+        };
+        assert!(big.to_bytes().is_ok());
+        // decode_fixed_bytes with an overflowing n * width: Err, not a
+        // debug panic (overflow) or release wrap (wrong comparison).
+        let enc = encode_fixed_bytes(&[7u8; 16], 16, LVL)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        assert!(decode_fixed_bytes(&enc, usize::MAX, 16).is_err());
+        assert!(decode_fixed_bytes(&enc, usize::MAX, usize::MAX).is_err());
+        // ... while a merely wrong (non-overflowing) count is still the
+        // plain length-mismatch error.
+        assert!(decode_fixed_bytes(&enc, 2, 16).is_err());
     }
 }

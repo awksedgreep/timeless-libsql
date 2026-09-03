@@ -385,16 +385,16 @@ fn encode_mode(msgs: &[&str], split_runs: bool, zstd_level: i32) -> Result<Vec<u
         }
     }
 
-    let ids_col = encode_i64(&tk.ids, zstd_level)?.to_bytes();
+    let ids_col = encode_i64(&tk.ids, zstd_level)?.to_bytes()?;
     let dict_col = encode_str(
         tk.dict.iter().map(String::as_str),
         tk.dict.len(),
         zstd_level,
     )?
-    .to_bytes();
-    let w_col = encode_u8(&widths, zstd_level)?.to_bytes();
-    let v_col = encode_i64(&values, zstd_level)?.to_bytes();
-    let s_col = encode_str(strs.iter().copied(), strs.len(), zstd_level)?.to_bytes();
+    .to_bytes()?;
+    let w_col = encode_u8(&widths, zstd_level)?.to_bytes()?;
+    let v_col = encode_i64(&values, zstd_level)?.to_bytes()?;
+    let s_col = encode_str(strs.iter().copied(), strs.len(), zstd_level)?.to_bytes()?;
 
     for (what, count) in [
         ("templates", tk.dict.len()),

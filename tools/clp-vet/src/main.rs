@@ -198,9 +198,7 @@ fn load_journal_json(path: &str) -> Corpus {
         // Canonical envelope: every other field, key-sorted, compact.
         let rest: BTreeMap<&String, &serde_json::Value> = obj
             .iter()
-            .filter(|(k, _)| {
-                !matches!(k.as_str(), "MESSAGE" | "__REALTIME_TIMESTAMP" | "PRIORITY")
-            })
+            .filter(|(k, _)| !matches!(k.as_str(), "MESSAGE" | "__REALTIME_TIMESTAMP" | "PRIORITY"))
             .collect();
         envelopes.push(serde_json::to_string(&rest).unwrap());
         messages.push(msg);
@@ -252,7 +250,9 @@ fn gen_unique_ids(n: usize) -> Vec<String> {
                     }
                 })
                 .collect();
-            let sess: String = (0..16).map(|_| HEX[rng.below(16) as usize] as char).collect();
+            let sess: String = (0..16)
+                .map(|_| HEX[rng.below(16) as usize] as char)
+                .collect();
             format!(
                 "request {uuid} from session {sess} completed in {} ms",
                 rng.below(100_000)
@@ -397,7 +397,11 @@ fn measure_block(block: &[String], s: &mut CorpusStats) {
 /// Measure one tokenizer mode over one block: build all three layouts,
 /// round-trip v1 and v2-lite through the DECODED columns bit-exact, and
 /// return the projected sizes.
-fn measure_mode(block: &[String], split_runs: bool, mut stats: Option<&mut CorpusStats>) -> ModeSizes {
+fn measure_mode(
+    block: &[String],
+    split_runs: bool,
+    mut stats: Option<&mut CorpusStats>,
+) -> ModeSizes {
     let n = block.len();
     let t1 = Instant::now();
     let mut dict_map: HashMap<String, i64> = HashMap::new();
@@ -502,16 +506,23 @@ fn measure_mode(block: &[String], split_runs: bool, mut stats: Option<&mut Corpu
 
     // Round-trip v1 THROUGH THE DECODED COLUMNS, asserted bit-exact for
     // every message — the Phase-0 correctness backbone.
-    let ids_dec = decode_i64(&ids_col.to_bytes(), n).unwrap();
-    let dict_dec = decode_str(&dict_col.to_bytes(), dict.len()).unwrap();
+    let ids_dec = decode_i64(&ids_col.to_bytes().unwrap(), n).unwrap();
+    let dict_dec = decode_str(&dict_col.to_bytes().unwrap(), dict.len()).unwrap();
     {
-        let w_dec = decode_u8(&w1_col.to_bytes(), w1.len()).unwrap();
-        let v_dec = decode_i64(&vals1_col.to_bytes(), vals1.len()).unwrap();
-        let s_dec = decode_str(&str1_col.to_bytes(), str1.len()).unwrap();
+        let w_dec = decode_u8(&w1_col.to_bytes().unwrap(), w1.len()).unwrap();
+        let v_dec = decode_i64(&vals1_col.to_bytes().unwrap(), vals1.len()).unwrap();
+        let s_dec = decode_str(&str1_col.to_bytes().unwrap(), str1.len()).unwrap();
         let (mut nc, mut sc) = (0usize, 0usize);
         for (m, &id) in block.iter().zip(&ids_dec) {
-            let back = detokenize(&dict_dec[id as usize], &w_dec, &v_dec, &mut nc, &s_dec, &mut sc)
-                .unwrap();
+            let back = detokenize(
+                &dict_dec[id as usize],
+                &w_dec,
+                &v_dec,
+                &mut nc,
+                &s_dec,
+                &mut sc,
+            )
+            .unwrap();
             assert_eq!(&back, m, "v1 round-trip mismatch");
         }
         assert_eq!(nc, v_dec.len(), "unconsumed num vars");
@@ -521,9 +532,9 @@ fn measure_mode(block: &[String], split_runs: bool, mut stats: Option<&mut Corpu
     // Round-trip v2-lite: rebuild group extents from the id column +
     // template slot kinds alone, then splice per message.
     {
-        let w_dec = decode_u8(&w2_col.to_bytes(), w2.len()).unwrap();
-        let v_dec = decode_i64(&vals2_col.to_bytes(), vals2.len()).unwrap();
-        let s_dec = decode_str(&str2_col.to_bytes(), str2.len()).unwrap();
+        let w_dec = decode_u8(&w2_col.to_bytes().unwrap(), w2.len()).unwrap();
+        let v_dec = decode_i64(&vals2_col.to_bytes().unwrap(), vals2.len()).unwrap();
+        let s_dec = decode_str(&str2_col.to_bytes().unwrap(), str2.len()).unwrap();
         let kinds_by_id: Vec<Vec<VarKind>> = dict_dec.iter().map(|t| slot_kinds(t)).collect();
         let mut sizes: BTreeMap<(i64, u16), usize> = BTreeMap::new();
         for &id in &ids_dec {
@@ -564,8 +575,7 @@ fn measure_mode(block: &[String], split_runs: bool, mut stats: Option<&mut Corpu
                 *c += 1;
             }
             let (mut nc, mut sc) = (0usize, 0usize);
-            let back =
-                detokenize(template, &widths_m, &vals_m, &mut nc, &strs_m, &mut sc).unwrap();
+            let back = detokenize(template, &widths_m, &vals_m, &mut nc, &strs_m, &mut sc).unwrap();
             assert_eq!(&back, m, "v2-lite round-trip mismatch");
         }
     }

@@ -148,6 +148,12 @@ pub fn encode_block(
     }
 
     let n = entries.len();
+    // The container's entry count is a u32 prefix (and BlockMeta carries
+    // it as u32): reject over-wide blocks here so every `n as u32` below
+    // is guarded by construction, never a silent wrap.
+    if n > u32::MAX as usize {
+        return Err("encode_block: entry count exceeds u32::MAX".into());
+    }
     let rich_codec = matches!(
         codec,
         CODEC_RICH_RAW | CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE
@@ -204,7 +210,8 @@ pub fn encode_block(
                 zstd_compress(&col_meta_raw, zstd_level)?
             };
             let col_msg_str =
-                encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?.to_bytes();
+                encode_str(entries.iter().map(|e| e.message.as_str()), n, zstd_level)?
+                    .to_bytes()?;
             let col_msg = if codec == CODEC_RICH_TEMPLATE {
                 // Codec 8: template-compress the message column, but
                 // MEASURE against the codec-7 encoding — if templates
@@ -223,8 +230,8 @@ pub fn encode_block(
                 col_msg_str
             };
             [
-                encode_i64(&ts_values, zstd_level)?.to_bytes(),
-                encode_u8(&col_lvl_raw, zstd_level)?.to_bytes(),
+                encode_i64(&ts_values, zstd_level)?.to_bytes()?,
+                encode_u8(&col_lvl_raw, zstd_level)?.to_bytes()?,
                 col_msg,
                 col_meta,
             ]
@@ -962,7 +969,7 @@ pub(crate) fn encode_pairs_column(
         }
         out.extend_from_slice(&encode_bitmap(&present));
         let n_dense = dense.len();
-        out.extend_from_slice(&encode_str(dense, n_dense, zstd_level)?.to_bytes());
+        out.extend_from_slice(&encode_str(dense, n_dense, zstd_level)?.to_bytes()?);
     }
     Ok(out)
 }

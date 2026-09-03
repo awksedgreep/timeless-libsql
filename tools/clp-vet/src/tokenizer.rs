@@ -414,11 +414,17 @@ mod tests {
 
     #[test]
     fn shapes() {
-        let (_, vars) = tokenize("x 42 d3adbeef 99999999999999999999 blk_-35445833772896257380000000000000");
+        let (_, vars) =
+            tokenize("x 42 d3adbeef 99999999999999999999 blk_-35445833772896257380000000000000");
         let shapes: Vec<VarShape> = vars.iter().map(classify_shape).collect();
         assert_eq!(
             shapes,
-            vec![VarShape::Num, VarShape::Hex, VarShape::BigNum, VarShape::BigNum]
+            vec![
+                VarShape::Num,
+                VarShape::Hex,
+                VarShape::BigNum,
+                VarShape::BigNum
+            ]
         );
     }
 }

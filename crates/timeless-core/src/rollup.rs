@@ -81,8 +81,15 @@ pub fn rollup_buckets(samples: &[(i64, f64)], resolution: i64) -> Vec<RollupBuck
 
 pub fn encode_rollup_payload(buckets: &[RollupBucket]) -> Result<Vec<u8>, String> {
     let n = buckets.len();
-    let mut raw = Vec::with_capacity(4 + n * 56);
-    raw.extend_from_slice(&(n as u32).to_le_bytes());
+    // u32 count prefix + `n * 56` body bytes: checked so an over-wide
+    // bucket list is a clean Err, never a wrapped prefix or capacity.
+    let body = n
+        .checked_mul(56)
+        .ok_or_else(|| format!("rollup payload: {n} buckets exceeds addressable size"))?;
+    let count =
+        u32::try_from(n).map_err(|_| format!("rollup payload: {n} buckets exceeds u32::MAX"))?;
+    let mut raw = Vec::with_capacity(4 + body);
+    raw.extend_from_slice(&count.to_le_bytes());
     for b in buckets {
         raw.extend_from_slice(&b.bucket_ts.to_le_bytes());
     }
@@ -116,7 +123,12 @@ pub fn decode_rollup_payload(payload: &[u8]) -> Result<Vec<RollupBucket>, String
         return Err("rollup payload truncated (no header)".into());
     }
     let n = u32::from_le_bytes(raw[..4].try_into().unwrap()) as usize;
-    let expected = 4 + n * 56;
+    // A corrupt header must not wrap the size math (debug panic) or
+    // mis-compare (release wrap): checked, then an exact-length error.
+    let expected = n
+        .checked_mul(56)
+        .and_then(|body| body.checked_add(4))
+        .ok_or_else(|| format!("rollup payload: bucket count {n} overflows size math"))?;
     if raw.len() != expected {
         return Err(format!(
             "rollup payload is {} byte(s); {n} buckets require {expected}",
@@ -241,6 +253,30 @@ mod tests {
             assert_eq!(d.last_ts, b.last_ts);
             assert_eq!(d.last_val.to_bits(), b.last_val.to_bits());
         }
+    }
+
+    #[test]
+    fn corrupt_bucket_count_is_an_error_not_a_wrap() {
+        // Regression test for the truncating-cast class (issue #40): a
+        // header claiming u32::MAX buckets with a 4-byte body must be a
+        // clean Err from the checked size math — never a wrapped
+        // `expected` (release) or an arithmetic panic (debug).
+        let raw = u32::MAX.to_le_bytes();
+        let payload = zstd::bulk::compress(&raw, ROLLUP_ZSTD_LEVEL).unwrap();
+        let err = decode_rollup_payload(&payload).expect_err("corrupt count must fail");
+        // 64-bit: exact-length mismatch (u32::MAX * 56 still fits usize);
+        // 32-bit: size-math overflow. Either way a clean Err — never a
+        // wrapped `expected` or an arithmetic panic.
+        assert!(
+            err.contains("require") || err.contains("overflows"),
+            "unexpected error: {err}"
+        );
+        // A merely truncated body for an honest count is still the
+        // exact-length error, not the overflow one.
+        let one = 1u32.to_le_bytes();
+        let short = zstd::bulk::compress(&one, ROLLUP_ZSTD_LEVEL).unwrap();
+        let err = decode_rollup_payload(&short).expect_err("short body must fail");
+        assert!(err.contains("require"), "unexpected error: {err}");
     }
 
     #[test]

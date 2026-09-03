@@ -304,6 +304,12 @@ pub fn encode_span_block(
     }
 
     let n = entries.len();
+    // The container's entry count is a u32 prefix (and BlockMeta carries
+    // it as u32): reject over-wide blocks here so every `n as u32` below
+    // is guarded by construction, never a silent wrap.
+    if n > u32::MAX as usize {
+        return Err("encode_span_block: entry count exceeds u32::MAX".into());
+    }
 
     // ── Raw column material shared by every codec ────────────────────
     let mut col_trace = Vec::with_capacity(n * 16);
@@ -375,60 +381,60 @@ pub fn encode_span_block(
             .map(|e| i64::from(e.scope_dropped_attributes_count))
             .collect();
         vec![
-            encode_fixed_bytes(&col_trace, 16, zstd_level)?.to_bytes(),
-            encode_fixed_bytes(&col_span, 8, zstd_level)?.to_bytes(),
+            encode_fixed_bytes(&col_trace, 16, zstd_level)?.to_bytes()?,
+            encode_fixed_bytes(&col_span, 8, zstd_level)?.to_bytes()?,
             // Parent ids: variable-width presence serialization, plain
             // zstd (unframed, byte-identical to the codec-2 column).
             zstd_compress(&col_parent, zstd_level)?,
-            encode_str(entries.iter().map(|e| e.name.as_str()), n, zstd_level)?.to_bytes(),
-            encode_str(entries.iter().map(|e| e.service.as_str()), n, zstd_level)?.to_bytes(),
-            encode_u8(&col_kind, zstd_level)?.to_bytes(),
-            encode_u8(&col_status, zstd_level)?.to_bytes(),
+            encode_str(entries.iter().map(|e| e.name.as_str()), n, zstd_level)?.to_bytes()?,
+            encode_str(entries.iter().map(|e| e.service.as_str()), n, zstd_level)?.to_bytes()?,
+            encode_u8(&col_kind, zstd_level)?.to_bytes()?,
+            encode_u8(&col_status, zstd_level)?.to_bytes()?,
             // Both i64 columns delta inside encode_i64; durations don't
             // trend but the adaptive pick just falls back to whichever
             // strategy handles their magnitude-similarity best.
-            encode_i64(&starts, zstd_level)?.to_bytes(),
-            encode_i64(&durs, zstd_level)?.to_bytes(),
-            encode_str(entries.iter().map(|e| e.attributes.as_ref()), n, zstd_level)?.to_bytes(),
+            encode_i64(&starts, zstd_level)?.to_bytes()?,
+            encode_i64(&durs, zstd_level)?.to_bytes()?,
+            encode_str(entries.iter().map(|e| e.attributes.as_ref()), n, zstd_level)?.to_bytes()?,
             encode_str(
                 entries.iter().map(|e| e.status_description.as_ref()),
                 n,
                 zstd_level,
             )?
-            .to_bytes(),
-            encode_str(entries.iter().map(|e| e.events.as_ref()), n, zstd_level)?.to_bytes(),
-            encode_str(entries.iter().map(|e| e.resource.as_ref()), n, zstd_level)?.to_bytes(),
+            .to_bytes()?,
+            encode_str(entries.iter().map(|e| e.events.as_ref()), n, zstd_level)?.to_bytes()?,
+            encode_str(entries.iter().map(|e| e.resource.as_ref()), n, zstd_level)?.to_bytes()?,
             encode_str(
                 entries.iter().map(|e| e.instrumentation_scope.as_ref()),
                 n,
                 zstd_level,
             )?
-            .to_bytes(),
-            encode_str(entries.iter().map(|e| e.links.as_ref()), n, zstd_level)?.to_bytes(),
+            .to_bytes()?,
+            encode_str(entries.iter().map(|e| e.links.as_ref()), n, zstd_level)?.to_bytes()?,
             encode_str(
                 entries.iter().map(|e| e.trace_state.as_ref()),
                 n,
                 zstd_level,
             )?
-            .to_bytes(),
-            encode_i64(&trace_flags, zstd_level)?.to_bytes(),
-            encode_i64(&dropped_attributes, zstd_level)?.to_bytes(),
-            encode_i64(&dropped_events, zstd_level)?.to_bytes(),
-            encode_i64(&dropped_links, zstd_level)?.to_bytes(),
+            .to_bytes()?,
+            encode_i64(&trace_flags, zstd_level)?.to_bytes()?,
+            encode_i64(&dropped_attributes, zstd_level)?.to_bytes()?,
+            encode_i64(&dropped_events, zstd_level)?.to_bytes()?,
+            encode_i64(&dropped_links, zstd_level)?.to_bytes()?,
             encode_str(
                 entries.iter().map(|e| e.resource_schema_url.as_ref()),
                 n,
                 zstd_level,
             )?
-            .to_bytes(),
+            .to_bytes()?,
             encode_str(
                 entries.iter().map(|e| e.scope_schema_url.as_ref()),
                 n,
                 zstd_level,
             )?
-            .to_bytes(),
-            encode_i64(&resource_dropped_attributes, zstd_level)?.to_bytes(),
-            encode_i64(&scope_dropped_attributes, zstd_level)?.to_bytes(),
+            .to_bytes()?,
+            encode_i64(&resource_dropped_attributes, zstd_level)?.to_bytes()?,
+            encode_i64(&scope_dropped_attributes, zstd_level)?.to_bytes()?,
         ]
     } else {
         // ── Codecs 1/2 — the Session 6 formats, byte-for-byte ────────

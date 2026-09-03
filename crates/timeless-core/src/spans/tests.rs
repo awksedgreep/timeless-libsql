@@ -524,19 +524,27 @@ fn encode_generation_1(
         let dur: Vec<i64> = entries.iter().map(|entry| entry.duration_ns).collect();
         let pair_refs: Vec<&[(String, String)]> = pairs.iter().map(Vec::as_slice).collect();
         vec![
-            encode_fixed_bytes(&trace, 16, 7).unwrap().to_bytes(),
-            encode_fixed_bytes(&spans, 8, 7).unwrap().to_bytes(),
+            encode_fixed_bytes(&trace, 16, 7)
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+            encode_fixed_bytes(&spans, 8, 7)
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
             zstd_compress(&parents, 7).unwrap(),
             encode_str(entries.iter().map(|entry| entry.name.as_str()), n, 7)
                 .unwrap()
-                .to_bytes(),
+                .to_bytes()
+                .unwrap(),
             encode_str(entries.iter().map(|entry| entry.service.as_str()), n, 7)
                 .unwrap()
-                .to_bytes(),
-            encode_u8(&kinds, 7).unwrap().to_bytes(),
-            encode_u8(&statuses, 7).unwrap().to_bytes(),
-            encode_i64(&ts, 7).unwrap().to_bytes(),
-            encode_i64(&dur, 7).unwrap().to_bytes(),
+                .to_bytes()
+                .unwrap(),
+            encode_u8(&kinds, 7).unwrap().to_bytes().unwrap(),
+            encode_u8(&statuses, 7).unwrap().to_bytes().unwrap(),
+            encode_i64(&ts, 7).unwrap().to_bytes().unwrap(),
+            encode_i64(&dur, 7).unwrap().to_bytes().unwrap(),
             if codec == CODEC_COLUMNAR_V2 {
                 encode_pairs_column(&pair_refs, &attrs, 7).unwrap()
             } else {
