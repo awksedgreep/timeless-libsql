@@ -143,15 +143,22 @@ def pump_available(fd):
 
 
 def type_line(fd, line, pace=1.0):
+    # Typed in small bursts, not per character: GIF frames bottom out at
+    # 20 ms, so one frame per keystroke plays typing back at half its
+    # real speed (and triples the frame count). A 2-6 char burst per
+    # frame reads as fast, human, and stays smooth in the GIF.
     if pace <= 0:
         os.write(fd, line.encode())
         time.sleep(0.06)
         pump_available(fd)
     else:
-        for ch in line:
-            os.write(fd, ch.encode())
+        i = 0
+        while i < len(line):
+            burst = random.randint(2, 6)
+            os.write(fd, line[i : i + burst].encode())
+            i += burst
             pump_available(fd)
-            time.sleep(random.uniform(0.006, 0.016) * pace)
+            time.sleep(random.uniform(0.012, 0.030) * pace)
         time.sleep(0.08)
         pump_available(fd)
     os.write(fd, b"\r")
