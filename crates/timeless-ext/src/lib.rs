@@ -67,6 +67,7 @@ mod otel_json;
 pub mod query_frame;
 mod query_report;
 mod query_tvf;
+mod schema;
 mod shadow_block_store;
 mod shadow_meta;
 mod shadow_span_store;

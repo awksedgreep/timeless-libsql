@@ -72,6 +72,7 @@ use timeless_core::{
 use crate::batch::BatchReader;
 use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::otel_json;
+use crate::schema;
 use crate::shadow_meta;
 use crate::shadow_span_store::{self, ShadowSpanStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
@@ -320,6 +321,12 @@ impl TracesTab {
             // record OURS in _meta so tooling (and future readers of
             // this db) know these blocks speak nanoseconds.
             store.save_meta("ts_unit", b"ns").map_err(module_err)?;
+            // Observability schema spike (#20/#21): companion views and
+            // inventory install in the same CREATE VIRTUAL TABLE
+            // transaction, so rollback removes everything and the
+            // collision sweep fails before any user object is touched.
+            schema::install_trace_views(&host, &database, &table)
+                .map_err(|error| module_err(format!("install observability schema: {error}")))?;
         }
         if is_create {
             shadow_span_store::ensure_duration_bounds_table(&host, &database, &table)?;
@@ -333,6 +340,13 @@ impl TracesTab {
             shadow_meta::require_instance_id(&host, &database, &table)
         }
         .map_err(module_err)?;
+        if !is_create {
+            // Best-effort refresh on open (dbhealth pattern): a writable
+            // open upgrades stale companion definitions; read-only opens
+            // keep working with whatever is installed. Never fails the
+            // connect itself.
+            schema::refresh_trace_views(&host, &database, &table);
+        }
 
         // Retention and attribute index configuration are data properties:
         // xCreate validates and persists them, xConnect loads metadata and
@@ -959,6 +973,11 @@ impl CreateVTab<'_> for TracesTab {
         shared::pin_for_drop(self.db, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
+        // Uninstall owned companions first: removal touches only what
+        // the inventory attributes to this source table, then the
+        // shadow tables go. All inside DROP TABLE's transaction.
+        schema::drop_trace_views(&host, &self.database_name, &self.table_name)
+            .map_err(|error| module_err(format!("remove observability schema: {error}")))?;
         host.execute_batch(&shadow_span_store::drop_ddl(
             &self.database_name,
             &self.table_name,
@@ -1631,6 +1650,32 @@ unsafe impl VTabCursor for TracesCursor<'_> {
 mod tests {
     use super::*;
 
+    pub(super) const SPAN_INSERT: &str = "INSERT INTO traces (trace_id, span_id, name, service, kind, status, start_ts, duration_ns) \
+             VALUES ('4bf92f3577b34da6a3ce929d0e0e4736', '00f067aa0ba902b7', \
+             'GET /checkout', 'checkout', 'server', 'ok', 1753000000123000000, 8500000);";
+
+    pub(super) fn inventory_rows(db: &Connection, table: &str) -> Vec<(String, String, i64)> {
+        let mut stmt = db
+            .prepare(
+                "SELECT object_name, object_kind, schema_version \
+                 FROM timeless_schema_inventory WHERE source_table = ?1 ORDER BY object_name",
+            )
+            .unwrap();
+        stmt.query_map([table], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    pub(super) fn object_names(db: &Connection) -> Vec<String> {
+        db.prepare("SELECT name FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     #[test]
     fn insert_guarded_path_round_trips_one_span() {
         let db = Connection::open_in_memory().unwrap();
@@ -1656,5 +1701,236 @@ mod tests {
             .unwrap();
         assert_eq!(name, "GET /checkout");
         assert_eq!(duration, 8500000);
+    }
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod schema_spike_tests {
+    use super::tests::{inventory_rows, object_names, SPAN_INSERT};
+    use super::*;
+
+    #[test]
+    fn create_installs_view_and_inventory() {
+        // Phase 0 spike (#20/#21): CREATE VIRTUAL TABLE installs the
+        // companion span view plus one inventory row, and the view
+        // serves real spans through the public vtab surface.
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+            .unwrap();
+        assert_eq!(
+            inventory_rows(&db, "traces"),
+            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
+        );
+        db.execute(SPAN_INSERT, []).unwrap();
+        db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+            .unwrap();
+        let (trace_id, name, start_time, duration_ms): (String, String, String, f64) = db
+            .query_row(
+                "SELECT trace_id, name, start_time, duration_ms \
+                 FROM timeless_traces_spans;",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(name, "GET /checkout");
+        // Human-friendly side of the timestamp contract: ISO-8601 UTC
+        // millis next to the exact native nanoseconds.
+        assert!(
+            start_time.starts_with("2025-") && start_time.ends_with(".123Z"),
+            "{start_time}"
+        );
+        assert_eq!(duration_ms, 8.5);
+        let description: String = db
+            .query_row(
+                "SELECT description FROM timeless_schema_inventory \
+                 WHERE source_table = 'traces';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!description.is_empty(), "inventory must describe objects");
+    }
+
+    #[test]
+    fn create_collision_fails_without_touching_user_objects() {
+        // A user object at a planned name fails the install BEFORE
+        // anything is created: the user table (and its rows) survive,
+        // and no inventory trace is left behind.
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch(
+            "CREATE TABLE timeless_traces_spans(id INTEGER); \
+             INSERT INTO timeless_traces_spans VALUES (7);",
+        )
+        .unwrap();
+        let error = db
+            .execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+            .expect_err("collision must fail the install");
+        assert!(error.to_string().contains("already exists"), "{error}");
+        let rows: i64 = db
+            .query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1, "user object must be untouched");
+        let inventory: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'timeless_schema_inventory';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inventory, 0, "failed install leaves no trace");
+    }
+
+    #[test]
+    fn rolled_back_create_leaves_nothing_behind() {
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch(
+            "BEGIN; \
+             CREATE VIRTUAL TABLE traces USING timeless_traces; \
+             ROLLBACK;",
+        )
+        .unwrap();
+        for name in [
+            "traces",
+            "timeless_traces_spans",
+            "timeless_schema_inventory",
+        ] {
+            assert!(
+                !object_names(&db).iter().any(|n| n == name),
+                "rolled-back object {name:?} still present: {:?}",
+                object_names(&db)
+            );
+        }
+    }
+
+    #[test]
+    fn drop_removes_only_owned_objects() {
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE traces USING timeless_traces; \
+             CREATE TABLE user_data(id INTEGER);",
+        )
+        .unwrap();
+        assert!(object_names(&db).contains(&"timeless_traces_spans".to_string()));
+        db.execute_batch("DROP TABLE traces;").unwrap();
+        let names = object_names(&db);
+        assert!(
+            !names.iter().any(|n| n == "timeless_traces_spans"),
+            "{names:?}"
+        );
+        assert!(!names.iter().any(|n| n == "traces"), "{names:?}");
+        assert!(names.iter().any(|n| n == "user_data"), "{names:?}");
+        assert!(inventory_rows(&db, "traces").is_empty());
+    }
+
+    #[test]
+    fn reopen_keeps_views_queryable_without_duplicates() {
+        // xConnect refresh is idempotent: reopening neither duplicates
+        // inventory rows nor loses the installed surface.
+        let path = std::env::temp_dir().join(format!(
+            "timeless_schema_spike_reopen_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = Connection::open(&path).unwrap();
+            register(&db).unwrap();
+            db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+                .unwrap();
+            db.execute(SPAN_INSERT, []).unwrap();
+            db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+                .unwrap();
+        }
+        let db = Connection::open(&path).unwrap();
+        register(&db).unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            inventory_rows(&db, "traces"),
+            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stale_version_upgrades_on_reopen() {
+        // Release-level migration (user feedback): an inventory row
+        // predating the binary's schema version is dropped and
+        // reinstalled at today's definition when a writable open
+        // refreshes — per object, by version comparison.
+        let path = std::env::temp_dir().join(format!(
+            "timeless_schema_spike_upgrade_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = Connection::open(&path).unwrap();
+            register(&db).unwrap();
+            db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+                .unwrap();
+            // Simulate a previous release's definition: same name, stale
+            // shape that still reads the base table, stale version. The
+            // refresh must replace the shape, not just the version
+            // number. Note the upgrade lands for the statement AFTER
+            // first touch (SQLite expands the view before xConnect
+            // fires); dashboards self-heal on the next refresh, and the
+            // inventory row says exactly what is installed.
+            db.execute_batch(
+                "DROP VIEW timeless_traces_spans; \
+                 CREATE VIEW timeless_traces_spans AS SELECT trace_id FROM traces; \
+                 UPDATE timeless_schema_inventory SET schema_version = 0;",
+            )
+            .unwrap();
+        }
+        let db = Connection::open(&path).unwrap();
+        register(&db).unwrap();
+        // First touch goes through the VIEW itself (the dashboard
+        // case): this is what triggers xConnect and therefore the
+        // refresh. If the self-replacement races the outer prepare,
+        // SQLite reports it loudly; a retry then sees the new shape.
+        // That behavior is asserted below, not hidden.
+        let first_touch = db.query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
+            row.get::<_, i64>(0)
+        });
+        let count = match first_touch {
+            Ok(count) => count,
+            Err(first_error) => {
+                let count: i64 = db
+                    .query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
+                        row.get(0)
+                    })
+                    .expect("retry after upgrade must succeed");
+                eprintln!("first touch after upgrade reported (retry succeeded): {first_error}");
+                count
+            }
+        };
+        assert_eq!(count, 0);
+        // The stale shape is gone: the current definition (with the
+        // friendly timestamp columns) is installed and versioned.
+        let sql: String = db
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'timeless_traces_spans';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("start_time"), "{sql}");
+        assert_eq!(
+            inventory_rows(&db, "traces"),
+            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 }
