@@ -53,14 +53,16 @@ pub(crate) fn register(db: &Connection) -> Result<()> {
 struct SpikeTab {
     base: ffi::sqlite3_vtab,
     /// Raw handle to the HOST connection (the db the user's SQL runs on).
-    /// We keep it so callbacks can run SQL against shadow tables.
+    /// Never stored as a `Connection`: a stored handle would dangle after
+    /// `sqlite3_close`. Every callback re-wraps it with `host()` for the
+    /// duration of that call only — the same discipline as the
+    /// production vtabs.
     db: *mut ffi::sqlite3,
-    /// Name of our shadow table, quoted-safe ("<vtab_name>_shadow").
+    /// Name of our shadow table, RAW ("<vtab_name>_shadow"). The vtab
+    /// name is attacker-controlled (it can contain `"`), so this is
+    /// quoted with `sql_ident::quote` at every SQL construction site,
+    /// never interpolated bare.
     shadow: String,
-    /// Long-lived borrow of the host connection. Statements prepared through
-    /// `prepare_cached` on this survive across xUpdate calls - the difference
-    /// between parsing SQL once vs. once per row (measured ~4x on inserts).
-    host: Connection,
     /// Pre-formatted SQL so the hot path allocates nothing per row.
     insert_sql: String,
 }
@@ -93,7 +95,6 @@ impl SpikeTab {
             db: handle,
             insert_sql: format!("INSERT INTO {shadow_ident} (ts, value) VALUES (?1, ?2)"),
             shadow,
-            host: unsafe { Connection::from_handle(handle) }?,
         };
 
         // xCreate runs for a brand-new vtab: make the shadow table.
@@ -179,9 +180,13 @@ impl UpdateVTab<'_> for SpikeTab {
     fn insert(&mut self, args: &Inserts<'_>) -> Result<i64> {
         let ts: i64 = args.get(2)?;
         let value: f64 = args.get(3)?;
-        let mut stmt = self.host.prepare_cached(&self.insert_sql)?;
+        // Per-callback borrow, never the stored handle: the temporary
+        // `Connection` is dropped at the end of this call, so it cannot
+        // outlive `sqlite3_close` the way a stored `host` field could.
+        let host = self.host()?;
+        let mut stmt = host.prepare_cached(&self.insert_sql)?;
         stmt.execute((ts, value))?;
-        Ok(self.host.last_insert_rowid())
+        Ok(host.last_insert_rowid())
     }
 
     /// DELETE: arg is the rowid of the row to remove.
@@ -274,5 +279,91 @@ unsafe impl VTabCursor for SpikeCursor<'_> {
 
     fn rowid(&self) -> Result<i64> {
         Ok(self.rows[self.pos].0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests (issue #43): the vtab name is attacker-controlled, so
+// every shadow-table identifier must be quoted. A name containing `"`
+// broke out of the old bare `"..."` interpolation (CREATE failed with a
+// syntax error at best, executed attacker SQL at worst).
+//
+// These run only under the `embedded` feature: the default
+// `entrypoints` build routes every SQLite call through the
+// loadable-extension API table (initialized by `sqlite3_extension_init`
+// at `.load` time), so `open_in_memory` panics there. The `embedded`
+// build links the host SQLite directly and can drive modules
+// in-process — the same mode `register_telemetry` serves.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "embedded"))]
+mod tests {
+    use super::*;
+
+    fn memdb() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db
+    }
+
+    fn table_names(db: &Connection) -> Vec<String> {
+        db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn quoted_table_name_round_trips_through_shadow() {
+        let db = memdb();
+        // Embedded `"`: pre-fix, CREATE TABLE IF NOT EXISTS "we"ird_shadow"
+        // was a syntax error (and a crafted name could inject SQL).
+        db.execute_batch(r#"CREATE VIRTUAL TABLE "we""ird" USING timeless_spike;"#)
+            .unwrap();
+        db.execute(r#"INSERT INTO "we""ird" (ts, value) VALUES (7, 2.5);"#, [])
+            .unwrap();
+        let (ts, value): (i64, f64) = db
+            .query_row(r#"SELECT ts, value FROM "we""ird""#, [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((ts, value), (7, 2.5));
+        // Exactly the vtab plus one shadow table with the LITERAL name —
+        // nothing escaped the identifier.
+        assert_eq!(
+            table_names(&db),
+            vec![r#"we"ird"#.to_string(), r#"we"ird_shadow"#.to_string()]
+        );
+    }
+
+    #[test]
+    fn quoted_name_supports_update_delete_and_drop() {
+        let db = memdb();
+        db.execute_batch(r#"CREATE VIRTUAL TABLE "odd""table" USING timeless_spike;"#)
+            .unwrap();
+        db.execute(
+            r#"INSERT INTO "odd""table" (ts, value) VALUES (1, 1.0);"#,
+            [],
+        )
+        .unwrap();
+        // Exercises the UPDATE site.
+        db.execute(r#"UPDATE "odd""table" SET value = 3.0 WHERE ts = 1;"#, [])
+            .unwrap();
+        let value: f64 = db
+            .query_row(r#"SELECT value FROM "odd""table""#, [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 3.0);
+        // Exercises the DELETE site.
+        db.execute(r#"DELETE FROM "odd""table" WHERE ts = 1;"#, [])
+            .unwrap();
+        let count: i64 = db
+            .query_row(r#"SELECT COUNT(*) FROM "odd""table""#, [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        // Exercises the DROP (xDestroy) site: the shadow goes with the vtab.
+        db.execute_batch(r#"DROP TABLE "odd""table";"#).unwrap();
+        assert!(table_names(&db).is_empty());
     }
 }
