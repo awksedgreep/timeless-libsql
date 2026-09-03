@@ -81,6 +81,11 @@ native columns are never replaced, only accompanied.
 | object | shape | source |
 |---|---|---|
 | `timeless_<source>_spans` | one row per span: hex `trace_id`/`span_id`/`parent_span_id`, `name`, `service`, `kind`, `status`, `start_ts` + `start_time`, `duration_ns` + `duration_ms`, verbatim `attributes` | `timeless_traces` base-table scan |
+| `timeless_<source>_summary` | one row per retained trace: span/error counts, envelope timing (native plus human-readable), invalid-end count, root rows/state, service count and ordered set, `completeness` always `'unknown'` | `timeless_<source>_spans` |
+| `timeless_<source>_services` | distinct retained service names, ordered | `timeless_<source>_spans` |
+| `timeless_<source>_operations` | distinct retained service/operation pairs, ordered | `timeless_<source>_spans` |
+| `timeless_<source>_errors` | spans-view rows with `status = 'error'` | `timeless_<source>_spans` |
+| `timeless_<source>_roots` | spans-view rows with no parent | `timeless_<source>_spans` |
 
 All columns are verbatim public vtab outputs or exact formattings
 thereof. No shadow tables, no lossy projections, no new evaluators.
@@ -93,8 +98,15 @@ harness validates this table: object names are unique and follow the
 resolves to a matrix row, recipe, or trace contract, and every
 description is non-empty. Code-side installers are pinned by
 exact-inventory-row tests to the same set — an object in either place
-but not the other fails the suite.
+but not the other fails the suite. Rows below use the canonical
+`traces` source; each additional installed source table owns the same
+shapes under its own derived names.
 
 | object | kind | source tables | refs | description |
 |---|---|---|---|---|
 | `timeless_traces_spans` | view | `traces` | `TSQ-01` | One row per span: hex trace/span IDs, service and timing (native nanoseconds plus human-readable UTC), and verbatim attributes. |
+| `timeless_traces_summary` | view | `traces` | `TSQ-04`, `TSQ-05` | One row per retained trace: span, distinct-span, and error counts; envelope start/end/duration with invalid-end handling; root rows, state, and scalar root fields only when unique; ordered service set and count; completeness always unknown. |
+| `timeless_traces_services` | view | `traces` | `TSQ-05` | Distinct retained service names, ordered. |
+| `timeless_traces_operations` | view | `traces` | `TSQ-05` | Distinct retained service/operation pairs, ordered. |
+| `timeless_traces_errors` | view | `traces` | `TSQ-04` | Retained spans whose status is exactly error, in spans shape. |
+| `timeless_traces_roots` | view | `traces` | `TSQ-04` | Retained spans with no parent, in spans shape. |

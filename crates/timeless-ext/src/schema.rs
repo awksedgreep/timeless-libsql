@@ -37,6 +37,112 @@ pub(crate) fn spans_view_name(source_table: &str) -> String {
     format!("timeless_{source_table}_spans")
 }
 
+/// One installable companion object: its derived name, DDL, and the
+/// human description recorded in the inventory.
+pub(crate) struct SchemaObject {
+    pub name: String,
+    pub kind: &'static str,
+    pub ddl: String,
+    pub description: &'static str,
+}
+
+/// The full trace companion set for one source table, in dependency
+/// order. Every builder reads only public vtab/view surfaces.
+pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
+    let spans = spans_view_name(table);
+    let summary = format!("timeless_{table}_summary");
+    let services = format!("timeless_{table}_services");
+    let operations = format!("timeless_{table}_operations");
+    let errors = format!("timeless_{table}_errors");
+    let roots = format!("timeless_{table}_roots");
+    vec![
+        SchemaObject {
+            name: spans.clone(),
+            kind: "view",
+            ddl: trace_spans_view_ddl(database, table).1,
+            description: trace_spans_description(),
+        },
+        SchemaObject {
+            name: summary.clone(),
+            kind: "view",
+            ddl: trace_summary_view_ddl(database, &spans, &summary),
+            description: "One row per retained trace: span and error counts, \
+                envelope timing (native plus human-readable), invalid-end \
+                count, root rows/state (missing/unique/ambiguous, never \
+                invented), service count and ordered service set, and \
+                completeness always 'unknown'.",
+        },
+        SchemaObject {
+            name: services.clone(),
+            kind: "view",
+            ddl: trace_services_view_ddl(database, &spans, &services),
+            description: "Distinct service names retained in this source, \
+                ordered. Backed by a spans-view scan, not the discovery TVF.",
+        },
+        SchemaObject {
+            name: operations.clone(),
+            kind: "view",
+            ddl: trace_operations_view_ddl(database, &spans, &operations),
+            description: "Distinct service/operation pairs retained in this \
+                source, ordered. Backed by a spans-view scan.",
+        },
+        SchemaObject {
+            name: errors.clone(),
+            kind: "view",
+            ddl: trace_filtered_view_ddl(database, &spans, &errors, "status = 'error'"),
+            description: "Retained spans whose status is exactly 'error', \
+                in spans-view shape.",
+        },
+        SchemaObject {
+            name: roots.clone(),
+            kind: "view",
+            ddl: trace_filtered_view_ddl(database, &spans, &roots, "parent_span_id IS NULL"),
+            description: "Retained root spans (no parent), in spans-view shape.",
+        },
+    ]
+}
+
+/// Service catalog over the spans view: distinct retained service
+/// names, ordered. Plain SQL rather than the discovery TVF so the
+/// definition stays inspectable in the view text itself.
+pub(crate) fn trace_services_view_ddl(database: &str, spans: &str, name: &str) -> String {
+    let view = sql_ident::qualified(database, name);
+    let spans = sql_ident::qualified(database, spans);
+    format!(
+        "CREATE VIEW {view} AS \
+         SELECT DISTINCT service FROM {spans} ORDER BY service"
+    )
+}
+
+/// Operation catalog: distinct retained service/operation pairs,
+/// ordered. Same plain-SQL rationale as the service catalog.
+pub(crate) fn trace_operations_view_ddl(database: &str, spans: &str, name: &str) -> String {
+    let view = sql_ident::qualified(database, name);
+    let spans = sql_ident::qualified(database, spans);
+    format!(
+        "CREATE VIEW {view} AS \
+         SELECT DISTINCT service, name AS operation FROM {spans} \
+         ORDER BY service, operation"
+    )
+}
+
+/// Span-shaped filtered views (error spans, root spans): the exact
+/// spans-view column list with one predicate. Sharing the list keeps
+/// the shape from drifting; see [`TRACE_SPAN_COLUMNS`].
+pub(crate) fn trace_filtered_view_ddl(
+    database: &str,
+    spans: &str,
+    name: &str,
+    predicate: &str,
+) -> String {
+    let view = sql_ident::qualified(database, name);
+    let spans = sql_ident::qualified(database, spans);
+    format!(
+        "CREATE VIEW {view} AS SELECT {} FROM {spans} WHERE {predicate}",
+        TRACE_SPAN_COLUMNS.join(", ")
+    )
+}
+
 /// DDL for the inventory table. Plain rowid table for maximum host
 /// compatibility (no WITHOUT ROWID requirement).
 pub(crate) fn inventory_ddl(database: &str) -> String {
@@ -90,9 +196,81 @@ pub(crate) fn trace_spans_description() -> &'static str {
      nanoseconds plus human-readable UTC), and verbatim attributes."
 }
 
-/// Names this installer would own for one source table (spike: one).
-fn planned_objects(table: &str) -> Vec<(String, &'static str)> {
-    vec![(spans_view_name(table), "view")]
+/// Shared select list for the span-shaped views, so the error and root
+/// filters cannot drift from the spans view. A test pins the spans
+/// view's own columns to this list via PRAGMA table_info.
+pub(crate) const TRACE_SPAN_COLUMNS: &[&str] = &[
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "name",
+    "service",
+    "kind",
+    "status",
+    "start_ts",
+    "start_time",
+    "duration_ns",
+    "duration_ms",
+    "attributes",
+];
+
+/// One-row-per-trace retained snapshot (TSQ-04/TSQ-05, SQL recipe
+/// "Retained trace summaries"): exact group aggregates over the spans
+/// view, generalized from `WHERE trace_id = ?1` to `GROUP BY trace_id`.
+/// Repeated rows count repeatedly, roots/services are sets-or-states
+/// (never invented scalars), completeness is always `unknown`, and
+/// invalid durations NULL the envelope instead of coercing it.
+pub(crate) fn trace_summary_view_ddl(database: &str, spans: &str, name: &str) -> String {
+    let view = sql_ident::qualified(database, name);
+    let spans = sql_ident::qualified(database, spans);
+    format!(
+        "CREATE VIEW {view} AS \
+         WITH retained AS ( \
+           SELECT trace_id, span_id, parent_span_id, name, service, status, \
+                  start_ts, duration_ns, \
+                  CASE WHEN duration_ns >= 0 \
+                        AND start_ts <= 9223372036854775807 - duration_ns \
+                       THEN start_ts + duration_ns END AS valid_end_ts \
+           FROM {spans} \
+         ) \
+         SELECT trace_id, \
+                count(*) AS span_rows, \
+                count(DISTINCT span_id) AS distinct_span_ids, \
+                count(*) FILTER (WHERE status = 'error') AS error_rows, \
+                min(start_ts) AS start_ts, \
+                strftime('%Y-%m-%dT%H:%M:%fZ', min(start_ts) / 1000000000.0, 'unixepoch') AS start_time, \
+                max(valid_end_ts) AS end_ts, \
+                CASE WHEN max(valid_end_ts) IS NULL THEN NULL \
+                     ELSE strftime('%Y-%m-%dT%H:%M:%fZ', max(valid_end_ts) / 1000000000.0, 'unixepoch') END AS end_time, \
+                CASE WHEN count(*) = 0 \
+                       OR count(*) FILTER (WHERE valid_end_ts IS NULL) <> 0 THEN NULL \
+                     WHEN min(start_ts) >= 0 THEN max(valid_end_ts) - min(start_ts) \
+                     WHEN max(valid_end_ts) <= 9223372036854775807 + min(start_ts) \
+                       THEN max(valid_end_ts) - min(start_ts) \
+                END AS duration_ns, \
+                (CASE WHEN count(*) = 0 \
+                       OR count(*) FILTER (WHERE valid_end_ts IS NULL) <> 0 THEN NULL \
+                     WHEN min(start_ts) >= 0 THEN max(valid_end_ts) - min(start_ts) \
+                     WHEN max(valid_end_ts) <= 9223372036854775807 + min(start_ts) \
+                       THEN max(valid_end_ts) - min(start_ts) \
+                END) / 1000000.0 AS duration_ms, \
+                count(*) FILTER (WHERE valid_end_ts IS NULL) AS invalid_end_rows, \
+                count(*) FILTER (WHERE parent_span_id IS NULL) AS root_rows, \
+                CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL) = 1 \
+                  THEN min(span_id) FILTER (WHERE parent_span_id IS NULL) END AS root_span_id, \
+                CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL) = 1 \
+                  THEN min(name) FILTER (WHERE parent_span_id IS NULL) END AS root_name, \
+                CASE WHEN count(*) FILTER (WHERE parent_span_id IS NULL) = 1 \
+                  THEN min(service) FILTER (WHERE parent_span_id IS NULL) END AS root_service, \
+                CASE count(*) FILTER (WHERE parent_span_id IS NULL) \
+                  WHEN 0 THEN 'missing' WHEN 1 THEN 'unique' ELSE 'ambiguous' END AS root_state, \
+                count(DISTINCT service) AS service_count, \
+                (SELECT group_concat(service, ',') FROM \
+                   (SELECT DISTINCT service FROM {spans} WHERE trace_id = retained.trace_id \
+                    ORDER BY service)) AS services, \
+                'unknown' AS completeness \
+         FROM retained GROUP BY trace_id"
+    )
 }
 
 /// True when `name` exists as a table/view/trigger in `database`.
@@ -119,74 +297,108 @@ fn owned_objects(host: &Connection, database: &str, table: &str) -> Result<Vec<(
     names.collect()
 }
 
-/// Install the spike surface for one traces table. Fails cleanly (no
-/// user object touched) when any planned name collides with an object
-/// this installation does not own.
-pub(crate) fn install_trace_views(
+/// Install one companion object and record it. The caller sweeps
+/// collisions first; this runs inside the caller's transaction where
+/// one exists (xCreate), so a later failure still rolls everything
+/// back.
+fn install_object(
     host: &Connection,
     database: &str,
     table: &str,
-) -> Result<Vec<String>> {
-    let planned = planned_objects(table);
-    // Collision sweep first: every name must either be absent or already
-    // owned by this exact source. Nothing is created before this passes.
-    // No inventory table yet is not a collision — it just means a
-    // first install into this schema.
-    let owned = owned_objects(host, database, table).unwrap_or_default();
-    for (name, _) in &planned {
-        if !owned.iter().any(|(o, _)| o == name) && object_exists(host, database, name)? {
-            return Err(rusqlite::Error::ModuleError(format!(
-                "timeless schema install refused: {name:?} already exists \
-                 and is not owned by this installation"
-            )));
-        }
-    }
-    host.execute_batch(&inventory_ddl(database))?;
-    let (name, ddl) = trace_spans_view_ddl(database, table);
-    debug_assert!(planned.iter().any(|(n, _)| n == &name));
-    host.execute_batch(&ddl)?;
+    object: &SchemaObject,
+) -> Result<()> {
+    host.execute_batch(&object.ddl)?;
     host.execute(
         &format!(
             "INSERT OR REPLACE INTO {} \
              (source_database, source_table, object_name, object_kind, \
               schema_version, description, installed_at) \
-             VALUES (?1, ?2, ?3, 'view', ?4, ?5, unixepoch())",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())",
             sql_ident::qualified(database, INVENTORY_TABLE)
         ),
         rusqlite::params![
             database,
             table,
-            name,
+            object.name,
+            object.kind,
             SCHEMA_VERSION as i64,
-            trace_spans_description()
+            object.description
         ],
     )?;
-    Ok(vec![name])
+    Ok(())
 }
 
-/// Best-effort refresh on open: every owned object whose recorded
-/// version differs from [`SCHEMA_VERSION`] is dropped and reinstalled
-/// at today's definition — per-release migration without a separate
-/// step. Missing inventory (or a missing table) simply means nothing
-/// to drop; install then lays down the current shape unless a user
-/// object collides, in which case the old state is left alone.
-/// Failures are swallowed — open must succeed on read-only
-/// connections, and stale views fail loudly at query time (SQLite
-/// errors on unknown columns) rather than returning wrong rows.
-pub(crate) fn refresh_trace_views(host: &Connection, database: &str, table: &str) {
-    let wanted = spans_view_name(table);
-    let fresh = owned_objects(host, database, table)
-        .map(|owned| {
-            owned
-                .iter()
-                .any(|(name, version)| name == &wanted && *version == SCHEMA_VERSION as i64)
-        })
-        .unwrap_or(false);
-    if fresh {
-        return;
+/// Remove one owned object and forget it. Unknown names are a no-op
+/// through `IF EXISTS`; the inventory row goes with the object.
+fn drop_object(host: &Connection, database: &str, table: &str, name: &str) -> Result<()> {
+    host.execute_batch(&format!(
+        "DROP VIEW IF EXISTS {}",
+        sql_ident::qualified(database, name)
+    ))?;
+    host.execute(
+        &format!(
+            "DELETE FROM {} WHERE source_database = ?1 AND source_table = ?2 \
+             AND object_name = ?3",
+            sql_ident::qualified(database, INVENTORY_TABLE)
+        ),
+        [database, table, name],
+    )?;
+    Ok(())
+}
+
+/// Install the trace companion set for one source table. Fails cleanly
+/// (no user object touched) when any planned name collides with an
+/// object this installation does not own.
+pub(crate) fn install_trace_views(
+    host: &Connection,
+    database: &str,
+    table: &str,
+) -> Result<Vec<String>> {
+    let planned = trace_objects(database, table);
+    // Collision sweep first: every name must either be absent or already
+    // owned by this exact source. Nothing is created before this passes.
+    // No inventory table yet is not a collision — it just means a
+    // first install into this schema.
+    let owned = owned_objects(host, database, table).unwrap_or_default();
+    for object in &planned {
+        if !owned.iter().any(|(o, _)| o == &object.name)
+            && object_exists(host, database, &object.name)?
+        {
+            return Err(rusqlite::Error::ModuleError(format!(
+                "timeless schema install refused: {:?} already exists \
+                 and is not owned by this installation",
+                object.name
+            )));
+        }
     }
-    let _ = drop_trace_views(host, database, table);
-    let _ = install_trace_views(host, database, table);
+    host.execute_batch(&inventory_ddl(database))?;
+    for object in &planned {
+        install_object(host, database, table, object)?;
+    }
+    Ok(planned.into_iter().map(|object| object.name).collect())
+}
+
+/// Best-effort refresh on open, per owned object: anything whose
+/// recorded version differs from [`SCHEMA_VERSION`] is dropped and
+/// reinstalled at today's definition — per-release migration without a
+/// separate step, and a failed object never blocks its siblings.
+/// Missing inventory simply means nothing to drop. Failures are
+/// swallowed — open must succeed on read-only connections, and stale
+/// views fail loudly at query time (SQLite errors on unknown columns)
+/// rather than returning wrong rows.
+pub(crate) fn refresh_trace_views(host: &Connection, database: &str, table: &str) {
+    let planned = trace_objects(database, table);
+    let owned = owned_objects(host, database, table).unwrap_or_default();
+    for object in &planned {
+        let fresh = owned
+            .iter()
+            .any(|(name, version)| name == &object.name && *version == SCHEMA_VERSION as i64);
+        if fresh {
+            continue;
+        }
+        let _ = drop_object(host, database, table, &object.name);
+        let _ = install_object(host, database, table, object);
+    }
 }
 
 /// Remove exactly the objects the inventory attributes to one source
@@ -194,19 +406,8 @@ pub(crate) fn refresh_trace_views(host: &Connection, database: &str, table: &str
 pub(crate) fn drop_trace_views(host: &Connection, database: &str, table: &str) -> Result<()> {
     let owned = owned_objects(host, database, table).unwrap_or_default();
     for (name, _) in &owned {
-        let sql = format!(
-            "DROP VIEW IF EXISTS {}",
-            sql_ident::qualified(database, name)
-        );
-        host.execute_batch(&sql)?;
+        drop_object(host, database, table, name)?;
     }
-    host.execute(
-        &format!(
-            "DELETE FROM {} WHERE source_database = ?1 AND source_table = ?2",
-            sql_ident::qualified(database, INVENTORY_TABLE)
-        ),
-        [database, table],
-    )?;
     Ok(())
 }
 

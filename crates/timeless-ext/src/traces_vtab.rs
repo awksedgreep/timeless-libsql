@@ -1676,6 +1676,23 @@ mod tests {
             .unwrap()
     }
 
+    /// The full Phase-3 trace companion set, in inventory order. Every
+    /// install/refresh/drop assertion compares against this one list so
+    /// a new companion cannot land without updating the contract.
+    pub(super) fn expected_trace_inventory() -> Vec<(String, String, i64)> {
+        [
+            "timeless_traces_errors",
+            "timeless_traces_operations",
+            "timeless_traces_roots",
+            "timeless_traces_services",
+            "timeless_traces_spans",
+            "timeless_traces_summary",
+        ]
+        .into_iter()
+        .map(|name| (name.to_string(), "view".to_string(), 1))
+        .collect()
+    }
+
     #[test]
     fn insert_guarded_path_round_trips_one_span() {
         let db = Connection::open_in_memory().unwrap();
@@ -1706,7 +1723,7 @@ mod tests {
 
 #[cfg(all(test, feature = "embedded"))]
 mod schema_spike_tests {
-    use super::tests::{inventory_rows, object_names, SPAN_INSERT};
+    use super::tests::{expected_trace_inventory, inventory_rows, object_names, SPAN_INSERT};
     use super::*;
 
     #[test]
@@ -1718,10 +1735,7 @@ mod schema_spike_tests {
         register(&db).unwrap();
         db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
             .unwrap();
-        assert_eq!(
-            inventory_rows(&db, "traces"),
-            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
-        );
+        assert_eq!(inventory_rows(&db, "traces"), expected_trace_inventory());
         db.execute(SPAN_INSERT, []).unwrap();
         db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
             .unwrap();
@@ -1855,10 +1869,7 @@ mod schema_spike_tests {
             })
             .unwrap();
         assert_eq!(count, 1);
-        assert_eq!(
-            inventory_rows(&db, "traces"),
-            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
-        );
+        assert_eq!(inventory_rows(&db, "traces"), expected_trace_inventory());
         drop(db);
         let _ = std::fs::remove_file(&path);
     }
@@ -1926,10 +1937,7 @@ mod schema_spike_tests {
             )
             .unwrap();
         assert!(sql.contains("start_time"), "{sql}");
-        assert_eq!(
-            inventory_rows(&db, "traces"),
-            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
-        );
+        assert_eq!(inventory_rows(&db, "traces"), expected_trace_inventory());
         drop(db);
         let _ = std::fs::remove_file(&path);
     }
@@ -1971,10 +1979,7 @@ mod schema_spike_tests {
             })
             .unwrap();
         assert_eq!(count, 1);
-        assert_eq!(
-            inventory_rows(&db, "traces"),
-            vec![("timeless_traces_spans".to_string(), "view".to_string(), 1)]
-        );
+        assert_eq!(inventory_rows(&db, "traces"), expected_trace_inventory());
         drop(db);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&copy);
@@ -2018,7 +2023,7 @@ mod schema_spike_tests {
             db.execute(
                 &format!(
                     "INSERT INTO traces (trace_id, span_id, {parent_col}name, service, kind, status, start_ts, duration_ns) \
-                     VALUES ('{trace}', '{span}', {parent_sql}{comma} 'op', 'svc', 'server', 'ok', {ts}, 2000000);",
+                     VALUES ('{trace}', '{span}', {parent_sql}{comma}'{name}', 'svc', 'server', 'ok', {ts}, 2000000);",
                     comma = if parent.is_some() { ", " } else { "" }
                 ),
                 [],
@@ -2094,5 +2099,240 @@ mod schema_spike_tests {
                 v.6
             );
         }
+    }
+
+    /// Insert one span through the vtab, hex TEXT ids. `parent=None` is a
+    /// root; durations pass through verbatim (negative/overflowing
+    /// included) so edge semantics stay exact.
+    fn insert_span(
+        db: &Connection,
+        trace: &str,
+        span: &str,
+        parent: Option<&str>,
+        service: &str,
+        status: &str,
+        start_ts: i64,
+        duration_ns: i64,
+    ) {
+        let (parent_col, parent_val) = match parent {
+            Some(p) => ("parent_span_id, ", format!("'{p}', ")),
+            None => ("", String::new()),
+        };
+        db.execute(
+            &format!(
+                "INSERT INTO traces (trace_id, span_id, {parent_col}name, service, kind, status, start_ts, duration_ns) \
+                 VALUES ('{trace}', '{span}', {parent_val}'n', '{service}', 'server', '{status}', {start_ts}, {duration_ns});"
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn trace_summary_aggregates_with_documented_edge_semantics() {
+        // Phase 3 (#24): the summary implements TSQ-04/TSQ-05 exactly —
+        // repeated rows count, roots/services are states-or-sets,
+        // completeness stays unknown, invalid durations NULL the
+        // envelope instead of coercing it.
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+            .unwrap();
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let c = "cccccccccccccccccccccccccccccccc";
+        let d = "dddddddddddddddddddddddddddddddd";
+        let e = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let s = |n: u8| format!("{n:02x}00000000000000");
+        // Trace A: root + child + retried child (same IDs) + error span
+        // on a second service.
+        insert_span(&db, a, &s(1), None, "svc1", "ok", 1_000, 100);
+        insert_span(&db, a, &s(2), Some(&s(1)), "svc1", "ok", 1_050, 100);
+        insert_span(&db, a, &s(2), Some(&s(1)), "svc1", "ok", 1_050, 100);
+        insert_span(&db, a, &s(3), Some(&s(1)), "svc2", "error", 1_100, 50);
+        // Trace B: dangling parent, no root anywhere.
+        insert_span(&db, b, &s(1), Some(&s(9)), "svc1", "ok", 2_000, 100);
+        // Trace C: two roots — ambiguous, never a picked scalar.
+        insert_span(&db, c, &s(1), None, "svc1", "ok", 3_000, 100);
+        insert_span(&db, c, &s(2), None, "svc1", "ok", 3_100, 100);
+        // Trace D: negative duration — invalid end, NULL envelope.
+        insert_span(&db, d, &s(1), None, "svc1", "ok", 4_000, -5);
+        // Trace E: end overflows i64 — invalid end, NULL envelope.
+        insert_span(&db, e, &s(1), None, "svc1", "ok", i64::MAX - 10, 20);
+        db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+            .unwrap();
+
+        let rows: Vec<Summary> = db
+            .prepare(
+                "SELECT trace_id, span_rows, distinct_span_ids, error_rows, \
+                 start_ts, end_ts, duration_ns, invalid_end_rows, root_rows, \
+                 root_span_id, root_name, root_service, root_state, \
+                 service_count, services, completeness \
+                 FROM timeless_traces_summary ORDER BY trace_id;",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok(Summary {
+                    trace_id: row.get(0)?,
+                    span_rows: row.get(1)?,
+                    distinct_span_ids: row.get(2)?,
+                    error_rows: row.get(3)?,
+                    start_ts: row.get(4)?,
+                    end_ts: row.get(5)?,
+                    duration_ns: row.get(6)?,
+                    invalid_end_rows: row.get(7)?,
+                    root_rows: row.get(8)?,
+                    root_span_id: row.get(9)?,
+                    root_name: row.get(10)?,
+                    root_service: row.get(11)?,
+                    root_state: row.get(12)?,
+                    service_count: row.get(13)?,
+                    services: row.get(14)?,
+                    completeness: row.get(15)?,
+                })
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 5);
+        let by_id = |id: &str| rows.iter().find(|r| r.trace_id == id).unwrap();
+
+        let ra = by_id(a);
+        assert_eq!(
+            (ra.span_rows, ra.distinct_span_ids, ra.error_rows),
+            (4, 3, 1),
+            "retries count repeatedly, errors count exactly"
+        );
+        assert_eq!((ra.start_ts, ra.end_ts), (Some(1_000), Some(1_150)));
+        assert_eq!(ra.duration_ns, Some(150));
+        assert_eq!(ra.invalid_end_rows, 0);
+        assert_eq!(ra.root_rows, 1);
+        assert_eq!(ra.root_state, "unique");
+        assert_eq!(ra.root_name.as_deref(), Some("n"));
+        assert_eq!(ra.service_count, 2);
+        assert_eq!(ra.services, "svc1,svc2");
+
+        let rb = by_id(b);
+        assert_eq!(rb.root_rows, 0);
+        assert_eq!(rb.root_state, "missing");
+        assert!(rb.root_span_id.is_none() && rb.root_name.is_none());
+
+        let rc = by_id(c);
+        assert_eq!(rc.root_rows, 2);
+        assert_eq!(rc.root_state, "ambiguous");
+        assert!(rc.root_span_id.is_none());
+
+        let rd = by_id(d);
+        assert_eq!(rd.invalid_end_rows, 1);
+        assert!(rd.end_ts.is_none() && rd.duration_ns.is_none());
+
+        let re = by_id(e);
+        assert_eq!(re.invalid_end_rows, 1);
+        assert!(re.end_ts.is_none() && re.duration_ns.is_none());
+
+        for row in &rows {
+            assert_eq!(row.completeness, "unknown");
+        }
+    }
+
+    #[derive(Debug)]
+    struct Summary {
+        trace_id: String,
+        span_rows: i64,
+        distinct_span_ids: i64,
+        error_rows: i64,
+        start_ts: Option<i64>,
+        end_ts: Option<i64>,
+        duration_ns: Option<i64>,
+        invalid_end_rows: i64,
+        root_rows: i64,
+        root_span_id: Option<String>,
+        root_name: Option<String>,
+        root_service: Option<String>,
+        root_state: String,
+        service_count: i64,
+        services: String,
+        completeness: String,
+    }
+
+    #[test]
+    fn service_operation_error_root_views_agree() {
+        // Catalogs list exactly what is retained; error/root views
+        // select exactly the spans-view rows their predicate names.
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+            .unwrap();
+        let t = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let s = |n: u8| format!("{n:02x}00000000000000");
+        insert_span(&db, t, &s(1), None, "svc1", "ok", 1_000, 100);
+        insert_span(&db, t, &s(2), Some(&s(1)), "svc1", "error", 1_050, 100);
+        insert_span(&db, t, &s(3), Some(&s(1)), "svc2", "ok", 1_100, 100);
+        db.execute("INSERT INTO traces(traces) VALUES ('flush');", [])
+            .unwrap();
+
+        let services: Vec<String> = db
+            .prepare("SELECT service FROM timeless_traces_services;")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(services, vec!["svc1".to_string(), "svc2".to_string()]);
+
+        let operations: Vec<(String, String)> = db
+            .prepare("SELECT service, operation FROM timeless_traces_operations;")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            operations,
+            vec![
+                ("svc1".to_string(), "n".to_string()),
+                ("svc2".to_string(), "n".to_string())
+            ]
+        );
+
+        let errors: Vec<String> = db
+            .prepare("SELECT span_id FROM timeless_traces_errors ORDER BY span_id;")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(errors, vec![s(2)]);
+
+        let roots: Vec<String> = db
+            .prepare("SELECT span_id FROM timeless_traces_roots;")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(roots, vec![s(1)]);
+    }
+
+    #[test]
+    fn spans_view_columns_match_the_shared_list() {
+        // The filtered views build their select lists from
+        // TRACE_SPAN_COLUMNS: if the spans view gains or loses a
+        // column without updating the list, the shapes drift apart.
+        // PRAGMA reads the installed definition, so this pins the
+        // full install path, not just the builder string.
+        use crate::schema::TRACE_SPAN_COLUMNS;
+        let db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE traces USING timeless_traces;")
+            .unwrap();
+        let columns: Vec<String> = db
+            .prepare("SELECT name FROM pragma_table_info('timeless_traces_spans');")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(columns, TRACE_SPAN_COLUMNS);
     }
 }
