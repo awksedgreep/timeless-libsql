@@ -45,7 +45,7 @@ pub fn router_with_limits(storage: Storage, limits: LogsQueryLimits) -> Router {
         .route("/select/logsql/field_values", get(field_values))
         .route("/select/logsql/stats", get(stats))
         .route("/select/logsql/tail", get(tail_get).post(tail_post))
-        .route("/api/v1/flush", get(flush))
+        .route("/api/v1/flush", post(flush))
         .route("/api/v1/backup", post(backup))
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

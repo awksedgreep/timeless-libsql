@@ -28,7 +28,7 @@ pub struct AuthConfig {
     verifier: Option<Arc<AuthVerifier>>,
     /// S4 (VictoriaMetrics -deleteAuthKey precedent): when set,
     /// administrative routes additionally require this key — header
-    /// `x-timeless-admin-key` or query parameter `admin_key` — independent
+    /// `x-timeless-admin-key` — independent
     /// of whether token auth is enabled. Unset means open, consistent with
     /// the default-open posture. Defence in depth, not the fix for the
     /// S1-S3 defects, which are closed on their merits.
@@ -369,17 +369,14 @@ fn is_admin_path(path: &str) -> bool {
 
 fn admin_key_matches(request: &Request, expected: &str) -> bool {
     use subtle::ConstantTimeEq;
+    // Header only. A query-string key lands in access logs, proxy logs,
+    // browser history, and Referer headers; the header never leaves the
+    // process boundary in URL form.
     let presented = request
         .headers()
         .get("x-timeless-admin-key")
         .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-        .or_else(|| {
-            request.uri().query().and_then(|query| {
-                form_urlencoded::parse(query.as_bytes())
-                    .find_map(|(name, value)| (name == "admin_key").then(|| value.into_owned()))
-            })
-        });
+        .map(str::to_owned);
     match presented {
         Some(presented) => presented.as_bytes().ct_eq(expected.as_bytes()).into(),
         None => false,
@@ -894,7 +891,9 @@ mod tests {
             StatusCode::OK
         );
 
-        // Query-parameter form works too.
+        // Query-parameter form is GONE (issue #47 M2): a key in the URL
+        // leaks into access/proxy logs, browser history, and Referer.
+        // The same request without the header is now unauthorized.
         let response = app
             .clone()
             .oneshot(
@@ -906,25 +905,40 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        // Query keys use application/x-www-form-urlencoded decoding, so
-        // reserved characters, spaces, and UTF-8 are representable.
+        // Header keys use exact byte comparison; header values are
+        // constrained to visible ASCII + space by HTTP itself, so keys
+        // must be too (see SERVER_API_REFERENCE).
         let encoded = protect_router(
             Router::new().route("/api/v1/backup", post(|| async { "backup" })),
-            AuthConfig::disabled().with_admin_key(Some("a+b& c/✓".into())),
+            AuthConfig::disabled().with_admin_key(Some("a+b& c/3".into())),
         );
         let response = encoded
+            .clone()
             .oneshot(
                 axum::http::Request::builder()
-                    .uri("/api/v1/backup?ignored=value&admin_key=a%2Bb%26+c%2F%E2%9C%93")
+                    .uri("/api/v1/backup")
                     .method("POST")
+                    .header("x-timeless-admin-key", "a+b& c/3")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        // A query-string attempt against the same key fails closed.
+        let response = encoded
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/backup?ignored=value&admin_key=a%2Bb%26+c%2F3")
+                    .method("POST")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         // Without a configured key the same routes are open.
         let open = protect_router(

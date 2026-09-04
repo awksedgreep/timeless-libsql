@@ -48,7 +48,7 @@ pub fn router_with_limits(storage: Storage, limits: TracesQueryLimits) -> Router
             "/select/timeless/api/traces/{trace_id}",
             get(dashboard_trace),
         )
-        .route("/api/v1/flush", get(flush).post(flush))
+        .route("/api/v1/flush", post(flush))
         .route("/api/v1/backup", post(backup))
         .route("/insert/opentelemetry/v1/traces", post(ingest_otlp))
         .fallback(unsupported)

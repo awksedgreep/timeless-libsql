@@ -88,7 +88,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `logs` | `GET` | `/select/logsql/field_values` | `logs:read` | Bounded discovery for `service`, `host`, `path`, or `status`. |
 | `logs` | `GET` | `/select/logsql/stats` | `logs:stats` | Complete serialized `StorageStats`. |
 | `logs` | `GET, POST` | `/select/logsql/tail` | `logs:read` | Live tail: streams admitted entries matching one LogsQL filter expression as NDJSON; pipelines are rejected; slow consumers drop (counted in stats). |
-| `logs` | `GET` | `/api/v1/flush` | `logs:maintenance` | Ordered writer completion and extension durability barrier. |
+| `logs` | `POST` | `/api/v1/flush` | `logs:maintenance` | Ordered writer completion and extension durability barrier. |
 | `logs` | `POST` | `/api/v1/backup` | `logs:maintenance` | Flush, optimize, checkpoint, and verified SQLite backup. |
 | `traces` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |
 | `traces` | `GET` | `/ready` | `traces:stats` | Readiness plus build, negotiated rich-span capability, and queue watermarks. |
@@ -102,7 +102,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `traces` | `GET` | `/select/timeless/api/spans` | `traces:read` | Native rich-span search for the Timeless dashboard contract. |
 | `traces` | `GET, POST` | `/select/timeless/api/spans/tail` | `traces:read` | Live tail: streams admitted spans as NDJSON, filtered by the search surface's live-matchable parameters (`service`, `name`, `kind`, `status`) plus an `attributes` JSON object of exact scalar matches; invalid values are rejected; slow consumers drop spans (counted in stats). |
 | `traces` | `GET` | `/select/timeless/api/traces/{trace_id}` | `traces:read` | One native trace with complete rich-span fields. |
-| `traces` | `GET, POST` | `/api/v1/flush` | `traces:maintenance` | Ordered writer completion, extension flush, and durability barrier. |
+| `traces` | `POST` | `/api/v1/flush` | `traces:maintenance` | Ordered writer completion, extension flush, and durability barrier. |
 | `traces` | `POST` | `/api/v1/backup` | `traces:maintenance` | Flush, optimize, checkpoint, and verified SQLite backup. |
 | `traces` | `POST` | `/insert/opentelemetry/v1/traces` | `traces:write` | OTLP JSON, protobuf, or gzip-compressed protobuf ingestion. |
 
@@ -282,7 +282,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_AUTH_POLICY_FILE` | all | none | Readable policy-v1 JSON path; required when `TIMELESS_AUTH_MODE=required`. |
 | `TIMELESS_TENANT` | all | `default` | Exact tenant required in both policy and token. |
 | `TIMELESS_BACKUP_DIR` | all | `backups/` beside the database file | Directory backups are confined to; destinations that canonicalize outside it are rejected. Relative destinations resolve inside it. |
-| `TIMELESS_ADMIN_KEY` | all | unset | When set, `/api/v1/scrape/targets`, `/api/v1/backup`, `/api/v1/flush`, and `/api/v1/optimize` additionally require it (header `x-timeless-admin-key` or query `admin_key`), independent of `TIMELESS_AUTH_MODE`. Unset means open. |
+| `TIMELESS_ADMIN_KEY` | all | unset | When set, `/api/v1/scrape/targets`, `/api/v1/backup`, `/api/v1/flush`, and `/api/v1/optimize` additionally require it (header `x-timeless-admin-key`), independent of `TIMELESS_AUTH_MODE`. Unset means open. Header-only by design: a query-string key leaks into access/proxy logs and browser history. Keys must be visible ASCII (an HTTP header-value constraint). |
 | `TIMELESS_METRICS_READER_CONNECTIONS` | metrics | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_METRICS_COMMAND_QUEUE_BATCHES` | metrics | `256` | Writer-command queue capacity in admitted request batches. |
 | `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |

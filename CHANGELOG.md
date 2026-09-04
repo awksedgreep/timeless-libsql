@@ -57,6 +57,22 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   key. Lifecycle and compatibility policy:
   `docs/OBSERVABILITY_SCHEMA.md`.
 
+- **`POST /api/v1/flush` is now the only flush route on all three
+  servers.** The logs server accepted `GET` only and the traces server
+  `GET, POST`; a state-changing durability barrier behind `GET` is
+  crawlable, prefetchable, and cacheable, so any unauthenticated
+  request — a browser preload, a link scanner — could trigger WAL
+  flushes on an open deployment. Metrics was already `POST`-only.
+  `GET` now returns `405`; update scripts and dashboards that issued
+  `GET`.
+
+- **The admin key is header-only.** `TIMELESS_ADMIN_KEY` previously
+  also accepted `?admin_key=` on administrative routes; a key in the
+  URL leaks into access and proxy logs, browser history, and `Referer`
+  headers. Present it via the `x-timeless-admin-key` header instead.
+  Keys are constrained to visible ASCII (an HTTP header-value
+  constraint); query-string attempts now fail closed.
+
 ## [0.7.9] — 2026-09-02
 
 ### Added
