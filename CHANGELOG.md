@@ -65,6 +65,19 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   side already had — and oversized patterns return a clean `400`
   before any compile work. Legitimate label filters are unaffected.
 
+- **Ingest admission is now bounded by queued payload bytes, not just
+  batch count.** The writer command channels held up to
+  `queue_batches` × 10 MiB of body bytes (2.5 GiB by default) before
+  backpressuring producers. All three servers add a bytes-based
+  admission gate — 128 MiB by default, configurable via
+  `TIMELESS_<SIGNAL>_QUEUE_BYTES` — that admits ingest requests while
+  queued payload stays under the bound and holds each request's
+  reservation until the writer applies its batch. A batch larger than
+  the whole gate is admitted alone rather than deadlocking the
+  producer. The metrics plane additionally now reports insert failures
+  to the ingesting caller directly instead of deferring them to the
+  next flush, backup, or barrier.
+
 - **`POST /api/v1/flush` is now the only flush route on all three
   servers.** The logs server accepted `GET` only and the traces server
   `GET, POST`; a state-changing durability barrier behind `GET` is

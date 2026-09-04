@@ -285,6 +285,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_ADMIN_KEY` | all | unset | When set, `/api/v1/scrape/targets`, `/api/v1/backup`, `/api/v1/flush`, and `/api/v1/optimize` additionally require it (header `x-timeless-admin-key`), independent of `TIMELESS_AUTH_MODE`. Unset means open. Header-only by design: a query-string key leaks into access/proxy logs and browser history. Keys must be visible ASCII (an HTTP header-value constraint). |
 | `TIMELESS_METRICS_READER_CONNECTIONS` | metrics | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_METRICS_COMMAND_QUEUE_BATCHES` | metrics | `256` | Writer-command queue capacity in admitted request batches. |
+| `TIMELESS_METRICS_QUEUE_BYTES` | metrics | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
 | `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |
 | `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` | metrics | `300` | Public compact/rollup cadence. |
 | `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` | metrics | `3600` | Seven-day raw-retention prune check cadence. |
@@ -296,6 +297,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_PROMQL_DEADLINE_MS` | metrics | `30000` | Hard PromQL/MetricsQL execution deadline. |
 | `TIMELESS_LOGS_READER_CONNECTIONS` | logs | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_LOGS_COMMAND_QUEUE_BATCHES` | logs | `256` | Writer-command queue capacity in admitted request batches. |
+| `TIMELESS_LOGS_QUEUE_BYTES` | logs | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
 | `TIMELESS_LOGS_FLUSH_INTERVAL_SECS` | logs | `1` | Ordered public extension flush cadence. |
 | `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` | logs | `30` | Bounded public optimize cadence. |
 | `TIMELESS_LOGS_LOGSQL_MAX_RESULT_ROWS` | logs | `100000` | Final rows; valid range 1–100,000. |
@@ -306,6 +308,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_LOGS_RETENTION` | logs | absent/inherit | Retention window as `<n>` plus a required unit suffix `s`, `m`, `h`, or `d`. Applied to new and existing stores at startup; enforcement remains at flush/optimize boundaries. Absent preserves the store's current window. |
 | `TIMELESS_TRACES_READER_CONNECTIONS` | traces | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_TRACES_COMMAND_QUEUE_BATCHES` | traces | `256` | Writer-command queue capacity in admitted requests. |
+| `TIMELESS_TRACES_QUEUE_BYTES` | traces | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
 | `TIMELESS_TRACES_RETENTION_SECS` | traces | absent/inherit | If absent, preserve the vtab's stored retention (a fresh table has none); positive sets and enforces it; `0` explicitly disables it. |
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | traces | `1` | Ordered public extension flush cadence. |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | traces | `30` | Bounded public optimize cadence. |

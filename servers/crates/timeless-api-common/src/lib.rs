@@ -5,9 +5,11 @@
 //! fencing, loopback policy, shutdown signals, and identical maintenance-task
 //! lifecycle.
 
+mod admission;
 mod auth;
 mod prometheus;
 
+pub use admission::{BytesGate, GatePermit};
 pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims, RESULT_ROWS_HEADER};
 pub use prometheus::{build_info, Exposition, PROMETHEUS_CONTENT_TYPE};
 

@@ -16,7 +16,7 @@ use serde_json::Value as JsonValue;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
-    require_query_surface, BackupReport, DataPlaneSpec,
+    require_query_surface, BackupReport, BytesGate, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -1055,6 +1055,7 @@ struct StorageInner {
     timestamp_unit: TimestampUnit,
     database_path: PathBuf,
     queue_capacity: usize,
+    gate: BytesGate,
     tail: Arc<crate::tail::TailHub>,
 }
 
@@ -1062,6 +1063,11 @@ struct StorageInner {
 pub struct Storage(Arc<StorageInner>);
 
 impl Storage {
+    /// Upper bound on payload bytes queued ahead of the writer. The
+    /// default gate tightens the historical worst case
+    /// (`queue_batches` × 10 MiB bodies) to 128 MiB of queued payload.
+    pub const DEFAULT_QUEUE_BYTES: usize = 128 * 1024 * 1024;
+
     pub fn start(
         database_path: PathBuf,
         extension_path: PathBuf,
@@ -1084,12 +1090,31 @@ impl Storage {
         queue_batches: usize,
         timestamp_unit: TimestampUnit,
     ) -> Result<Self, String> {
-        Self::start_with_policy(
+        Self::start_with_queue_bytes(
             database_path,
             extension_path,
             reader_connections,
             queue_batches,
             timestamp_unit,
+            Self::DEFAULT_QUEUE_BYTES,
+        )
+    }
+
+    pub fn start_with_queue_bytes(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        timestamp_unit: TimestampUnit,
+        queue_bytes: usize,
+    ) -> Result<Self, String> {
+        Self::start_with_policy_full(
+            database_path,
+            extension_path,
+            reader_connections,
+            queue_batches,
+            timestamp_unit,
+            queue_bytes,
             StorePolicy::default(),
         )
     }
@@ -1102,11 +1127,34 @@ impl Storage {
         timestamp_unit: TimestampUnit,
         policy: StorePolicy,
     ) -> Result<Self, String> {
+        Self::start_with_policy_full(
+            database_path,
+            extension_path,
+            reader_connections,
+            queue_batches,
+            timestamp_unit,
+            Self::DEFAULT_QUEUE_BYTES,
+            policy,
+        )
+    }
+
+    pub fn start_with_policy_full(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        timestamp_unit: TimestampUnit,
+        queue_bytes: usize,
+        policy: StorePolicy,
+    ) -> Result<Self, String> {
         if reader_connections == 0 {
             return Err("reader_connections must be positive".into());
         }
         if queue_batches == 0 {
             return Err("command_queue_batches must be positive".into());
+        }
+        if queue_bytes == 0 {
+            return Err("queue_bytes must be positive".into());
         }
         if let Some(parent) = database_path
             .parent()
@@ -1184,6 +1232,7 @@ impl Storage {
             timestamp_unit,
             database_path,
             queue_capacity: queue_batches,
+            gate: BytesGate::new(queue_bytes as u64),
             tail,
         })))
     }
@@ -1202,6 +1251,14 @@ impl Storage {
             return Err("logs data plane is shutting down".into());
         }
         let count = entries.len();
+        // M5: bound queued payload bytes. Payload estimate per entry:
+        // ts + level + the two owned strings plus fixed overhead — the
+        // same bytes that sit in the channel until the writer applies.
+        let payload_bytes = entries
+            .iter()
+            .map(|entry| 96 + entry.message.len() + entry.metadata_json.len())
+            .sum::<usize>();
+        let gate_permit = self.0.gate.acquire(payload_bytes).await;
         let (reply_tx, reply_rx) = oneshot::channel();
         let permit = self
             .0
@@ -1219,6 +1276,10 @@ impl Storage {
             entries,
             reply: reply_tx,
         });
+        // The admission lock only orders queue-slot reservation; drop it
+        // before the apply wait so one slow apply never blocks later
+        // admissions.
+        drop(_admission);
         // Wait for the writer to apply the batch: the writer publishes
         // to the live tail itself on success, so a subscriber never sees
         // an entry a search would not return (the traces server already
@@ -1227,6 +1288,7 @@ impl Storage {
         reply_rx
             .await
             .map_err(|_| "SQLite writer stopped before ingest completed".to_string())??;
+        drop(gate_permit);
         Ok(count)
     }
 

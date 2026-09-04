@@ -83,6 +83,7 @@ pub struct Config {
     pub listen: SocketAddr,
     pub reader_connections: usize,
     pub command_queue_batches: usize,
+    pub queue_bytes: usize,
     pub flush_interval: Duration,
     pub optimize_interval: Duration,
     pub timestamp_unit: TimestampUnit,
@@ -102,6 +103,7 @@ impl Default for Config {
             // and duplicate SQLite/extension working sets unnecessarily.
             reader_connections: 2,
             command_queue_batches: 256,
+            queue_bytes: Storage::DEFAULT_QUEUE_BYTES,
             // Host orchestration only: the extension remains passive at low
             // volume, just as it does for every direct SQLite user.
             flush_interval: Duration::from_secs(1),
@@ -132,6 +134,9 @@ impl Config {
         if self.command_queue_batches == 0 {
             return Err("command_queue_batches must be positive".into());
         }
+        if self.queue_bytes == 0 {
+            return Err("queue_bytes must be positive".into());
+        }
         if self.flush_interval.is_zero() || self.optimize_interval.is_zero() {
             return Err("maintenance intervals must be positive".into());
         }
@@ -144,12 +149,13 @@ impl Config {
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
 
-    let storage = Storage::start_with_policy(
+    let storage = Storage::start_with_policy_full(
         config.database_path.clone(),
         config.extension_path.clone(),
         config.reader_connections,
         config.command_queue_batches,
         config.timestamp_unit,
+        config.queue_bytes,
         config.store_policy.clone(),
     )?;
     let app = protect_router(

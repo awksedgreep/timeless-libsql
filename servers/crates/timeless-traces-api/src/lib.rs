@@ -80,6 +80,7 @@ pub struct Config {
     pub flush_interval: Duration,
     pub optimize_interval: Duration,
     pub query_limits: TracesQueryLimits,
+    pub queue_bytes: usize,
     pub auth: AuthConfig,
 }
 
@@ -99,6 +100,7 @@ impl Default for Config {
             flush_interval: Duration::from_secs(1),
             optimize_interval: Duration::from_secs(30),
             query_limits: TracesQueryLimits::default(),
+            queue_bytes: Storage::DEFAULT_QUEUE_BYTES,
             auth: AuthConfig::disabled(),
         }
     }
@@ -119,6 +121,9 @@ impl Config {
         if self.command_queue_batches == 0 {
             return Err("command_queue_batches must be positive".into());
         }
+        if self.queue_bytes == 0 {
+            return Err("queue_bytes must be positive".into());
+        }
         if self.retention.is_some_and(|duration| duration.is_zero()) {
             return Err("retention must be positive when enabled".into());
         }
@@ -135,13 +140,14 @@ impl Config {
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
-    let storage = Storage::start_with_retention_policy(
+    let storage = Storage::start_with_queue_bytes_and_retention_policy(
         config.database_path.clone(),
         config.extension_path.clone(),
         config.reader_connections,
         config.command_queue_batches,
         config.retention,
         config.enforce_retention,
+        config.queue_bytes,
     )?;
     let app = protect_router(
         router_with_limits(storage.clone(), config.query_limits),

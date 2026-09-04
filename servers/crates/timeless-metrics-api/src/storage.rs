@@ -15,7 +15,7 @@ use serde::Serialize;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
-    BackupReport, DataPlaneSpec,
+    BackupReport, BytesGate, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -288,10 +288,12 @@ enum WriteCommand {
         blob: Vec<u8>,
         points: usize,
         body_bytes: usize,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     IngestPrometheus {
         body: Bytes,
         body_bytes: usize,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Barrier(oneshot::Sender<Result<(), String>>),
     Flush {
@@ -333,6 +335,7 @@ struct StorageInner {
     database_path: PathBuf,
     raw_retention: Duration,
     queue_capacity: usize,
+    gate: BytesGate,
     shutting_down: AtomicBool,
     scrape: ScrapeController,
 }
@@ -353,6 +356,13 @@ impl Storage {
         self.0.scrape.report().await
     }
 
+    /// Upper bound on payload bytes queued ahead of the writer. Batches
+    /// are ≤ 10 MiB each and the channel holds `queue_batches` of them,
+    /// so the historical worst case was `queue_batches × 10 MiB`
+    /// (256 × 10 MiB = 2.5 GiB by default). The default gate tightens
+    /// that to 128 MiB of queued payload.
+    pub const DEFAULT_QUEUE_BYTES: usize = 128 * 1024 * 1024;
+
     pub fn start(
         database_path: PathBuf,
         extension_path: PathBuf,
@@ -360,11 +370,32 @@ impl Storage {
         queue_batches: usize,
         raw_retention: Duration,
     ) -> Result<Self, String> {
+        Self::start_with_queue_bytes(
+            database_path,
+            extension_path,
+            reader_connections,
+            queue_batches,
+            raw_retention,
+            Self::DEFAULT_QUEUE_BYTES,
+        )
+    }
+
+    pub fn start_with_queue_bytes(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        raw_retention: Duration,
+        queue_bytes: usize,
+    ) -> Result<Self, String> {
         if reader_connections == 0 {
             return Err("reader_connections must be positive".into());
         }
         if queue_batches == 0 {
             return Err("command_queue_batches must be positive".into());
+        }
+        if queue_bytes == 0 {
+            return Err("queue_bytes must be positive".into());
         }
         if raw_retention.is_zero() {
             return Err("raw_retention must be positive".into());
@@ -453,6 +484,7 @@ impl Storage {
             database_path,
             raw_retention,
             queue_capacity: queue_batches,
+            gate: BytesGate::new(queue_bytes as u64),
             shutting_down: AtomicBool::new(false),
             scrape: ScrapeController::default(),
         })))
@@ -468,6 +500,8 @@ impl Storage {
                 blob,
                 points,
                 body_bytes,
+                // admit_ingest attaches the real reply channel.
+                reply: oneshot::channel().0,
             },
             Admission {
                 points: Some(points),
@@ -495,6 +529,8 @@ impl Storage {
                 blob,
                 points,
                 body_bytes,
+                // admit_ingest attaches the real reply channel.
+                reply: oneshot::channel().0,
             },
             Admission {
                 points: Some(points),
@@ -511,7 +547,13 @@ impl Storage {
     pub async fn submit_prometheus(&self, body: Bytes) -> Result<(), String> {
         let body_bytes = body.len();
         self.admit_ingest(
-            WriteCommand::IngestPrometheus { body, body_bytes },
+            // admit_ingest attaches the real reply channel; the dangling
+            // one here is never observed.
+            WriteCommand::IngestPrometheus {
+                body,
+                body_bytes,
+                reply: oneshot::channel().0,
+            },
             Admission {
                 points: None,
                 body_bytes,
@@ -526,11 +568,17 @@ impl Storage {
 
     async fn admit_ingest(
         &self,
-        command: WriteCommand,
+        mut command: WriteCommand,
         admission: Admission,
     ) -> Result<(), String> {
         let admission_started = Instant::now();
         let _ordered = self.0.admission.lock().await;
+        // M5: bound queued PAYLOAD bytes, not just batch count. The gate
+        // is held until the writer has applied the batch (the reply the
+        // writer sends below), so in-flight bytes can never exceed the
+        // gate. An oversized batch clamps to the full gate and is
+        // admitted alone rather than deadlocking the producer.
+        let gate_permit = self.0.gate.acquire(admission.body_bytes).await;
         let permit = self
             .0
             .writer
@@ -574,8 +622,28 @@ impl Storage {
                 }
             }
         }
+        // The reply doubles as the M5 release signal: the gate permit
+        // below is dropped only after the writer has applied the batch,
+        // so queued bytes track what the channel actually holds.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        match &mut command {
+            WriteCommand::IngestNamed { reply, .. } => *reply = reply_tx,
+            WriteCommand::IngestPrometheus { reply, .. } => *reply = reply_tx,
+            _ => unreachable!("admit_ingest only admits ingest commands"),
+        }
         permit.send(command);
-        Ok(())
+        // The admission lock only orders queue-slot reservation; it must
+        // drop before the apply wait, or one slow apply would block every
+        // later admission (and flush/backup admission behind it).
+        drop(_ordered);
+        // Unlike the traces/logs planes this is a contract change:
+        // a failed insert is now reported to the caller directly (it was
+        // previously deferred to the next flush/backup/barrier).
+        let result = reply_rx
+            .await
+            .unwrap_or_else(|_| Err("SQLite writer stopped before ingest completed".to_string()));
+        drop(gate_permit);
+        result
     }
 
     /// Proves that every previously admitted batch completed its SQLite
@@ -912,6 +980,7 @@ fn writer_main(
                 blob,
                 points,
                 body_bytes,
+                reply,
             } => {
                 record_queue_start(&profile, Some(points), body_bytes);
                 let started = Instant::now();
@@ -922,16 +991,24 @@ fn writer_main(
                     });
                 let insert_ns = elapsed_ns(started);
                 record_queue_completion(&profile, Some(points), body_bytes, insert_ns, &result);
+                // The admitting caller hears the failure directly AND the
+                // error stays latched for flush/backup gating below.
+                let _ = reply.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
                 if let Err(error) = result {
                     unreported_error = Some(error);
                 }
             }
-            WriteCommand::IngestPrometheus { body, body_bytes } => {
+            WriteCommand::IngestPrometheus {
+                body,
+                body_bytes,
+                reply,
+            } => {
                 record_queue_start(&profile, None, body_bytes);
                 let started = Instant::now();
                 let result = insert_prometheus_body(&conn, table, body.as_ref());
                 let insert_ns = elapsed_ns(started);
                 record_queue_completion(&profile, None, body_bytes, insert_ns, &result);
+                let _ = reply.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
                 if let Err(error) = result {
                     unreported_error = Some(error);
                 }

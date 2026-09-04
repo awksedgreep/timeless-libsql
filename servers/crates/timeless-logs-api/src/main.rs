@@ -100,6 +100,14 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let queue_bytes =
+        match positive_usize_from_env("TIMELESS_LOGS_QUEUE_BYTES", defaults.queue_bytes) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(2);
+            }
+        };
     let logs_query_limits = LogsQueryLimits {
         max_result_rows: match positive_usize_from_env(
             "TIMELESS_LOGS_LOGSQL_MAX_RESULT_ROWS",
@@ -138,6 +146,7 @@ async fn main() -> ExitCode {
         command_queue_batches,
         flush_interval,
         optimize_interval,
+        queue_bytes,
         logs_query_limits,
         auth,
         store_policy: StorePolicy {

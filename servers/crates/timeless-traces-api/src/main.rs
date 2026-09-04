@@ -68,6 +68,11 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
+    let queue_bytes = match positive_usize_from_env("TIMELESS_TRACES_QUEUE_BYTES", defaults.queue_bytes)
+    {
+        Ok(value) => value,
+        Err(error) => return usage_error(error),
+    };
     let enforce_retention = std::env::var_os("TIMELESS_TRACES_RETENTION_SECS").is_some();
     let retention =
         match optional_duration_from_env("TIMELESS_TRACES_RETENTION_SECS", defaults.retention) {
@@ -95,6 +100,7 @@ async fn main() -> ExitCode {
         listen,
         reader_connections,
         command_queue_batches,
+        queue_bytes,
         retention,
         enforce_retention,
         flush_interval,

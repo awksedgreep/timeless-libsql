@@ -96,6 +96,7 @@ pub struct Config {
     pub listen: SocketAddr,
     pub reader_connections: usize,
     pub command_queue_batches: usize,
+    pub queue_bytes: usize,
     pub flush_interval: Duration,
     pub compact_interval: Duration,
     pub retention_interval: Duration,
@@ -114,6 +115,7 @@ impl Default for Config {
             // readers retained the best throughput/memory/tail balance.
             reader_connections: 2,
             command_queue_batches: 256,
+            queue_bytes: Storage::DEFAULT_QUEUE_BYTES,
             // These match TimelessMetrics.LibsqlEngine's current orchestration.
             flush_interval: Duration::from_secs(10),
             compact_interval: Duration::from_secs(5 * 60),
@@ -140,6 +142,9 @@ impl Config {
         if self.command_queue_batches == 0 {
             return Err("command_queue_batches must be positive".into());
         }
+        if self.queue_bytes == 0 {
+            return Err("queue_bytes must be positive".into());
+        }
         if self.flush_interval.is_zero()
             || self.compact_interval.is_zero()
             || self.retention_interval.is_zero()
@@ -155,12 +160,13 @@ impl Config {
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
-    let storage = Storage::start(
+    let storage = Storage::start_with_queue_bytes(
         config.database_path.clone(),
         config.extension_path.clone(),
         config.reader_connections,
         config.command_queue_batches,
         config.raw_retention,
+        config.queue_bytes,
     )?;
     let app = protect_router(
         router_with_limits(storage.clone(), config.prom_query_limits),

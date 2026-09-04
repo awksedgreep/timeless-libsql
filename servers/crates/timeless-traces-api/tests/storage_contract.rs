@@ -365,6 +365,55 @@ async fn session_two_owns_lifecycle_durability_and_cold_reopen() {
 }
 
 #[tokio::test]
+async fn bytes_gate_blocks_admission_when_queue_bytes_are_exhausted() {
+    // M5 regression: the queue is bounded by PAYLOAD bytes, not just
+    // batch count. A 64 KiB gate fills with one large in-flight batch;
+    // further admissions must block on the gate even though channel
+    // slots remain free. The oversized-batch clamp lets the first batch
+    // through at all.
+    let extension = required_extension();
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start_with_queue_bytes_and_retention_policy(
+        directory.path().join("gate.db"),
+        extension,
+        1,
+        8,
+        None,
+        false,
+        64 * 1024,
+    )
+    .unwrap();
+
+    let blocker = Connection::open(directory.path().join("gate.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let spans = minimal_spans(8_192);
+    let blob = rich_batch(&spans);
+    let (span_count, body_bytes) = (spans.len(), blob.len());
+    assert!(blob.len() > 64 * 1024, "fixture must exceed the gate");
+    let first = tokio::spawn({
+        let storage = storage.clone();
+        async move { storage.submit_batch(blob, span_count, body_bytes).await }
+    });
+    wait_for_in_flight(&storage, 1).await;
+
+    let one = vec![RichSpan::minimal(9_000)];
+    let one_batch = rich_batch(&one);
+    let mut third = Box::pin(storage.submit_batch(one_batch.clone(), 1, one_batch.len()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut third)
+            .await
+            .is_err(),
+        "a full bytes gate must block further admissions"
+    );
+    drop(third);
+
+    blocker.execute_batch("COMMIT").unwrap();
+    first.await.unwrap().unwrap();
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn bounded_queue_backpressures_without_over_admitting() {
     let extension = required_extension();
     let directory = TempDir::new().unwrap();
@@ -384,7 +433,10 @@ async fn bounded_queue_backpressures_without_over_admitting() {
             .submit_batch(rich_batch(&spans), spans.len(), body_bytes)
             .await
     });
-    first.await.unwrap().unwrap();
+    // submit_batch now waits for the writer to APPLY the batch (issue #47
+    // M5: the bytes gate must span the queue). The writer dequeues and
+    // blocks on the held write lock, so the spawned future stays pending
+    // until COMMIT below.
     wait_for_in_flight(&storage, 1).await;
 
     let one = vec![RichSpan::minimal(9_000)];
@@ -414,6 +466,9 @@ async fn bounded_queue_backpressures_without_over_admitting() {
 
     blocker.execute_batch("COMMIT").unwrap();
     storage.barrier().await.unwrap();
+    // The held batch applied once the lock was released; its admission
+    // reply carried the result back to the spawned task.
+    first.await.unwrap().expect("first batch must apply after commit");
     let drained = storage.runtime_watermarks();
     assert_eq!(drained.completed_requests, 2);
     assert_eq!(drained.completed_spans, 8_193);

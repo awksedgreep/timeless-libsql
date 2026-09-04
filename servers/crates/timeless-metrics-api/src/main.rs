@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
 use timeless_metrics_api::{run, Config, PromQueryLimits};
-
 const USAGE: &str = "usage: timeless-metrics-api <libtimeless_ext.so> <database> [listen-address]";
 
 #[tokio::main]
@@ -67,6 +66,13 @@ async fn main() -> ExitCode {
     let command_queue_batches = match positive_usize_from_env(
         "TIMELESS_METRICS_COMMAND_QUEUE_BATCHES",
         defaults.command_queue_batches,
+    ) {
+        Ok(value) => value,
+        Err(error) => return usage_error(error),
+    };
+    let queue_bytes = match positive_usize_from_env(
+        "TIMELESS_METRICS_QUEUE_BYTES",
+        defaults.queue_bytes,
     ) {
         Ok(value) => value,
         Err(error) => return usage_error(error),
@@ -143,6 +149,7 @@ async fn main() -> ExitCode {
         listen,
         reader_connections,
         command_queue_batches,
+        queue_bytes,
         flush_interval,
         compact_interval,
         retention_interval,

@@ -14,7 +14,7 @@ use serde::Serialize;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
-    BackupReport, DataPlaneSpec,
+    BackupReport, BytesGate, DataPlaneSpec,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -336,7 +336,11 @@ enum WriteCommand {
         blob: Vec<u8>,
         spans: usize,
         body_bytes: usize,
-        reply: Option<oneshot::Sender<Result<(), String>>>,
+        reply: oneshot::Sender<Result<(), String>>,
+        /// Bytes-gate permit travelling with the batch: dropped by the
+        /// writer when the command is consumed, releasing the queued
+        /// bytes back to the admission gate exactly at apply time.
+        gate_permit: timeless_api_common::GatePermit,
     },
     Barrier(oneshot::Sender<Result<(), String>>),
     Flush {
@@ -386,6 +390,7 @@ struct StorageInner {
     database_path: PathBuf,
     retention: Option<Duration>,
     queue_capacity: usize,
+    gate: BytesGate,
     shutting_down: AtomicBool,
     tail: Arc<crate::tail::TailHub>,
 }
@@ -402,6 +407,12 @@ pub struct IngestTimings {
 }
 
 impl Storage {
+    /// Upper bound on payload bytes queued ahead of the writer. Batches
+    /// are ≤ 10 MiB each and the channel holds `queue_batches` of them;
+    /// the default gate tightens the worst case to 128 MiB of queued
+    /// payload.
+    pub const DEFAULT_QUEUE_BYTES: usize = 128 * 1024 * 1024;
+
     pub fn start(
         database_path: PathBuf,
         extension_path: PathBuf,
@@ -427,11 +438,34 @@ impl Storage {
         retention: Option<Duration>,
         enforce_retention: bool,
     ) -> Result<Self, String> {
+        Self::start_with_queue_bytes_and_retention_policy(
+            database_path,
+            extension_path,
+            reader_connections,
+            queue_batches,
+            retention,
+            enforce_retention,
+            Self::DEFAULT_QUEUE_BYTES,
+        )
+    }
+
+    pub fn start_with_queue_bytes_and_retention_policy(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        retention: Option<Duration>,
+        enforce_retention: bool,
+        queue_bytes: usize,
+    ) -> Result<Self, String> {
         if reader_connections == 0 {
             return Err("reader_connections must be positive".into());
         }
         if queue_batches == 0 {
             return Err("command_queue_batches must be positive".into());
+        }
+        if queue_bytes == 0 {
+            return Err("queue_bytes must be positive".into());
         }
         if retention.is_some_and(|duration| duration.is_zero()) {
             return Err("retention must be positive when enabled".into());
@@ -541,6 +575,7 @@ impl Storage {
             database_path,
             retention,
             queue_capacity: queue_batches,
+            gate: BytesGate::new(queue_bytes as u64),
             shutting_down: AtomicBool::new(false),
             tail: crate::tail::TailHub::new(),
         })))
@@ -553,6 +588,10 @@ impl Storage {
     /// The Session 3 OTLP handler uses this seam after parsing one request
     /// and encoding one public rich-span v1 batch. It never inserts spans one
     /// at a time and never owns a second buffer or block policy.
+    /// Test seam: fire-and-forget admission (returns at enqueue; failures
+    /// surface through barrier()/stats). The production HTTP path is
+    /// [`Self::submit_otlp_batch`], which waits for the apply and holds
+    /// the bytes gate for the whole queue stay.
     pub async fn submit_batch(
         &self,
         blob: Vec<u8>,
@@ -571,7 +610,8 @@ impl Storage {
     }
 
     /// Production OTLP admission waits for the single SQLite batch statement
-    /// to finish. A successful HTTP response cannot conceal a writer failure.
+    /// to finish. A successful HTTP response cannot conceal a writer failure,
+    /// and the bytes gate is held across the entire queue stay.
     pub async fn submit_otlp_batch(
         &self,
         blob: Vec<u8>,
@@ -601,6 +641,12 @@ impl Storage {
         if self.0.shutting_down.load(Ordering::Acquire) {
             return Err("traces API is shutting down; admission is closed".into());
         }
+        // M5: bound queued payload bytes, not just batch count. The
+        // production path (Some(reply)) holds the gate permit until the
+        // writer has applied the batch; the fire-and-forget seam can
+        // only hold it across the enqueue, so its bytes are released
+        // early by design.
+        let gate_permit = self.0.gate.acquire(body_bytes).await;
         let permit = self
             .0
             .writer
@@ -635,13 +681,36 @@ impl Storage {
                 .decompressed_body_bytes
                 .saturating_add(timings.decompressed_body_bytes as u64);
         }
-        permit.send(WriteCommand::Ingest {
-            blob,
-            spans,
-            body_bytes,
-            reply,
-        });
-        Ok(())
+        // The admission lock only orders queue-slot reservation; drop it
+        // before any apply wait so one slow apply never blocks later
+        // admissions.
+        drop(_ordered);
+        // M5: the gate permit travels INSIDE the queued command on the
+        // production path and is dropped by the writer when the batch has
+        // been applied — queued bytes stay bounded across the whole stay.
+        // The fire-and-forget seam releases its bytes at enqueue.
+        match reply {
+            Some(reply_tx) => {
+                permit.send(WriteCommand::Ingest {
+                    blob,
+                    spans,
+                    body_bytes,
+                    reply: reply_tx,
+                    gate_permit,
+                });
+                Ok(())
+            }
+            None => {
+                permit.send(WriteCommand::Ingest {
+                    blob,
+                    spans,
+                    body_bytes,
+                    reply: oneshot::channel().0,
+                    gate_permit,
+                });
+                Ok(())
+            }
+        }
     }
 
     pub fn record_ingest_rejection(&self, spans: usize, body_bytes: usize) {
@@ -977,16 +1046,16 @@ fn writer_main(
                 spans,
                 body_bytes,
                 reply,
+                // Dropping the travelling permit releases the queued
+                // bytes back to the admission gate exactly at apply time.
+                gate_permit,
             } => {
                 record_queue_start(&profile, spans, body_bytes);
                 let started = Instant::now();
                 let result = insert_rich_batch(&conn, &blob, spans);
                 record_queue_completion(&profile, spans, body_bytes, elapsed_ns(started), &result);
-                if let Some(reply) = reply {
-                    let _ = reply.send(result);
-                } else if let Err(error) = result {
-                    unreported_error = Some(error);
-                }
+                let _ = reply.send(result);
+                drop(gate_permit);
             }
             WriteCommand::Barrier(reply) => {
                 let result = unreported_error.take().map_or(Ok(()), Err);
