@@ -119,10 +119,9 @@ impl Signal {
     }
 
     fn flush_method(self) -> Method {
-        match self {
-            Self::Logs => Method::GET,
-            Self::Metrics | Self::Traces => Method::POST,
-        }
+        // All three planes route flush through POST only (issue #47 M3).
+        let _ = self;
+        Method::POST
     }
 
     fn expected_ingest_status(self) -> u16 {
