@@ -15,14 +15,14 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.7.9` | Current extension/core/dbhealth source line. |
-| `server_workspace` | `0.7.9` | Current metrics/logs/traces server source line. |
+| `extension_workspace` | `0.8.0` | Current extension/core/dbhealth source line. |
+| `server_workspace` | `0.8.0` | Current metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
-| `extension_minimum_server` | `0.7.0` | Oldest server accepted by the current extension document. |
+| `extension_minimum_server` | `0.8.0` | Oldest server accepted by the current extension document. |
 | `server_data_schema` | `1` | Additive `_timeless_schema_migrations` ledger generation. |
 | `server_required_data_abi` | `1` | Data ABI required by all current signal servers. |
-| `server_minimum_extension` | `0.7.0` | Oldest extension semantic version considered by current servers. |
+| `server_minimum_extension` | `0.8.0` | Oldest extension semantic version considered by current servers. |
 
 <!-- public-compatibility-versions:end -->
 
@@ -70,14 +70,24 @@ These independent versions must not be conflated:
   [upgrade guide](UPGRADE.md) warning. Deployments that set the mode
   explicitly (either value) are unaffected.
 
+### Behavior changes on the 0.8 line
+
+- `POST /api/v1/flush` is the only flush route on every signal server;
+  `GET` returns `405`. The admin key (`TIMELESS_ADMIN_KEY`) is accepted
+  only via the `x-timeless-admin-key` header; query-string keys fail
+  closed. Metrics ingest reports insert failures to the ingesting
+  caller directly. See the [changelog](../CHANGELOG.md) for the full
+  list and the [server API reference](SERVER_API_REFERENCE.md) for the
+  updated routes.
+
 ## Supported artifact pairings
 
 | Extension | Rust server | Verdict | Reason |
 |---|---|---|---|
-| current `0.7.x` | matching current `0.7.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
+| current `0.8.x` | matching current `0.8.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
 | tagged `v0.3.0` | `0.7.x` | unsupported | The tag predates `timeless_capabilities()` and the release-server query guards. |
-| tagged `0.4.x`–`0.6.x` | current `0.7.x` server | unsupported | The current servers declare a `0.7.0` extension floor; a pre-`0.5.0` extension additionally cannot decode codec-8 blocks a later optimize may already have written. |
-| `0.7.x` | tagged `0.3.x`–`0.6.x` server | unsupported | The current extension declares a `0.7.0` server floor; an old server cannot prove it understands the current API/resource contract, and the `0.7` line changed the documented authentication default. |
+| tagged `0.4.x`–`0.7.x` | current `0.8.x` server | unsupported | The current servers declare a `0.8.0` extension floor; a pre-`0.5.0` extension additionally cannot decode codec-8 blocks a later optimize may already have written. |
+| `0.8.x` | tagged `0.3.x`–`0.7.x` server | unsupported | The current extension declares a `0.8.0` server floor; an old server cannot prove it understands the current API/resource contract, and the `0.7` line changed the documented authentication default. |
 | any version with a different `data_abi` | current servers | unsupported | The server refuses before virtual-table initialization. |
 | current extension with a future-schema database | current servers | unsupported/fail closed | The server does not downgrade or mutate a future ledger. |
 | current extension loaded directly by SQLite/libSQL | no Timeless server; host-owned | supported | The host must negotiate capabilities and own maintenance, backup, concurrency, and limits. |
