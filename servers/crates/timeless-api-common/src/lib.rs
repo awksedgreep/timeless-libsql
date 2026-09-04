@@ -768,3 +768,71 @@ mod tests {
         assert!(!error.contains("Unix-socket"), "{error}");
     }
 }
+
+/// Ceiling on the whole post-signal drain: serve-loop stop, maintenance
+/// task teardown, storage flush/checkpoint/join. Orchestrators send
+/// SIGTERM and then SIGKILL after their grace period; without a ceiling,
+/// one open live-tail stream or one wedged checkpoint consumes that
+/// grace and the process dies anyway — mid-drain and unlogged. On
+/// expiry the drain future is dropped (aborting the in-flight drain) and
+/// the returned errors explain why. Buffered-but-unflushed data beyond
+/// the last durable barrier is lost exactly as on SIGKILL, which the
+/// durability contract already accepts.
+pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Run `drain` under [`SHUTDOWN_DEADLINE`]. `drain` yields the serve
+/// result and the storage-shutdown result; on expiry both error slots
+/// are populated and the process should proceed to exit.
+pub async fn shutdown_with_deadline(
+    deadline: Duration,
+    signal: &'static str,
+    drain: impl Future<Output = (Result<(), String>, Result<(), String>)>,
+) -> (Result<(), String>, Result<(), String>) {
+    match tokio::time::timeout(deadline, drain).await {
+        Ok(pair) => pair,
+        Err(_) => {
+            eprintln!(
+                "{signal}: shutdown deadline of {}s exceeded; exiting without \
+                 a full drain — buffered tail data beyond the last durable \
+                 barrier is lost, exactly as on SIGKILL",
+                deadline.as_secs()
+            );
+            let expired = Err(format!(
+                "{signal}: drain abandoned after the {}s shutdown deadline",
+                SHUTDOWN_DEADLINE.as_secs()
+            ));
+            (expired.clone(), expired)
+        }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_deadline_tests {
+    use super::*;
+    use std::future::pending;
+
+    #[tokio::test]
+    async fn completed_drain_passes_both_results_through() {
+        let (served, storage) = shutdown_with_deadline(Duration::from_secs(5), "t", async {
+            (Ok(()), Err("storage failed".into()))
+        })
+        .await;
+        assert_eq!(served, Ok(()));
+        assert_eq!(storage, Err("storage failed".into()));
+    }
+
+    #[tokio::test]
+    async fn hung_drain_hits_the_deadline_with_errors() {
+        let started = Instant::now();
+        let (served, storage) = shutdown_with_deadline(Duration::from_millis(50), "t", async {
+            pending::<()>().await;
+            (Ok(()), Ok(()))
+        })
+        .await;
+        assert!(served.is_err() && storage.is_err());
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "deadline must actually bound the wait"
+        );
+    }
+}

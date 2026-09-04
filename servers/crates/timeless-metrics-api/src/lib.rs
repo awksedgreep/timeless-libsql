@@ -198,20 +198,26 @@ pub async fn run(config: Config) -> Result<(), String> {
         |storage| async move { storage.schedule_wal_checkpoint().await },
     );
 
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|error| format!("serve API: {error}"));
-
-    flush_task.abort();
-    compact_task.abort();
-    retention_task.abort();
-    wal_checkpoint_task.abort();
-    let _ = flush_task.await;
-    let _ = compact_task.await;
-    let _ = retention_task.await;
-    let _ = wal_checkpoint_task.await;
-    let shutdown = storage.shutdown().await;
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    let drain = async {
+        let served = server.await.map_err(|error| format!("serve API: {error}"));
+        flush_task.abort();
+        compact_task.abort();
+        retention_task.abort();
+        wal_checkpoint_task.abort();
+        let _ = flush_task.await;
+        let _ = compact_task.await;
+        let _ = retention_task.await;
+        let _ = wal_checkpoint_task.await;
+        let shutdown = storage.shutdown().await;
+        (served, shutdown)
+    };
+    let (served, shutdown) = timeless_api_common::shutdown_with_deadline(
+        timeless_api_common::SHUTDOWN_DEADLINE,
+        "timeless-metrics-api",
+        drain,
+    )
+    .await;
     served.and(shutdown)
 }
 
