@@ -724,6 +724,7 @@ attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
 [Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.6...HEAD
+[0.8.0]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.9...v0.8.0
 [0.7.9]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/awksedgreep/timeless-libsql/compare/v0.7.6...v0.7.7

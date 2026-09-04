@@ -150,10 +150,10 @@ storage.
 ## Platform and SQLite/libSQL boundary
 
 The release-tool target inventory covers x86-64/AArch64 Linux GNU and
-x86-64/AArch64 macOS. For `v0.7.9`, all four native build, identity,
+x86-64/AArch64 macOS. For `v0.8.0`, all four native build, identity,
 install/remove, and upload jobs passed, followed by the complete outer
 checksum job, and the workflow published the archives plus `SHA256SUMS` as
-permanent `v0.7.9` GitHub Release assets (the tag→Release path first proven
+permanent `v0.8.0` GitHub Release assets (the tag→Release path first proven
 by `v0.4.2`). The [artifact guide](ARTIFACTS.md) is the canonical
 publication-status record.
 
