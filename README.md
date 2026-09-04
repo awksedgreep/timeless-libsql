@@ -442,6 +442,7 @@ in [RESULTS.md](RESULTS.md) and are labeled as historical.
 | document | use it for |
 |---|---|
 | [User guide](docs/GUIDE.md) | SQL-first walkthrough and operational concepts. |
+| [Observability schema](docs/OBSERVABILITY_SCHEMA.md) | Friendly views, naming, lifecycle, and compatibility policy. |
 | [SQLite extension API](docs/SQL_API_REFERENCE.md) | Canonical tables, columns, TVFs, commands, batches, frames, capabilities, transactions, and errors. |
 | [Rust signal server API](docs/SERVER_API_REFERENCE.md) | Binaries, routes, authentication, limits, lifecycle, backup, and configuration. |
 | [Query cookbook](docs/QUERIES.md) | Copyable SQL query patterns. |

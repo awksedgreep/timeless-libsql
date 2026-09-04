@@ -59,6 +59,7 @@ use timeless_core::{
 use crate::batch::BatchReader;
 use crate::flatjson::{pairs_to_json, parse_labels_json};
 use crate::query_report::LogQueryReportState;
+use crate::schema;
 use crate::shadow_block_store::{self, ShadowBlockStore};
 use crate::shadow_meta;
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
@@ -321,6 +322,11 @@ impl LogsTab {
         })?;
         let table = String::from_utf8_lossy(table_name).into_owned();
         let database = String::from_utf8_lossy(database_name).into_owned();
+        // Innocuous (the FTS5 precedent, same as metrics): reads have no
+        // side effects, so companion views may reference this vtab under
+        // trusted_schema=off — which is exactly how the observability
+        // schema reaches ordinary sqlite3 CLI users.
+        db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
         // Bind the calling connection for every store operation below
         // (DDL, _meta reads/writes, recovery scans). RAII unbind.
@@ -435,6 +441,31 @@ impl LogsTab {
                 timestamp_unit,
             )
         };
+
+        if is_create {
+            // Observability schema companions (#20/#21) install in the
+            // same CREATE VIRTUAL TABLE transaction: rollback removes
+            // everything, and the collision sweep fails before any user
+            // object is touched. The entries view bakes this table's
+            // timestamp unit; services/fields follow the declared keys.
+            schema::install_log_views(
+                &host,
+                &database,
+                &table,
+                &index_keys,
+                timestamp_unit.per_second,
+            )
+            .map_err(|error| module_err(format!("install observability schema: {error}")))?;
+        } else {
+            // Best-effort refresh on open; never fails the connect.
+            schema::refresh_log_views(
+                &host,
+                &database,
+                &table,
+                &index_keys,
+                timestamp_unit.per_second,
+            );
+        }
 
         // R4: one engine per (db file, schema alias, table, instance). First
         // connection in builds it — BlockEngine::new recovers the block
@@ -990,6 +1021,8 @@ impl CreateVTab<'_> for LogsTab {
         shared::pin_for_drop(self.db, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
+        schema::drop_objects(&host, &self.database_name, &self.table_name)
+            .map_err(|error| module_err(format!("remove observability schema: {error}")))?;
         host.execute_batch(&shadow_block_store::drop_ddl(
             &self.database_name,
             &self.table_name,
@@ -1478,5 +1511,152 @@ unsafe impl VTabCursor for LogsCursor<'_> {
 
     fn rowid(&self) -> Result<i64> {
         Ok(self.pos as i64)
+    }
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod schema_tests {
+    use super::*;
+
+    fn inventory_names(db: &Connection) -> Vec<(String, String, i64)> {
+        let mut stmt = db
+            .prepare(
+                "SELECT object_name, object_kind, schema_version \
+                 FROM timeless_schema_inventory ORDER BY object_name",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn register_logs(db: &Connection) {
+        crate::logs_vtab::register(
+            db,
+            Arc::new(crate::query_report::LogQueryReportState::default()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn schema_installs_entries_services_and_fields() {
+        // Phase 4 (#23 MVP): normalized entries plus discovery over
+        // declared keys, inventoried exactly. Typed metadata must
+        // survive the view verbatim (number stays number).
+        let db = Connection::open_in_memory().unwrap();
+        register_logs(&db);
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service,host');",
+        )
+        .unwrap();
+        assert_eq!(
+            inventory_names(&db),
+            vec![
+                ("timeless_logs_entries".to_string(), "view".to_string(), 1),
+                ("timeless_logs_fields".to_string(), "view".to_string(), 1),
+                ("timeless_logs_services".to_string(), "view".to_string(), 1),
+            ]
+        );
+        db.execute_batch(
+            r#"INSERT INTO logs(ts, level, message, metadata) VALUES
+             (1753000000123, 'error', 'payment declined',
+              '{"service":"payments","retryable":false,"attempt":2}');"#,
+        )
+        .unwrap();
+        db.execute("INSERT INTO logs(logs) VALUES ('flush');", [])
+            .unwrap();
+
+        let (ts, ts_time, level, message): (i64, String, String, String) = db
+            .query_row(
+                "SELECT ts, ts_time, level, message FROM timeless_logs_entries;",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (ts, level, message.as_str()),
+            (1753000000123, "error".to_string(), "payment declined")
+        );
+        assert!(
+            ts_time.starts_with("2025-") && ts_time.ends_with(".123Z"),
+            "{ts_time}"
+        );
+        // Typed fidelity through the view: number/boolean are JSON
+        // values, not strings.
+        let attempt: i64 = db
+            .query_row(
+                "SELECT json_extract(metadata, '$.attempt') FROM timeless_logs_entries;",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt, 2);
+        let retryable: i64 = db
+            .query_row(
+                "SELECT json_extract(metadata, '$.retryable') FROM timeless_logs_entries;",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retryable, 0);
+
+        let services: Vec<String> = db
+            .prepare("SELECT service FROM timeless_logs_services;")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(services, vec!["payments".to_string()]);
+
+        let fields: Vec<String> = db
+            .prepare("SELECT field FROM timeless_logs_fields;")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(fields, vec!["service".to_string(), "host".to_string()]);
+    }
+
+    #[test]
+    fn schema_without_keys_installs_entries_only() {
+        // Partial install: no declared keys means no services or fields
+        // views — inventoried exactly, not as empty views.
+        let db = Connection::open_in_memory().unwrap();
+        register_logs(&db);
+        db.execute_batch("CREATE VIRTUAL TABLE logs USING timeless_logs;")
+            .unwrap();
+        assert_eq!(
+            inventory_names(&db),
+            vec![("timeless_logs_entries".to_string(), "view".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn schema_microsecond_unit_bakes_into_entries_view() {
+        let db = Connection::open_in_memory().unwrap();
+        register_logs(&db);
+        db.execute_batch("CREATE VIRTUAL TABLE logs USING timeless_logs(timestamp_unit='us');")
+            .unwrap();
+        db.execute_batch(
+            "INSERT INTO logs(ts, level, message, metadata) VALUES \
+             (1753000000123456, 'info', 'tick', '{}');",
+        )
+        .unwrap();
+        db.execute("INSERT INTO logs(logs) VALUES ('flush');", [])
+            .unwrap();
+        let ts_time: String = db
+            .query_row("SELECT ts_time FROM timeless_logs_entries;", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        // Millis precision by contract; the microsecond divisor is
+        // pinned by the date itself (a ms divisor would land in 1970).
+        assert!(
+            ts_time.starts_with("2025-07-20") && ts_time.ends_with(".123Z"),
+            "microsecond divisor wrong: {ts_time}"
+        );
     }
 }

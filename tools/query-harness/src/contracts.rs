@@ -1057,6 +1057,140 @@ fn validate_public_artifact_inventory(root: &Path) -> Result<Vec<String>> {
     Ok(errors)
 }
 
+fn validate_observability_schema_catalog(root: &Path) -> Result<Vec<String>> {
+    let relative = "docs/OBSERVABILITY_SCHEMA.md";
+    let path = root.join(relative);
+    if !path.is_file() {
+        // Fixture roots that never mention the schema feature skip this
+        // check (same convention as the embedding contract without its
+        // manifest); the checked-in tree always carries the document.
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(&path)?;
+    let mut errors = Vec::new();
+
+    // Section-scoped table: header row, separator row, then data rows
+    // until the first non-table line.
+    let section = match text.split("## Object catalog").nth(1) {
+        Some(section) => section,
+        None => {
+            return Ok(vec![format!("{relative}: missing Object catalog section")]);
+        }
+    };
+    let mut rows = section
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('|'));
+    rows.next(); // header
+    let separator = rows.next().unwrap_or_default();
+    if !separator.contains("---") {
+        return Ok(vec![format!(
+            "{relative}: Object catalog table is missing its header"
+        )]);
+    }
+
+    // Identifiers this catalog may reference: matrix rows, recipe
+    // headers, and trace-matrix rows. Scanned, not fully parsed —
+    // enough to catch stale links.
+    let mut known: BTreeSet<String> = BTreeSet::new();
+    let id_pattern = Regex::new(r"`((?:PQL|MQL|LQL)-[A-Z]?\d{2})`")?;
+    for matrix in MATRICES {
+        let candidate = root.join(matrix);
+        if candidate.is_file() {
+            let content = fs::read_to_string(&candidate)?;
+            known.extend(
+                id_pattern
+                    .captures_iter(&content)
+                    .map(|captures| captures[1].to_owned()),
+            );
+        }
+    }
+    let equivalents = root.join("docs/QUERY_SQL_EQUIVALENTS.md");
+    if equivalents.is_file() {
+        let header_pattern = Regex::new(r"(?m)^###\s+((?:SQL-[A-Z]+-\d+|MQL-\d+))")?;
+        let content = fs::read_to_string(&equivalents)?;
+        known.extend(
+            header_pattern
+                .captures_iter(&content)
+                .map(|captures| captures[1].to_owned()),
+        );
+    }
+    let trace_matrix = root.join("docs/2026-08-08_trace_query_matrix.md");
+    if trace_matrix.is_file() {
+        let tsq_pattern = Regex::new(r"`(TSQ-\d+)`")?;
+        let content = fs::read_to_string(&trace_matrix)?;
+        known.extend(
+            tsq_pattern
+                .captures_iter(&content)
+                .map(|captures| captures[1].to_owned()),
+        );
+    }
+    let ref_pattern = Regex::new(r"`((?:[A-Z]+-)?[A-Z]+-\d+)`")?;
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for (index, row) in rows.enumerate() {
+        if !row.ends_with('|') {
+            break;
+        }
+        let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() != 5 {
+            errors.push(format!(
+                "{relative}: catalog row {} has {} cells, expected 5 (object | kind | sources | refs | description)",
+                index + 1,
+                cells.len()
+            ));
+            continue;
+        }
+        let name = cells[0].trim_matches('`');
+        if !name.starts_with("timeless_") || name.contains([' ', '"']) {
+            errors.push(format!(
+                "{relative}: catalog object {name:?} breaks the timeless_<source>_<kind> convention"
+            ));
+        }
+        if !seen.insert(name.to_owned()) {
+            errors.push(format!("{relative}: duplicate catalog object {name:?}"));
+        }
+        if cells[1].trim_matches('`') != "view" {
+            errors.push(format!(
+                "{relative}: catalog object {name:?} has unknown kind {}",
+                cells[1]
+            ));
+        }
+        if cells[2].trim().is_empty() {
+            errors.push(format!(
+                "{relative}: catalog object {name:?} has no source tables"
+            ));
+        }
+        let refs: Vec<String> = ref_pattern
+            .captures_iter(cells[3])
+            .map(|captures| captures[1].to_owned())
+            .collect();
+        if refs.is_empty() {
+            errors.push(format!(
+                "{relative}: catalog object {name:?} names no recipe or contract IDs"
+            ));
+        }
+        for reference in refs {
+            if !known.contains(&reference) {
+                errors.push(format!(
+                    "{relative}: catalog object {name:?} references unknown ID {reference:?}"
+                ));
+            }
+        }
+        if cells[4].trim().is_empty() {
+            errors.push(format!(
+                "{relative}: catalog object {name:?} has an empty description"
+            ));
+        }
+    }
+    if seen.is_empty() {
+        errors.push(format!(
+            "{relative}: Object catalog table has no object rows"
+        ));
+    }
+    Ok(errors)
+}
+
 fn validate_public_embedding_contract(root: &Path) -> Result<Vec<String>> {
     let manifest_relative = "crates/timeless-ext/Cargo.toml";
     let manifest_path = root.join(manifest_relative);
@@ -1951,6 +2085,7 @@ pub(crate) fn validate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_public_server_environment(root)?);
     errors.extend(validate_public_compatibility_versions(root)?);
     errors.extend(validate_public_artifact_inventory(root)?);
+    errors.extend(validate_observability_schema_catalog(root)?);
     errors.extend(validate_public_embedding_contract(root)?);
     errors.extend(validate_markdown_table_structure(root)?);
     errors.extend(validate_query_storage_findings(root)?);
@@ -2149,6 +2284,87 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("tables.md:5"));
         assert!(errors[0].contains("has 4 unescaped separators; expected 3"));
+    }
+
+    fn schema_fixture(catalog_rows: &str) -> TempDir {
+        let fixture = fixture();
+        fs::write(
+            fixture.path().join("docs/2026-08-08_trace_query_matrix.md"),
+            "# Trace matrix\n\n| `TSQ-01` | lookup | shipped |\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/QUERY_SQL_EQUIVALENTS.md"),
+            "# Equivalents\n\n### SQL-LOG-004: distinct field values\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("docs/OBSERVABILITY_SCHEMA.md"),
+            format!(
+                "# Schema\n\n## Object catalog\n\n\
+                 | object | kind | source tables | refs | description |\n\
+                 |---|---|---|---|---|\n\
+                 {catalog_rows}"
+            ),
+        )
+        .unwrap();
+        fixture
+    }
+
+    fn schema_errors(root: &Path) -> Vec<String> {
+        validate(root)
+            .unwrap()
+            .into_iter()
+            .filter(|error| error.contains("catalog") || error.contains("OBSERVABILITY_SCHEMA"))
+            .collect()
+    }
+
+    #[test]
+    fn observability_catalog_accepts_a_valid_row() {
+        let fixture = schema_fixture(
+            "| `timeless_traces_spans` | view | `traces` | `TSQ-01` | Spans. |\n\
+             | `timeless_logs_services` | view | `logs` | `SQL-LOG-004` | Services. |\n",
+        );
+        assert_eq!(schema_errors(fixture.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn observability_catalog_rejects_bad_rows() {
+        for (row, needle) in [
+            (
+                "| `timeless_traces_spans` | view | `traces` | `TSQ-01` | Spans. |\n\
+                 | `timeless_traces_spans` | view | `traces` | `TSQ-01` | Twice. |\n",
+                "duplicate catalog object",
+            ),
+            (
+                "| `timeless_traces_spans` | view | `traces` | `TSQ-99` | Spans. |\n",
+                "references unknown ID",
+            ),
+            (
+                "| `timeless_traces_spans` | view | `traces` | `TSQ-01` |  |\n",
+                "empty description",
+            ),
+            (
+                "| `traces_spans` | view | `traces` | `TSQ-01` | Spans. |\n",
+                "breaks the timeless",
+            ),
+            (
+                "| `timeless_traces_spans` | view | `traces` | none | Spans. |\n",
+                "names no recipe",
+            ),
+            (
+                "| `timeless_traces_spans` | view |  | `TSQ-01` | Spans. |\n",
+                "has no source tables",
+            ),
+        ] {
+            let fixture = schema_fixture(row);
+            assert!(
+                schema_errors(fixture.path())
+                    .iter()
+                    .any(|error| error.contains(needle)),
+                "row {row:?} should fail with {needle:?}"
+            );
+        }
     }
 
     #[test]

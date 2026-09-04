@@ -101,6 +101,33 @@ The tour: seed, series count, the incident error-bucket ramp, error logs, the
 log→trace pivot, and the storage report. Edit the `SCRIPT` list at the
 top of screencast.py to change the shots.
 
+## Recording the observability-schema tour
+
+A second, lighter tour shows the friendly companion views (#20):
+install-by-CREATE, the inventory, spans/summary/errors, log entries
+with typed JSON, metric latest, and owned-only removal. It needs only
+`libtimeless_ext` — no demogen module — and hand-seeds a handful of
+rows so every output stays readable:
+
+```sh
+rm -f schema-tour.db
+python3 tools/demogen/schema_screencast.py schema-tour.db                  # rehearse
+python3 tools/demogen/schema_screencast.py schema-tour.db --cast schema.cast
+```
+
+`--cast` records an asciinema-v3 file directly — no asciinema install
+required. Play it with `asciinema play schema.cast`, upload it to
+asciinema.org, or convert to GIF with `agg` (already available via
+`cargo install --git https://github.com/asciinema/agg`):
+
+```sh
+agg --cols 120 --rows 32 schema.cast schema-demo.gif
+```
+
+(Or record with asciinema itself, same as the tour above:
+`asciinema rec --window-size 120x32 -c 'python3
+tools/demogen/schema_screencast.py schema-tour.db' schema.cast`.)
+
 For a take that includes the dashboards in a browser, use any screen
 recorder and run `timeless_demo('follow', 120)` in the terminal while
 the UI updates alongside.

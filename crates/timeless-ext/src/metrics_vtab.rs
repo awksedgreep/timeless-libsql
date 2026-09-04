@@ -78,6 +78,7 @@ use timeless_core::{Engine, Labels};
 
 use crate::batch::BatchReader;
 use crate::flatjson::{labels_to_json, parse_labels_json};
+use crate::schema;
 use crate::shadow_meta;
 use crate::shadow_store::{self, ShadowTableStore};
 use crate::shared::{self, DbGuard, RegistryKey, SharedEngine};
@@ -237,8 +238,14 @@ impl MetricsTab {
 
             host.execute_batch(&shadow_store::ddl(&database, &table))?;
             shadow_store::ensure_max_ts_val_column(&host, &database, &table)?;
+            // Observability schema companions (#20/#21), same contract
+            // as traces/logs: same-transaction install, best-effort
+            // refresh on open, owned-only removal on drop.
+            schema::install_metric_views(&host, &database, &table)
+                .map_err(|error| module_err(format!("install observability schema: {error}")))?;
         } else {
             shadow_store::require_read_schema(&host, &database, &table)?;
+            schema::refresh_metric_views(&host, &database, &table);
         }
         let instance_id = if is_create {
             shadow_meta::ensure_instance_id(&host, &database, &table)
@@ -915,6 +922,8 @@ impl CreateVTab<'_> for MetricsTab {
         shared::pin_for_drop(self.db, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
+        schema::drop_objects(&host, &self.database_name, &self.table_name)
+            .map_err(|error| module_err(format!("remove observability schema: {error}")))?;
         host.execute_batch(&shadow_store::drop_ddl(
             &self.database_name,
             &self.table_name,
@@ -1473,5 +1482,114 @@ mod tests {
                 || (message.contains("4294967295 series require at least")
                     && message.contains("but only 0 remain"))
         );
+    }
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod schema_tests {
+    use super::*;
+
+    fn inventory_names(db: &Connection) -> Vec<(String, String, i64)> {
+        let mut stmt = db
+            .prepare(
+                "SELECT object_name, object_kind, schema_version \
+                 FROM timeless_schema_inventory ORDER BY object_name",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn schema_installs_series_and_latest() {
+        // Phase 4 (#22 MVP): series catalog plus latest values over the
+        // public TVFs and base table, inventoried exactly.
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE metrics USING timeless_metrics;")
+            .unwrap();
+        assert_eq!(
+            inventory_names(&db),
+            vec![
+                ("timeless_metrics_latest".to_string(), "view".to_string(), 1),
+                ("timeless_metrics_series".to_string(), "view".to_string(), 1),
+            ]
+        );
+        // Same series, labels in different key order across inserts:
+        // canonical grouping must keep it one series.
+        db.execute_batch(
+            "INSERT INTO metrics(name, ts, value, labels) VALUES \
+             ('cpu', 1700000000, 1.5, '{\"host\":\"a\",\"region\":\"x\"}'); \
+             INSERT INTO metrics(name, ts, value, labels) VALUES \
+             ('cpu', 1700000060, 2.5, '{\"region\":\"x\",\"host\":\"a\"}'); \
+             INSERT INTO metrics(name, ts, value, labels) VALUES \
+             ('mem', 1700000000, 512.0, '{\"host\":\"a\"}');",
+        )
+        .unwrap();
+        db.execute("INSERT INTO metrics(metrics) VALUES ('flush');", [])
+            .unwrap();
+
+        let series: Vec<(String, String)> = db
+            .prepare("SELECT name, labels FROM timeless_metrics_series ORDER BY name, labels;")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            series,
+            vec![
+                (
+                    "cpu".to_string(),
+                    "{\"host\":\"a\",\"region\":\"x\"}".to_string()
+                ),
+                ("mem".to_string(), "{\"host\":\"a\"}".to_string()),
+            ]
+        );
+
+        let latest: Vec<(String, i64, f64, String)> = db
+            .prepare("SELECT name, ts, value, ts_time FROM timeless_metrics_latest;")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(latest.len(), 2, "one row per series: {latest:?}");
+        let cpu = latest.iter().find(|row| row.0 == "cpu").unwrap();
+        assert_eq!((cpu.1, cpu.2), (1700000060, 2.5), "newest wins");
+        assert!(
+            cpu.3.starts_with("2023-") && cpu.3.ends_with(".000Z"),
+            "friendly UTC seconds: {}",
+            cpu.3
+        );
+    }
+
+    #[test]
+    fn schema_drop_removes_owned_views() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE metrics USING timeless_metrics; \
+             CREATE TABLE user_data(id INTEGER);",
+        )
+        .unwrap();
+        db.execute_batch("DROP TABLE metrics;").unwrap();
+        let names: Vec<String> = db
+            .prepare("SELECT name FROM sqlite_master ORDER BY name;")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            !names.iter().any(|n| n.starts_with("timeless_metrics_")),
+            "{names:?}"
+        );
+        assert!(names.contains(&"user_data".to_string()));
+        assert!(inventory_names(&db).is_empty());
     }
 }
