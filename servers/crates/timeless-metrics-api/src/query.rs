@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::PromQueryLimits;
@@ -146,13 +146,37 @@ struct Matcher {
     regex: Option<Regex>,
 }
 
+/// Upper bound on user-supplied regular-expression patterns. The regex
+/// crate is linear-time (no catastrophic backtracking) and bounds the
+/// compiled program, but compile cost itself scales with the pattern;
+/// a megabyte-length matcher expression is never a legitimate label
+/// filter. Mirrors the LogsQL side's posture.
+const MAX_REGEX_PATTERN_BYTES: usize = 1024;
+
+/// Compile a user-supplied pattern, anchored, with the shared budget:
+/// a length cap plus a 1 MiB compiled-program limit (the regex crate's
+/// default is 10 MiB — generous for an unauthenticated request path).
+fn compile_user_regex(pattern: &str, context: &str) -> Result<Regex, String> {
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err(format!(
+            "{context}: pattern is {} bytes, exceeds the {}-byte limit",
+            pattern.len(),
+            MAX_REGEX_PATTERN_BYTES
+        ));
+    }
+    RegexBuilder::new(pattern)
+        .size_limit(1 << 20)
+        .build()
+        .map_err(|error| format!("{context}: {error}"))
+}
+
 impl Matcher {
     fn new(key: String, op: MatcherOp, value: String) -> Result<Self, String> {
         let regex = if matches!(op, MatcherOp::Regex | MatcherOp::NotRegex) {
-            Some(
-                Regex::new(&format!("^(?:{value})$"))
-                    .map_err(|error| format!("invalid regex for {key}: {error}"))?,
-            )
+            Some(compile_user_regex(
+                &format!("^(?:{value})$"),
+                &format!("invalid regex for {key}"),
+            )?)
         } else {
             None
         };
@@ -6665,8 +6689,10 @@ fn execute_prometheus_label_replace(
     if label_replace.destination.is_empty() {
         return Err("invalid destination label name in label_replace(): \"\"".into());
     }
-    let pattern = Regex::new(&format!("^(?s:{})$", label_replace.pattern))
-        .map_err(|error| format!("invalid regular expression in label_replace(): {}", error))?;
+    let pattern = compile_user_regex(
+        &format!("^(?s:{})$", label_replace.pattern),
+        "invalid regular expression in label_replace()",
+    )?;
     let child = execute_prometheus(
         conn,
         features,
@@ -10101,6 +10127,28 @@ fn comma(output: &mut Vec<u8>, index: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_regex_compilation_is_bounded() {
+        // M6: unauthenticated patterns get a length cap and a compiled-
+        // program budget. Normal patterns compile and anchor as before.
+        let ok = compile_user_regex(&format!("^(?:{})$", "web-.*"), "t").unwrap();
+        assert!(ok.is_match("web-1"));
+        // Oversized: rejected before any compile work.
+        let big = "a".repeat(MAX_REGEX_PATTERN_BYTES + 1);
+        let err = compile_user_regex(&big, "t").unwrap_err();
+        assert!(err.contains("exceeds the"), "{err}");
+        // At the cap: compiles fine.
+        let edge = "a".repeat(MAX_REGEX_PATTERN_BYTES);
+        assert!(compile_user_regex(&edge, "t").is_ok());
+        // Pathological nesting is rejected by the program-size budget,
+        // not by hanging the request.
+        let nested = "a".repeat(64);
+        let nested = format!("({nested}){{100}}");
+        let nested = format!("({nested}){{100}}");
+        let err = compile_user_regex(&format!("^(?:{nested})$"), "t").unwrap_err();
+        assert!(err.contains("t:"), "{err}");
+    }
 
     #[test]
     fn prometheus_atan2_matches_go_rounding_and_ieee_quadrants() {
