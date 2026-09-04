@@ -728,6 +728,32 @@ impl FsStore {
             .parse()
             .map_err(|_| format!("PCO1 header has non-numeric partition key {pk_str:?}"))?;
 
+        // Header sanity (issue #41 residual): these invariants hold for
+        // every chunk the engine writes, so a violation means the file
+        // is corrupt and must be quarantined at scan rather than
+        // entering the index where only a lucky query would ever notice.
+        if point_count == 0 {
+            return Err("PCO1 header has point_count 0".into());
+        }
+        if min_ts > max_ts {
+            return Err(format!(
+                "PCO1 header has inverted ts range [{min_ts}, {max_ts}]"
+            ));
+        }
+        if encoding == ENC_RAW {
+            // RAW layout is exact: a 27-byte fixed prefix + partition key
+            // + 24 bytes of value stats, then both columns length-prefixed
+            // with exactly point_count × 8 bytes each.
+            let expected_len = 59 + pk_len + point_count as usize * 16;
+            let actual_len = file.metadata().map_err(|e| e.to_string())?.len() as usize;
+            if actual_len != expected_len {
+                return Err(format!(
+                    "PCO1 RAW file is {actual_len} bytes, expected {expected_len} \
+                     for {point_count} points"
+                ));
+            }
+        }
+
         Ok(vec![StoredChunk {
             series_id,
             meta: ChunkMeta {
@@ -790,6 +816,22 @@ impl FsStore {
             pos += 4;
 
             data_entries.push((data_offset, data_len));
+            // Same header invariants as PCO1 (issue #41 residual): the
+            // engine never writes a zero-point or ts-inverted chunk.
+            if point_count == 0 {
+                return Err("PCB1 table entry has point_count 0".into());
+            }
+            if min_ts > max_ts {
+                return Err(format!(
+                    "PCB1 table entry has inverted ts range [{min_ts}, {max_ts}]"
+                ));
+            }
+            if encoding == ENC_RAW && data_len != point_count * 16 {
+                return Err(format!(
+                    "PCB1 RAW entry is {data_len} bytes, expected {} for {point_count} points",
+                    point_count * 16
+                ));
+            }
             results.push(StoredChunk {
                 series_id,
                 meta: ChunkMeta {
@@ -1264,6 +1306,82 @@ mod tests {
             !FsStore::manifest_path(&dir).exists(),
             "successful recovery did not clear its manifest"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Well-formed PCO1 framing (RAW encoding) with one corrupted header
+    /// field, overwritten at `patch` with the given bytes.
+    fn raw_pco1_header_with(point_count: u32, min_ts: i64, max_ts: i64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"PCO1");
+        out.push(2u8); // version 2 = ENC_RAW
+        out.extend_from_slice(&point_count.to_be_bytes());
+        out.extend_from_slice(&min_ts.to_be_bytes());
+        out.extend_from_slice(&max_ts.to_be_bytes());
+        let pk = "7".as_bytes(); // numeric series id
+        out.extend_from_slice(&(pk.len() as u16).to_be_bytes());
+        out.extend_from_slice(pk);
+        out.extend_from_slice(&0f64.to_be_bytes());
+        out.extend_from_slice(&0f64.to_be_bytes());
+        out.extend_from_slice(&0f64.to_be_bytes());
+        // RAW columns: length-prefixed, point_count × 8 bytes each.
+        out.extend_from_slice(&(point_count * 8).to_be_bytes());
+        out.extend_from_slice(&vec![0u8; point_count as usize * 8]);
+        out.extend_from_slice(&(point_count * 8).to_be_bytes());
+        out.extend_from_slice(&vec![0u8; point_count as usize * 8]);
+        out
+    }
+
+    #[test]
+    fn header_invariants_are_enforced_at_scan() {
+        // Issue #41 residual: a file whose header parses but whose fields
+        // are corrupt must be quarantined at scan, not indexed to be
+        // discovered (or not) by whichever query selects it.
+        let dir = temp_dir("header-invariants");
+        let store = FsStore::new(dir.clone()).unwrap();
+        store.put_chunks(&[raw_chunk(7, 1_000)]).unwrap();
+        let chunks_dir = dir.join("chunks");
+
+        let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+            (
+                "zero_points.pco1",
+                raw_pco1_header_with(0, 1_000, 1_000),
+                "point_count 0",
+            ),
+            (
+                "inverted.pco1",
+                raw_pco1_header_with(1, 2_000, 1_000),
+                "inverted ts range",
+            ),
+            (
+                "truncated_raw.pco1",
+                {
+                    // Correct header for 4 points, body cut short.
+                    let mut full = raw_pco1_header_with(4, 1_000, 4_000);
+                    full.truncate(full.len() - 8);
+                    full
+                },
+                "expected 64",
+            ),
+        ];
+        for (name, bytes, needle) in &cases {
+            let path = chunks_dir.join(name);
+            fs::write(&path, bytes).unwrap();
+            let before = store.quarantined_file_count();
+            let chunks = store.scan().unwrap();
+            assert_eq!(chunks.len(), 1, "{name}: healthy chunk must still index");
+            assert_eq!(chunks[0].series_id, 7);
+            assert_eq!(
+                store.quarantined_file_count(),
+                before + 1,
+                "{name}: corruption must be counted ({needle})"
+            );
+            assert!(
+                chunks_dir.join(format!("{name}.corrupt")).exists(),
+                "{name} must be renamed aside"
+            );
+            let _ = fs::remove_file(chunks_dir.join(format!("{name}.corrupt")));
+        }
         let _ = fs::remove_dir_all(dir);
     }
 
