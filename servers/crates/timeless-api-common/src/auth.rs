@@ -431,8 +431,26 @@ async fn authorize(State(config): State<AuthConfig>, request: Request, next: Nex
                 .response()
         }
     };
-    if let Err(error) = enforce_query_limit_from_body(&body, claims.limits.max_query_rows) {
-        return error.response();
+    // The body pre-check is a heuristic for POSTed QUERY FORMS
+    // (`application/x-www-form-urlencoded`, the Prometheus POST shape).
+    // Applying it to other content types false-positives on payload
+    // content: an NDJSON log line containing `limit=…` is data, not a
+    // query limit. Actual result rows are still enforced downstream by
+    // the handler's verified result-row header.
+    let form_body = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| {
+            value
+                .trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        });
+    if form_body {
+        if let Err(error) = enforce_query_limit_from_body(&body, claims.limits.max_query_rows) {
+            return error.response();
+        }
     }
     parts.extensions.insert(claims.clone());
     let request = Request::from_parts(parts, Body::from(body));
@@ -1485,9 +1503,11 @@ mod tests {
             Router::new().route("/api/v1/query", post(|| async { "query" })),
             AuthConfig::enforced("metrics", "tenant-a", &policy_path),
         );
-        let (status, body) = request_method(
+        // The body pre-check requires the form content type: it is a
+        // heuristic for POSTed QUERY FORMS (the Prometheus POST shape),
+        // not a scan of arbitrary payloads.
+        let (status, body) = request_form(
             &query_app,
-            Method::POST,
             "/api/v1/query",
             Some(&query_token),
             "limit=1001",
@@ -1495,9 +1515,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["reason"], "query_rows_exceeded");
-        let (status, body) = request_method(
+        let (status, body) = request_form(
             &query_app,
-            Method::POST,
             "/api/v1/query",
             Some(&query_token),
             "query=level%3Aerror+%7C+limit+1001",
@@ -1505,6 +1524,44 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["reason"], "query_rows_exceeded");
+
+        // Issue #46 regression: the scan must NOT apply to non-form
+        // payloads. An ingest body whose message text mentions limits is
+        // data, and previously tripped the heuristic into a spurious 422.
+        let import_app = protect_router(
+            Router::new().route("/api/v1/import", post(|| async { "imported" })),
+            AuthConfig::enforced("metrics", "tenant-a", &policy_path),
+        );
+        let import_token = {
+            let mut write_claims = claims(now);
+            write_claims["scopes"] = json!(["metrics:write"]);
+            token(&signing, write_claims)
+        };
+        for content_type in ["application/x-ndjson", "application/json", "text/plain"] {
+            let response = import_app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/v1/import")
+                        .header(
+                            header::AUTHORIZATION,
+                            format!("Bearer {import_token}"),
+                        )
+                        .header(header::CONTENT_TYPE, content_type)
+                        .body(Body::from(
+                            r#"{"message":"note limit=1001 and max_rows=1001 everywhere"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{content_type}: limit-like payload text must not trip the query-limit pre-check"
+            );
+        }
 
         let actual_rows_app = protect_router(
             Router::new().route(
@@ -1688,6 +1745,35 @@ mod tests {
 
     async fn request(app: &Router, path: &str, token: Option<&str>) -> (StatusCode, Value) {
         request_method(app, Method::GET, path, token, "").await
+    }
+
+    /// POST a form-urlencoded body — the shape the query-limit body
+    /// pre-check is defined for (the Prometheus POST form).
+    async fn request_form(
+        app: &Router,
+        path: &str,
+        token: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(
+                header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            );
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 16_384).await.unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, body)
     }
 
     async fn request_method(

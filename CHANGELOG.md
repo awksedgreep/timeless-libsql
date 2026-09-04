@@ -59,6 +59,18 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   key. Lifecycle and compatibility policy:
   `docs/OBSERVABILITY_SCHEMA.md`.
 
+- **The query-limit body pre-check is now scoped to form-urlencoded
+  request bodies.** The authorization middleware scanned every request
+  body for `limit=`/`max_rows=`-style fields regardless of content
+  type, so an ingest payload whose message text contained
+  `limit=999999` could be spuriously rejected with `422
+  query_rows_exceeded`. The pre-check now applies only to
+  `application/x-www-form-urlencoded` bodies (the Prometheus POST
+  shape); other content types skip it, and actual result rows remain
+  enforced downstream by the verified result-row header. Requests
+  POSTing query forms without a content type lose only the redundant
+  pre-check — the server-side limit still applies.
+
 - **User-supplied regular expressions are budgeted on the metrics
   server.** Label matchers and `label_replace()` patterns compiled with
   the regex crate's defaults (10 MiB program budget, no length cap) on
