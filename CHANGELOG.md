@@ -57,6 +57,14 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   key. Lifecycle and compatibility policy:
   `docs/OBSERVABILITY_SCHEMA.md`.
 
+- **User-supplied regular expressions are budgeted on the metrics
+  server.** Label matchers and `label_replace()` patterns compiled with
+  the regex crate's defaults (10 MiB program budget, no length cap) on
+  an unauthenticated request path. Patterns are now capped at 1024
+  bytes with a 1 MiB compiled-program budget — the posture the LogsQL
+  side already had — and oversized patterns return a clean `400`
+  before any compile work. Legitimate label filters are unaffected.
+
 - **`POST /api/v1/flush` is now the only flush route on all three
   servers.** The logs server accepted `GET` only and the traces server
   `GET, POST`; a state-changing durability barrier behind `GET` is
