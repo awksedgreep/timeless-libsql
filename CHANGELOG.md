@@ -14,6 +14,19 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Token clock-skew tolerance is now symmetric (issue #46).** The verifier
+  granted `CLOCK_SKEW_SECONDS` (30 s) of leeway to `nbf`, `iat` and
+  `not_before`, but compared `exp` against the raw clock, so a minting clock
+  running even slightly behind the verifier produced tokens rejected as
+  `expired_token` while still inside their stated lifetime. `exp` now carries
+  the same bounded allowance. Leeway applies to CLAIMS only: `exp`/`iat`/`nbf`
+  come from the minting side and need a second clock reconciled, while
+  `key.not_before`, `key.expires_at` and `key.revoked` come from the policy
+  file this verifier reads — revocation in particular must take effect
+  promptly rather than be softened by a skew allowance.
+
 ### Added
 
 - **`auto_optimize` is now a table argument and a runtime command on

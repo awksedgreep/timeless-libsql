@@ -697,7 +697,18 @@ impl AuthVerifier {
             .map_err(|_| AuthError::unauthorized("invalid_signature"))?;
 
         let now = unix_seconds()?;
-        if claims.exp <= now {
+        // Clock-skew leeway applies to CLAIMS, not to policy fields.
+        //
+        // exp/iat/nbf are stamped by the minting side (authctl, or another
+        // control plane) whose clock is not this process's clock, so each
+        // needs the same tolerance in BOTH directions: without it a client
+        // one second fast issues tokens this verifier rejects as expired
+        // the moment they are minted. key.not_before / key.expires_at /
+        // key.revoked come from the policy file this verifier reads, so
+        // there is no second clock to reconcile — and revocation in
+        // particular must take effect promptly rather than be softened by
+        // a skew allowance.
+        if claims.exp.saturating_add(CLOCK_SKEW_SECONDS) <= now {
             return Err(AuthError::unauthorized("expired_token"));
         }
         if claims.exp <= claims.iat
@@ -1173,6 +1184,82 @@ mod tests {
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
+    /// Clock-skew tolerance must be SYMMETRIC on the claims: a minting
+    /// clock that runs fast produces `nbf`/`iat` in this verifier's future,
+    /// and one that runs slow produces an `exp` already in its past. Only
+    /// the first direction had leeway, so a client seconds ahead of the
+    /// server saw its freshly minted tokens rejected as `expired_token`
+    /// (issue #46). Policy-side key fields keep no leeway on purpose.
+    #[tokio::test]
+    async fn clock_skew_leeway_is_symmetric_across_claim_boundaries() {
+        let root = std::env::temp_dir().join(format!(
+            "timeless-auth-skew-{}-{}",
+            std::process::id(),
+            unix_seconds().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let policy_path = root.join("policy.json");
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        write_policy(&policy_path, &signing, 1, &[]);
+        let config = AuthConfig::enforced("metrics", "tenant-a", &policy_path);
+        config.preflight().unwrap();
+        let app = protect_router(
+            Router::new().route("/api/v1/query", get(|| async { "ok" })),
+            config,
+        );
+        let now = unix_seconds().unwrap();
+
+        // A token whose own lifetime is coherent (iat well before exp) but
+        // whose exp has just passed on THIS clock — the shape a minting
+        // clock running slightly behind the verifier produces. Setting exp
+        // in the past without moving iat would trip the `exp <= iat`
+        // lifetime check instead, which is a different rejection.
+        let skewed = |exp_offset: i64| {
+            let mut value = claims(now);
+            value["nbf"] = json!(now - 121);
+            value["iat"] = json!(now - 120);
+            value["exp"] = json!(now + exp_offset);
+            value
+        };
+
+        // Just expired, inside the allowance: accepted, matching the
+        // tolerance nbf/iat already had in the other direction.
+        let inside = skewed(-1);
+        assert_eq!(
+            request(&app, "/api/v1/query", Some(&token(&signing, inside)))
+                .await
+                .0,
+            StatusCode::OK,
+            "a token one second past exp is inside the skew allowance"
+        );
+
+        // The far edge of the allowance is still accepted...
+        let edge = skewed(-CLOCK_SKEW_SECONDS + 1);
+        assert_eq!(
+            request(&app, "/api/v1/query", Some(&token(&signing, edge)))
+                .await
+                .0,
+            StatusCode::OK
+        );
+
+        // ...and one second past it is not. The allowance is bounded, not
+        // an open-ended extension of token lifetime.
+        let outside = skewed(-CLOCK_SKEW_SECONDS - 1);
+        let (status, body) = request(&app, "/api/v1/query", Some(&token(&signing, outside))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["reason"], json!("expired_token"));
+
+        // The symmetric direction keeps working: a future nbf beyond the
+        // allowance is still rejected.
+        let mut future = claims(now);
+        future["nbf"] = json!(now + CLOCK_SKEW_SECONDS + 60);
+        let (status, body) = request(&app, "/api/v1/query", Some(&token(&signing, future))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["reason"], json!("token_not_yet_valid"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn every_claim_boundary_scope_and_limit_fails_closed() {
         let root = std::env::temp_dir().join(format!(
@@ -1219,7 +1306,9 @@ mod tests {
         for (field, value, code, status) in [
             (
                 "exp",
-                json!(now - 1),
+                // Past the skew allowance: `now - 1` is now accepted, which
+                // is the point of the leeway.
+                json!(now - CLOCK_SKEW_SECONDS - 1),
                 "expired_token",
                 StatusCode::UNAUTHORIZED,
             ),
