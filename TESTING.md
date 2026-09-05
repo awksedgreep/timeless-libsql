@@ -90,8 +90,23 @@ current source.
 
 ### 1. Extension and engine workspace
 
+`cargo fmt --all` only reaches the workspace it is pointed at. The root
+workspace excludes `servers/`, and every `tools/*` crate is a DETACHED
+workspace, so the root invocation checks roughly a fifth of the tree. Check
+each manifest — `servers/` and four tool workspaces had all drifted before
+the gate did this (issue #45):
+
 ```sh
-cargo fmt --all -- --check
+for manifest in Cargo.toml servers/Cargo.toml \
+  tools/query-harness/Cargo.toml tools/bench/Cargo.toml \
+  tools/demogen/Cargo.toml tools/release-tool/Cargo.toml \
+  tools/libsql-check/Cargo.toml tools/clp-vet/Cargo.toml
+do
+  cargo fmt --all --manifest-path "$manifest" -- --check || exit
+done
+```
+
+```sh
 cargo build --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings

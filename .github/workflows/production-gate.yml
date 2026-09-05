@@ -33,9 +33,28 @@ jobs:
         run: |
           cargo build -p timeless-ext --release --locked
           cargo build --manifest-path servers/Cargo.toml --workspace --release --locked
+      - name: Formatting, every workspace
+        # The root workspace excludes servers/, and every tool is a
+        # DETACHED workspace, so `cargo fmt --all` at the root reaches
+        # roughly a fifth of the tree. Checking each manifest explicitly is
+        # what keeps the others from drifting (issue #45); servers/ and four
+        # tool workspaces had already drifted before this ran.
+        run: |
+          for manifest in \
+            Cargo.toml \
+            servers/Cargo.toml \
+            tools/query-harness/Cargo.toml \
+            tools/bench/Cargo.toml \
+            tools/demogen/Cargo.toml \
+            tools/release-tool/Cargo.toml \
+            tools/libsql-check/Cargo.toml \
+            tools/clp-vet/Cargo.toml
+          do
+            echo "== rustfmt --check $manifest =="
+            cargo fmt --all --manifest-path "$manifest" -- --check
+          done
       - name: Unit, contract, and lint gates
         run: |
-          cargo fmt --all -- --check
           cargo test --workspace --locked
           cargo clippy --workspace --locked -- -D warnings
           cargo test --manifest-path servers/Cargo.toml --workspace --all-targets --locked
@@ -43,6 +62,7 @@ jobs:
           cargo test --manifest-path tools/query-harness/Cargo.toml --locked
           cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- contracts
           cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- oracle validate
+          RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
       - name: Exact real-extension storage contracts
         run: |
           cargo test --manifest-path servers/Cargo.toml -p timeless-metrics-api --test storage_contract -- --ignored

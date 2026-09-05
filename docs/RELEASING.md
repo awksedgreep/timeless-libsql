@@ -20,23 +20,29 @@ than the exact tree being tagged verifies nothing.
 2. **Lockfiles**: `cargo check --workspace --locked` in the root AND
    `servers/` (and `tools/query-harness/`). The release workflow builds with
    `--locked`; a bump without a lock refresh fails every platform job.
-3. **Cargo suites**: `cargo test --workspace --locked` in the root and
+3. **Formatting, every workspace**: `cargo fmt --all -- --check` checks only
+   the workspace it is pointed at. The root excludes `servers/` and each
+   `tools/*` crate is detached, so run the per-manifest loop in
+   [TESTING.md](../TESTING.md) §1. A clean tree is a release precondition, and
+   `servers/` plus four tool workspaces drifted unnoticed while only the root
+   was checked (issue #45).
+4. **Cargo suites**: `cargo test --workspace --locked` in the root and
    `servers/`.
-4. **CLI suite**: `./tests/cli.sh` — all sections.
-5. **Correctness suites**: `./tests/correctness.sh` for each section
+5. **CLI suite**: `./tests/cli.sh` — all sections.
+6. **Correctness suites**: `./tests/correctness.sh` for each section
    (`r1 r2 r3 r4 r8 logs-rich`), plus `./tests/dbhealth.sh` and
    `./tests/crash.sh target/release/libtimeless_ext.so`.
-6. **Query contracts + oracles** (the `query-contracts` gate, runnable
+7. **Query contracts + oracles** (the `query-contracts` gate, runnable
    locally):
    `cargo test --manifest-path tools/query-harness/Cargo.toml --locked`,
    then `-- contracts` and `-- oracle validate`.
-7. **Everything above runs locally, in one pass, without pausing between
+8. **Everything above runs locally, in one pass, without pausing between
    steps.** The dispatchable CI workflows re-run the same binaries on
    slower shared runners and have produced false failures from timing
    flakes; they earn their keep on changes that skipped the local stack,
    not as a ritual after ones that ran it. CI's unique job is the
    four-platform artifact build, and the tag triggers that automatically.
-8. **Changelog**: a dated section for the release under the versioning
+9. **Changelog**: a dated section for the release under the versioning
    policy at the top of `CHANGELOG.md`; update the `release-target` comment.
 
 Only then: tag from `main`, push the tag, watch `Release artifacts` to
