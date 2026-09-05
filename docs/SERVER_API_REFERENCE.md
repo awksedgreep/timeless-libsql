@@ -369,6 +369,19 @@ nonempty `subjects` object, a nonempty `keys` array, and optional
 `maximum_limits`, and optional `enabled` (default true). A key contains
 `kid`, `public_key`, `not_before`, `expires_at`, and optional `revoked`.
 
+**Audience convention: `timeless-<signal>`** — `timeless-metrics`,
+`timeless-logs`, `timeless-traces`. `authctl policy init` writes this, and
+`authctl mint` copies the policy's `audience` into the token's `aud`, so an
+authctl-managed deployment satisfies it automatically. Hand-written policies
+and third-party minters should follow it.
+
+The verifier does not enforce the shape: it requires only that the token's
+`aud` equals the policy's `audience` (any matching pair is accepted), and it
+separately rejects a token whose `signal` does not match the server's. A
+per-signal audience is therefore defence in depth rather than the primary
+control — it keeps a policy minted for one signal from being repurposed for
+another by editing the server it points at.
+
 Token claims are `iss`, `aud`, `sub`, `jti`, `tenant`, `signal`, `scopes`,
 `auth_version`, `iat`, `nbf`, `exp`, and `limits`. The signal is exactly
 `metrics`, `logs`, or `traces`. The seven positive limit fields are:

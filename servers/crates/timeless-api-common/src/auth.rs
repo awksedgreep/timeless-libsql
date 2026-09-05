@@ -1743,7 +1743,12 @@ mod tests {
 
     fn claims(now: i64) -> Value {
         json!({
-            "iss": "timeless-control-plane", "aud": "timeless-data-plane",
+            // Per-signal audience, matching what `authctl policy init`
+            // writes for this signal (see SERVER_API_REFERENCE.md). The
+            // verifier only requires claims.aud == policy.audience, so a
+            // shared value passed too — but then the fixtures modelled a
+            // convention the tool never produces.
+            "iss": "timeless-control-plane", "aud": "timeless-metrics",
             "sub": "user-1", "jti": "token-1", "tenant": "tenant-a",
             "signal": "metrics", "scopes": ["metrics:read", "metrics:stats"],
             "auth_version": 1, "iat": now, "nbf": now - 1, "exp": now + 300,
@@ -1761,7 +1766,7 @@ mod tests {
     fn policy_document(signing: &SigningKey, version: u64, revoked: &[&str]) -> Value {
         json!({
             "version": 1, "issuer": "timeless-control-plane",
-            "audience": "timeless-data-plane", "tenant": "tenant-a",
+            "audience": "timeless-metrics", "tenant": "tenant-a",
             "minimum_auth_version": version,
             "max_token_seconds": 900,
             "maximum_limits": {"max_request_bytes": 4096, "max_decompressed_bytes": 8192,

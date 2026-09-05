@@ -115,6 +115,10 @@ async fn authctl_tokens_verify_through_the_server_middleware() {
     assert_eq!(header["alg"], "EdDSA");
     assert_eq!(claims["sub"], "default");
     assert_eq!(claims["signal"], "metrics");
+    // The audience convention is per-signal: `timeless-<signal>`. The
+    // verifier only compares the token's aud against the policy's, so
+    // nothing enforces the SHAPE at runtime — this is where it is pinned.
+    assert_eq!(claims["aud"], "timeless-metrics");
 }
 
 #[test]

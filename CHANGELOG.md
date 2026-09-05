@@ -14,6 +14,21 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Changed
+
+- **The auth audience convention is pinned to `timeless-<signal>` (issue
+  #46).** `authctl policy init` already wrote it and `authctl mint` copies the
+  policy's `audience` into the token, so authctl-managed deployments were
+  always self-consistent; the verifier compares only `claims.aud` against
+  `policy.audience` and never had a canonical value. What was missing was a
+  documented convention for hand-written policies and third-party minters, and
+  verifier fixtures that modelled a shared `timeless-data-plane` audience the
+  tool never produces. The fixtures now use the per-signal form, an authctl
+  round-trip test pins the shape where it is produced, and
+  SERVER_API_REFERENCE.md states the convention along with the fact that the
+  verifier does not enforce it (the separate `signal` check is the primary
+  control; a per-signal audience is defence in depth).
+
 ### Fixed
 
 - **Overlapping backups are refused instead of queued (issue #46).** A backup
