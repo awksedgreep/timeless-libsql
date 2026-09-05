@@ -138,6 +138,51 @@ recoveries, and section 43's size-tiered/bounded optimize),
 `tests/correctness.sh` r1/r2/r3/r4/r8/logs-rich, and `tests/dbhealth.sh`. All
 pass.
 
+## Reconfirmed at v0.8.0 (2026-09-04)
+
+Every number above was measured at `7beca58` (the v0.7.9 baseline). v0.8.0
+landed the observability-schema surface, `prom_text`, admission/auth work, and
+changes to `blocks/codec.rs`, `spans/codec.rs` and `rollup.rs` — none of which
+touch the merge planner, but all of which sit under these benchmarks. Re-run on
+the same host at `f1d5071`, same method, second runs quoted:
+
+| logs | v0.7.9 | v0.8.0 |
+|---|---:|---:|
+| Tier 1 / Tier 2 ingest | 0.29M / 0.50M entries/s | 0.29M / 0.50M entries/s |
+| service+level+range | 6.9 ms | 6.8 ms |
+| `optimize` | 29.9 ms | 30.0 ms |
+| level=error count | 26.5 ms | 26.8 ms |
+| `count(*)` cold reopen | 486.8 ms | 492.5 ms |
+| `LIKE '%timeout%'` | 606.2 ms | 621.3 ms |
+| `timeless_log_buckets` | 176.9 ms | 177.8 ms |
+| storage | 9.09 B/entry | 9.10 B/entry |
+
+The block layout is byte-identical — 215 blocks, 55,777 ms mean span, 98,635 ms
+max span, 0 over target — so the codec changes did not alter block formation and
+the merge guard still holds its layout.
+
+| traces | v0.7.9 | v0.8.0 |
+|---|---:|---:|
+| vtab / batch-v0 ingest | 0.17M / 0.27M spans/s | 0.17M / 0.27M spans/s |
+| trace_id point lookup | 0.265 ms | 0.245 ms |
+| status='error' count | 1.5 ms | 1.4 ms |
+| service+range (pushdown) | 24.8 ms | 25.4 ms |
+| `optimize` | 82.7 ms | 87.1 ms |
+| storage | 34.94 B/span | 34.95 B/span |
+
+| metrics | v0.7.9 | v0.8.0 |
+|---|---:|---:|
+| plain / Tier 1 / Tier 2 | 3.26M / 1.30M / 16.61M pts/s | 3.26M / 1.28M / 16.73M pts/s |
+| name+range / full scan | 4.6 ms / 176.0 ms | 4.5 ms / 176.3 ms |
+| `timeless_grid` TVF | 2.1 ms | 2.1 ms |
+| rollup build / tier read | 121.7 ms / 3.2 ms | 121.9 ms / 3.2 ms |
+| storage | 8.348 B/pt | 8.352 B/pt |
+
+Everything sits inside the repository's noise band. The two largest movers are
+logs `LIKE` (+2.5%) and traces `optimize` (+5.3%); neither is repeatable enough
+across the paired runs to call a regression, and both are on paths the merge
+guard does not touch.
+
 ## Not done here
 
 - **Traces keeps the unguarded merge path.** `SpanEngine` has no
