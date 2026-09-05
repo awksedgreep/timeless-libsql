@@ -1380,10 +1380,13 @@ fn open_connection(
     if initialize {
         let create = match retention {
             Some(duration) => format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces(retention='{}s');",
+                "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces(\
+                 retention='{}s', auto_optimize='off');",
                 duration.as_secs()
             ),
-            None => "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces;".to_owned(),
+            None => "CREATE VIRTUAL TABLE IF NOT EXISTS traces USING timeless_traces(\
+                     auto_optimize='off');"
+                .to_owned(),
         };
         // Writer WAL discipline: with the 16 KiB pages above,
         // wal_autocheckpoint = 1000 attempts a passive checkpoint once the
@@ -1417,6 +1420,23 @@ fn open_connection(
         .map_err(|error| format!("configure traces reader: {error}"))?;
     }
     verify_capability(&conn, retention, enforce_retention, initialize)?;
+    if initialize {
+        // This server schedules its own budgeted optimize every 30 s
+        // (Config::optimize_interval -> schedule_optimize -> the writer
+        // queue), so the extension's flush-path pass would compact the same
+        // backlog a second time — and it rides an ingesting statement inside
+        // the write transaction, where its cost lands on write latency.
+        // Issued here rather than only in CREATE so databases made before
+        // this argument existed are corrected on the next boot, and AFTER
+        // verify_capability so an incompatible table still fails with its
+        // own error rather than this command's. Persists to _meta;
+        // idempotent.
+        conn.execute(
+            "INSERT INTO traces(traces) VALUES ('auto_optimize:off')",
+            [],
+        )
+        .map_err(|error| format!("disable flush-path auto-optimize: {error}"))?;
+    }
     Ok(conn)
 }
 

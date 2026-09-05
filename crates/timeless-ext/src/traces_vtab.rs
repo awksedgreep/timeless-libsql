@@ -157,6 +157,19 @@ fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
 }
 
+/// Flush-path auto-optimize interval for future connects. Absent meta
+/// means the built-in default: a store created before this argument
+/// existed keeps the behaviour it has always had.
+fn load_auto_optimize(host: &Connection, database: &str, table: &str) -> Result<usize> {
+    Ok(
+        shadow_meta::load_meta_text(host, database, table, "auto_optimize")
+            .map_err(module_err)?
+            .as_deref()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(AUTO_OPTIMIZE_INTERVAL_FLUSHES),
+    )
+}
+
 fn load_attribute_indexes(
     host: &Connection,
     database: &str,
@@ -287,6 +300,9 @@ impl TracesTab {
         shared.engine.set_retention(
             shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
         );
+        shared
+            .engine
+            .set_auto_optimize_interval(load_auto_optimize(&host, database, table)?);
         Ok(shared)
     }
 
@@ -359,6 +375,7 @@ impl TracesTab {
         let (retention, attribute_indexes) = if is_create {
             let mut retention = None;
             let mut attribute_indexes = Vec::new();
+            let mut auto_optimize: Option<usize> = None;
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 match name.as_str() {
                     "retention" => {
@@ -371,9 +388,14 @@ impl TracesTab {
                         attribute_indexes =
                             parse_span_attribute_indexes(&value).map_err(module_err)?;
                     }
+                    "auto_optimize" => {
+                        auto_optimize =
+                            Some(table_args::parse_auto_optimize(&value).map_err(module_err)?);
+                    }
                     other => {
                         return Err(module_err(format!(
-                            "unrecognized argument {other:?}; timeless_traces supports: retention, attribute_indexes"
+                            "unrecognized argument {other:?}; timeless_traces supports: retention, attribute_indexes, \
+                             auto_optimize"
                         )));
                     }
                 }
@@ -385,6 +407,18 @@ impl TracesTab {
                     &table,
                     "retention",
                     &native.to_string(),
+                )
+                .map_err(module_err)?;
+            }
+            // Absent argument writes no meta row, so a store created before
+            // this argument existed keeps the built-in default on reconnect.
+            if let Some(interval) = auto_optimize {
+                shadow_meta::save_meta_text(
+                    &host,
+                    &database,
+                    &table,
+                    "auto_optimize",
+                    &interval.to_string(),
                 )
                 .map_err(module_err)?;
             }
@@ -423,6 +457,9 @@ impl TracesTab {
             .map_err(module_err)
         })?;
         shared_engine.engine.set_retention(retention);
+        shared_engine
+            .engine
+            .set_auto_optimize_interval(load_auto_optimize(&host, &database, &table)?);
 
         let schema = format!(
             "CREATE TABLE x(trace_id BLOB, span_id BLOB, parent_span_id BLOB, \
@@ -713,6 +750,18 @@ impl TracesTab {
                 .engine
                 .optimize_budgeted(max_entries)
                 .map_err(module_err)?;
+        } else if let Some(value) = cmd.strip_prefix("auto_optimize:") {
+            // Turn the FLUSH-PATH compaction pass off (or retune it) and
+            // persist the choice. A host that already schedules
+            // 'optimize:<budget>' on its own connection should turn this
+            // off: otherwise the same compaction runs twice, and the
+            // flush-path copy runs inline on an ingesting statement inside
+            // the host's write transaction.
+            let interval = table_args::parse_auto_optimize(value).map_err(module_err)?;
+            self.shared
+                .engine
+                .set_auto_optimize_interval_persistent(interval)
+                .map_err(module_err)?;
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             let ts: i64 = ts_str.trim().parse().map_err(|_| {
                 module_err(format!("prune: expected 'prune:<ts>' (ns), got {cmd:?}"))
@@ -721,7 +770,7 @@ impl TracesTab {
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'optimize', \
-                 'optimize:<max_spans>', 'prune:<ts>'"
+                 'optimize:<max_spans>', 'prune:<ts>', 'auto_optimize:<off|n>'"
             )));
         }
         Ok(0)

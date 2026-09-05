@@ -107,6 +107,26 @@ pub(crate) fn parse_rollups(
     Ok((tiers, spec))
 }
 
+/// Parse the `auto_optimize` argument: `off` (0) or a positive flush
+/// count. This is the FLUSH-PATH pass — every n-th flush call, plus an
+/// urgent pass when raw backlog crosses the budget — so its cost lands on
+/// whichever statement happens to fill the buffer, inside the host's write
+/// transaction. A host that schedules `optimize:<budget>` itself should
+/// turn it off rather than pay for the same compaction twice.
+pub(crate) fn parse_auto_optimize(value: &str) -> Result<usize, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("off") || value == "0" {
+        return Ok(0);
+    }
+    let n: usize = value.parse().map_err(|_| {
+        format!("auto_optimize: expected 'off' or a positive flush count, got {value:?}")
+    })?;
+    if n == 0 {
+        return Err("auto_optimize: expected 'off' or a positive flush count".into());
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

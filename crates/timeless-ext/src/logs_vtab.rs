@@ -199,6 +199,22 @@ fn metadata_is_flat_strings(text: &str) -> bool {
 }
 
 /// Load the persisted F6 message_index setting ('trigram' => true).
+/// Flush-path auto-optimize interval for future connects. Absent meta
+/// means the built-in default: a store created before this argument
+/// existed keeps the behaviour it has always had.
+fn load_auto_optimize(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+) -> std::result::Result<usize, String> {
+    Ok(
+        shadow_meta::load_meta_text(conn, database, table, "auto_optimize")?
+            .as_deref()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(AUTO_OPTIMIZE_INTERVAL_FLUSHES),
+    )
+}
+
 fn load_message_index(
     conn: &Connection,
     database: &str,
@@ -305,6 +321,9 @@ impl LogsTab {
         shared.engine.set_retention(
             shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
         );
+        shared.engine.set_auto_optimize_interval(
+            load_auto_optimize(&host, database, table).map_err(module_err)?,
+        );
         Ok(shared)
     }
 
@@ -358,12 +377,17 @@ impl LogsTab {
             let mut keys_value: Option<String> = None;
             let mut retention_value: Option<String> = None;
             let mut message_index: Option<bool> = None;
+            let mut auto_optimize: Option<usize> = None;
             let mut timestamp_unit_value = "ms".to_owned();
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 match name.as_str() {
                     "index_keys" => keys_value = Some(value),
                     "retention" => retention_value = Some(value),
                     "timestamp_unit" => timestamp_unit_value = value,
+                    "auto_optimize" => {
+                        auto_optimize =
+                            Some(table_args::parse_auto_optimize(&value).map_err(module_err)?);
+                    }
                     "message_index" => {
                         message_index = Some(match value.as_str() {
                             "trigram" => true,
@@ -378,7 +402,8 @@ impl LogsTab {
                     other => {
                         return Err(module_err(format!(
                             "unrecognized argument {other:?}; timeless_logs supports: \
-                             index_keys, retention, message_index, timestamp_unit"
+                             index_keys, retention, message_index, timestamp_unit, \
+                             auto_optimize"
                         )));
                     }
                 }
@@ -415,6 +440,18 @@ impl LogsTab {
             if message_index == Some(true) {
                 shadow_meta::save_meta_text(&host, &database, &table, "message_index", "trigram")
                     .map_err(module_err)?;
+            }
+            // Absent argument writes no meta row, so a store created before
+            // this argument existed keeps the built-in default on reconnect.
+            if let Some(interval) = auto_optimize {
+                shadow_meta::save_meta_text(
+                    &host,
+                    &database,
+                    &table,
+                    "auto_optimize",
+                    &interval.to_string(),
+                )
+                .map_err(module_err)?;
             }
             (keys, retention, timestamp_unit)
         } else {
@@ -494,6 +531,9 @@ impl LogsTab {
             .map_err(module_err)
         })?;
         shared_engine.engine.set_retention(retention);
+        shared_engine.engine.set_auto_optimize_interval(
+            load_auto_optimize(&host, &database, &table).map_err(module_err)?,
+        );
 
         // Declared schema, built at runtime: fixed columns + one HIDDEN
         // TEXT column per index key + exact message search input + an optional
@@ -698,6 +738,18 @@ impl LogsTab {
                 .parse()
                 .map_err(|_| module_err(format!("prune: expected 'prune:<ts>', got {cmd:?}")))?;
             self.shared.engine.prune(ts).map_err(module_err)?;
+        } else if let Some(value) = cmd.strip_prefix("auto_optimize:") {
+            // Turn the FLUSH-PATH compaction pass off (or retune it) and
+            // persist the choice. A host that already schedules
+            // 'optimize:<budget>' on its own connection should turn this
+            // off: otherwise the same compaction runs twice, and the
+            // flush-path copy runs inline on an ingesting statement inside
+            // the host's write transaction.
+            let interval = table_args::parse_auto_optimize(value).map_err(module_err)?;
+            self.shared
+                .engine
+                .set_auto_optimize_interval_persistent(interval)
+                .map_err(module_err)?;
         } else if let Some(value) = cmd.strip_prefix("message_index:") {
             // Opt out of (or back into) the F6 trigram message index.
             // 'none' persists the choice and drops every tg: posting now;
@@ -745,7 +797,8 @@ impl LogsTab {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'optimize', \
                  'optimize:<max_entries>', 'prune:<ts>', 'reindex:<keys>', \
-                 'retention:<n[s|m|h|d]>', 'message_index:<none|trigram>'"
+                 'retention:<n[s|m|h|d]>', 'message_index:<none|trigram>', \
+                 'auto_optimize:<off|n>'"
             )));
         }
         Ok(0)
