@@ -410,6 +410,18 @@ Scope derivation is deterministic: readiness, health, and paths ending in
 read; other routes use write. The exact result is listed beside every route
 above.
 
+Backpressure rejections carry `Retry-After`, in whole seconds, derived from
+the subject's own `max_queue_ms` — exactly how long admission was willing to
+hold the request — rounded up to a 1-second floor (RFC 9110 has no sub-second
+form). It is sent only for `queue_wait_exceeded` (429) and `queue_unavailable`
+(503): rejections a retry cannot fix, such as bad credentials, a wrong tenant,
+or an oversized payload, deliberately carry no hint.
+
+`RateLimit-*` headers are deliberately not sent. Those describe a request
+quota over a time window; the limit enforced here is `max_concurrent_requests`,
+a concurrency cap with no window, so populating them would misreport what the
+server actually enforces.
+
 Authorization errors use
 `{"error":"data_plane_authorization","reason":"<code>"}`. Stable reason
 codes are:

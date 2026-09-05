@@ -29,6 +29,19 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   verifier does not enforce it (the separate `signal` check is the primary
   control; a per-signal audience is defence in depth).
 
+### Added
+
+- **Backpressure rejections carry `Retry-After` (issue #46).** A bare 429 or
+  503 tells a client it was throttled but not when to return, and guessing is
+  what turns backpressure into a retry storm. `queue_wait_exceeded` (429) and
+  `queue_unavailable` (503) now send `Retry-After` in whole seconds, derived
+  from the subject's own `max_queue_ms` rather than a guessed constant, with a
+  1-second floor since RFC 9110 has no sub-second form. Rejections a retry
+  cannot fix — bad credentials, wrong tenant, oversized payload — deliberately
+  carry no hint. `RateLimit-*` headers are deliberately not sent: they
+  describe a quota over a time window, while the limit enforced here is
+  `max_concurrent_requests`, a concurrency cap with no window.
+
 ### Fixed
 
 - **LogsQL caps user-supplied regex source length (issue #46).** All three

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
@@ -311,6 +311,10 @@ impl Drop for AdmissionGuard {
 struct AuthError {
     status: StatusCode,
     code: &'static str,
+    /// Whole-second `Retry-After` for backpressure rejections; `None` for
+    /// every failure a retry cannot fix (bad credentials, wrong tenant,
+    /// oversized payload).
+    retry_after_seconds: Option<u64>,
 }
 
 impl AuthError {
@@ -318,6 +322,7 @@ impl AuthError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code,
+            retry_after_seconds: None,
         }
     }
 
@@ -325,19 +330,47 @@ impl AuthError {
         Self {
             status: StatusCode::FORBIDDEN,
             code,
+            retry_after_seconds: None,
         }
     }
 
     const fn limit(status: StatusCode, code: &'static str) -> Self {
-        Self { status, code }
+        Self {
+            status,
+            code,
+            retry_after_seconds: None,
+        }
+    }
+
+    /// A backpressure rejection that can carry `Retry-After`. The wait is
+    /// derived from the subject's own `max_queue_ms`, which is exactly how
+    /// long admission was willing to hold this request before giving up,
+    /// so it is a real estimate rather than a guessed constant. RFC 9110
+    /// expresses the delay in whole seconds, so a sub-second queue budget
+    /// rounds up to the 1-second floor.
+    fn throttled(status: StatusCode, code: &'static str, max_queue_ms: u64) -> Self {
+        Self {
+            status,
+            code,
+            retry_after_seconds: Some(max_queue_ms.div_ceil(1_000).max(1)),
+        }
     }
 
     fn response(self) -> Response {
-        (
+        let mut response = (
             self.status,
             Json(json!({"error": "data_plane_authorization", "reason": self.code})),
         )
-            .into_response()
+            .into_response();
+        // Retry-After turns a bare 429/503 into an actionable one: without
+        // it a client has to guess, and guessing wrong is what turns
+        // backpressure into a retry storm.
+        if let Some(seconds) = self.retry_after_seconds {
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -610,7 +643,11 @@ impl AuthVerifier {
             let notified = self.admission_notify.notified();
             {
                 let mut admission = self.admission.lock().map_err(|_| {
-                    AuthError::limit(StatusCode::SERVICE_UNAVAILABLE, "queue_unavailable")
+                    AuthError::throttled(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "queue_unavailable",
+                        claims.limits.max_queue_ms,
+                    )
                 })?;
                 let active = admission.entry(claims.sub.clone()).or_default();
                 if *active < claims.limits.max_concurrent_requests {
@@ -622,9 +659,10 @@ impl AuthVerifier {
                 }
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return Err(AuthError::limit(
+                return Err(AuthError::throttled(
                     StatusCode::TOO_MANY_REQUESTS,
                     "queue_wait_exceeded",
+                    claims.limits.max_queue_ms,
                 ));
             }
         }
@@ -1260,6 +1298,109 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn retry_after_rounds_the_queue_budget_up_to_whole_seconds() {
+        // RFC 9110 expresses Retry-After in whole seconds, so a sub-second
+        // budget must round UP to 1 rather than truncate to 0 ("retry
+        // immediately", which is the retry storm this header prevents).
+        let seconds = |ms| {
+            AuthError::throttled(StatusCode::TOO_MANY_REQUESTS, "queue_wait_exceeded", ms)
+                .retry_after_seconds
+        };
+        assert_eq!(seconds(0), Some(1));
+        assert_eq!(seconds(1), Some(1));
+        assert_eq!(seconds(999), Some(1));
+        assert_eq!(seconds(1_000), Some(1));
+        assert_eq!(seconds(1_001), Some(2));
+        assert_eq!(seconds(30_000), Some(30));
+
+        // Non-backpressure failures carry no hint at all.
+        assert_eq!(AuthError::unauthorized("bad").retry_after_seconds, None);
+        assert_eq!(AuthError::forbidden("nope").retry_after_seconds, None);
+        assert_eq!(
+            AuthError::limit(StatusCode::PAYLOAD_TOO_LARGE, "too_big").retry_after_seconds,
+            None
+        );
+    }
+
+    /// A bare 429 tells a client it was throttled but not when to come
+    /// back, and guessing is what turns backpressure into a retry storm.
+    /// The hint is derived from the subject's own `max_queue_ms` — exactly
+    /// how long admission was willing to hold the request — and is sent
+    /// ONLY for rejections a retry can fix (issue #46).
+    #[tokio::test]
+    async fn backpressure_rejections_carry_retry_after_and_others_do_not() {
+        let root = std::env::temp_dir().join(format!(
+            "timeless-auth-retry-{}-{}",
+            std::process::id(),
+            unix_seconds().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let policy_path = root.join("policy.json");
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        write_policy(&policy_path, &signing, 1, &[]);
+        let now = unix_seconds().unwrap();
+
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (held_entered, held_release) = (entered.clone(), release.clone());
+        let app = protect_router(
+            Router::new()
+                .route(
+                    "/hold",
+                    get(move || {
+                        let entered = held_entered.clone();
+                        let release = held_release.clone();
+                        async move {
+                            entered.notify_one();
+                            release.notified().await;
+                            "held"
+                        }
+                    }),
+                )
+                .route("/api/v1/query", get(|| async { "ok" })),
+            AuthConfig::enforced("metrics", "tenant-a", &policy_path),
+        );
+
+        // Saturate the single admission slot, then let a second request
+        // exhaust its 2 s queue budget.
+        let mut queue_claims = claims(now);
+        queue_claims["limits"]["max_concurrent_requests"] = json!(1);
+        // The queue budget must expire well before the REQUEST deadline,
+        // or the two race and the rejection is 504 request_time_exceeded
+        // instead of 429. Both must also stay inside the policy's
+        // maximum_limits, or the token is rejected before admission and
+        // the holder never enters the handler at all.
+        queue_claims["limits"]["max_queue_ms"] = json!(200);
+        queue_claims["limits"]["max_request_ms"] = json!(5_000);
+        let queue_token = token(&signing, queue_claims);
+        let (holder_app, holder_token) = (app.clone(), queue_token.clone());
+        let holder =
+            tokio::spawn(async move { request(&holder_app, "/hold", Some(&holder_token)).await });
+        entered.notified().await;
+
+        let (status, retry_after) = request_with_headers(&app, "/hold", Some(&queue_token)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            retry_after.as_deref(),
+            Some("1"),
+            "a 200 ms budget rounds up to the 1-second floor RFC 9110 allows"
+        );
+
+        release.notify_one();
+        assert_eq!(holder.await.unwrap().0, StatusCode::OK);
+
+        // A rejection no retry can fix must NOT invite one.
+        let (status, retry_after) = request_with_headers(&app, "/api/v1/query", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            retry_after, None,
+            "missing credentials is not backpressure; retrying cannot help"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn every_claim_boundary_scope_and_limit_fails_closed() {
         let root = std::env::temp_dir().join(format!(
@@ -1885,6 +2026,30 @@ mod tests {
         let body = serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes)));
         (status, body)
+    }
+
+    /// Like `request`, but keeps the headers so backpressure hints can be
+    /// asserted.
+    async fn request_with_headers(
+        app: &Router,
+        path: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, Option<String>) {
+        let mut builder = Request::builder().method(Method::GET).uri(path);
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        (response.status(), retry_after)
     }
 
     async fn assert_case(
