@@ -2121,7 +2121,7 @@ fn apply_store_policy(
              PRAGMA wal_autocheckpoint = 1000;
              PRAGMA journal_size_limit = 67108864;
              CREATE VIRTUAL TABLE logs USING timeless_logs(
-               index_keys='{}', timestamp_unit='{}'{retention_arg});",
+               index_keys='{}', timestamp_unit='{}', auto_optimize='off'{retention_arg});",
             keys.replace('\'', ""),
             timestamp_unit.sql_name()
         ))
@@ -2235,10 +2235,21 @@ fn open_connection(
              PRAGMA journal_size_limit = 67108864;
              PRAGMA temp_store = MEMORY;
              CREATE VIRTUAL TABLE IF NOT EXISTS logs USING timeless_logs(
-               index_keys='{DEFAULT_INDEX_KEYS}', timestamp_unit='{}');",
+               index_keys='{DEFAULT_INDEX_KEYS}', timestamp_unit='{}',
+               auto_optimize='off');",
             timestamp_unit.sql_name()
         ))
         .map_err(|e| format!("initialize logs database: {e}"))?;
+        // This server schedules its own budgeted optimize every 30 s
+        // (Config::optimize_interval -> schedule_optimize -> the writer
+        // queue), so the extension's flush-path pass would compact the same
+        // backlog a second time — and it rides an ingesting statement inside
+        // the write transaction, where its cost lands on write latency.
+        // Turn it off here rather than only in CREATE, so databases made
+        // before this argument existed are corrected on the next boot. The
+        // command persists to _meta and is idempotent.
+        conn.execute("INSERT INTO logs(logs) VALUES ('auto_optimize:off')", [])
+            .map_err(|e| format!("disable flush-path auto-optimize: {e}"))?;
         apply_schema_ledger(&conn, spec, &capabilities)?;
         let stored = stat_text(&conn, "timestamp_unit")?;
         if stored.as_deref() != Some(timestamp_unit.sql_name()) {

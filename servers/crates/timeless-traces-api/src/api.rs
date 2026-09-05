@@ -25,7 +25,9 @@ pub fn router(storage: Storage) -> Router {
 }
 
 pub fn router_with_limits(storage: Storage, limits: TracesQueryLimits) -> Router {
-    limits.validate().expect("traces router limits must be valid");
+    limits
+        .validate()
+        .expect("traces router limits must be valid");
     Router::new()
         .route("/live", get(liveness))
         .route("/ready", get(readiness))
@@ -323,12 +325,7 @@ async fn dashboard_trace(
     Extension(limits): Extension<TracesQueryLimits>,
     Path(trace_id): Path<String>,
 ) -> Response {
-    read_response(
-        storage,
-        limits,
-        ReadRequest::DashboardTrace { trace_id },
-    )
-    .await
+    read_response(storage, limits, ReadRequest::DashboardTrace { trace_id }).await
 }
 
 async fn dashboard_search(
@@ -376,10 +373,7 @@ async fn read_response(
     if output.body.len() > limits.max_response_bytes {
         return client_error(
             StatusCode::BAD_REQUEST,
-            format!(
-                "response exceeds {} bytes",
-                limits.max_response_bytes
-            ),
+            format!("response exceeds {} bytes", limits.max_response_bytes),
         );
     }
     (

@@ -106,10 +106,7 @@ fn main() -> ExitCode {
                     &scopes,
                 ) {
                     Ok(false) => {
-                        println!(
-                            "added subject {subject:?} with {} scope(s)",
-                            scopes.len()
-                        );
+                        println!("added subject {subject:?} with {} scope(s)", scopes.len());
                         ExitCode::SUCCESS
                     }
                     Ok(true) => {

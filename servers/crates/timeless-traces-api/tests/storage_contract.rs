@@ -468,7 +468,10 @@ async fn bounded_queue_backpressures_without_over_admitting() {
     storage.barrier().await.unwrap();
     // The held batch applied once the lock was released; its admission
     // reply carried the result back to the spawned task.
-    first.await.unwrap().expect("first batch must apply after commit");
+    first
+        .await
+        .unwrap()
+        .expect("first batch must apply after commit");
     let drained = storage.runtime_watermarks();
     assert_eq!(drained.completed_requests, 2);
     assert_eq!(drained.completed_spans, 8_193);

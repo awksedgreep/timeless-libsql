@@ -70,13 +70,11 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
-    let queue_bytes = match positive_usize_from_env(
-        "TIMELESS_METRICS_QUEUE_BYTES",
-        defaults.queue_bytes,
-    ) {
-        Ok(value) => value,
-        Err(error) => return usage_error(error),
-    };
+    let queue_bytes =
+        match positive_usize_from_env("TIMELESS_METRICS_QUEUE_BYTES", defaults.queue_bytes) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        };
     let flush_interval = match interval_from_env(
         "TIMELESS_METRICS_FLUSH_INTERVAL_SECS",
         defaults.flush_interval,

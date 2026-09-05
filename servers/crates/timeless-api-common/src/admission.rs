@@ -31,7 +31,9 @@ impl BytesGate {
     /// A gate allowing at most `max_bytes` of queued payload. Values
     /// below one unit still yield a workable gate of one unit.
     pub fn new(max_bytes: u64) -> Self {
-        let units = u32::try_from(max_bytes.div_ceil(UNIT_BYTES)).unwrap_or(u32::MAX).max(1);
+        let units = u32::try_from(max_bytes.div_ceil(UNIT_BYTES))
+            .unwrap_or(u32::MAX)
+            .max(1);
         Self {
             semaphore: Arc::new(Semaphore::new(units as usize)),
             max_bytes: units as u64 * UNIT_BYTES,
@@ -54,9 +56,13 @@ impl BytesGate {
                     .expect("gate is never closed"),
             };
         }
-        let requested = u64::try_from(bytes).unwrap_or(u64::MAX).div_ceil(UNIT_BYTES);
+        let requested = u64::try_from(bytes)
+            .unwrap_or(u64::MAX)
+            .div_ceil(UNIT_BYTES);
         let total = self.semaphore.available_permits() as u64;
-        let units = u32::try_from(requested.min(total)).unwrap_or(u32::MAX).max(1);
+        let units = u32::try_from(requested.min(total))
+            .unwrap_or(u32::MAX)
+            .max(1);
         GatePermit {
             _permit: self
                 .semaphore

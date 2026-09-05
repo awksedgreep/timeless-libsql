@@ -1544,10 +1544,7 @@ mod tests {
                     Request::builder()
                         .method(Method::POST)
                         .uri("/api/v1/import")
-                        .header(
-                            header::AUTHORIZATION,
-                            format!("Bearer {import_token}"),
-                        )
+                        .header(header::AUTHORIZATION, format!("Bearer {import_token}"))
                         .header(header::CONTENT_TYPE, content_type)
                         .body(Body::from(
                             r#"{"message":"note limit=1001 and max_rows=1001 everywhere"}"#,
@@ -1758,10 +1755,7 @@ mod tests {
         let mut builder = Request::builder()
             .method(Method::POST)
             .uri(path)
-            .header(
-                header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            );
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
         if let Some(token) = token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }

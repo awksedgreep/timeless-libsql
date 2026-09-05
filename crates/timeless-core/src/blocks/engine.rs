@@ -622,6 +622,13 @@ pub struct BlockEngine {
     retention_floor: AtomicI64,
     /// Flush calls since the last auto-optimize backlog check.
     flushes_since_auto_optimize: AtomicUsize,
+    /// Live copy of BlockEngineConfig::auto_optimize_interval_flushes so a
+    /// host can turn the flush-path pass off (or retune it) at runtime and
+    /// have it persist, the same way retention and message_index do. Hosts
+    /// that already schedule optimize themselves — both signal servers run
+    /// a budgeted, backlog-driven pass every 30 s — otherwise pay for the
+    /// same compaction twice, once inline on an ingesting statement.
+    auto_optimize_interval: AtomicUsize,
     /// One-shot guard for the trigram-posting purge on stores that did
     /// not opt into `message_index='trigram'` (see optimize()).
     trigram_purge_checked: AtomicBool,
@@ -667,6 +674,7 @@ impl BlockEngine {
             })
             .collect();
 
+        let auto_optimize_seed = config.auto_optimize_interval_flushes;
         Ok(BlockEngine {
             store,
             config,
@@ -678,6 +686,7 @@ impl BlockEngine {
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
             flushes_since_auto_optimize: AtomicUsize::new(0),
+            auto_optimize_interval: AtomicUsize::new(auto_optimize_seed),
             trigram_purge_checked: AtomicBool::new(false),
             profile: BlockEngineProfile::default(),
         })
@@ -1006,7 +1015,7 @@ impl BlockEngine {
     /// budgeted pass if it found actionable work. A raw backlog at or past
     /// the budget triggers immediately instead of waiting out the interval.
     fn maybe_auto_optimize(&self) -> Result<(), String> {
-        let interval = self.config.auto_optimize_interval_flushes;
+        let interval = self.auto_optimize_interval.load(Ordering::Relaxed);
         if interval == 0 {
             return Ok(());
         }
@@ -1941,6 +1950,34 @@ impl BlockEngine {
     /// operation. Returns the number of blocks deleted.
     /// F2: configure the automatic retention window (NATIVE ts units;
     /// None disables). Idempotent per connect.
+    /// Current flush-path auto-optimize interval (0 = off).
+    pub fn auto_optimize_interval(&self) -> usize {
+        self.auto_optimize_interval.load(Ordering::Relaxed)
+    }
+
+    /// Retune the flush-path auto-optimize pass for THIS engine instance.
+    /// 0 turns it off: no interval pass, no urgent pass.
+    pub fn set_auto_optimize_interval(&self, interval: usize) {
+        self.auto_optimize_interval
+            .store(interval, Ordering::Relaxed);
+    }
+
+    /// Retune it and persist the choice for future connects — the
+    /// runtime-command counterpart of the CREATE-time `auto_optimize`
+    /// argument, mirroring set_retention_persistent.
+    ///
+    /// A host that schedules optimize itself should turn this off rather
+    /// than run both: the flush-path pass rides an ingesting statement
+    /// inside the host's write transaction, so its cost lands on write
+    /// latency, while a scheduled pass does the same work on its own
+    /// connection.
+    pub fn set_auto_optimize_interval_persistent(&self, interval: usize) -> Result<(), String> {
+        self.store
+            .save_meta("auto_optimize", interval.to_string().as_bytes())?;
+        self.set_auto_optimize_interval(interval);
+        Ok(())
+    }
+
     pub fn set_retention(&self, native: Option<i64>) {
         self.retention_native
             .store(native.unwrap_or(0).max(0), Ordering::Relaxed);

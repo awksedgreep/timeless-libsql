@@ -2982,3 +2982,61 @@ fn corrupt_header_count_and_range_fail_decode() {
         );
     }
 }
+
+#[test]
+fn auto_optimize_interval_is_settable_and_persists() {
+    // A host that schedules 'optimize:<budget>' itself turns the
+    // flush-path pass off so the same backlog is not compacted twice —
+    // once of which would ride an ingesting statement.
+    let store = Arc::new(MemBlockStore::new());
+    let engine =
+        BlockEngine::new(Box::new(SharedStore(store.clone())), auto_config(3, 32_768)).unwrap();
+    assert_eq!(engine.auto_optimize_interval(), 3, "seeded from config");
+
+    engine.set_auto_optimize_interval_persistent(0).unwrap();
+    assert_eq!(engine.auto_optimize_interval(), 0);
+
+    for i in 0..200i64 {
+        engine
+            .push(entry(1_000 + i, 1, &format!("m {i}"), &[]))
+            .unwrap();
+    }
+    for _ in 0..40 {
+        engine.flush().unwrap();
+    }
+    let (blocks, raw_blocks, _) = engine.stats();
+    assert_eq!(
+        raw_blocks, blocks,
+        "turning the interval off at runtime stops the flush-path pass"
+    );
+    assert!(raw_blocks > 0);
+
+    // The choice is written where a reconnect will read it back.
+    assert_eq!(
+        store.load_meta("auto_optimize").unwrap().as_deref(),
+        Some(b"0".as_slice()),
+        "the setting persists for future connects"
+    );
+
+    // A host-scheduled pass still drains everything the flush path skipped.
+    engine.optimize().unwrap();
+    let (_, raw_after, _) = engine.stats();
+    assert_eq!(raw_after, 0, "scheduled optimize drains the deferred debt");
+}
+
+#[test]
+fn auto_optimize_interval_can_be_retuned_upward() {
+    let engine = BlockEngine::new(Box::new(MemBlockStore::new()), auto_config(0, 32_768)).unwrap();
+    engine.set_auto_optimize_interval(2);
+    assert_eq!(engine.auto_optimize_interval(), 2);
+    for i in 0..200i64 {
+        engine
+            .push(entry(1_000 + i, 1, &format!("m {i}"), &[]))
+            .unwrap();
+    }
+    for _ in 0..10 {
+        engine.flush().unwrap();
+    }
+    let (_, raw_blocks, _) = engine.stats();
+    assert_eq!(raw_blocks, 0, "re-enabled interval compresses again");
+}

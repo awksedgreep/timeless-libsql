@@ -14,6 +14,33 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- **`auto_optimize` is now a table argument and a runtime command on
+  `timeless_logs` and `timeless_traces`.** `auto_optimize='off'` at CREATE, or
+  `INSERT INTO t(t) VALUES ('auto_optimize:off')` at any time; both persist to
+  `_meta` and survive reconnects, and a positive value retunes the flush
+  interval instead of disabling it. This controls only the FLUSH-PATH pass,
+  which rides whichever statement happens to fill the buffer, inside the
+  host's write transaction. The default is unchanged and no meta row is
+  written when the argument is absent, so existing stores and hosts that only
+  send `flush` keep exactly the behaviour they have.
+
+### Changed
+
+- **The logs and traces servers now opt out of flush-path compaction.** Both
+  already run a budgeted, backlog-driven `optimize:<budget>` every 30 s
+  through their writer queue, so the extension's flush-path pass was
+  compacting the same backlog a second time — inline on an ingesting
+  statement. They now issue `auto_optimize:off` on every writer boot (after
+  the schema and capability checks, so an incompatible table still fails with
+  its own error) and pass `auto_optimize='off'` at CREATE, which also corrects
+  databases created before the argument existed. Measured on 1M log entries,
+  M1 Max: ingest 4.18 s -> 2.20 s (1.90x) and p99 write latency 87 ms -> 23 ms
+  (3.8x), with total work unchanged (4.21 s vs 4.24 s combined) — the
+  compaction moves to the scheduled connection, where it drains in budgeted
+  passes averaging 68 ms instead of stalling an insert.
+
 ## [0.8.0] — 2026-09-03
 
 ### Added
