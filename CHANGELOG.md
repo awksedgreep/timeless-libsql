@@ -31,6 +31,16 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **LogsQL caps user-supplied regex source length (issue #46).** All three
+  user-facing pattern entry points — the `~"..."` filter, `replace_regexp`,
+  and `extract_regexp` — bounded the compiled program with `size_limit` but
+  not the pattern text, so an unauthenticated request could hand the parser an
+  arbitrarily long expression and pay compile cost proportional to it. They
+  now share one `compile_user_regex` helper carrying a 1 KiB source cap,
+  matching `MAX_REGEX_PATTERN_BYTES` in the metrics server (whose comment
+  already claimed to mirror the LogsQL posture — it does now). The rejection
+  echoes only a bounded prefix of the offending pattern.
+
 - **Overlapping backups are refused instead of queued (issue #46).** A backup
   occupies a signal's single writer for its whole duration — flush, the entire
   optimize backlog, a WAL checkpoint, then the copy — so every queued ingest

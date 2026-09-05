@@ -50,6 +50,17 @@ pub struct LogsqlPlan {
     pub(crate) implicit_result_limit: Option<usize>,
 }
 
+/// Cap on the SOURCE length of a user-supplied regex.
+///
+/// `size_limit` below already bounds the COMPILED program, and the regex
+/// crate is linear-time in the subject (no catastrophic backtracking).
+/// Neither bounds compilation cost against the pattern text itself, which
+/// an unauthenticated request path can otherwise make arbitrarily long: a
+/// megabyte-length expression is never a legitimate log filter. Matches
+/// `MAX_REGEX_PATTERN_BYTES` in timeless-metrics-api, whose comment
+/// already claimed to mirror "the LogsQL side's posture" — it does now.
+const MAX_REGEX_PATTERN_BYTES: usize = 1024;
+
 const MAX_QUERY_BACKED_LIST_DEPTH: usize = 8;
 const MAX_QUERY_BACKED_LISTS: usize = 32;
 const MAX_COMMON_CASE_UPPERCASE: usize = 10;
@@ -2019,15 +2030,7 @@ fn parse_replace_regexp_pipe(
     }
     let pattern = parse_replace_argument(&arguments[0], operation, "regexp")?;
     let replacement = parse_replace_argument(&arguments[1], operation, "replacement")?;
-    let regex = RegexBuilder::new(&pattern)
-        .dot_matches_new_line(true)
-        .size_limit(1 << 20)
-        .build()
-        .map_err(|error| {
-            LogsqlError::malformed(format!(
-                "invalid LogsQL replace_regexp regexp {pattern:?}: {error}"
-            ))
-        })?;
+    let regex = compile_user_regex(&pattern, "replace_regexp regexp", true)?;
     let replacement = parse_regexp_replacement(&replacement);
     rest = rest[close + 1..].trim_start();
 
@@ -2243,15 +2246,7 @@ fn parse_extract_regexp_pipe(
         let consumed = rest.find(char::is_whitespace).unwrap_or(rest.len());
         (rest[..consumed].to_owned(), consumed)
     };
-    let regex = RegexBuilder::new(&pattern)
-        .dot_matches_new_line(true)
-        .size_limit(1 << 20)
-        .build()
-        .map_err(|error| {
-            LogsqlError::malformed(format!(
-                "invalid LogsQL extract_regexp regexp {pattern:?}: {error}"
-            ))
-        })?;
+    let regex = compile_user_regex(&pattern, "extract_regexp regexp", true)?;
     let mut captures = Vec::new();
     for (index, name) in regex.capture_names().enumerate() {
         let Some(name) = name else {
@@ -8577,11 +8572,34 @@ fn parse_regexp_filter(token: &str) -> Result<Option<regex::Regex>, LogsqlError>
     let pattern = quoted_value(value)?.ok_or_else(|| {
         LogsqlError::malformed("LogsQL regexp filter requires a quoted pattern after ~")
     })?;
-    RegexBuilder::new(&pattern)
+    compile_user_regex(&pattern, "regexp", false).map(Some)
+}
+
+/// Compile a user-supplied LogsQL regex under the shared budget: a source
+/// length cap plus a 1 MiB compiled-program limit. Every user-supplied
+/// pattern in this module goes through here so a new call site cannot
+/// silently skip the cap.
+fn compile_user_regex(
+    pattern: &str,
+    context: &str,
+    dot_matches_new_line: bool,
+) -> Result<Regex, LogsqlError> {
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        // Echo a bounded prefix: the whole point is that the pattern may
+        // be enormous, and the error travels back to the client.
+        let preview: String = pattern.chars().take(48).collect();
+        return Err(LogsqlError::malformed(format!(
+            "invalid LogsQL {context} {preview:?}...: pattern is {} bytes, exceeds the {MAX_REGEX_PATTERN_BYTES}-byte limit",
+            pattern.len()
+        )));
+    }
+    RegexBuilder::new(pattern)
+        .dot_matches_new_line(dot_matches_new_line)
         .size_limit(1 << 20)
         .build()
-        .map(Some)
-        .map_err(|error| LogsqlError::malformed(format!("invalid LogsQL regexp: {error}")))
+        .map_err(|error| {
+            LogsqlError::malformed(format!("invalid LogsQL {context} {pattern:?}: {error}"))
+        })
 }
 
 fn parse_pattern_match_filter(token: &str) -> Result<Option<PatternMatcher>, LogsqlError> {
@@ -11539,6 +11557,41 @@ fn clamp_native_timestamp(timestamp: i128) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every user-supplied regex entry point must carry the source-length
+    /// cap, not just the compiled-program `size_limit`: compile cost
+    /// scales with the pattern text, and these paths are reachable from an
+    /// unauthenticated request (issue #46).
+    #[test]
+    fn oversized_user_regexes_are_rejected_at_every_entry_point() {
+        let huge = "a".repeat(MAX_REGEX_PATTERN_BYTES + 1);
+        let at_cap = "a".repeat(MAX_REGEX_PATTERN_BYTES);
+
+        for query in [
+            format!(r#"~"{huge}""#),
+            format!(r#"* | replace_regexp ("{huge}", "x")"#),
+            format!(r#"* | extract_regexp "{huge}""#),
+        ] {
+            let error = parse_at(&query, TimestampUnit::Microseconds, 0)
+                .expect_err("an oversized pattern must be refused");
+            assert!(
+                error.to_string().contains("exceeds the")
+                    && error.to_string().contains("byte limit"),
+                "wrong rejection for {}: {error:?}",
+                &query[..40.min(query.len())]
+            );
+            // The whole pattern must not be echoed back to the caller.
+            assert!(
+                error.to_string().len() < MAX_REGEX_PATTERN_BYTES,
+                "the error echoed the oversized pattern back"
+            );
+        }
+
+        // The cap is a boundary, not a ban: a pattern exactly at the limit
+        // still compiles.
+        parse_at(&format!(r#"~"{at_cap}""#), TimestampUnit::Microseconds, 0)
+            .expect("a pattern exactly at the cap is still accepted");
+    }
 
     #[test]
     fn stats_by_grammar_is_exact_and_strict() {
