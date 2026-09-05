@@ -778,6 +778,62 @@ mod tests {
 /// the returned errors explain why. Buffered-but-unflushed data beyond
 /// the last durable barrier is lost exactly as on SIGKILL, which the
 /// durability contract already accepts.
+/// Stable reason a backup was refused because one is already running.
+/// Handlers compare against this exact value to answer 409 instead of
+/// 500; it is a shared sentinel, not a substring match on prose.
+pub const BACKUP_IN_PROGRESS: &str = "a backup is already running";
+
+/// At-most-one-at-a-time guard for work that occupies the single writer.
+///
+/// A backup flushes, drains the whole optimize backlog, checkpoints the
+/// WAL and copies the database — all on the writer thread, so every
+/// queued ingest waits behind it. Without this, N concurrent requests
+/// queue N full backups and the writer does nothing else until they
+/// finish: an authorized caller can stall ingest indefinitely just by
+/// repeating the call. Refusing the overlap keeps the cost of a repeated
+/// request O(1) instead of O(backup).
+///
+/// Deliberately per-process, not per-destination: the scarce resource is
+/// the writer, not the output path.
+#[derive(Debug, Default)]
+pub struct SingleFlight {
+    busy: std::sync::atomic::AtomicBool,
+}
+
+impl SingleFlight {
+    pub const fn new() -> Self {
+        Self {
+            busy: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Claim the slot, or return `None` if it is already held. The guard
+    /// releases on drop, so an early `?`, a cancelled request future, or
+    /// a panic cannot strand the slot.
+    pub fn try_enter(&self) -> Option<SingleFlightGuard<'_>> {
+        self.busy
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+            .then_some(SingleFlightGuard { flag: &self.busy })
+    }
+}
+
+#[derive(Debug)]
+pub struct SingleFlightGuard<'a> {
+    flag: &'a std::sync::atomic::AtomicBool,
+}
+
+impl Drop for SingleFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Run `drain` under [`SHUTDOWN_DEADLINE`]. `drain` yields the serve
@@ -833,6 +889,47 @@ mod shutdown_deadline_tests {
         assert!(
             started.elapsed() >= Duration::from_millis(50),
             "deadline must actually bound the wait"
+        );
+    }
+}
+
+#[cfg(test)]
+mod single_flight_tests {
+    use super::SingleFlight;
+
+    #[test]
+    fn only_one_holder_at_a_time_and_the_slot_is_reusable() {
+        let flight = SingleFlight::new();
+
+        let first = flight.try_enter().expect("uncontended slot is available");
+        assert!(
+            flight.try_enter().is_none(),
+            "a second caller must be refused while the slot is held"
+        );
+
+        drop(first);
+        let second = flight
+            .try_enter()
+            .expect("dropping the guard releases the slot");
+        assert!(flight.try_enter().is_none());
+        drop(second);
+        assert!(flight.try_enter().is_some());
+    }
+
+    #[test]
+    fn an_unwinding_holder_still_releases_the_slot() {
+        // The guard is what makes an early `?`, a cancelled request future
+        // and a panic all release the slot; if release were manual, one
+        // failed backup would wedge the endpoint until restart.
+        let flight = SingleFlight::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = flight.try_enter().expect("slot available");
+            panic!("holder blew up");
+        }));
+        assert!(result.is_err());
+        assert!(
+            flight.try_enter().is_some(),
+            "the slot must not stay claimed after the holder unwound"
         );
     }
 }

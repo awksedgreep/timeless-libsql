@@ -1134,6 +1134,14 @@ async fn backup(
 ) -> impl IntoResponse {
     match storage.backup(request.destination).await {
         Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        // A backup is already occupying the writer. That is a transient
+        // conflict the caller can retry, not an internal fault, so it must
+        // not be flattened into 500 by the generic error path.
+        Err(error) if error == timeless_api_common::BACKUP_IN_PROGRESS => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "conflict", "reason": error})),
+        )
+            .into_response(),
         Err(error) => server_error(error),
     }
 }

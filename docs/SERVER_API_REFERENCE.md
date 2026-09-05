@@ -104,6 +104,15 @@ The "Required scope" column applies **only when auth is enabled**
 | `traces` | `GET` | `/select/timeless/api/traces/{trace_id}` | `traces:read` | One native trace with complete rich-span fields. |
 | `traces` | `POST` | `/api/v1/flush` | `traces:maintenance` | Ordered writer completion, extension flush, and durability barrier. |
 | `traces` | `POST` | `/api/v1/backup` | `traces:maintenance` | Flush, optimize, checkpoint, and verified SQLite backup. |
+
+A backup occupies the signal's single writer for its whole duration — flush,
+the entire optimize backlog, a WAL checkpoint, then the copy — so queued
+ingest waits behind it. At most one runs per process at a time: an
+overlapping `POST /api/v1/backup` is answered `409 Conflict` with
+`{"error":"conflict","reason":"a backup is already running"}` rather than
+queued, so repeating the call costs the writer nothing. Retry after the
+in-flight backup completes.
+
 | `traces` | `POST` | `/insert/opentelemetry/v1/traces` | `traces:write` | OTLP JSON, protobuf, or gzip-compressed protobuf ingestion. |
 
 <!-- public-server-routes:end -->

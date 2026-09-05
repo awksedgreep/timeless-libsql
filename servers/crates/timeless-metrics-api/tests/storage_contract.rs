@@ -10,6 +10,46 @@ use timeless_metrics_api::{
 };
 use tower::ServiceExt;
 
+/// A backup occupies the single writer for its whole duration — flush,
+/// the entire optimize backlog, a WAL checkpoint, then the copy — so
+/// every queued ingest waits behind it. Overlapping requests must be
+/// refused outright rather than queued, or an authorized caller stalls
+/// ingest for as long as it keeps calling (issue #46).
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn concurrent_backups_are_refused_rather_than_queued() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("metrics.db");
+    let storage = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    storage
+        .submit_named_batch(named_batch(3, 1_700_000_000), 3)
+        .await
+        .unwrap();
+
+    // The slot is claimed before the first await, so joining two backups
+    // on one task is deterministic: the first poll of `a` takes it, and
+    // `b` is refused the moment it is polled.
+    let (a, b) = tokio::join!(
+        storage.backup(directory.path().join("backups/a.db")),
+        storage.backup(directory.path().join("backups/b.db")),
+    );
+    let first = a.expect("the first backup runs");
+    assert_eq!(first.signal, "metrics");
+    let refused = b.expect_err("the overlapping backup is refused");
+    assert_eq!(refused, "a backup is already running", "{refused}");
+
+    // Refusal is not a wedged endpoint: the slot released with the guard,
+    // so the next request succeeds.
+    let after = storage
+        .backup(directory.path().join("backups/c.db"))
+        .await
+        .expect("the slot is free once the first backup finished");
+    assert!(after.bytes > 0);
+
+    storage.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
 async fn release_backup_is_ordered_verified_no_clobber_and_cold_reopenable() {

@@ -1044,6 +1044,9 @@ const OPTIMIZE_TARGET_ENTRIES: usize = 8192;
 const MAX_BACKUP_OPTIMIZE_STEPS: usize = 1_000_000;
 
 struct StorageInner {
+    /// At most one backup at a time: it occupies the single writer
+    /// for its whole duration (see SingleFlight).
+    backup_guard: timeless_api_common::SingleFlight,
     writer: mpsc::Sender<WriteCommand>,
     readers: Vec<mpsc::Sender<ReadCommand>>,
     next_reader: AtomicUsize,
@@ -1229,6 +1232,7 @@ impl Storage {
             admission: Mutex::new(()),
             lease: StdMutex::new(Some(lease)),
             shutting_down: AtomicBool::new(false),
+            backup_guard: timeless_api_common::SingleFlight::new(),
             timestamp_unit,
             database_path,
             queue_capacity: queue_batches,
@@ -1360,6 +1364,13 @@ impl Storage {
     }
 
     pub async fn backup(&self, destination: PathBuf) -> Result<BackupReport, String> {
+        // Claimed BEFORE the admission lock: a caller that would only wait
+        // for an in-flight backup should be told so immediately, not queue
+        // behind it. The guard releases on drop, including if this future
+        // is cancelled when the client disconnects.
+        let Some(_backup_slot) = self.0.backup_guard.try_enter() else {
+            return Err(timeless_api_common::BACKUP_IN_PROGRESS.to_string());
+        };
         let _ordered = self.0.admission.lock().await;
         if self.0.shutting_down.load(Ordering::Acquire) {
             return Err("logs API is shutting down; backup is closed".into());

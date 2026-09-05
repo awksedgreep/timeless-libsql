@@ -16,6 +16,16 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Overlapping backups are refused instead of queued (issue #46).** A backup
+  occupies a signal's single writer for its whole duration — flush, the entire
+  optimize backlog, a WAL checkpoint, then the copy — so every queued ingest
+  waits behind it. Concurrent `POST /api/v1/backup` requests each queued
+  another full backup, letting an authorized caller stall ingest for as long
+  as it kept calling. All three signals now admit one backup at a time and
+  answer `409 Conflict` with reason `a backup is already running` otherwise,
+  making a repeated request O(1) for the writer. The route is already behind
+  the maintenance scope, so this closes the remaining half of the finding.
+
 - **Token clock-skew tolerance is now symmetric (issue #46).** The verifier
   granted `CLOCK_SKEW_SECONDS` (30 s) of leeway to `nbf`, `iat` and
   `not_before`, but compared `exp` against the raw clock, so a minting clock
