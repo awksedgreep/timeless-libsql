@@ -376,6 +376,7 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     let response = app
         .oneshot(
             Request::builder()
+                .method("POST")
                 .uri("/api/v1/flush")
                 .body(Body::empty())
                 .unwrap(),

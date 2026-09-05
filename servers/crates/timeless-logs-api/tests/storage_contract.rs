@@ -32,7 +32,7 @@ async fn exposition_and_stats_json_reconcile_with_engine_timeless_stats() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     let response = app
         .clone()
-        .oneshot(Request::get("/api/v1/flush").body(Body::empty()).unwrap())
+        .oneshot(Request::post("/api/v1/flush").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
