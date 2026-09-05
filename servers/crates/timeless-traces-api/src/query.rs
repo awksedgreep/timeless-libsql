@@ -112,9 +112,7 @@ impl ReadRequest {
             Some(raw) => parse_exact_integer("limit", raw)?,
         };
         if !(0..=MAX_SEARCH_LIMIT).contains(&limit) {
-            return Err(format!(
-                "limit must be between 0 and {MAX_SEARCH_LIMIT}"
-            ));
+            return Err(format!("limit must be between 0 and {MAX_SEARCH_LIMIT}"));
         }
         let min_duration_ns = params
             .min_duration
@@ -793,12 +791,11 @@ fn envelope(
 fn parse_duration(value: &str) -> Result<i64, String> {
     for (suffix, multiplier) in [("ms", 1_000_000), ("us", 1_000), ("s", 1_000_000_000)] {
         if let Some(number) = value.strip_suffix(suffix) {
-            return parse_exact_integer("duration", number)
-                .and_then(|number| {
-                    number.checked_mul(multiplier).ok_or_else(|| {
-                        format!("invalid Jaeger duration {value:?}")
-                    })
-                });
+            return parse_exact_integer("duration", number).and_then(|number| {
+                number
+                    .checked_mul(multiplier)
+                    .ok_or_else(|| format!("invalid Jaeger duration {value:?}"))
+            });
         }
     }
     parse_exact_integer("duration", value)
