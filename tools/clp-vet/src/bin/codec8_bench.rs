@@ -12,9 +12,7 @@
 
 use std::time::Instant;
 
-use timeless_core::blocks::{
-    decode_block, encode_block, CODEC_RICH_COLUMNAR, CODEC_RICH_TEMPLATE,
-};
+use timeless_core::blocks::{decode_block, encode_block, CODEC_RICH_COLUMNAR, CODEC_RICH_TEMPLATE};
 use timeless_core::LogEntry;
 
 const GROUP: usize = 8192; // the engine's merge_target_entries
@@ -63,7 +61,10 @@ fn run(path: &str) {
     let mut blocks = 0usize;
     for group in entries.chunks(GROUP) {
         blocks += 1;
-        for (i, codec) in [CODEC_RICH_COLUMNAR, CODEC_RICH_TEMPLATE].into_iter().enumerate() {
+        for (i, codec) in [CODEC_RICH_COLUMNAR, CODEC_RICH_TEMPLATE]
+            .into_iter()
+            .enumerate()
+        {
             let t0 = Instant::now();
             let (bytes, meta) = encode_block(group, codec, ZSTD_LEVEL).unwrap();
             enc_secs[i] += t0.elapsed().as_secs_f64();
@@ -164,9 +165,7 @@ fn load_journal_json(path: &str) -> Vec<LogEntry> {
         };
         let rest: std::collections::BTreeMap<&String, &serde_json::Value> = obj
             .iter()
-            .filter(|(k, _)| {
-                !matches!(k.as_str(), "MESSAGE" | "__REALTIME_TIMESTAMP" | "PRIORITY")
-            })
+            .filter(|(k, _)| !matches!(k.as_str(), "MESSAGE" | "__REALTIME_TIMESTAMP" | "PRIORITY"))
             .collect();
         out.push(LogEntry {
             ts,

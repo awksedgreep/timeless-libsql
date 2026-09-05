@@ -55,16 +55,31 @@ pub struct ProfileSpec {
 pub fn profile(name: &str) -> Option<ProfileSpec> {
     Some(match name {
         "small" => ProfileSpec {
-            services: 6, pods: 10, paths: 8, minutes: 30, step_secs: 15,
-            logs: 200_000, traces: 20_000,
+            services: 6,
+            pods: 10,
+            paths: 8,
+            minutes: 30,
+            step_secs: 15,
+            logs: 200_000,
+            traces: 20_000,
         },
         "medium" => ProfileSpec {
-            services: 12, pods: 30, paths: 12, minutes: 60, step_secs: 15,
-            logs: 2_000_000, traces: 100_000,
+            services: 12,
+            pods: 30,
+            paths: 12,
+            minutes: 60,
+            step_secs: 15,
+            logs: 2_000_000,
+            traces: 100_000,
         },
         "large" => ProfileSpec {
-            services: 25, pods: 100, paths: 12, minutes: 60, step_secs: 30,
-            logs: 5_000_000, traces: 300_000,
+            services: 25,
+            pods: 100,
+            paths: 12,
+            minutes: 60,
+            step_secs: 30,
+            logs: 5_000_000,
+            traces: 300_000,
         },
         _ => return None,
     })

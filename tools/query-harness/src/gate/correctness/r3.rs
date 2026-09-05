@@ -257,10 +257,7 @@ fn complete_lifecycle(extension: &Path, temporary: &Path) -> Result<()> {
     // installs, and reinstallation recreates nothing redundant.
     ensure!(
         schema_objects(&connection, "aux")?
-            == BTreeSet::from([(
-                "table".into(),
-                "timeless_schema_inventory".into()
-            )])
+            == BTreeSet::from([("table".into(), "timeless_schema_inventory".into())])
     );
     assert_signal_rows(&connection, "main", "main")?;
     Ok(())
@@ -350,10 +347,7 @@ fn quoted_names(extension: &Path, temporary: &Path) -> Result<()> {
     // installs (deleted rows, dropped table, orphaned views).
     ensure!(
         schema_objects(&connection, schema)?
-            == BTreeSet::from([(
-                "table".into(),
-                "timeless_schema_inventory".into()
-            )])
+            == BTreeSet::from([("table".into(), "timeless_schema_inventory".into())])
     );
     Ok(())
 }

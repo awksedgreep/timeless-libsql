@@ -67,9 +67,31 @@ impl Rng {
 // ---------------------------------------------------------------------------
 
 pub const SERVICE_POOL: [&str; 25] = [
-    "api", "web", "auth", "billing", "search", "ingest", "worker", "gateway", "cache", "notify",
-    "orders", "inventory", "shipping", "payments", "users", "catalog", "email", "push",
-    "analytics", "export", "scheduler", "webhooks", "media", "sessions", "audit",
+    "api",
+    "web",
+    "auth",
+    "billing",
+    "search",
+    "ingest",
+    "worker",
+    "gateway",
+    "cache",
+    "notify",
+    "orders",
+    "inventory",
+    "shipping",
+    "payments",
+    "users",
+    "catalog",
+    "email",
+    "push",
+    "analytics",
+    "export",
+    "scheduler",
+    "webhooks",
+    "media",
+    "sessions",
+    "audit",
 ];
 
 pub const PATH_POOL: [&str; 20] = [
@@ -211,7 +233,11 @@ pub enum Behavior {
     /// Bounded random walk (cpu, load, gc pause); emits 0.1 steps.
     Walk { base: f64, span: f64, max: f64 },
     /// Slowly growing level with jitter (memory); emits `quant` multiples.
-    Grow { base: f64, slope_per_sec: f64, quant: f64 },
+    Grow {
+        base: f64,
+        slope_per_sec: f64,
+        quant: f64,
+    },
     /// Monotonic integer counter with jittered per-second rate.
     Counter { rate_per_sec: f64 },
     /// Diurnal-ish sinusoid with noise; emits `quant` multiples.
@@ -296,8 +322,16 @@ pub fn build_catalog(cfg: &Config) -> Vec<SeriesSpec> {
                 push(
                     "cpu_usage_percent",
                     &mut vec![("mode", mode.to_string())],
-                    Behavior::Walk { base: b, span: s, max: m },
-                    if mode == "user" { Role::CpuSpike } else { Role::None },
+                    Behavior::Walk {
+                        base: b,
+                        span: s,
+                        max: m,
+                    },
+                    if mode == "user" {
+                        Role::CpuSpike
+                    } else {
+                        Role::None
+                    },
                     &mut salt,
                 );
             }
@@ -315,7 +349,11 @@ pub fn build_catalog(cfg: &Config) -> Vec<SeriesSpec> {
             push(
                 "memory_cached_bytes",
                 &mut vec![],
-                Behavior::Gauge { base: rng.range(0.8e9, 1.6e9), amp: 2.0e8, quant: 4096.0 },
+                Behavior::Gauge {
+                    base: rng.range(0.8e9, 1.6e9),
+                    amp: 2.0e8,
+                    quant: 4096.0,
+                },
                 Role::None,
                 &mut salt,
             );
@@ -336,14 +374,22 @@ pub fn build_catalog(cfg: &Config) -> Vec<SeriesSpec> {
             push(
                 "load_average_1m",
                 &mut vec![],
-                Behavior::Walk { base: rng.range(0.5, 3.0), span: 2.0, max: 32.0 },
+                Behavior::Walk {
+                    base: rng.range(0.5, 3.0),
+                    span: 2.0,
+                    max: 32.0,
+                },
                 Role::None,
                 &mut salt,
             );
             push(
                 "open_file_descriptors",
                 &mut vec![],
-                Behavior::Gauge { base: rng.range(200.0, 500.0), amp: 60.0, quant: 1.0 },
+                Behavior::Gauge {
+                    base: rng.range(200.0, 500.0),
+                    amp: 60.0,
+                    quant: 1.0,
+                },
                 Role::None,
                 &mut salt,
             );
@@ -363,7 +409,9 @@ pub fn build_catalog(cfg: &Config) -> Vec<SeriesSpec> {
                     push(
                         "http_requests_total",
                         &mut vec![("path", path.to_string()), ("status", status.to_string())],
-                        Behavior::Counter { rate_per_sec: req_rate * mult },
+                        Behavior::Counter {
+                            rate_per_sec: req_rate * mult,
+                        },
                         role,
                         &mut salt,
                     );
@@ -371,14 +419,18 @@ pub fn build_catalog(cfg: &Config) -> Vec<SeriesSpec> {
                 push(
                     "http_request_duration_ms_sum",
                     &mut vec![("path", path.to_string())],
-                    Behavior::Counter { rate_per_sec: req_rate * 1.13 * latency_ms },
+                    Behavior::Counter {
+                        rate_per_sec: req_rate * 1.13 * latency_ms,
+                    },
                     Role::LatencySum,
                     &mut salt,
                 );
                 push(
                     "http_request_duration_ms_count",
                     &mut vec![("path", path.to_string())],
-                    Behavior::Counter { rate_per_sec: req_rate * 1.13 },
+                    Behavior::Counter {
+                        rate_per_sec: req_rate * 1.13,
+                    },
                     Role::None,
                     &mut salt,
                 );
@@ -388,28 +440,40 @@ pub fn build_catalog(cfg: &Config) -> Vec<SeriesSpec> {
             push(
                 "queue_depth",
                 &mut vec![],
-                Behavior::Gauge { base: rng.range(2.0, 20.0), amp: 10.0, quant: 1.0 },
+                Behavior::Gauge {
+                    base: rng.range(2.0, 20.0),
+                    amp: 10.0,
+                    quant: 1.0,
+                },
                 Role::None,
                 &mut salt,
             );
             push(
                 "cache_hits_total",
                 &mut vec![],
-                Behavior::Counter { rate_per_sec: rng.range(100.0, 900.0) },
+                Behavior::Counter {
+                    rate_per_sec: rng.range(100.0, 900.0),
+                },
                 Role::None,
                 &mut salt,
             );
             push(
                 "cache_misses_total",
                 &mut vec![],
-                Behavior::Counter { rate_per_sec: rng.range(5.0, 80.0) },
+                Behavior::Counter {
+                    rate_per_sec: rng.range(5.0, 80.0),
+                },
                 Role::None,
                 &mut salt,
             );
             push(
                 "gc_pause_ms",
                 &mut vec![],
-                Behavior::Walk { base: rng.range(1.0, 8.0), span: 6.0, max: 500.0 },
+                Behavior::Walk {
+                    base: rng.range(1.0, 8.0),
+                    span: 6.0,
+                    max: 500.0,
+                },
                 Role::None,
                 &mut salt,
             );
@@ -435,7 +499,11 @@ impl SeriesState {
             Behavior::Walk { base, .. } => base + rng.range(-2.0, 2.0),
             _ => 0.0,
         };
-        SeriesState { rng, level, cum: 0.0 }
+        SeriesState {
+            rng,
+            level,
+            cum: 0.0,
+        }
     }
 
     /// Value for step `i` at wall time `ts` (unix millis).
@@ -459,7 +527,11 @@ impl SeriesState {
                 };
                 (v * 10.0).round() / 10.0
             }
-            Behavior::Grow { base, slope_per_sec, quant } => {
+            Behavior::Grow {
+                base,
+                slope_per_sec,
+                quant,
+            } => {
                 let v = base
                     + slope_per_sec * (i as f64 * cfg.step_secs as f64)
                     + self.rng.range(-0.002, 0.002) * base;
@@ -500,7 +572,10 @@ pub struct TraceReservoir {
 
 impl TraceReservoir {
     pub fn new(cap: usize) -> Self {
-        TraceReservoir { entries: Vec::new(), cap }
+        TraceReservoir {
+            entries: Vec::new(),
+            cap,
+        }
     }
 
     fn offer(&mut self, rng: &mut Rng, service: usize, trace_id: &[u8; 16], ts_ms: i64) {
@@ -545,12 +620,20 @@ pub fn generate_trace(
     let ts_ms = trace_start_ns / 1_000_000;
     let hot = root_service == incident.service && incident.active(ts_ms);
     let trace_id: [u8; 16] = rng.bytes();
-    let is_error = if hot { rng.below(10) < 3 } else { rng.below(20) == 0 };
+    let is_error = if hot {
+        rng.below(10) < 3
+    } else {
+        rng.below(20) == 0
+    };
     if is_error {
         reservoir.offer(rng, root_service, &trace_id, ts_ms);
     }
     // 80% short chains (5..=11), 20% fan-outs (12..=20) → mean ≈ 10.
-    let n_spans = if rng.below(10) < 8 { 5 + rng.below(7) } else { 12 + rng.below(9) } as usize;
+    let n_spans = if rng.below(10) < 8 {
+        5 + rng.below(7)
+    } else {
+        12 + rng.below(9)
+    } as usize;
     let dur_scale = if hot { 200_000_000.0 } else { 50_000_000.0 };
     let root_dur = rng.duration(dur_scale).max(1_000_000);
     let error_child = 1 + rng.below((n_spans - 1) as u64) as usize;
@@ -569,8 +652,7 @@ pub fn generate_trace(
         let (kind_num, scale) = if root {
             (1u8, dur_scale) // server
         } else {
-            let (k, s) = [(0u8, 1.0e6), (2, 1.0e7), (3, 2.0e6), (4, 2.0e6)]
-                [rng.below(4) as usize];
+            let (k, s) = [(0u8, 1.0e6), (2, 1.0e7), (3, 2.0e6), (4, 2.0e6)][rng.below(4) as usize];
             (k, s)
         };
         let status_num = if this_error {
@@ -581,7 +663,11 @@ pub fn generate_trace(
             1
         };
         let http_status: u16 = if this_error {
-            if rng.below(2) == 0 { 500 } else { 503 }
+            if rng.below(2) == 0 {
+                500
+            } else {
+                503
+            }
         } else {
             200
         };
@@ -609,7 +695,11 @@ pub fn generate_trace(
             kind_num,
             status_num,
             start_ts,
-            duration_ns: if root { root_dur } else { rng.duration(scale).max(1_000) },
+            duration_ns: if root {
+                root_dur
+            } else {
+                rng.duration(scale).max(1_000)
+            },
             attributes: span_attrs(method, http_status),
             status_message: if this_error {
                 format!("upstream {service} returned {http_status}")
@@ -722,5 +812,10 @@ pub fn generate_log(
         format!("{{\"path\":\"{path}\",\"service\":\"{service}\",\"status\":\"{status}\"}}")
     };
 
-    LogEntry { ts, level_num, message, metadata }
+    LogEntry {
+        ts,
+        level_num,
+        message,
+        metadata,
+    }
 }

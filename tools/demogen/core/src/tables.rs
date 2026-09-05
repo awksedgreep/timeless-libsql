@@ -118,7 +118,12 @@ impl Tables {
 
     pub fn serialize(&self) -> String {
         let slot = |s: &Option<String>| s.clone().unwrap_or_else(|| "-".into());
-        format!("{} {} {}", slot(&self.metrics), slot(&self.logs), slot(&self.spans))
+        format!(
+            "{} {} {}",
+            slot(&self.metrics),
+            slot(&self.logs),
+            slot(&self.spans)
+        )
     }
 
     pub fn parse(row: &str) -> Self {
@@ -127,7 +132,11 @@ impl Tables {
             None | Some("-") => None,
             Some(name) => Some(name.to_string()),
         };
-        Self { metrics: slot(), logs: slot(), spans: slot() }
+        Self {
+            metrics: slot(),
+            logs: slot(),
+            spans: slot(),
+        }
     }
 
     /// Claim `name` for the signal its `sql` declares.
@@ -137,9 +146,8 @@ impl Tables {
     /// timeless module, at most one table per signal.
     pub fn claim(&mut self, name: &str, sql: &str) -> Result<(), String> {
         let module = module_of(sql).ok_or_else(|| format!("'{name}' is not a virtual table"))?;
-        let signal = Signal::from_module(&module).ok_or_else(|| {
-            format!("'{name}' is a {module} table, not a timeless signal table")
-        })?;
+        let signal = Signal::from_module(&module)
+            .ok_or_else(|| format!("'{name}' is a {module} table, not a timeless signal table"))?;
         if let Some(taken) = self.slot(signal).replace(name.to_string()) {
             return Err(format!(
                 "'{taken}' and '{name}' are both {} — name at most one table per signal",
@@ -186,7 +194,9 @@ mod tests {
         );
         // A longer module is not mistaken for the one it starts with.
         assert_eq!(
-            Signal::from_module(&module_of("CREATE VIRTUAL TABLE a USING timeless_metrics_v2").unwrap()),
+            Signal::from_module(
+                &module_of("CREATE VIRTUAL TABLE a USING timeless_metrics_v2").unwrap()
+            ),
             None
         );
         assert_eq!(module_of("CREATE TABLE plain(x)"), None);
@@ -195,7 +205,8 @@ mod tests {
     #[test]
     fn one_table_per_signal() {
         let mut t = Tables::default();
-        t.claim("a", "CREATE VIRTUAL TABLE a USING timeless_metrics").unwrap();
+        t.claim("a", "CREATE VIRTUAL TABLE a USING timeless_metrics")
+            .unwrap();
         let err = t
             .claim("b", "CREATE VIRTUAL TABLE b USING timeless_metrics")
             .unwrap_err();
@@ -205,7 +216,10 @@ mod tests {
     #[test]
     fn ordinary_tables_and_foreign_modules_are_rejected() {
         let mut t = Tables::default();
-        assert!(t.claim("p", "CREATE TABLE p(x)").unwrap_err().contains("not a virtual table"));
+        assert!(t
+            .claim("p", "CREATE TABLE p(x)")
+            .unwrap_err()
+            .contains("not a virtual table"));
         assert!(t
             .claim("f", "CREATE VIRTUAL TABLE f USING fts5(body)")
             .unwrap_err()
@@ -215,7 +229,11 @@ mod tests {
     #[test]
     fn round_trips_through_state_including_absent_signals() {
         let mut t = Tables::default();
-        t.claim("app_logs", "CREATE VIRTUAL TABLE app_logs USING timeless_logs").unwrap();
+        t.claim(
+            "app_logs",
+            "CREATE VIRTUAL TABLE app_logs USING timeless_logs",
+        )
+        .unwrap();
         assert_eq!(t.serialize(), "- app_logs -");
         assert_eq!(Tables::parse(&t.serialize()), t);
         assert_eq!(t.describe(), "logs (app_logs)");

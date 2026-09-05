@@ -118,7 +118,10 @@ fn rss_kb() -> u64 {
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()
         .expect("run ps");
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 fn fmt_mb(kb: u64) -> String {
@@ -129,7 +132,8 @@ fn open_with_ext(path: &str, ext: &str) -> Connection {
     let conn = Connection::open(path).expect("open db");
     unsafe {
         conn.load_extension_enable().expect("enable ext loading");
-        conn.load_extension(ext, None::<&str>).expect("load extension");
+        conn.load_extension(ext, None::<&str>)
+            .expect("load extension");
     }
     conn.load_extension_disable().expect("disable ext loading");
     conn
@@ -168,9 +172,15 @@ fn run_probe(db: &str, ext: &str, n_series: usize) {
     // ── Regime 1: TVF-only (engine rebuilt per statement) ──
     let t = Instant::now();
     let series: i64 = conn
-        .query_row("SELECT COUNT(*) FROM timeless_series('m')", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM timeless_series('m')", [], |r| {
+            r.get(0)
+        })
         .expect("first catalog");
-    emit("unpinned_catalog", t.elapsed().as_secs_f64() * 1e3, format!("{series} series"));
+    emit(
+        "unpinned_catalog",
+        t.elapsed().as_secs_f64() * 1e3,
+        format!("{series} series"),
+    );
     assert_eq!(series as usize, n_series, "catalog series count");
 
     let t = Instant::now();
@@ -182,7 +192,11 @@ fn run_probe(db: &str, ext: &str, n_series: usize) {
             |r| r.get(0),
         )
         .expect("unpinned eq grid");
-    emit("unpinned_grid_eq", t.elapsed().as_secs_f64() * 1e3, format!("{rows} rows"));
+    emit(
+        "unpinned_grid_eq",
+        t.elapsed().as_secs_f64() * 1e3,
+        format!("{rows} rows"),
+    );
 
     // ── Pin: one pushdown-narrow query against the base vtab. Its
     // connection keeps the engine Arc alive from here on. ──
@@ -195,14 +209,24 @@ fn run_probe(db: &str, ext: &str, n_series: usize) {
             |r| r.get(0),
         )
         .expect("pin vtab");
-    emit("pin_base_vtab", t.elapsed().as_secs_f64() * 1e3, String::new());
+    emit(
+        "pin_base_vtab",
+        t.elapsed().as_secs_f64() * 1e3,
+        String::new(),
+    );
 
     // ── Regime 2: pinned (generation fast path) ──
     let t = Instant::now();
     let _: i64 = conn
-        .query_row("SELECT COUNT(*) FROM timeless_series('m')", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM timeless_series('m')", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    emit("pinned_catalog", t.elapsed().as_secs_f64() * 1e3, String::new());
+    emit(
+        "pinned_catalog",
+        t.elapsed().as_secs_f64() * 1e3,
+        String::new(),
+    );
 
     let t = Instant::now();
     let hosts: i64 = conn
@@ -212,7 +236,11 @@ fn run_probe(db: &str, ext: &str, n_series: usize) {
             |r| r.get(0),
         )
         .unwrap();
-    emit("pinned_label_values", t.elapsed().as_secs_f64() * 1e3, format!("{hosts} hosts"));
+    emit(
+        "pinned_label_values",
+        t.elapsed().as_secs_f64() * 1e3,
+        format!("{hosts} hosts"),
+    );
     assert_eq!(hosts as usize, n_series / N_METRICS, "host count");
 
     // Equality filter: one host, one metric — the index-pushdown path.
@@ -225,7 +253,11 @@ fn run_probe(db: &str, ext: &str, n_series: usize) {
             |r| r.get(0),
         )
         .expect("eq grid");
-    emit("pinned_grid_eq", t.elapsed().as_secs_f64() * 1e3, format!("{rows} rows"));
+    emit(
+        "pinned_grid_eq",
+        t.elapsed().as_secs_f64() * 1e3,
+        format!("{rows} rows"),
+    );
 
     // Regex matcher: anchored scan over EVERY candidate series of the
     // metric (n_series/10) — the F8 per-series cost at cardinality.
@@ -238,7 +270,11 @@ fn run_probe(db: &str, ext: &str, n_series: usize) {
             |r| r.get(0),
         )
         .expect("regex grid");
-    emit("pinned_grid_re", t.elapsed().as_secs_f64() * 1e3, format!("{rows} rows"));
+    emit(
+        "pinned_grid_re",
+        t.elapsed().as_secs_f64() * 1e3,
+        format!("{rows} rows"),
+    );
 
     // The heavy dashboard shape: 5-min rate for one metric across ALL
     // hosts (n_series/10 series decoded + folded).
@@ -251,7 +287,11 @@ fn run_probe(db: &str, ext: &str, n_series: usize) {
             |r| r.get(0),
         )
         .expect("window rate");
-    emit("pinned_window_rate", t.elapsed().as_secs_f64() * 1e3, format!("{rows} rows"));
+    emit(
+        "pinned_window_rate",
+        t.elapsed().as_secs_f64() * 1e3,
+        format!("{rows} rows"),
+    );
 
     emit("final", 0.0, String::new());
 }
@@ -304,7 +344,8 @@ fn run_one(n_series: usize, ext: &str, dir: &str) -> Vec<String> {
     let rss_ingest = rss_kb();
 
     let t0 = Instant::now();
-    conn.execute("INSERT INTO m(m) VALUES ('flush')", []).expect("flush");
+    conn.execute("INSERT INTO m(m) VALUES ('flush')", [])
+        .expect("flush");
     let flush_s = t0.elapsed().as_secs_f64();
     let rss_flush = rss_kb();
     drop(conn);
@@ -415,10 +456,18 @@ fn main() {
         .iter()
         .position(|a| a == "--series")
         .and_then(|i| args.get(i + 1))
-        .map(|s| s.split(',').map(|n| n.parse().expect("series count")).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|n| n.parse().expect("series count"))
+                .collect()
+        })
         .unwrap_or_else(|| vec![1_000, 10_000, 100_000]);
 
-    let dir = format!("{}/tl_bench_card_{}", env::temp_dir().display(), std::process::id());
+    let dir = format!(
+        "{}/tl_bench_card_{}",
+        env::temp_dir().display(),
+        std::process::id()
+    );
     fs::create_dir_all(&dir).expect("create scratch dir");
 
     println!("# bench-cardinality — {PTS_PER_SERIES} pts/series, tier2 blob ingest\n");
