@@ -93,7 +93,6 @@ pub(crate) struct ShadowBlockStore {
     scan_sql: String,
     stats_counter_sql: String,
     stats_fallback_sql: String,
-    ensure_stats_sql: String,
     initialize_stats_sql: String,
     adjust_stats_sql: String,
     stats_fallback: Mutex<Option<BlockStorageStats>>,
@@ -149,21 +148,6 @@ impl ShadowBlockStore {
                         COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
                                           THEN length(data) ELSE 0 END),0), \
                         (SELECT COUNT(*) FROM {terms}) FROM {blocks}",
-                target = crate::logs_vtab::MERGE_TARGET_ENTRIES,
-            ),
-            ensure_stats_sql: format!(
-                "INSERT OR IGNORE INTO {meta}(k,v) \
-                 SELECT 'stats_disk_entries', COALESCE(SUM(entry_count),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_block_bytes', COALESCE(SUM(length(data)),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_raw_bytes', \
-                   COALESCE(SUM(CASE WHEN codec IN (1,6) THEN length(data) ELSE 0 END),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_optimize_source_entries', \
-                   COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
-                                     THEN entry_count ELSE 0 END),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_optimize_source_bytes', \
-                   COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
-                                     THEN length(data) ELSE 0 END),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_term_rows', COUNT(*) FROM {terms}",
                 target = crate::logs_vtab::MERGE_TARGET_ENTRIES,
             ),
             initialize_stats_sql: format!(
@@ -259,23 +243,26 @@ impl ShadowBlockStore {
             .stats_fallback
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(stats) = cached {
-            conn.execute(
-                &self.initialize_stats_sql,
-                params![
-                    stats.disk_entries as i64,
-                    stats.bytes_on_disk as i64,
-                    stats.raw_bytes as i64,
-                    stats.optimize_source_entries as i64,
-                    stats.optimize_source_bytes as i64,
-                    stats.term_rows as i64,
-                ],
-            )
-            .map_err(|error| format!("initialize cached log storage counters failed: {error}"))?;
-        } else {
-            conn.execute(&self.ensure_stats_sql, [])
-                .map_err(|error| format!("initialize log storage counters failed: {error}"))?;
-        }
+        // This runs from a virtual-table xUpdate callback. Combining the
+        // fallback scan and counter write as INSERT ... SELECT can self-lock
+        // SQLite when the nested write reads this table's shadow tables.
+        // Split it into a read-only scan and a VALUES insert instead.
+        let stats = match cached {
+            Some(stats) => stats,
+            None => self.scan_storage_stats(conn)?,
+        };
+        conn.execute(
+            &self.initialize_stats_sql,
+            params![
+                stats.disk_entries as i64,
+                stats.bytes_on_disk as i64,
+                stats.raw_bytes as i64,
+                stats.optimize_source_entries as i64,
+                stats.optimize_source_bytes as i64,
+                stats.term_rows as i64,
+            ],
+        )
+        .map_err(|error| format!("initialize log storage counters failed: {error}"))?;
         Ok(())
     }
 

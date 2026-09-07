@@ -1488,6 +1488,66 @@ check_eq "catalog after committed DROP/recreate is fresh (R4)" \
   "$(grep '^fresh|' <<<"$got")" "fresh|disk|999|999|1|1"
 
 # ---------------------------------------------------------------------------
+echo "== section 23b: legacy logs/traces storage-counter migration does not self-lock =="
+LEGACY_STATS_DB="$TMP/legacy_stats.db"
+sqlite3 "$LEGACY_STATS_DB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE l USING timeless_logs(index_keys='service');
+CREATE VIRTUAL TABLE t USING timeless_traces;
+INSERT INTO l(ts, level, message, metadata)
+  VALUES (1, 'info', 'first', '{"service":"api"}');
+INSERT INTO l(l) VALUES ('flush');
+INSERT INTO t(trace_id, span_id, name, service, start_ts)
+  VALUES (x'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', x'1111111111111111', 'first', 'api', 1);
+INSERT INTO t(t) VALUES ('flush');
+-- Simulate a store created before durable stats counters existed. The next
+-- process has no in-memory fallback cache and its first flush must establish
+-- the baseline from the shadow tables without a nested-write self-lock.
+DELETE FROM l_meta WHERE k LIKE 'stats_%';
+DELETE FROM t_meta WHERE k LIKE 'stats_%';
+SQL
+if got=$(timeout 30s sqlite3 "$LEGACY_STATS_DB" <<SQL
+.load $EXT
+INSERT INTO l(ts, level, message, metadata)
+  VALUES (2, 'error', 'second', '{"service":"api"}');
+INSERT INTO l(l) VALUES ('flush');
+INSERT INTO t(trace_id, span_id, name, service, start_ts)
+  VALUES (x'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', x'2222222222222222', 'second', 'api', 2);
+INSERT INTO t(t) VALUES ('flush');
+SELECT 'loglegacy',
+       (SELECT COUNT(*) FROM l_meta WHERE k LIKE 'stats_%') = 6,
+       (SELECT CAST(v AS INTEGER) FROM l_meta WHERE k='stats_disk_entries') =
+         (SELECT COALESCE(SUM(entry_count),0) FROM l_blocks),
+       (SELECT CAST(v AS INTEGER) FROM l_meta WHERE k='stats_block_bytes') =
+         (SELECT COALESCE(SUM(length(data)),0) FROM l_blocks),
+       (SELECT CAST(v AS INTEGER) FROM l_meta WHERE k='stats_term_rows') =
+         (SELECT COUNT(*) FROM l_terms),
+       (SELECT COUNT(*) FROM l) = 2;
+SELECT 'tracelegacy',
+       (SELECT COUNT(*) FROM t_meta WHERE k LIKE 'stats_%') = 9,
+       (SELECT CAST(v AS INTEGER) FROM t_meta WHERE k='stats_block_bytes') =
+         (SELECT COALESCE(SUM(length(data)),0) FROM t_blocks),
+       (SELECT CAST(v AS INTEGER) FROM t_meta WHERE k='stats_duration_bounded_blocks') =
+         (SELECT COUNT(*) FROM t_duration_bounds),
+       (SELECT CAST(v AS INTEGER) FROM t_meta WHERE k='stats_term_rows') =
+         (SELECT COUNT(*) FROM t_terms),
+       (SELECT CAST(v AS INTEGER) FROM t_meta WHERE k='stats_trace_index_rows') =
+         (SELECT COUNT(*) FROM t_trace_blocks),
+       (SELECT CAST(v AS INTEGER) FROM t_meta WHERE k='stats_attribute_bloom_rows') =
+         (SELECT COUNT(*) FROM t_attribute_blooms),
+       (SELECT COUNT(*) FROM t) = 2;
+SQL
+); then
+  :
+else
+  got='legacy storage-counter migration failed or timed out'
+fi
+check_eq "legacy logs counters initialize on first flush without self-lock" \
+  "$(grep '^loglegacy|' <<<"$got")" "loglegacy|1|1|1|1|1"
+check_eq "legacy traces counters initialize on first flush without self-lock" \
+  "$(grep '^tracelegacy|' <<<"$got")" "tracelegacy|1|1|1|1|1|1|1"
+
+# ---------------------------------------------------------------------------
 echo "== section 24: F2 automated retention (table argument) =="
 F2DB="$TMP/f2_retention.db"
 got=$(sqlite3 "$F2DB" <<SQL

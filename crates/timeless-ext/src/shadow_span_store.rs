@@ -208,7 +208,6 @@ pub(crate) struct ShadowSpanStore {
     duration_exists_sql: String,
     stats_counter_sql: String,
     stats_fallback_sql: String,
-    ensure_stats_sql: String,
     initialize_stats_sql: String,
     adjust_stats_sql: String,
     stats_fallback: Mutex<Option<SpanStorageStats>>,
@@ -319,25 +318,6 @@ impl ShadowSpanStore {
                         (SELECT COUNT(*) FROM {attributes}), \
                         (SELECT COALESCE(SUM(length(bits)),0) FROM {attributes}) \
                  FROM {blocks}",
-                target = crate::traces_vtab::MERGE_TARGET_ENTRIES,
-            ),
-            ensure_stats_sql: format!(
-                "INSERT OR IGNORE INTO {meta}(k,v) \
-                 SELECT 'stats_block_bytes', COALESCE(SUM(length(data)),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_raw_bytes', \
-                   COALESCE(SUM(CASE WHEN codec=1 THEN length(data) ELSE 0 END),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_optimize_source_entries', \
-                   COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
-                                     THEN entry_count ELSE 0 END),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_optimize_source_bytes', \
-                   COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
-                                     THEN length(data) ELSE 0 END),0) FROM {blocks} \
-                 UNION ALL SELECT 'stats_duration_bounded_blocks', COUNT(*) FROM {durations} \
-                 UNION ALL SELECT 'stats_term_rows', COUNT(*) FROM {terms} \
-                 UNION ALL SELECT 'stats_trace_index_rows', COUNT(*) FROM {traces} \
-                 UNION ALL SELECT 'stats_attribute_bloom_rows', COUNT(*) FROM {attributes} \
-                 UNION ALL SELECT 'stats_attribute_bloom_bytes', \
-                   COALESCE(SUM(length(bits)),0) FROM {attributes}",
                 target = crate::traces_vtab::MERGE_TARGET_ENTRIES,
             ),
             initialize_stats_sql: format!(
@@ -462,26 +442,28 @@ impl ShadowSpanStore {
             .stats_fallback
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(stats) = cached {
-            conn.execute(
-                &self.initialize_stats_sql,
-                params![
-                    stats.bytes_on_disk as i64,
-                    stats.raw_bytes as i64,
-                    stats.optimize_source_entries as i64,
-                    stats.optimize_source_bytes as i64,
-                    stats.duration_bounded_blocks as i64,
-                    stats.term_rows as i64,
-                    stats.trace_index_rows as i64,
-                    stats.attribute_bloom_rows as i64,
-                    stats.attribute_bloom_bytes as i64,
-                ],
-            )
-            .map_err(|error| format!("initialize cached trace storage counters failed: {error}"))?;
-        } else {
-            conn.execute(&self.ensure_stats_sql, [])
-                .map_err(|error| format!("initialize trace storage counters failed: {error}"))?;
-        }
+        // See ShadowBlockStore::ensure_storage_stats: split the legacy
+        // baseline read from the counter write to avoid self-locking SQLite
+        // with a nested INSERT ... SELECT inside xUpdate.
+        let stats = match cached {
+            Some(stats) => stats,
+            None => self.scan_storage_stats(conn)?,
+        };
+        conn.execute(
+            &self.initialize_stats_sql,
+            params![
+                stats.bytes_on_disk as i64,
+                stats.raw_bytes as i64,
+                stats.optimize_source_entries as i64,
+                stats.optimize_source_bytes as i64,
+                stats.duration_bounded_blocks as i64,
+                stats.term_rows as i64,
+                stats.trace_index_rows as i64,
+                stats.attribute_bloom_rows as i64,
+                stats.attribute_bloom_bytes as i64,
+            ],
+        )
+        .map_err(|error| format!("initialize trace storage counters failed: {error}"))?;
         Ok(())
     }
 
