@@ -16609,7 +16609,11 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     let extract_regexp_timeout = router_with_limits(
         storage.clone(),
         LogsQueryLimits {
-            deadline: Duration::from_millis(1),
+            // Regex compilation is covered by the HTTP deadline but happens
+            // before Storage::pipeline enters the cancellable reader. A 1 ms
+            // deadline can expire during compilation on a loaded CI runner,
+            // producing the expected 504 without a storage cancellation.
+            deadline: Duration::from_millis(5),
             ..LogsQueryLimits::default()
         },
     )
