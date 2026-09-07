@@ -697,20 +697,24 @@ fn logs_optimize(extension: &Path, database: &Path) -> Result<()> {
     )?;
     connection.execute("INSERT INTO logs(logs) VALUES('flush')", [])?;
     connection.execute_batch("ROLLBACK")?;
-    ensure!(scalar_i64(
-        &connection,
-        "SELECT COUNT(*) FROM logs_meta WHERE k GLOB 'stats_*'"
-    )? == 0);
+    ensure!(
+        scalar_i64(
+            &connection,
+            "SELECT COUNT(*) FROM logs_meta WHERE k GLOB 'stats_*'"
+        )? == 0
+    );
     ensure!(stat(&stats(&connection, "logs")?, "disk_entries")? == 10_240);
     connection.execute(
         "INSERT INTO logs(logs) VALUES(?1)",
         params![blobs::log_batch(50_000, 1, 1)],
     )?;
     connection.execute("INSERT INTO logs(logs) VALUES('flush')", [])?;
-    ensure!(scalar_i64(
-        &connection,
-        "SELECT COUNT(*) FROM logs_meta WHERE k GLOB 'stats_*'"
-    )? == 6);
+    ensure!(
+        scalar_i64(
+            &connection,
+            "SELECT COUNT(*) FROM logs_meta WHERE k GLOB 'stats_*'"
+        )? == 6
+    );
     ensure!(stat(&stats(&connection, "logs")?, "disk_entries")? == 10_241);
     println!("PASS: size-tiered optimize bounds rewrites and budgets work");
     Ok(())
@@ -875,10 +879,12 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     let rolled_back_backfill = stats(&reopened, "traces")?;
     ensure!(stat(&rolled_back_backfill, "duration_bounded_blocks")? == 0);
     ensure!(stat(&rolled_back_backfill, "duration_unknown_blocks")? == 1);
-    ensure!(scalar_i64(
-        &reopened,
-        "SELECT COUNT(*) FROM traces_meta WHERE k GLOB 'stats_*'"
-    )? == 0);
+    ensure!(
+        scalar_i64(
+            &reopened,
+            "SELECT COUNT(*) FROM traces_meta WHERE k GLOB 'stats_*'"
+        )? == 0
+    );
     reopened.execute("INSERT INTO traces(traces) VALUES('optimize')", [])?;
     let optimized = stats(&reopened, "traces")?;
     ensure!(stat(&optimized, "duration_bounded_blocks")? > 0);
@@ -887,10 +893,12 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     ensure!(stat(&optimized, "optimize_duration_backfill_entries")? == 24);
     ensure!(stat(&optimized, "optimize_duration_backfill_input_bytes")? > 0);
     ensure!(stat(&optimized, "optimize_duration_backfill_total_ns")? > 0);
-    ensure!(scalar_i64(
-        &reopened,
-        "SELECT COUNT(*) FROM traces_meta WHERE k GLOB 'stats_*'"
-    )? == 9);
+    ensure!(
+        scalar_i64(
+            &reopened,
+            "SELECT COUNT(*) FROM traces_meta WHERE k GLOB 'stats_*'"
+        )? == 9
+    );
     let before_rewritten_miss = stats(&reopened, "traces")?;
     ensure!(
         scalar_i64(
