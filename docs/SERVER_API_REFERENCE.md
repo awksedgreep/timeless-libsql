@@ -57,8 +57,8 @@ The "Required scope" column applies **only when auth is enabled**
 | Signal | Methods | Path | Required scope | Contract |
 |---|---|---|---|---|
 | `metrics` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |
-| `metrics` | `GET` | `/ready` | `metrics:stats` | Readiness plus build, storage, queue, rollup, and file accounting. |
-| `metrics` | `GET` | `/health` | `metrics:stats` | Alias of `/ready`. |
+| `metrics` | `GET` | `/ready` | `metrics:stats` | Constant-time process readiness plus build identity; does not scan storage. |
+| `metrics` | `GET` | `/health` | `metrics:stats` | Readiness plus storage, queue, rollup, and file accounting. |
 | `metrics` | `GET` | `/metrics` | none | Prometheus text exposition of the plane's own operational stats plus `timeless_build_info`; unauthenticated like the probe endpoints. |
 | `metrics` | `GET` | `/select/metrics/stats` | `metrics:stats` | Complete serialized `StorageStats`. |
 | `metrics` | `POST` | `/api/v1/flush` | `metrics:maintenance` | Ordered writer completion, extension flush, and durability barrier. |
@@ -145,6 +145,14 @@ separate families: `timeless_<plane>_storage_bytes` (the engine's
 `timeless_<plane>_database_file_bytes`. A compression ratio is
 raw-vs-storage; index, WAL, freelist, and whole-file bytes are operational
 series and are never part of one.
+
+Metrics payload bytes and row counts are maintained transactionally in the
+table metadata, so routine health and scrape requests do not aggregate the
+complete chunk table. Exact metrics per-index bytes would require a complete
+`dbstat` walk and are therefore reported as unavailable by the extension (the
+server's compatibility gauge is `0`); page, freelist, WAL, and database-file
+gauges remain available. Logs and traces retain their existing index-byte
+accounting.
 
 The raw side per plane: `timeless_metrics_raw_ingested_bytes` is
 `16 × total_points` (8-byte timestamp + 8-byte value per sample — the
@@ -298,6 +306,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |
 | `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` | metrics | `300` | Public compact/rollup cadence. |
 | `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` | metrics | `3600` | Seven-day raw-retention prune check cadence. |
+| `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows in bounded 65,536-row batches. The HTTP API does not require persisted rollups. |
 | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Evaluation-grid points per series; valid range 1–11,000. |
 | `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` | metrics | `100000` | Final serialized result points. |
 | `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Cumulative storage and intermediate evaluation points. |

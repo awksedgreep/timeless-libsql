@@ -14,7 +14,8 @@
 //! The hidden command column accepts THREE payload kinds, dispatched by
 //! SQLite TYPE and then (for blobs) by the first byte:
 //!
-//!   TEXT  → maintenance command: 'flush' | 'compact' | 'prune:<unix_ts>'
+//!   TEXT  → maintenance/configuration command: `flush` | `compact` |
+//!           `prune:<unix_ts>` | `rollups:none|<ladder>` | `clear-rollups`
 //!           (the FTS5 idiom: an insert that sets only the hidden column
 //!           runs maintenance instead of storing a row).
 //!   BLOB, first byte 0x01
@@ -460,6 +461,47 @@ impl MetricsTab {
             // F3: produce settled buckets for every declared tier. A
             // no-op (0 chunks) without a rollups= ladder.
             self.shared.engine.rollup().map_err(module_err)?;
+        } else if let Some(spec) = cmd.strip_prefix("rollups:") {
+            let host = unsafe { Connection::from_handle(self.db) }?;
+            let spec = spec.trim();
+            if spec.eq_ignore_ascii_case("none") {
+                shadow_meta::delete_meta_key(
+                    &host,
+                    &self.database_name,
+                    &self.table_name,
+                    "rollups",
+                )
+                .map_err(module_err)?;
+                self.shared.engine.set_rollups_transactional(Vec::new());
+            } else {
+                let (tiers, persisted) =
+                    table_args::parse_rollups(spec, NATIVE_PER_SECOND).map_err(module_err)?;
+                shadow_meta::save_meta_text(
+                    &host,
+                    &self.database_name,
+                    &self.table_name,
+                    "rollups",
+                    &persisted,
+                )
+                .map_err(module_err)?;
+                self.shared.engine.set_rollups_transactional(tiers);
+            }
+        } else if cmd == "clear-rollups" {
+            if !self.shared.engine.rollup_tiers().is_empty() {
+                return Err(module_err(
+                    "clear-rollups requires rollups:none first; refusing to delete an active tier"
+                        .into(),
+                ));
+            }
+            let (deleted, _more, errors) = self.shared.engine.clear_rollups_batch();
+            if !errors.is_empty() {
+                return Err(module_err(format!(
+                    "clear-rollups errors: {}",
+                    errors.join("; ")
+                )));
+            }
+            return i64::try_from(deleted)
+                .map_err(|_| module_err("clear-rollups count exceeds i64::MAX".into()));
         } else if let Some(ts_str) = cmd.strip_prefix("prune:") {
             // Retention: drop whole chunks whose max_ts < the cutoff.
             // Block-granular deletes — one DELETE row removes a whole
@@ -473,7 +515,8 @@ impl MetricsTab {
             }
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'compact', 'rollup', 'prune:<unix_ts>'"
+                "unknown command {cmd:?}; supported: 'flush', 'compact', 'rollup', \
+                 'rollups:none|<ladder>', 'clear-rollups', 'prune:<unix_ts>'"
             )));
         }
         Ok(0)
@@ -1088,9 +1131,10 @@ impl UpdateVTab<'_> for MetricsTab {
 ///   entries whose rows were restored come back, and pre-txn points
 ///   drained by an intra-txn flush return to the buffer.
 ///
-/// ALL commands ('flush', 'compact', 'prune:<ts>') are allowed inside
-/// explicit transactions and roll back fully — the journal covers their
-/// index mutations, and their row mutations ride the host transaction.
+/// ALL commands (`flush`, `compact`, `prune:<ts>`, rollup configuration and
+/// cleanup) are allowed inside explicit transactions and roll back fully —
+/// the journal covers their index/configuration mutations, and their row/meta
+/// mutations ride the host transaction.
 ///
 /// SAVEPOINT ADDITION — rusqlite's update_module_with_tx does not wire
 /// xSavepoint/xRelease/xRollbackTo, so vtab_tx.rs fills those version-2

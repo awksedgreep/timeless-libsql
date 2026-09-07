@@ -102,6 +102,37 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   compaction moves to the scheduled connection, where it drains in budgeted
   passes averaging 68 ms instead of stalling an insert.
 
+### Changed
+
+- **Persisted metrics rollups are opt-in for newly-created standalone API
+  databases.** The HTTP query implementation reads the raw/window batch
+  surfaces and does not consume the extension's persisted rollup tiers, so
+  creating millions of unused rollup rows only spent memory and I/O. Set
+  `TIMELESS_METRICS_ROLLUPS` to a ladder such as `1h@30d,1d@365d` to opt in;
+  new databases default to none. Unset configuration preserves an existing
+  database's ladder, while explicit `none` disables future rollup production
+  and lets scheduled compact maintenance drain historical rollup rows in
+  bounded 65,536-row transactions.
+
+### Fixed
+
+- **Metrics rollup indexes now scale as compact grouped arrays instead of a
+  per-row metadata B-tree.** Each `(series, resolution)` owns one sorted vector
+  of 32-byte row entries, preserving duplicate timestamps by durable rowid
+  while removing raw-chunk floats, locations, repeated keys, and B-tree node
+  overhead from every rollup. SQLite recovery streams rows directly into the
+  grouped index instead of staging a second all-rollups vector, and automatic
+  rollup retention deletes at most 4,096 rows per maintenance pass.
+
+- **Metrics readiness and routine stats no longer scan the complete chunk
+  table.** `/ready` is a constant-time process/readiness probe, startup
+  validates virtual-table ownership without invoking `timeless_stats`, and
+  payload row/byte totals are maintained transactionally in `_meta` (with one
+  cached aggregate fallback for legacy databases). Rollup counts come from the
+  in-memory index, and metrics omits exact per-index `dbstat` accounting because
+  computing it would make every health or Prometheus scrape scale with the
+  database.
+
 ## [0.8.0] — 2026-09-03
 
 ### Added

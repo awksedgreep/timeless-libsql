@@ -38,7 +38,7 @@
 //! that used to live here is deleted, not relocated.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use timeless_core::{
@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS {chunks} (
 );
 CREATE INDEX IF NOT EXISTS {chunks_index} ON {chunks_local}(series_id, ts_min);
 CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
+INSERT OR IGNORE INTO {meta}(k, v) VALUES ('chunk_rows', 0), ('chunk_bytes', 0);
 CREATE TABLE IF NOT EXISTS {series} (
   id               INTEGER PRIMARY KEY,
   name             TEXT NOT NULL,
@@ -183,6 +184,10 @@ pub(crate) struct ShadowTableStore {
     chunks_ident: String,
     scan_sql: String,
     stats_sql: String,
+    stats_counter_sql: String,
+    ensure_stats_sql: String,
+    adjust_stats_sql: String,
+    stats_fallback: Mutex<Option<(u64, usize)>>,
     save_registry_sql: String,
     load_registry_sql: String,
     load_series_sql: String,
@@ -251,20 +256,37 @@ impl ShadowTableStore {
             ),
             scan_rollups_sql: format!(
                 "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding \
-                 FROM {chunks} WHERE resolution > 0"
+                 FROM {chunks} WHERE resolution > 0 ORDER BY id"
             ),
             insert_rollup_sql: format!(
                 "INSERT INTO {chunks} (series_id, ts_min, ts_max, point_count, \
                  min_val, max_val, sum_val, encoding, resolution, ts_data, val_data) \
                  VALUES (?1, ?2, ?3, ?4, 0, 0, 0, ?5, ?6, ?7, x'')"
             ),
-            // POC accounting: a full aggregate over the table. Fine while
-            // tables are small; should become an incrementally-maintained
-            // counter in _meta once ingest volume matters.
+            // Legacy fallback only: new stores seed counters in _meta and all
+            // mutations below maintain them transactionally. An older store
+            // pays for this aggregate at most once per process before its
+            // first mutation initializes the durable counters.
             stats_sql: format!(
                 "SELECT COUNT(*), COALESCE(SUM(length(ts_data) + length(val_data)), 0) \
                  FROM {chunks}"
             ),
+            stats_counter_sql: format!(
+                "SELECT (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k = 'chunk_rows'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k = 'chunk_bytes')"
+            ),
+            ensure_stats_sql: format!(
+                "INSERT OR IGNORE INTO {meta}(k, v) \
+                 SELECT 'chunk_rows', COUNT(*) FROM {chunks} \
+                 UNION ALL \
+                 SELECT 'chunk_bytes', COALESCE(SUM(length(ts_data) + length(val_data)), 0) \
+                 FROM {chunks}"
+            ),
+            adjust_stats_sql: format!(
+                "INSERT INTO {meta}(k, v) VALUES ('chunk_rows', ?1), ('chunk_bytes', ?2) \
+                 ON CONFLICT(k) DO UPDATE SET v = CAST(v AS INTEGER) + excluded.v"
+            ),
+            stats_fallback: Mutex::new(None),
             save_registry_sql: format!(
                 "INSERT OR REPLACE INTO {meta} (k, v) VALUES ('series_registry', ?1)"
             ),
@@ -309,7 +331,7 @@ impl ShadowTableStore {
             ),
             scan_rollups_since_sql: format!(
                 "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding \
-                 FROM {chunks} WHERE resolution > 0 AND id > ?1"
+                 FROM {chunks} WHERE resolution > 0 AND id > ?1 ORDER BY id"
             ),
         }
     }
@@ -323,6 +345,45 @@ impl ShadowTableStore {
             .execute([])
             .map_err(|e| format!("chunk generation bump failed: {e}"))?;
         Ok(())
+    }
+
+    fn ensure_storage_stats(&self, conn: &Connection) -> Result<(), String> {
+        let counters: (Option<i64>, Option<i64>) = conn
+            .query_row(&self.stats_counter_sql, [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| format!("read storage counters failed: {e}"))?;
+        if counters.0.is_some() && counters.1.is_some() {
+            return Ok(());
+        }
+        conn.prepare_cached(&self.ensure_stats_sql)
+            .map_err(|e| format!("prepare storage counter initialization failed: {e}"))?
+            .execute([])
+            .map_err(|e| format!("storage counter initialization failed: {e}"))?;
+        Ok(())
+    }
+
+    fn adjust_storage_stats(
+        &self,
+        conn: &Connection,
+        rows_delta: i64,
+        bytes_delta: i64,
+    ) -> Result<(), String> {
+        conn.prepare_cached(&self.adjust_stats_sql)
+            .map_err(|e| format!("prepare storage counter update failed: {e}"))?
+            .execute(params![rows_delta, bytes_delta])
+            .map_err(|e| format!("storage counter update failed: {e}"))?;
+        Ok(())
+    }
+
+    fn selected_storage_stats(&self, conn: &Connection, ids: &str) -> Result<(i64, i64), String> {
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(length(ts_data) + length(val_data)), 0) \
+             FROM {} WHERE id IN ({ids})",
+            self.chunks_ident
+        );
+        conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("read deleted chunk accounting failed: {e}"))
     }
 
     /// P2: bump the shape generation inside the caller's transaction.
@@ -610,7 +671,16 @@ impl ChunkStore for ShadowTableStore {
             return Ok(Vec::new());
         }
         let conn = Self::conn()?;
+        self.ensure_storage_stats(&conn)?;
         let locs = self.insert_chunks(&conn, chunks)?;
+        let bytes = chunks.iter().try_fold(0_i64, |total, chunk| {
+            let chunk_bytes = i64::try_from(chunk.ts_bytes.len() + chunk.val_bytes.len())
+                .map_err(|_| "chunk payload bytes exceed i64::MAX".to_string())?;
+            total
+                .checked_add(chunk_bytes)
+                .ok_or_else(|| "chunk payload byte total exceeds i64::MAX".to_string())
+        })?;
+        self.adjust_storage_stats(&conn, chunks.len() as i64, bytes)?;
         self.bump_chunk_generation(&conn)?;
         Ok(locs)
     }
@@ -630,9 +700,18 @@ impl ChunkStore for ShadowTableStore {
         on_committed: &mut dyn FnMut(&[ChunkLoc]),
     ) -> Result<Vec<ChunkLoc>, String> {
         let conn = Self::conn()?;
+        self.ensure_storage_stats(&conn)?;
 
         let locs = self.insert_chunks(&conn, add)?;
         on_committed(&locs);
+
+        let added_bytes = add.iter().try_fold(0_i64, |total, chunk| {
+            let chunk_bytes = i64::try_from(chunk.ts_bytes.len() + chunk.val_bytes.len())
+                .map_err(|_| "chunk payload bytes exceed i64::MAX".to_string())?;
+            total
+                .checked_add(chunk_bytes)
+                .ok_or_else(|| "chunk payload byte total exceeds i64::MAX".to_string())
+        })?;
 
         let mut ids = Vec::with_capacity(remove.len());
         for loc in remove {
@@ -641,12 +720,22 @@ impl ChunkStore for ShadowTableStore {
                 other => return Err(format!("ShadowTableStore cannot remove {other:?}")),
             }
         }
-        if !ids.is_empty() {
-            let sql = format!("{}{})", self.delete_prefix, ids.join(","));
+        let (removed_rows, removed_bytes) = if ids.is_empty() {
+            (0, 0)
+        } else {
+            let ids = ids.join(",");
+            let removed = self.selected_storage_stats(&conn, &ids)?;
+            let sql = format!("{}{})", self.delete_prefix, ids);
             conn.execute(&sql, [])
                 .map_err(|e| format!("compaction delete failed: {e}"))?;
             self.bump_shape_generation(&conn)?;
-        }
+            removed
+        };
+        self.adjust_storage_stats(
+            &conn,
+            add.len() as i64 - removed_rows,
+            added_bytes - removed_bytes,
+        )?;
         self.bump_chunk_generation(&conn)?;
         Ok(locs)
     }
@@ -764,9 +853,23 @@ impl ChunkStore for ShadowTableStore {
                 return errors;
             }
         };
-        let sql = format!("{}{})", self.delete_prefix, ids.join(","));
+        if let Err(error) = self.ensure_storage_stats(&conn) {
+            errors.push(error);
+            return errors;
+        }
+        let ids = ids.join(",");
+        let removed = match self.selected_storage_stats(&conn, &ids) {
+            Ok(removed) => removed,
+            Err(error) => {
+                errors.push(error);
+                return errors;
+            }
+        };
+        let sql = format!("{}{})", self.delete_prefix, ids);
         if let Err(e) = conn.execute(&sql, []) {
             errors.push(format!("batched chunk delete failed: {e}"));
+        } else if let Err(e) = self.adjust_storage_stats(&conn, -removed.0, -removed.1) {
+            errors.push(e);
         } else if let Err(e) = self
             .bump_shape_generation(&conn)
             .and_then(|()| self.bump_chunk_generation(&conn))
@@ -792,6 +895,7 @@ impl ChunkStore for ShadowTableStore {
             return Ok(Vec::new());
         }
         let conn = Self::conn()?;
+        self.ensure_storage_stats(&conn)?;
         let mut stmt = conn
             .prepare_cached(&self.insert_rollup_sql)
             .map_err(|e| format!("prepare rollup insert failed: {e}"))?;
@@ -812,6 +916,14 @@ impl ChunkStore for ShadowTableStore {
             });
         }
         drop(stmt);
+        let bytes = chunks.iter().try_fold(0_i64, |total, chunk| {
+            let chunk_bytes = i64::try_from(chunk.payload.len())
+                .map_err(|_| "rollup payload bytes exceed i64::MAX".to_string())?;
+            total
+                .checked_add(chunk_bytes)
+                .ok_or_else(|| "rollup payload byte total exceeds i64::MAX".to_string())
+        })?;
+        self.adjust_storage_stats(&conn, chunks.len() as i64, bytes)?;
         self.bump_chunk_generation(&conn)?;
         Ok(locs)
     }
@@ -819,6 +931,42 @@ impl ChunkStore for ShadowTableStore {
     fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
         let conn = Self::conn()?;
         Self::scan_rollup_rows(&conn, &self.scan_rollups_sql, [])
+    }
+
+    fn visit_rollups(
+        &self,
+        visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.scan_rollups_sql)
+            .map_err(|e| format!("prepare rollup scan failed: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("rollup scan failed: {e}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("rollup scan row failed: {e}"))?
+        {
+            visitor(StoredRollupChunk {
+                series_id: row.get(1).map_err(|e| e.to_string())?,
+                resolution: row.get(2).map_err(|e| e.to_string())?,
+                meta: ChunkMeta {
+                    min_ts: row.get(3).map_err(|e| e.to_string())?,
+                    max_ts: row.get(4).map_err(|e| e.to_string())?,
+                    max_ts_val: None,
+                    point_count: row.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
+                    min_val: 0.0,
+                    max_val: 0.0,
+                    sum_val: 0.0,
+                    loc: ChunkLoc::Row {
+                        rowid: row.get(0).map_err(|e| e.to_string())?,
+                    },
+                    encoding: row.get::<_, i64>(6).map_err(|e| e.to_string())? as u8,
+                },
+            })?;
+        }
+        Ok(())
     }
 
     fn append_watermark(&self) -> Result<Option<(i64, i64)>, String> {
@@ -1041,17 +1189,40 @@ impl ChunkStore for ShadowTableStore {
         Ok(())
     }
 
-    /// (total_bytes, row_count) for Engine::info(). Infallible signature,
-    /// so errors degrade to zeros. See stats_sql comment: full aggregate
-    /// now, incrementally-maintained counter later.
+    /// (total_bytes, row_count) for Engine::info(). Durable counters make the
+    /// normal path O(1). Legacy databases use and cache one aggregate until
+    /// their next mutation initializes the counters transactionally.
     fn storage_stats(&self) -> (u64, usize) {
         let Ok(conn) = Self::conn() else {
             return (0, 0);
         };
-        conn.query_row(&self.stats_sql, [], |r| {
-            Ok((r.get::<_, i64>(1)? as u64, r.get::<_, i64>(0)? as usize))
-        })
-        .unwrap_or((0, 0))
+        let counters: Option<(i64, i64)> = conn
+            .query_row(&self.stats_counter_sql, [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .ok()
+            .flatten();
+        if let Some((rows, bytes)) = counters {
+            return (bytes.max(0) as u64, rows.max(0) as usize);
+        }
+        let mut fallback = self
+            .stats_fallback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(stats) = *fallback {
+            return stats;
+        }
+        let stats = conn
+            .query_row(&self.stats_sql, [], |row| {
+                Ok((
+                    row.get::<_, i64>(1)?.max(0) as u64,
+                    row.get::<_, i64>(0)?.max(0) as usize,
+                ))
+            })
+            .unwrap_or((0, 0));
+        *fallback = Some(stats);
+        stats
     }
 
     /// No backend cache to sweep — SQLite's page cache does this job.

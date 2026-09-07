@@ -54,6 +54,23 @@ pub(crate) fn load_meta_text(
     .map_err(|err| format!("{table}: failed to load {key} from _meta: {err}"))
 }
 
+/// Remove one optional setting. Used by transactional configuration commands;
+/// the caller's host transaction supplies rollback semantics.
+pub(crate) fn delete_meta_key(
+    conn: &Connection,
+    database: &str,
+    table: &str,
+    key: &str,
+) -> Result<(), String> {
+    let meta = sql_ident::qualified_shadow(database, table, "meta");
+    conn.execute(
+        &format!("DELETE FROM {meta} WHERE k = ?1"),
+        rusqlite::params![key],
+    )
+    .map_err(|err| format!("{table}: failed to remove {key} from _meta: {err}"))?;
+    Ok(())
+}
+
 /// Load the persisted F2 retention setting (native ts units), if any.
 pub(crate) fn load_retention(
     conn: &Connection,

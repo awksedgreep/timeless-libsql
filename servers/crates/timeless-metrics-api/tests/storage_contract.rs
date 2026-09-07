@@ -178,6 +178,71 @@ async fn migrated_canonical_metrics_table_is_the_only_store_and_is_queried_in_pl
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn explicit_none_disables_and_boundedly_clears_existing_rollups() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("disable-rollups.db");
+    let conn = open_with_extension(&database, &extension);
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(rollups='60s@0');",
+    )
+    .unwrap();
+    let batch = named_batch(4_096, 1_700_000_000);
+    conn.execute(
+        "INSERT INTO metric_samples(metric_samples) VALUES (?1)",
+        [&batch],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO metric_samples(metric_samples) VALUES ('compact')",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "BEGIN;
+         INSERT INTO metric_samples(metric_samples) VALUES ('rollups:none');
+         INSERT INTO metric_samples(metric_samples) VALUES ('clear-rollups');
+         ROLLBACK;",
+    )
+    .unwrap();
+    let after_rollback: (String, i64) = conn
+        .query_row(
+            "SELECT CAST((SELECT v FROM metric_samples_meta WHERE k='rollups') AS TEXT),
+                    (SELECT COUNT(*) FROM metric_samples_chunks WHERE resolution > 0)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(after_rollback, ("60:0".to_string(), 1));
+    drop(conn);
+
+    let storage = Storage::start_with_queue_bytes_and_rollups(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+        Storage::DEFAULT_QUEUE_BYTES,
+        Some("none"),
+    )
+    .unwrap();
+    let disabled = storage.stats().await.unwrap();
+    assert_eq!(disabled.rollup_tiers, None);
+    assert!(disabled.rollup_chunks > 0);
+
+    storage.schedule_compact().await.unwrap();
+    assert_eq!(storage.stats().await.unwrap().rollup_chunks, 0);
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start(database, extension, 1, 8, DEFAULT_RAW_RETENTION).unwrap();
+    let recovered = reopened.stats().await.unwrap();
+    assert_eq!(recovered.rollup_tiers, None);
+    assert_eq!(recovered.rollup_chunks, 0);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn single_poc_metrics_table_remains_compatible_without_copying_storage() {
     let extension = extension_path();
     let directory = TempDir::new().unwrap();
@@ -271,6 +336,11 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     };
     assert!(owner_error.contains("already owned"), "{owner_error}");
 
+    let ready = get_json(&app, "/ready").await;
+    assert_eq!(ready.0, StatusCode::OK);
+    assert_eq!(ready.1["status"], "ready");
+    assert!(ready.1.get("points").is_none());
+
     let health = get_json(&app, "/health").await;
     assert_eq!(health.0, StatusCode::OK);
     assert_eq!(health.1["status"], "ok");
@@ -308,7 +378,7 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
         at_threshold.raw_chunk_index_entries,
         at_threshold.raw_tier_chunks
     );
-    assert!(at_threshold.sqlite_index_bytes > 0);
+    assert_eq!(at_threshold.sqlite_index_bytes, 0);
 
     storage
         .submit_named_batch(named_batch(10, 1_700_004_096), 10)
@@ -349,11 +419,8 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     assert_eq!(recovered.buffered_points, 0);
     assert_eq!(recovered.total_points, 4_106);
     assert_eq!(recovered.raw_tier_chunks, 2);
-    assert!(recovered.sqlite_index_bytes > 0);
-    assert_eq!(
-        recovered.rollup_tiers.as_deref(),
-        Some("3600:2592000,86400:31536000,2592000:0")
-    );
+    assert_eq!(recovered.sqlite_index_bytes, 0);
+    assert_eq!(recovered.rollup_tiers, None);
     reopened.shutdown().await.unwrap();
 }
 
@@ -15576,7 +15643,7 @@ async fn self_metrics_exposes_prometheus_families() {
 /// beside the ratio, never inside it.
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
-async fn compression_reporting_derives_raw_bytes_and_reconciles_index_bytes() {
+async fn compression_reporting_derives_raw_bytes_without_scanning_index_pages() {
     let extension = extension_path();
     let directory = TempDir::new().unwrap();
     let database = directory.path().join("compression.db");
@@ -15608,7 +15675,7 @@ async fn compression_reporting_derives_raw_bytes_and_reconciles_index_bytes() {
     assert_eq!(stats.1["buffered_points"], 10);
     assert_eq!(stats.1["total_points"], 4_106);
     assert_eq!(stats.1["raw_ingested_bytes"], 16 * 4_106);
-    assert!(stats.1["sqlite_index_bytes"].as_i64().unwrap() > 0);
+    assert_eq!(stats.1["sqlite_index_bytes"], 0);
 
     // Flush so the exposition reflects a fully durable database; a flush
     // moves points to disk, it never mints or drops them, so raw bytes
@@ -15638,24 +15705,24 @@ async fn compression_reporting_derives_raw_bytes_and_reconciles_index_bytes() {
         "raw must be exactly 16 bytes per stored sample"
     );
     let exposed_index = exposed("timeless_metrics_index_bytes");
-    assert!(exposed_index > 0);
+    assert_eq!(exposed_index, 0);
     assert!(exposed("timeless_metrics_storage_bytes") > 0);
 
     drop(app);
     storage.shutdown().await.unwrap();
     drop(storage);
 
-    // The exposed index gauge must reconcile with the engine's own public
-    // accounting on the same database.
+    // Exact dbstat index accounting is deliberately omitted from the routine
+    // stats path; it would make every scrape scale with the database.
     let conn = open_with_extension(&database, &extension);
-    let engine_index: i64 = conn
+    let engine_index: Option<i64> = conn
         .query_row(
             "SELECT value FROM timeless_stats('metric_samples') WHERE key = 'index_bytes'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(exposed_index, engine_index);
+    assert_eq!(engine_index, None);
     let engine_disk_points: i64 = conn
         .query_row(
             "SELECT value FROM timeless_stats('metric_samples') WHERE key = 'disk_points'",

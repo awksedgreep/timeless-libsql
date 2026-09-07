@@ -29,6 +29,16 @@ const BATCH_CHUNK_SIZE: usize = 1000;
 /// small chunks so narrow dashboard queries stay cheap.
 const COMPACT_MIN_AGE_SECS: i64 = 3600;
 
+/// Keep automatic retention work bounded. A large pre-existing backlog is
+/// drained over successive maintenance passes instead of allocating and
+/// deleting millions of rollup identities in one transaction.
+const ROLLUP_RETENTION_DELETE_BATCH: usize = 4096;
+
+/// Explicit rollup cleanup can use a larger bounded batch than automatic
+/// retention: it is operator-requested and must make practical progress on
+/// multi-million-row legacy indexes without one enormous transaction.
+const ROLLUP_CLEAR_DELETE_BATCH: usize = 65_536;
+
 // ═══════════════════════════════════════════════════════════════════════
 // Core types
 // ═══════════════════════════════════════════════════════════════════════
@@ -58,8 +68,119 @@ struct PartitionKey {
 /// the chunk-index shadowing fix (2026-07-22, see git history).)
 type ChunkKey = (PartitionKey, i64, u64);
 
-/// F3: rollup index key — (partition, resolution, first bucket ts, seq).
-type RollupKey = (PartitionKey, i64, i64, u64);
+/// A rollup index group. The series/tier identity is stored once for all of
+/// its chunks instead of repeated in every B-tree key.
+#[derive(Hash, Eq, PartialEq, Clone, Debug, Copy)]
+struct RollupGroupKey {
+    series_id: i64,
+    resolution: i64,
+}
+
+/// Compact metadata for one persisted rollup row. Rollups are supported by
+/// the row-addressed shadow store (not FsStore), so keeping the durable rowid
+/// directly avoids carrying the raw-chunk floats, Option, enum, and B-tree
+/// node overhead for every rollup chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RollupIndexEntry {
+    min_ts: i64,
+    max_ts: i64,
+    rowid: i64,
+    point_count: u32,
+    encoding: u8,
+}
+
+impl RollupIndexEntry {
+    fn key(self) -> (i64, i64) {
+        (self.min_ts, self.rowid)
+    }
+
+    fn loc(self) -> ChunkLoc {
+        ChunkLoc::Row { rowid: self.rowid }
+    }
+
+    fn chunk_meta(self) -> ChunkMeta {
+        ChunkMeta {
+            min_ts: self.min_ts,
+            max_ts: self.max_ts,
+            max_ts_val: None,
+            point_count: self.point_count,
+            min_val: 0.0,
+            max_val: 0.0,
+            sum_val: 0.0,
+            loc: self.loc(),
+            encoding: self.encoding,
+        }
+    }
+}
+
+/// Stable journal identity: group + first bucket timestamp + durable rowid.
+/// Rowid replaces the old process-local sequence number and still preserves
+/// chunks with duplicate first-bucket timestamps across restart/rollback.
+type RollupKey = (RollupGroupKey, i64, i64);
+
+#[derive(Default)]
+struct RollupIndex {
+    groups: HashMap<RollupGroupKey, Vec<RollupIndexEntry>>,
+    len: usize,
+}
+
+impl RollupIndex {
+    fn push_unsorted(&mut self, group: RollupGroupKey, entry: RollupIndexEntry) {
+        self.groups.entry(group).or_default().push(entry);
+        self.len += 1;
+    }
+
+    fn sort_groups(&mut self) {
+        for entries in self.groups.values_mut() {
+            entries.sort_unstable_by_key(|entry| entry.key());
+        }
+    }
+
+    fn insert(
+        &mut self,
+        group: RollupGroupKey,
+        entry: RollupIndexEntry,
+    ) -> Option<RollupIndexEntry> {
+        let entries = self.groups.entry(group).or_default();
+        match entries.binary_search_by_key(&entry.key(), |candidate| candidate.key()) {
+            Ok(position) => Some(std::mem::replace(&mut entries[position], entry)),
+            Err(position) => {
+                entries.insert(position, entry);
+                self.len += 1;
+                None
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &RollupKey) -> Option<RollupIndexEntry> {
+        let (group, min_ts, rowid) = *key;
+        let (removed, empty) = {
+            let entries = self.groups.get_mut(&group)?;
+            let position = entries
+                .binary_search_by_key(&(min_ts, rowid), |candidate| candidate.key())
+                .ok()?;
+            let removed = entries.remove(position);
+            (removed, entries.is_empty())
+        };
+        if empty {
+            self.groups.remove(&group);
+        }
+        self.len -= 1;
+        Some(removed)
+    }
+
+    fn entries(&self, group: &RollupGroupKey) -> &[RollupIndexEntry] {
+        self.groups.get(group).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    fn contains_rowid(&self, group: &RollupGroupKey, rowid: i64) -> bool {
+        self.entries(group).iter().any(|entry| entry.rowid == rowid)
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
 
 /// Full identity of a series for reverse lookups and label queries.
 #[derive(Clone)]
@@ -704,11 +825,10 @@ pub struct Engine {
     /// applies only the rows past the rowid half instead of reloading
     /// O(total series + chunks).
     append_wm: Mutex<Option<(i64, i64)>>,
-    /// F3 rollup index: (partition, resolution, min_ts, seq) → meta for
-    /// every persisted rollup chunk. Separate from the raw index ON
-    /// PURPOSE — every pre-F3 read path stays byte-identical. meta
-    /// semantics per StoredRollupChunk (max_ts = coverage END).
-    rollup_index: RwLock<BTreeMap<RollupKey, ChunkMeta>>,
+    /// F3 rollup index: one hash group per (series, resolution), each holding
+    /// compact, sorted row metadata. Separate from the raw index ON PURPOSE —
+    /// every pre-F3 read path stays byte-identical. max_ts is coverage END.
+    rollup_index: RwLock<RollupIndex>,
     /// The declared ladder (ascending resolutions). Empty = no rollups.
     rollup_tiers: Mutex<Vec<RollupTier>>,
     /// F2 retention window in NATIVE ts units; 0 = disabled. Set from
@@ -807,7 +927,10 @@ struct TxnFrame {
     /// F3: rollup index entries added / removed inside this frame (same
     /// cancel rule as added/removed on the raw index).
     rollup_added: HashSet<RollupKey>,
-    rollup_removed: Vec<(RollupKey, ChunkMeta)>,
+    rollup_removed: Vec<(RollupKey, RollupIndexEntry)>,
+    /// Ladder value before the first configuration change in this frame.
+    /// The matching `_meta` update rides the same SQLite transaction.
+    rollup_tiers_before: Option<Vec<RollupTier>>,
 }
 
 #[derive(Default)]
@@ -866,11 +989,11 @@ impl Engine {
         self.index.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn rollup_read(&self) -> RwLockReadGuard<'_, BTreeMap<RollupKey, ChunkMeta>> {
+    fn rollup_read(&self) -> RwLockReadGuard<'_, RollupIndex> {
         self.rollup_index.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn rollup_write(&self) -> RwLockWriteGuard<'_, BTreeMap<RollupKey, ChunkMeta>> {
+    fn rollup_write(&self) -> RwLockWriteGuard<'_, RollupIndex> {
         self.rollup_index.write().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -1073,6 +1196,7 @@ impl Engine {
         frame.series_added.clear();
         frame.rollup_added.clear();
         frame.rollup_removed.clear();
+        frame.rollup_tiers_before = None;
         for entry in self.partitions.iter() {
             frame
                 .buffer_marks
@@ -1135,9 +1259,16 @@ impl Engine {
             for key in frame.rollup_added.drain() {
                 rollups.remove(&key);
             }
-            for (key, meta) in frame.rollup_removed.drain(..) {
-                rollups.insert(key, meta);
+            for ((group, _, _), entry) in frame.rollup_removed.drain(..) {
+                rollups.insert(group, entry);
             }
+        }
+
+        if let Some(tiers) = frame.rollup_tiers_before.take() {
+            *self
+                .rollup_tiers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = tiers;
         }
 
         if !frame.series_added.is_empty() {
@@ -1188,6 +1319,9 @@ impl Engine {
             }
         }
         parent.rollup_added.extend(child.rollup_added.drain());
+        if parent.rollup_tiers_before.is_none() {
+            parent.rollup_tiers_before = child.rollup_tiers_before.take();
+        }
         parent.series_added.extend(child.series_added.drain());
     }
 
@@ -1336,9 +1470,7 @@ impl Engine {
             }
         };
         Self::validate_chunk_series(&registry, &stored_chunks)?;
-        let stored_rollups = store
-            .scan_rollups()
-            .map_err(|err| format!("failed to scan rollup chunks: {err}"))?;
+        let rollup_index = Self::load_rollup_index(store.as_ref())?;
 
         let engine = Engine {
             store,
@@ -1382,13 +1514,12 @@ impl Engine {
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(primed_gen),
             append_wm: Mutex::new(primed_wm),
-            rollup_index: RwLock::new(BTreeMap::new()),
+            rollup_index: RwLock::new(rollup_index),
             rollup_tiers: Mutex::new(Vec::new()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
         };
         engine.replace_index(stored_chunks);
-        engine.replace_rollup_index(stored_rollups);
         Ok(engine)
     }
 
@@ -3989,25 +4120,68 @@ impl Engine {
 
     // ── F3 rollup ladder (FEATURE_PLAN.md) ───────────────────────────
 
-    fn replace_rollup_index(&self, stored: Vec<StoredRollupChunk>) {
-        let mut rollups = self.rollup_write();
-        rollups.clear();
-        for chunk in stored {
-            let key = (
-                PartitionKey {
-                    series_id: chunk.series_id,
-                },
-                chunk.resolution,
-                chunk.meta.min_ts,
-                self.next_chunk_seq(),
-            );
-            rollups.insert(key, chunk.meta);
-        }
+    fn rollup_index_parts(
+        chunk: StoredRollupChunk,
+    ) -> EngineResult<(RollupGroupKey, RollupIndexEntry)> {
+        let rowid = match &chunk.meta.loc {
+            ChunkLoc::Row { rowid } => *rowid,
+            _ => {
+                return Err(format!(
+                    "rollup chunk for series {} has non-row storage location",
+                    chunk.series_id
+                ));
+            }
+        };
+        Ok((
+            RollupGroupKey {
+                series_id: chunk.series_id,
+                resolution: chunk.resolution,
+            },
+            RollupIndexEntry {
+                min_ts: chunk.meta.min_ts,
+                max_ts: chunk.meta.max_ts,
+                rowid,
+                point_count: chunk.meta.point_count,
+                encoding: chunk.meta.encoding,
+            },
+        ))
+    }
+
+    fn load_rollup_index(store: &dyn ChunkStore) -> EngineResult<RollupIndex> {
+        let mut rollups = RollupIndex::default();
+        store
+            .visit_rollups(&mut |chunk| {
+                let (group, entry) = Self::rollup_index_parts(chunk)?;
+                rollups.push_unsorted(group, entry);
+                Ok(())
+            })
+            .map_err(|err| format!("failed to scan rollup chunks: {err}"))?;
+        rollups.sort_groups();
+        Ok(rollups)
     }
 
     /// Configure the ladder (idempotent per connect, like set_retention).
     pub fn set_rollups(&self, tiers: Vec<RollupTier>) {
         *self.rollup_tiers.lock().unwrap_or_else(|e| e.into_inner()) = tiers;
+    }
+
+    /// Change the persisted ladder from a vtab command while recording the
+    /// previous process-local value for transaction/savepoint rollback.
+    pub fn set_rollups_transactional(&self, tiers: Vec<RollupTier>) {
+        let mut journal = self.txn_guard();
+        let mut current = self
+            .rollup_tiers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *current == tiers {
+            return;
+        }
+        if let Some(journal) = journal.as_deref_mut() {
+            journal
+                .rollup_tiers_before
+                .get_or_insert_with(|| current.clone());
+        }
+        *current = tiers;
     }
 
     pub fn rollup_tiers(&self) -> Vec<RollupTier> {
@@ -4079,12 +4253,16 @@ impl Engine {
             };
             let produce_to = last_bucket + r - 1;
             for &sid in &series_ids {
-                let pk = PartitionKey { series_id: sid };
+                let group = RollupGroupKey {
+                    series_id: sid,
+                    resolution: r,
+                };
                 let watermark = {
                     let rollups = self.rollup_read();
                     rollups
-                        .range((pk, r, i64::MIN, u64::MIN)..=(pk, r, i64::MAX, u64::MAX))
-                        .map(|(_, meta)| meta.max_ts)
+                        .entries(&group)
+                        .iter()
+                        .map(|entry| entry.max_ts)
                         .max()
                 };
                 let start = match watermark {
@@ -4135,26 +4313,29 @@ impl Engine {
         let mut journal = self.txn_guard();
         let mut rollups = self.rollup_write();
         for (chunk, loc) in batch.iter().zip(locs) {
-            let key = (
-                PartitionKey {
-                    series_id: chunk.series_id,
-                },
-                chunk.resolution,
-                chunk.min_ts,
-                self.next_chunk_seq(),
-            );
-            let meta = ChunkMeta {
+            let rowid = match loc {
+                ChunkLoc::Row { rowid } => rowid,
+                other => {
+                    return Err(format!(
+                        "rollup store returned non-row location {other:?} for series {}",
+                        chunk.series_id
+                    ));
+                }
+            };
+            let group = RollupGroupKey {
+                series_id: chunk.series_id,
+                resolution: chunk.resolution,
+            };
+            let entry = RollupIndexEntry {
                 min_ts: chunk.min_ts,
                 max_ts: chunk.max_ts,
-                max_ts_val: None,
+                rowid,
                 point_count: chunk.bucket_count,
-                min_val: 0.0,
-                max_val: 0.0,
-                sum_val: 0.0,
-                loc,
                 encoding: ENC_ROLLUP_V1,
             };
-            rollups.insert(key, meta);
+            let key = (group, entry.min_ts, entry.rowid);
+            let previous = rollups.insert(group, entry);
+            debug_assert!(previous.is_none());
             if let Some(journal) = journal.as_deref_mut() {
                 journal.rollup_added.insert(key);
             }
@@ -4176,13 +4357,18 @@ impl Engine {
             return Err(format!("resolution must be positive, got {resolution}"));
         }
         let _transition = self.transition_read();
-        let pk = PartitionKey { series_id };
+        let group = RollupGroupKey {
+            series_id,
+            resolution,
+        };
         let metas: Vec<ChunkMeta> = {
             let rollups = self.rollup_read();
             rollups
-                .range((pk, resolution, i64::MIN, u64::MIN)..=(pk, resolution, i64::MAX, u64::MAX))
-                .filter(|(_, meta)| meta.min_ts <= stop && meta.max_ts >= start)
-                .map(|(_, meta)| meta.clone())
+                .entries(&group)
+                .iter()
+                .take_while(|entry| entry.min_ts <= stop)
+                .filter(|entry| entry.max_ts >= start)
+                .map(|entry| entry.chunk_meta())
                 .collect()
         };
         let mut out = Vec::new();
@@ -4221,14 +4407,16 @@ impl Engine {
             series_ids
                 .iter()
                 .map(|&series_id| {
-                    let pk = PartitionKey { series_id };
+                    let group = RollupGroupKey {
+                        series_id,
+                        resolution,
+                    };
                     rollups
-                        .range(
-                            (pk, resolution, i64::MIN, u64::MIN)
-                                ..=(pk, resolution, i64::MAX, u64::MAX),
-                        )
-                        .filter(|(_, meta)| meta.min_ts <= stop && meta.max_ts >= start)
-                        .map(|(_, meta)| meta.clone())
+                        .entries(&group)
+                        .iter()
+                        .take_while(|entry| entry.min_ts <= stop)
+                        .filter(|entry| entry.max_ts >= start)
+                        .map(|entry| entry.chunk_meta())
                         .collect()
                 })
                 .collect()
@@ -4277,32 +4465,79 @@ impl Engine {
     /// before `cutoff`. Mirrors delete_before's structure (transition
     /// exclusive, journaled removals, rows deleted in the caller's
     /// transaction).
-    fn delete_rollups_before(&self, resolution: i64, cutoff: i64) -> (usize, Vec<String>) {
+    fn delete_rollups_before(&self, resolution: i64, cutoff: i64) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
         let mut journal = self.txn_guard();
         let mut rollups = self.rollup_write();
-        let victims: Vec<(RollupKey, ChunkMeta)> = rollups
+        let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
+            .groups
             .iter()
-            .filter(|((_, res, _, _), meta)| *res == resolution && meta.max_ts < cutoff)
-            .map(|(k, m)| (*k, m.clone()))
+            .filter(|(group, _)| group.resolution == resolution)
+            .flat_map(|(group, entries)| {
+                entries
+                    .iter()
+                    .filter(|entry| entry.max_ts < cutoff)
+                    .map(|entry| ((*group, entry.min_ts, entry.rowid), *entry))
+            })
+            .take(ROLLUP_RETENTION_DELETE_BATCH + 1)
             .collect();
+        let more = victims.len() > ROLLUP_RETENTION_DELETE_BATCH;
+        victims.truncate(ROLLUP_RETENTION_DELETE_BATCH);
         if victims.is_empty() {
-            return (0, Vec::new());
+            return (0, false, Vec::new());
         }
-        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, m)| m.loc.clone()).collect();
+        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, entry)| entry.loc()).collect();
         let errors = self.store.delete_chunks(&locs);
         if !errors.is_empty() {
-            return (0, errors);
+            return (0, more, errors);
         }
-        for (key, meta) in &victims {
+        for (key, entry) in &victims {
             rollups.remove(key);
             if let Some(journal) = journal.as_deref_mut() {
                 if !journal.rollup_added.remove(key) {
-                    journal.rollup_removed.push((*key, meta.clone()));
+                    journal.rollup_removed.push((*key, *entry));
                 }
             }
         }
-        (victims.len(), Vec::new())
+        (victims.len(), more, Vec::new())
+    }
+
+    /// Delete one bounded batch of persisted rollup rows across every tier.
+    /// Callers must disable the ladder first or maintenance could recreate the
+    /// rows. Returns (deleted, more_may_remain, errors).
+    pub fn clear_rollups_batch(&self) -> (usize, bool, Vec<String>) {
+        let _transition = self.transition_write();
+        let mut journal = self.txn_guard();
+        let mut rollups = self.rollup_write();
+        let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
+            .groups
+            .iter()
+            .flat_map(|(group, entries)| {
+                entries
+                    .iter()
+                    .map(|entry| ((*group, entry.min_ts, entry.rowid), *entry))
+            })
+            .take(ROLLUP_CLEAR_DELETE_BATCH + 1)
+            .collect();
+        let more = victims.len() > ROLLUP_CLEAR_DELETE_BATCH;
+        victims.truncate(ROLLUP_CLEAR_DELETE_BATCH);
+        if victims.is_empty() {
+            return (0, false, Vec::new());
+        }
+        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, entry)| entry.loc()).collect();
+        let errors = self.store.delete_chunks(&locs);
+        if !errors.is_empty() {
+            return (0, more, errors);
+        }
+        for (key, entry) in &victims {
+            rollups.remove(key);
+            if let Some(journal) = journal.as_deref_mut() {
+                if !journal.rollup_added.remove(key) {
+                    journal.rollup_removed.push((*key, *entry));
+                }
+            }
+        }
+        (victims.len(), more, Vec::new())
     }
 
     // ── Chunk reading ────────────────────────────────────────────────
@@ -4436,6 +4671,7 @@ impl Engine {
             return Ok(0); // hasn't advanced meaningfully since last time
         }
         let mut pruned = 0usize;
+        let mut retention_complete = true;
         if retention > 0 {
             let cutoff = high_water.saturating_sub(retention);
             let (chunks, _units, errors) = self.delete_before(cutoff);
@@ -4446,7 +4682,7 @@ impl Engine {
         }
         for tier in &tiers {
             let cutoff = high_water.saturating_sub(tier.retention);
-            let (chunks, errors) = self.delete_rollups_before(tier.resolution, cutoff);
+            let (chunks, more, errors) = self.delete_rollups_before(tier.resolution, cutoff);
             if !errors.is_empty() {
                 return Err(format!(
                     "rollup tier {} retention prune failed: {}",
@@ -4455,8 +4691,11 @@ impl Engine {
                 ));
             }
             pruned += chunks;
+            retention_complete &= !more;
         }
-        self.retention_floor.store(high_water, Ordering::Relaxed);
+        if retention_complete {
+            self.retention_floor.store(high_water, Ordering::Relaxed);
+        }
         Ok(pruned)
     }
 
@@ -4623,9 +4862,7 @@ impl Engine {
             .scan()
             .map_err(|err| format!("failed to refresh chunk index: {err}"))?;
         Self::validate_chunk_series(&registry, &chunks)?;
-        let rollup_chunks = self
-            .store
-            .scan_rollups()
+        let new_rollups = Self::load_rollup_index(self.store.as_ref())
             .map_err(|err| format!("failed to refresh rollup index: {err}"))?;
 
         let mut new_index = BTreeMap::new();
@@ -4639,19 +4876,6 @@ impl Engine {
         // Lock order remains transition -> txn -> index -> series. Holding
         // both write locks prevents readers from pairing a newly visible
         // series with an old chunk snapshot.
-        let mut new_rollups = BTreeMap::new();
-        for chunk in rollup_chunks {
-            let key = (
-                PartitionKey {
-                    series_id: chunk.series_id,
-                },
-                chunk.resolution,
-                chunk.meta.min_ts,
-                self.next_chunk_seq(),
-            );
-            new_rollups.insert(key, chunk.meta);
-        }
-
         // Lock order: transition → txn → index → series → rollup (other
         // paths only ever hold ONE of these at a time).
         let mut index = self.index_write();
@@ -4729,25 +4953,11 @@ impl Engine {
             index.insert((pk, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
         }
         for chunk in rollup_chunks {
-            let pk = PartitionKey {
-                series_id: chunk.series_id,
-            };
-            let known = rollups
-                .range((pk, chunk.resolution, i64::MIN, u64::MIN)..)
-                .take_while(|((key, res, _, _), _)| key == &pk && *res == chunk.resolution)
-                .any(|(_, meta)| meta.loc == chunk.meta.loc);
-            if known {
+            let (group, entry) = Self::rollup_index_parts(chunk)?;
+            if rollups.contains_rowid(&group, entry.rowid) {
                 continue;
             }
-            rollups.insert(
-                (
-                    pk,
-                    chunk.resolution,
-                    chunk.meta.min_ts,
-                    self.next_chunk_seq(),
-                ),
-                chunk.meta,
-            );
+            rollups.insert(group, entry);
         }
         *self.catalog_gen_lock() = observed;
         *self.append_wm_lock() = Some(new_wm);
@@ -4921,6 +5131,7 @@ impl Engine {
         let chunk_count = index.len();
         let partition_count = self.partitions.len();
         let series_count = series_reg.series_count();
+        let rollup_chunk_count = self.rollup_read().len();
         let buffered_points: usize = self
             .partitions
             .iter()
@@ -4969,6 +5180,7 @@ impl Engine {
 
         EngineInfo {
             chunk_count,
+            rollup_chunk_count,
             partition_count,
             series_count,
             disk_points: total_disk_points,
@@ -5044,6 +5256,7 @@ pub struct SeriesOverview {
 
 pub struct EngineInfo {
     pub chunk_count: usize,
+    pub rollup_chunk_count: usize,
     pub partition_count: usize,
     pub series_count: usize,
     pub disk_points: u64,
@@ -5265,6 +5478,98 @@ mod decode_tests {
         assert!(
             Engine::decode_chunk_data(&meta, &bytes, i64::MIN, i64::MAX).is_err(),
             "corrupt pco payload must fail"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rollup_index_tests {
+    use super::*;
+
+    fn entry(min_ts: i64, rowid: i64) -> RollupIndexEntry {
+        RollupIndexEntry {
+            min_ts,
+            max_ts: min_ts + 59,
+            rowid,
+            point_count: 1,
+            encoding: ENC_ROLLUP_V1,
+        }
+    }
+
+    #[test]
+    fn compact_rollup_entry_layout_is_pinned() {
+        assert_eq!(std::mem::size_of::<RollupIndexEntry>(), 32);
+    }
+
+    #[test]
+    fn grouped_index_preserves_duplicate_timestamps_and_sorted_reads() {
+        let group = RollupGroupKey {
+            series_id: 7,
+            resolution: 60,
+        };
+        let mut index = RollupIndex::default();
+        index.insert(group, entry(120, 3));
+        index.insert(group, entry(60, 2));
+        index.insert(group, entry(60, 1));
+
+        assert_eq!(index.len(), 3);
+        assert_eq!(
+            index
+                .entries(&group)
+                .iter()
+                .map(|entry| entry.key())
+                .collect::<Vec<_>>(),
+            vec![(60, 1), (60, 2), (120, 3)]
+        );
+        assert_eq!(index.remove(&(group, 60, 2)), Some(entry(60, 2)));
+        assert_eq!(index.len(), 2);
+        assert!(index.contains_rowid(&group, 1));
+        assert!(!index.contains_rowid(&group, 2));
+    }
+
+    #[test]
+    fn grouped_index_scale_fixture_keeps_entries_contiguous() {
+        let mut index = RollupIndex::default();
+        for series_id in 0..1_000 {
+            let group = RollupGroupKey {
+                series_id,
+                resolution: 3_600,
+            };
+            for chunk in 0..100 {
+                index.push_unsorted(group, entry(chunk * 3_600, series_id * 100 + chunk));
+            }
+        }
+        index.sort_groups();
+        assert_eq!(index.len(), 100_000);
+        assert_eq!(index.groups.len(), 1_000);
+        assert_eq!(
+            index.len() * std::mem::size_of::<RollupIndexEntry>(),
+            3_200_000
+        );
+    }
+
+    #[test]
+    #[ignore = "production-scale memory fixture (about 224 MiB of entry payload)"]
+    fn production_scale_rollup_index_fixture() {
+        let mut index = RollupIndex::default();
+        for series_id in 0..36_500 {
+            for (tier, resolution) in [3_600, 86_400, 2_592_000].into_iter().enumerate() {
+                let group = RollupGroupKey {
+                    series_id,
+                    resolution,
+                };
+                for chunk in 0..64 {
+                    let rowid = (series_id * 3 + tier as i64) * 64 + chunk;
+                    index.push_unsorted(group, entry(chunk * resolution, rowid));
+                }
+            }
+        }
+        index.sort_groups();
+        assert_eq!(index.len(), 7_008_000);
+        assert_eq!(index.groups.len(), 109_500);
+        assert_eq!(
+            index.len() * std::mem::size_of::<RollupIndexEntry>(),
+            224_256_000
         );
     }
 }

@@ -279,6 +279,11 @@ fn rollup_produce_query_watermark_retention() {
 
     // Recovery: a fresh engine over the same store sees the same buckets.
     let engine2 = new_engine(Box::new(Shared(store.clone())));
+    assert_eq!(
+        engine2.info().rollup_chunk_count,
+        chunks,
+        "all persisted rollup entries recovered"
+    );
     let rolled2 = engine2
         .query_rollup_by_id(sid, 60, i64::MIN, i64::MAX)
         .unwrap();
@@ -318,6 +323,14 @@ fn rollup_produce_query_watermark_retention() {
         .query_rollup_by_id(sid, 60, i64::MIN, i64::MAX)
         .unwrap();
     assert_eq!(r60.len(), rolled.len(), "keep-forever tier untouched");
+
+    let indexed = engine2.info().rollup_chunk_count;
+    engine2.set_rollups(Vec::new());
+    let (deleted, more, errors) = engine2.clear_rollups_batch();
+    assert!(errors.is_empty(), "clear errors: {errors:?}");
+    assert_eq!(deleted, indexed);
+    assert!(!more);
+    assert_eq!(engine2.info().rollup_chunk_count, 0);
 }
 
 /// THE LADDER'S PURPOSE: raw ages out, coarse survives. Raw retention
@@ -393,4 +406,21 @@ fn rollup_rollback_restores_index() {
             .is_empty(),
         "rollback removed rolled-up index entries"
     );
+}
+
+#[test]
+fn rollup_configuration_rollback_restores_the_previous_ladder() {
+    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let original = vec![RollupTier {
+        resolution: 60,
+        retention: 3_600,
+    }];
+    engine.set_rollups(original.clone());
+
+    engine.txn_begin();
+    engine.set_rollups_transactional(Vec::new());
+    assert!(engine.rollup_tiers().is_empty());
+    engine.txn_rollback();
+
+    assert_eq!(engine.rollup_tiers(), original);
 }

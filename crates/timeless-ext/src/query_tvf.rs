@@ -4652,17 +4652,6 @@ fn autoindex_name(table: &str, suffix: &str) -> String {
     )
 }
 
-fn metrics_index_bytes(database: &str, table: &str) -> Option<i64> {
-    storage_index_bytes(
-        database,
-        &[
-            crate::sql_ident::shadow_object(table, "chunks_series_ts"),
-            autoindex_name(table, "series"),
-            autoindex_name(table, "meta"),
-        ],
-    )
-}
-
 fn log_index_bytes(database: &str, table: &str) -> Option<i64> {
     storage_index_bytes(
         database,
@@ -4823,17 +4812,17 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                 let tiers = crate::shadow_meta::load_meta_text(&conn, &database, &table, "rollups")
                     .map_err(module_err)?;
                 rows.push(("rollup_tiers", tiers.map_or(Value::Null, Value::Text)));
-                let sql = format!(
-                    "SELECT COUNT(*) FROM {} WHERE resolution > 0",
-                    crate::sql_ident::qualified_shadow(&database, &table, "chunks")
-                );
                 rows.push((
                     "rollup_chunks",
-                    Value::Integer(conn.query_row(&sql, [], |r| r.get(0))?),
+                    Value::Integer(info.rollup_chunk_count as i64),
                 ));
                 rows.push((
                     "index_bytes",
-                    metrics_index_bytes(&database, &table).map_or(Value::Null, Value::Integer),
+                    // Exact per-index page accounting requires a full dbstat
+                    // walk. Metrics exposes database/page/freelist bytes at
+                    // the server layer; keep its routinely scraped stats path
+                    // independent of table size.
+                    Value::Null,
                 ));
             }
             TimelessModule::Logs => {

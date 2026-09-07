@@ -1363,11 +1363,11 @@ SELECT 'st', key, value FROM timeless_stats('t')
  WHERE key IN ('module','buffered_spans','disk_spans','total_spans','ts_min',
                'query_count','query_cancelled','query_candidate_blocks','query_payload_blocks_read',
                'query_decoded_spans','query_matched_spans','query_returned_spans');
-.print -- physical accounting and optimize sampling stay behind public stats
+.print -- metrics avoids full-db accounting; logs/traces keep public accounting
 INSERT INTO l(l) VALUES ('flush');
 INSERT INTO t(t) VALUES ('flush');
 SELECT 'public',
-       (SELECT value > 0 FROM timeless_stats('m') WHERE key='index_bytes'),
+       (SELECT value IS NULL FROM timeless_stats('m') WHERE key='index_bytes'),
        (SELECT value > 0 FROM timeless_stats('l') WHERE key='index_bytes'),
        (SELECT value FROM timeless_stats('l') WHERE key='optimize_source_entries'),
        (SELECT value > 0 FROM timeless_stats('l') WHERE key='optimize_source_bytes'),
@@ -1409,7 +1409,7 @@ st|query_payload_blocks_read|0
 st|query_decoded_spans|0
 st|query_matched_spans|0
 st|query_returned_spans|0'
-check_eq "all signal servers can obtain index/optimizer accounting from public stats" \
+check_eq "metrics omits full-db accounting; logs/traces retain public accounting" \
   "$(grep '^public|' <<<"$got")" "public|1|1|1|1|1|1|1"
 # prune is CHUNK-granular: cpu-a's {100,200} chunk straddles the cutoff
 # and survives whole; cpu-b's chunk dies, leaving an empty cataloged

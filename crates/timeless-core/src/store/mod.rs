@@ -259,6 +259,19 @@ pub trait ChunkStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Stream persisted rollup metadata into an index builder. The default
+    /// preserves compatibility with small/in-memory stores; SQL stores should
+    /// override it so recovery does not stage every row in a second Vec.
+    fn visit_rollups(
+        &self,
+        visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for chunk in self.scan_rollups()? {
+            visitor(chunk)?;
+        }
+        Ok(())
+    }
+
     /// F3: persist encoded rollup chunks. Same transactional contract as
     /// put_chunks — rows ride the caller's transaction. Deletion reuses
     /// delete_chunks (rollup rows live in the same chunk table and are

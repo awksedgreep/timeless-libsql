@@ -202,8 +202,14 @@ previously resolved `series_id`. Use the hidden command column for:
 - `flush` drains every series buffer into compressed chunks.
 - `compact` merges eligible metric chunks and runs declared rollups.
 - `rollup` builds settled buckets for the declared ladder.
-- `prune:<unix-seconds>` removes whole raw/rollup chunks older than the
-  explicit cutoff.
+- `rollups:none` disables future persisted rollup production;
+  `rollups:<ladder>` transactionally replaces the declared ladder.
+- `clear-rollups` removes at most 65,536 persisted rollup chunks and refuses
+  to run until the ladder is disabled. Repeat until `timeless_stats` reports
+  `rollup_chunks = 0`.
+- `prune:<unix-seconds>` removes whole raw chunks older than the explicit
+  cutoff. Declared rollup retention is applied by maintenance; use the
+  bounded `clear-rollups` command for an explicit full-tier removal.
 
 The authoritative per-series flush threshold is 4,096 points. A successful
 command participates in the surrounding SQLite transaction; rollback restores

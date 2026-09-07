@@ -101,6 +101,10 @@ pub struct Config {
     pub compact_interval: Duration,
     pub retention_interval: Duration,
     pub raw_retention: Duration,
+    /// Optional persisted-rollup override. None leaves existing databases
+    /// unchanged and creates new databases without rollups; `Some("none")`
+    /// disables an existing ladder, while another value replaces it.
+    pub rollups: Option<String>,
     pub prom_query_limits: PromQueryLimits,
     pub auth: AuthConfig,
 }
@@ -121,6 +125,7 @@ impl Default for Config {
             compact_interval: Duration::from_secs(5 * 60),
             retention_interval: Duration::from_secs(60 * 60),
             raw_retention: DEFAULT_RAW_RETENTION,
+            rollups: None,
             prom_query_limits: PromQueryLimits::default(),
             auth: AuthConfig::disabled(),
         }
@@ -160,13 +165,14 @@ impl Config {
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
-    let storage = Storage::start_with_queue_bytes(
+    let storage = Storage::start_with_queue_bytes_and_rollups(
         config.database_path.clone(),
         config.extension_path.clone(),
         config.reader_connections,
         config.command_queue_batches,
         config.raw_retention,
         config.queue_bytes,
+        config.rollups.as_deref(),
     )?;
     let app = protect_router(
         router_with_limits(storage.clone(), config.prom_query_limits),

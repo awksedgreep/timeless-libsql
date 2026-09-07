@@ -96,6 +96,10 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
+    let rollups = match rollups_from_env("TIMELESS_METRICS_ROLLUPS", defaults.rollups.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return usage_error(error),
+    };
     let prom_query_limits = PromQueryLimits {
         max_points_per_series: match positive_usize_from_env(
             "TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES",
@@ -151,6 +155,7 @@ async fn main() -> ExitCode {
         flush_interval,
         compact_interval,
         retention_interval,
+        rollups,
         prom_query_limits,
         auth,
         ..defaults
@@ -213,6 +218,28 @@ fn duration_millis_from_env(name: &str, default: Duration) -> Result<Duration, S
         return Err(format!("{name} must be positive"));
     }
     Ok(Duration::from_millis(milliseconds))
+}
+
+fn rollups_from_env(name: &str, default: Option<&str>) -> Result<Option<String>, String> {
+    let value = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(default.map(str::to_owned)),
+        Err(error) => return Err(format!("{name} is not valid Unicode: {error}")),
+    };
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Ok(Some("none".to_owned()));
+    }
+    if !value.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || character.is_ascii_whitespace()
+            || matches!(character, '@' | ',')
+    }) {
+        return Err(format!(
+            "{name} must be 'none' or a comma-separated resolution@retention ladder"
+        ));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 #[cfg(test)]

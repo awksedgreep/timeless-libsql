@@ -27,7 +27,7 @@ pub fn router_with_limits(storage: Storage, limits: PromQueryLimits) -> Router {
         .expect("PromQL router limits must be valid");
     Router::new()
         .route("/live", get(liveness))
-        .route("/ready", get(health))
+        .route("/ready", get(readiness))
         .route("/health", get(health))
         .route("/metrics", get(self_metrics))
         .route("/select/metrics/stats", get(stats))
@@ -72,6 +72,25 @@ pub fn router_with_limits(storage: Storage, limits: PromQueryLimits) -> Router {
 
 async fn liveness() -> Response {
     (StatusCode::OK, Json(json!({"status": "alive"}))).into_response()
+}
+
+async fn readiness(State(storage): State<Storage>) -> Response {
+    if storage.is_ready() {
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ready",
+                "build": server_build_identity("metrics")
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "not_ready", "reason": "shutting_down"})),
+        )
+            .into_response()
+    }
 }
 
 async fn latest(

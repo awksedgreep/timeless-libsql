@@ -22,9 +22,6 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
 use crate::scrape::{ScrapeController, ScrapeTargetSet, ScrapeTargetSetReport};
 
-/// The same ladder currently created by `TimelessMetrics.LibsqlEngine`.
-pub const DEFAULT_ROLLUPS: &str = "3600s@2592000s,86400s@31536000s,2592000s@0";
-
 /// The release migration and embedded Elixir engine have always used
 /// `metric_samples`. The POC server used `metrics` before the release boundary
 /// was established, so it remains a supported single-table database shape.
@@ -391,6 +388,26 @@ impl Storage {
         raw_retention: Duration,
         queue_bytes: usize,
     ) -> Result<Self, String> {
+        Self::start_with_queue_bytes_and_rollups(
+            database_path,
+            extension_path,
+            reader_connections,
+            queue_batches,
+            raw_retention,
+            queue_bytes,
+            None,
+        )
+    }
+
+    pub fn start_with_queue_bytes_and_rollups(
+        database_path: PathBuf,
+        extension_path: PathBuf,
+        reader_connections: usize,
+        queue_batches: usize,
+        raw_retention: Duration,
+        queue_bytes: usize,
+        rollups: Option<&str>,
+    ) -> Result<Self, String> {
         if reader_connections == 0 {
             return Err("reader_connections must be positive".into());
         }
@@ -419,9 +436,19 @@ impl Storage {
         let writer_db = database_path.clone();
         let writer_ext = extension_path.clone();
         let writer_profile = Arc::clone(&profile);
+        let writer_rollups = rollups.map(str::to_owned);
         let writer_join = thread::Builder::new()
             .name("timeless-metrics-writer".into())
-            .spawn(move || writer_main(writer_db, writer_ext, writer_rx, ready_tx, writer_profile))
+            .spawn(move || {
+                writer_main(
+                    writer_db,
+                    writer_ext,
+                    writer_rollups,
+                    writer_rx,
+                    ready_tx,
+                    writer_profile,
+                )
+            })
             .map_err(|error| format!("spawn SQLite writer: {error}"))?;
         let table = match ready_rx.recv() {
             Ok(Ok(table)) => table,
@@ -970,11 +997,21 @@ fn record_read_completion(
 fn writer_main(
     database_path: PathBuf,
     extension_path: PathBuf,
+    new_database_rollups: Option<String>,
     mut commands: mpsc::Receiver<WriteCommand>,
     ready: std_mpsc::Sender<Result<MetricsTable, String>>,
     profile: Arc<StdMutex<ApiProfile>>,
 ) -> Result<(), String> {
-    let (conn, table) = match open_connection(&database_path, &extension_path, true, None) {
+    let cleanup_rollups = new_database_rollups
+        .as_deref()
+        .is_some_and(|rollups| rollups.eq_ignore_ascii_case("none"));
+    let (conn, table) = match open_connection(
+        &database_path,
+        &extension_path,
+        true,
+        None,
+        new_database_rollups.as_deref(),
+    ) {
         Ok(opened) => {
             let _ = ready.send(Ok(opened.1));
             opened
@@ -1066,7 +1103,19 @@ fn writer_main(
             }
             WriteCommand::Compact(reply) => {
                 let started = Instant::now();
-                let result = run_command(&conn, table, "compact", "compact and roll up metrics");
+                let result = run_command(&conn, table, "compact", "compact and roll up metrics")
+                    .and_then(|()| {
+                        if cleanup_rollups {
+                            run_command(
+                                &conn,
+                                table,
+                                "clear-rollups",
+                                "clear disabled metrics rollups",
+                            )
+                        } else {
+                            Ok(())
+                        }
+                    });
                 record_maintenance(&profile, Maintenance::Compact, started.elapsed(), &result);
                 let _ = reply.send(result);
             }
@@ -1142,7 +1191,7 @@ fn reader_main(
     mut commands: mpsc::Receiver<ReadCommand>,
     ready: std_mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    let conn = match open_connection(&database_path, &extension_path, false, Some(table)) {
+    let conn = match open_connection(&database_path, &extension_path, false, Some(table), None) {
         Ok((conn, _)) => conn,
         Err(error) => {
             let _ = ready.send(Err(error.clone()));
@@ -1217,6 +1266,7 @@ fn open_connection(
     extension: &Path,
     initialize: bool,
     expected_table: Option<MetricsTable>,
+    new_database_rollups: Option<&str>,
 ) -> Result<(Connection, MetricsTable), String> {
     let conn =
         Connection::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
@@ -1269,15 +1319,20 @@ fn open_connection(
         let table = match discovered {
             Some(table) => table,
             None => {
-                conn.execute_batch(&format!(
-                    "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(
-                       rollups='{DEFAULT_ROLLUPS}');"
-                ))
-                .map_err(|error| format!("create canonical metrics virtual table: {error}"))?;
+                conn.execute_batch(&new_metrics_table_sql(new_database_rollups)?)
+                    .map_err(|error| format!("create canonical metrics virtual table: {error}"))?;
                 MetricsTable::Canonical
             }
         };
         validate_metrics_table(&conn, table)?;
+        if let Some(rollups) = new_database_rollups {
+            run_command(
+                &conn,
+                table,
+                &format!("rollups:{rollups}"),
+                "apply metrics rollup configuration",
+            )?;
+        }
         apply_schema_ledger(&conn, spec, &capabilities)?;
         table
     } else {
@@ -1297,6 +1352,27 @@ fn open_connection(
         table
     };
     Ok((conn, table))
+}
+
+fn new_metrics_table_sql(rollups: Option<&str>) -> Result<String, String> {
+    match rollups {
+        None => Ok("CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;".into()),
+        Some(spec) if spec.eq_ignore_ascii_case("none") => {
+            Ok("CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;".into())
+        }
+        Some(spec)
+            if spec.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || character.is_ascii_whitespace()
+                    || matches!(character, '@' | ',')
+            }) =>
+        {
+            Ok(format!(
+                "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(rollups='{spec}');"
+            ))
+        }
+        Some(_) => Err("rollups must be a comma-separated resolution@retention ladder".to_string()),
+    }
 }
 
 fn discover_metrics_table(conn: &Connection) -> Result<Option<MetricsTable>, String> {
@@ -1326,22 +1402,35 @@ fn discover_metrics_table(conn: &Connection) -> Result<Option<MetricsTable>, Str
 }
 
 fn validate_metrics_table(conn: &Connection, table: MetricsTable) -> Result<(), String> {
-    // Force xConnect and the public stats resolver during startup. A plain
-    // table with a recognized name must never be mistaken for extension-owned
-    // storage.
+    // Force xConnect, then verify the schema owner without invoking
+    // timeless_stats: that TVF intentionally computes detailed accounting and
+    // must not turn every writer/reader startup into another full chunk scan.
     conn.prepare(&format!("SELECT name FROM {} LIMIT 0", table.name()))
         .map_err(|error| format!("connect {} metrics virtual table: {error}", table.name()))?;
-    conn.query_row(
-        "SELECT COUNT(*) FROM timeless_stats(?1)",
-        [table.name()],
-        |row| row.get::<_, i64>(0),
-    )
-    .map_err(|error| {
-        format!(
-            "validate {} through public timeless_stats: {error}",
-            table.name()
+    let schema_sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table.name()],
+            |row| row.get(0),
         )
-    })?;
+        .map_err(|error| format!("read {} virtual-table schema: {error}", table.name()))?;
+    let words: Vec<String> = schema_sql
+        .split(|character: char| character.is_ascii_whitespace() || character == '(')
+        .map(|word| {
+            word.trim_matches(['\'', '"', '`', '[', ']'])
+                .to_ascii_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    if !words
+        .windows(2)
+        .any(|pair| pair[0] == "using" && pair[1] == "timeless_metrics")
+    {
+        return Err(format!(
+            "{} exists but is not owned by timeless_metrics",
+            table.name()
+        ));
+    }
     Ok(())
 }
 
@@ -1908,5 +1997,23 @@ mod tests {
     #[test]
     fn reader_queue_commands_keep_recursive_query_plans_behind_indirection() {
         assert!(std::mem::size_of::<ReadCommand>() <= 64);
+    }
+
+    #[test]
+    fn new_metrics_databases_only_persist_explicit_rollups() {
+        assert_eq!(
+            new_metrics_table_sql(None).unwrap(),
+            "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;"
+        );
+        assert_eq!(
+            new_metrics_table_sql(Some("NONE")).unwrap(),
+            new_metrics_table_sql(None).unwrap()
+        );
+        assert!(
+            new_metrics_table_sql(Some("3600s@2592000s,86400s@31536000s,2592000s@0"))
+                .unwrap()
+                .contains("rollups='3600s@2592000s")
+        );
+        assert!(new_metrics_table_sql(Some("1h@0'); DROP TABLE metric_samples;--")).is_err());
     }
 }

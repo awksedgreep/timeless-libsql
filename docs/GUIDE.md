@@ -604,8 +604,10 @@ INSERT INTO traces(traces)   VALUES ('optimize:65536'); -- bounded trace source 
   current raw-or-undersized source sample used to translate a byte budget into
   an entry budget. These are public extension rows; hosts must not inspect
   shadow block tables.
-- **`prune:<ts>`** — retention. Drops all data older than the timestamp,
-  which is given in *that table's* unit:
+- **`prune:<ts>`** — retention. Drops logs/traces data, or metrics raw chunks,
+  older than the timestamp, which is given in *that table's* unit. Metrics
+  rollup tiers follow their declared retention; disable them with
+  `rollups:none` and repeat `clear-rollups` for an explicit bounded removal:
 
 ```sql
 -- keep 30 days of metrics (ts in seconds)
@@ -805,6 +807,8 @@ INSERT INTO traces(trace_id, span_id, name, service, start_ts) VALUES (...);   -
 'optimize'     -- logs/traces: merge + recompress blocks (occasionally)
 'compact'      -- metrics/dbhealth: merge small chunks (occasionally)
 'prune:<ts>'   -- retention; ts in the table's own unit (s / ms / ns)
+'rollups:none' -- metrics: disable future persisted rollups
+'clear-rollups'-- metrics: delete at most 65,536 disabled-tier chunks
 'sample'       -- dbhealth only: snapshot SQLite health counters now
 
 -- QUERY (accelerated predicates)
