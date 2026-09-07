@@ -9,13 +9,14 @@ reachable from `main`.
 
 ## Current publication status
 
-`v0.8.0` was tagged from `main` at
-`718471e` (merge of the observability schema and the 0.8.0 release bump) on
-2026-09-04 (UTC). GitHub Actions run `33908396252` built, identity-checked,
-install/remove-drilled, and uploaded all four intended Linux/macOS archives;
+`v0.8.1` was tagged from `main` at
+`11c76c1` (bounded telemetry stats memory and corrected graceful-shutdown
+deadlines) on 2026-09-07 (UTC). GitHub Actions run `34089845348` built,
+identity-checked, install/remove-drilled, and uploaded all four intended
+Linux/macOS archives;
 its checksum job downloaded the whole matrix, produced and verified the
 complete outer `SHA256SUMS`; and the workflow published the
-[`v0.8.0` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.0)
+[`v0.8.1` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.1)
 with the four archives plus `SHA256SUMS` as permanent release assets. This is
 the current download channel. Complete published releases also exist for
 `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`,
