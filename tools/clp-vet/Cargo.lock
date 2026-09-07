@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-codec"
-version = "0.8.0"
+version = "0.8.2"
 dependencies = [
  "pco",
  "zstd",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-core"
-version = "0.8.0"
+version = "0.8.2"
 dependencies = [
  "dashmap",
  "pco",
