@@ -133,6 +133,16 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   computing it would make every health or Prometheus scrape scale with the
   database.
 
+- **Logs and traces now use the same bounded observability model.** Their
+  `/ready` endpoints report only process readiness and build identity, while
+  `/health`, `/metrics`, and stats endpoints retain the detailed operational
+  view. Payload, optimizer-source, posting-list, duration, trace-index, and
+  attribute-Bloom totals are maintained transactionally in table metadata,
+  with a cached one-time aggregate fallback for legacy databases. Routine
+  stats no longer count multi-million-row indexes or walk `dbstat`;
+  `index_bytes` is now `NULL` at the SQL boundary and the server compatibility
+  gauges report `0`.
+
 ## [0.8.0] — 2026-09-03
 
 ### Added

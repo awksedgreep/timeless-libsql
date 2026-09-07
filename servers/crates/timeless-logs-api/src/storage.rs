@@ -4712,23 +4712,6 @@ mod tests {
     }
 
     #[test]
-    fn bundled_sqlite_exposes_page_accounting_for_compatible_index_bytes() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE postings(term TEXT PRIMARY KEY)", [])
-            .unwrap();
-        conn.execute("INSERT INTO postings VALUES ('level:error')", [])
-            .unwrap();
-        let bytes: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(pgsize), 0) FROM dbstat WHERE name = 'postings'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(bytes > 0);
-    }
-
-    #[test]
     fn logsql_phrase_preserves_bytes_and_unicode_word_boundaries() {
         for matching in [
             "ssh: login fail",

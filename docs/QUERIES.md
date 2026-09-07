@@ -3216,9 +3216,10 @@ SELECT key, value
 Timestamps use the table's declared `timestamp_unit`. `total_entries` includes
 the live buffer, while `disk_entries` does not. The three payload-byte rows
 measure stored block blobs rather than the complete SQLite database, WAL, or
-freelist. `terms` is a posting-row count. `index_bytes` is the SQLite page
-allocation for the log term/timestamp/metadata structures and is `NULL` when
-the SQLite build does not expose `dbstat`. The `optimize_source_*` rows describe
+freelist. `terms` is a posting-row count. `index_bytes` is retained for
+compatibility but is `NULL`: exact allocation would require a complete
+`dbstat` walk, which does not belong on a routine observability path. The
+`optimize_source_*` rows describe
 the raw or undersized persisted blocks currently eligible as optimizer source;
 they are an observation for choosing a bounded `optimize:<entries>` command,
 not a separate storage contract. Statistics keys are additive, so callers

@@ -80,8 +80,8 @@ The "Required scope" column applies **only when auth is enabled**
 | `metrics` | `GET, POST` | `/metricsql/api/v1/query` | `metrics:read` | Explicit MetricsQL instant compatibility tier. |
 | `metrics` | `GET, POST` | `/metricsql/api/v1/query_range` | `metrics:read` | Explicit MetricsQL range compatibility tier. |
 | `logs` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |
-| `logs` | `GET` | `/ready` | `logs:stats` | Readiness plus build, storage, and queue accounting. |
-| `logs` | `GET` | `/health` | `logs:stats` | Alias of `/ready`. |
+| `logs` | `GET` | `/ready` | `logs:stats` | Constant-time process readiness plus build identity; does not scan storage. |
+| `logs` | `GET` | `/health` | `logs:stats` | Readiness plus storage and queue accounting. |
 | `logs` | `GET` | `/metrics` | none | Prometheus text exposition of the plane's own operational stats plus `timeless_build_info`; unauthenticated like the probe endpoints. |
 | `logs` | `POST` | `/insert/jsonline` | `logs:write` | NDJSON ingestion into one public rich-log batch per request. |
 | `logs` | `GET, POST` | `/select/logsql/query` | `logs:read` | Native parameter query on GET; LogsQL compatibility grammar on POST. |
@@ -91,8 +91,8 @@ The "Required scope" column applies **only when auth is enabled**
 | `logs` | `POST` | `/api/v1/flush` | `logs:maintenance` | Ordered writer completion and extension durability barrier. |
 | `logs` | `POST` | `/api/v1/backup` | `logs:maintenance` | Flush, optimize, checkpoint, and verified SQLite backup. |
 | `traces` | `GET` | `/live` | none | Process liveness only; does not touch SQLite. |
-| `traces` | `GET` | `/ready` | `traces:stats` | Readiness plus build, negotiated rich-span capability, and queue watermarks. |
-| `traces` | `GET` | `/health` | `traces:stats` | Alias of `/ready`. |
+| `traces` | `GET` | `/ready` | `traces:stats` | Constant-time process readiness plus build identity; does not scan storage. |
+| `traces` | `GET` | `/health` | `traces:stats` | Readiness plus negotiated rich-span capability, storage, and queue watermarks. |
 | `traces` | `GET` | `/metrics` | none | Prometheus text exposition of the plane's own operational stats plus `timeless_build_info`; unauthenticated like the probe endpoints. |
 | `traces` | `GET` | `/select/traces/stats` | `traces:stats` | Complete serialized `StorageStats`. |
 | `traces` | `GET` | `/select/jaeger/api/services` | `traces:read` | Sorted Jaeger service discovery. |
@@ -123,11 +123,13 @@ servers never forward it to Rocket, Phoenix, another process, or another
 storage owner.
 
 The three serialized `StorageStats` responses obtain extension-owned tier,
-block, index-byte, and optimizer-source accounting only from the public
+block, and optimizer-source accounting only from the public
 `timeless_stats` TVF. Servers never query implementation-owned shadow tables.
 Whole-database page/freelist and file/WAL/SHM sizes still come from public
-SQLite PRAGMAs and filesystem metadata. If `dbstat` is unavailable,
-`sqlite_index_bytes` is zero while all logical counts remain available.
+SQLite PRAGMAs and filesystem metadata. Exact per-index allocation would
+require a complete `dbstat` walk, so `index_bytes` is unavailable at the SQL
+boundary and the server's `sqlite_index_bytes` compatibility field is zero;
+all logical counts remain available from durable counters.
 Trace responses additionally pass through the cumulative public
 `attribute_index_fields`, `attribute_bloom_rows`, and
 `attribute_bloom_bytes` storage values, plus the cumulative public
@@ -146,13 +148,12 @@ separate families: `timeless_<plane>_storage_bytes` (the engine's
 raw-vs-storage; index, WAL, freelist, and whole-file bytes are operational
 series and are never part of one.
 
-Metrics payload bytes and row counts are maintained transactionally in the
-table metadata, so routine health and scrape requests do not aggregate the
-complete chunk table. Exact metrics per-index bytes would require a complete
-`dbstat` walk and are therefore reported as unavailable by the extension (the
-server's compatibility gauge is `0`); page, freelist, WAL, and database-file
-gauges remain available. Logs and traces retain their existing index-byte
-accounting.
+Payload bytes and logical storage counts are maintained transactionally in
+table metadata for all three signals, so routine health and scrape requests do
+not aggregate complete block, chunk, or posting-list tables. Exact per-index
+bytes would require a complete `dbstat` walk and are therefore reported as
+unavailable by the extension (the server compatibility gauges are `0`);
+page, freelist, WAL, and database-file gauges remain available.
 
 The raw side per plane: `timeless_metrics_raw_ingested_bytes` is
 `16 × total_points` (8-byte timestamp + 8-byte value per sample — the

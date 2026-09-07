@@ -43,8 +43,9 @@ publish the honest storage split:
   value; series identity is the amortized catalog, not the row). It derives
   from durable point counts — disk plus buffered — so it stays
   lifetime-accurate across restarts.
-- `timeless_metrics_index_bytes` (`sqlite_index_bytes`) is SQLite index
-  bytes, reported beside a compression ratio, never inside it.
+- `timeless_metrics_index_bytes` (`sqlite_index_bytes`) is a compatibility
+  gauge reported as `0`; exact allocation would require a complete `dbstat`
+  walk on every routine stats request.
 - `timeless_metrics_database_file_bytes`, `timeless_metrics_wal_bytes`, and
   `timeless_metrics_freelist_bytes` are operational series and are never part
   of a compression number.

@@ -75,6 +75,22 @@ pub use mem::MemSpanStore;
 // users don't need to know where they were born.
 pub use crate::blocks::{BlockLoc, BlockMeta};
 
+/// Persisted accounting maintained by SQL-backed span stores. The trace-id
+/// posting list can contain tens of millions of rows, so routine observability
+/// must read counters rather than walk those indexes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpanStorageStats {
+    pub bytes_on_disk: u64,
+    pub raw_bytes: u64,
+    pub optimize_source_entries: u64,
+    pub optimize_source_bytes: u64,
+    pub duration_bounded_blocks: u64,
+    pub term_rows: u64,
+    pub trace_index_rows: u64,
+    pub attribute_bloom_rows: u64,
+    pub attribute_bloom_bytes: u64,
+}
+
 /// OTel span kinds, stored as one byte per span:
 /// 0=internal 1=server 2=client 3=producer 4=consumer.
 pub const KIND_NAMES: [&str; 5] = ["internal", "server", "client", "producer", "consumer"];
@@ -253,6 +269,12 @@ pub trait SpanBlockStore: Send + Sync {
     /// releases its publication guard.
     fn query_snapshot_keeps_locations_readable(&self) -> bool {
         false
+    }
+
+    /// Constant-time persisted accounting when the backend supports it.
+    /// In-memory/test stores may retain the zero-valued default.
+    fn storage_stats(&self) -> Result<SpanStorageStats, String> {
+        Ok(SpanStorageStats::default())
     }
 
     /// Persist a batch of blocks (a status-partitioned flush emits up

@@ -171,13 +171,13 @@ use rusqlite::{Connection, Error, Result};
 use timeless_core::{AggFn, Engine, Labels, LogQuery};
 
 use crate::flatjson::{labels_to_json, parse_labels_json, parse_matchers_json, MatcherSpec};
-use crate::logs_vtab::{LogsTab, MERGE_TARGET_ENTRIES as LOG_MERGE_TARGET_ENTRIES};
+use crate::logs_vtab::LogsTab;
 use crate::metrics_vtab::MetricsTab;
 use crate::query_frame::{encode_aggregate_frame, encode_latest_frame};
 use crate::query_report::LogQueryReportState;
 use crate::shared::{self, DbGuard, SharedEngine};
 use crate::sql_value::integer_affinity;
-use crate::traces_vtab::{TracesTab, MERGE_TARGET_ENTRIES as TRACE_MERGE_TARGET_ENTRIES};
+use crate::traces_vtab::TracesTab;
 
 fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
@@ -4482,9 +4482,9 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
 }
 
 /// timeless_stats('t') — k/v health rows for any timeless table.
-/// Engine-view counters come from the shared in-process engine; byte
-/// sizes come from SQL over the shadow tables on the calling connection
-/// (always-current, works before any engine exists elsewhere).
+/// Engine-view counters come from the shared in-process engine and durable
+/// storage counters come from the shadow metadata table. Neither path walks
+/// payload or posting-list pages during routine observability.
 #[repr(C)]
 pub(crate) struct StatsTab {
     base: ffi::sqlite3_vtab,
@@ -4492,6 +4492,9 @@ pub(crate) struct StatsTab {
 }
 
 const STATS_COL_TBL: c_int = 2;
+const STATS_COL_KEY: c_int = 0;
+const STATS_IDX_TBL: c_int = 0b01;
+const STATS_IDX_KEY: c_int = 0b10;
 
 unsafe impl<'vtab> VTab<'vtab> for StatsTab {
     type Aux = ();
@@ -4517,7 +4520,54 @@ unsafe impl<'vtab> VTab<'vtab> for StatsTab {
     }
 
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
-        best_index_tbl(info, STATS_COL_TBL)
+        let mut table_slot = None;
+        let mut key_slot = None;
+        let mut unusable_table = false;
+        for (slot, constraint) in info.constraints().enumerate() {
+            match constraint.column() {
+                STATS_COL_TBL => {
+                    if !constraint.is_usable() {
+                        unusable_table = true;
+                    } else if constraint.operator() == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
+                        && table_slot.is_none()
+                    {
+                        table_slot = Some(slot);
+                    }
+                }
+                STATS_COL_KEY
+                    if constraint.is_usable()
+                        && constraint.operator()
+                            == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
+                        && key_slot.is_none() =>
+                {
+                    key_slot = Some(slot);
+                }
+                _ => {}
+            }
+        }
+        if unusable_table && table_slot.is_none() {
+            return Ok(false);
+        }
+        let mut idx_num = 0;
+        if let Some(slot) = table_slot {
+            let mut usage = info.constraint_usage(slot);
+            usage.set_argv_index(1);
+            usage.set_omit(true);
+            idx_num |= STATS_IDX_TBL;
+        }
+        if table_slot.is_some() {
+            if let Some(slot) = key_slot {
+                let mut usage = info.constraint_usage(slot);
+                usage.set_argv_index(2);
+                usage.set_omit(true);
+                idx_num |= STATS_IDX_KEY;
+            }
+        }
+        let filters_key = idx_num & STATS_IDX_KEY != 0;
+        info.set_estimated_cost(if filters_key { 1.0 } else { 100.0 });
+        info.set_estimated_rows(if filters_key { 1 } else { 100 });
+        info.set_idx_num(idx_num);
+        Ok(true)
     }
 
     fn open(&mut self) -> Result<StatsCursor<'vtab>> {
@@ -4540,168 +4590,87 @@ pub(crate) struct StatsCursor<'vtab> {
     phantom: PhantomData<&'vtab StatsTab>,
 }
 
-fn count_rows(database: &str, table: &str, suffix: &str) -> Result<i64> {
-    let conn = shared::current_conn().map_err(module_err)?;
-    let sql = format!(
-        "SELECT COUNT(*) FROM {}",
-        crate::sql_ident::qualified_shadow(database, table, suffix)
-    );
-    conn.query_row(&sql, [], |r| r.get(0))
-}
-
-fn sum_blob_bytes(database: &str, table: &str, suffix: &str, column: &str) -> Result<i64> {
-    let conn = shared::current_conn().map_err(module_err)?;
-    let sql = format!(
-        "SELECT COALESCE(SUM(length(\"{}\")),0) FROM {}",
-        column.replace('"', "\"\""),
-        crate::sql_ident::qualified_shadow(database, table, suffix)
-    );
-    conn.query_row(&sql, [], |row| row.get(0))
-}
-
-struct LogStorageSummary {
-    disk_entries: i64,
-    bytes_on_disk: i64,
-    raw_bytes: i64,
-    optimize_source_entries: i64,
-    optimize_source_bytes: i64,
-}
-
-struct TraceStorageSummary {
-    bytes_on_disk: i64,
-    raw_bytes: i64,
-    optimize_source_entries: i64,
-    optimize_source_bytes: i64,
-    duration_bounded_blocks: i64,
-    duration_unknown_blocks: i64,
-}
-
-fn log_storage_summary(database: &str, table: &str) -> Result<LogStorageSummary> {
-    let conn = shared::current_conn().map_err(module_err)?;
-    let blocks = crate::sql_ident::qualified_shadow(database, table, "blocks");
-    let sql = format!(
-        "SELECT COALESCE(SUM(entry_count), 0),
-                COALESCE(SUM(length(data)), 0),
-                COALESCE(SUM(CASE WHEN codec IN (1, 6) THEN length(data) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN codec IN (1, 6) OR entry_count < {LOG_MERGE_TARGET_ENTRIES}
-                                  THEN entry_count ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN codec IN (1, 6) OR entry_count < {LOG_MERGE_TARGET_ENTRIES}
-                                  THEN length(data) ELSE 0 END), 0)
-           FROM {blocks}"
-    );
-    conn.query_row(&sql, [], |row| {
-        Ok(LogStorageSummary {
-            disk_entries: row.get(0)?,
-            bytes_on_disk: row.get(1)?,
-            raw_bytes: row.get(2)?,
-            optimize_source_entries: row.get(3)?,
-            optimize_source_bytes: row.get(4)?,
-        })
-    })
-}
-
-fn trace_storage_summary(database: &str, table: &str) -> Result<TraceStorageSummary> {
-    let conn = shared::current_conn().map_err(module_err)?;
-    let blocks = crate::sql_ident::qualified_shadow(database, table, "blocks");
-    let durations = crate::sql_ident::qualified_shadow(database, table, "duration_bounds");
-    let sql = format!(
-        "SELECT COALESCE(SUM(length(b.data)), 0),
-                COALESCE(SUM(CASE WHEN b.codec = 1 THEN length(b.data) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN b.codec = 1 OR b.entry_count < {TRACE_MERGE_TARGET_ENTRIES}
-                                  THEN b.entry_count ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN b.codec = 1 OR b.entry_count < {TRACE_MERGE_TARGET_ENTRIES}
-                                  THEN length(b.data) ELSE 0 END), 0),
-                COALESCE(SUM(d.block_id IS NOT NULL), 0),
-                COALESCE(SUM(d.block_id IS NULL), 0)
-           FROM {blocks} b LEFT JOIN {durations} d ON d.block_id = b.id"
-    );
-    conn.query_row(&sql, [], |row| {
-        Ok(TraceStorageSummary {
-            bytes_on_disk: row.get(0)?,
-            raw_bytes: row.get(1)?,
-            optimize_source_entries: row.get(2)?,
-            optimize_source_bytes: row.get(3)?,
-            duration_bounded_blocks: row.get(4)?,
-            duration_unknown_blocks: row.get(5)?,
-        })
-    })
-}
-
-fn storage_index_bytes(database: &str, names: &[String]) -> Option<i64> {
-    if names.is_empty() {
-        return Some(0);
-    }
-    let conn = shared::current_conn().ok()?;
-    let dbstat = crate::sql_ident::qualified(database, "dbstat");
-    let placeholders = (1..=names.len())
-        .map(|position| format!("?{position}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT COALESCE(SUM(pgsize), 0) FROM {dbstat}
-          WHERE name IN ({placeholders})"
-    );
-    conn.query_row(&sql, rusqlite::params_from_iter(names), |row| row.get(0))
-        .ok()
-}
-
-fn autoindex_name(table: &str, suffix: &str) -> String {
-    format!(
-        "sqlite_autoindex_{}_1",
-        crate::sql_ident::shadow_object(table, suffix)
-    )
-}
-
-fn log_index_bytes(database: &str, table: &str) -> Option<i64> {
-    storage_index_bytes(
-        database,
-        &[
-            crate::sql_ident::shadow_object(table, "terms"),
-            crate::sql_ident::shadow_object(table, "blocks_ts"),
-            crate::sql_ident::shadow_object(table, "meta"),
-            autoindex_name(table, "meta"),
-        ],
-    )
-}
-
-fn trace_index_bytes(database: &str, table: &str) -> Option<i64> {
-    storage_index_bytes(
-        database,
-        &[
-            crate::sql_ident::shadow_object(table, "blocks_ts"),
-            crate::sql_ident::shadow_object(table, "terms"),
-            crate::sql_ident::shadow_object(table, "trace_blocks"),
-            crate::sql_ident::shadow_object(table, "duration_bounds"),
-            crate::sql_ident::shadow_object(table, "attribute_blooms"),
-            autoindex_name(table, "meta"),
-        ],
-    )
-}
-
 unsafe impl VTabCursor for StatsCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         use rusqlite::types::Value;
-        let (database, table) = require_tbl("timeless_stats", idx_num, args)?;
+        if idx_num & STATS_IDX_TBL == 0 {
+            return Err(module_err(
+                "timeless_stats: missing required argument tbl — call as \
+                 timeless_stats('<table>' | '<schema>.<table>')"
+                    .to_owned(),
+            ));
+        }
+        let spec: Option<String> = args.get(0)?;
+        let spec = spec.ok_or_else(|| module_err("timeless_stats: tbl must not be NULL".into()))?;
+        let (database, table) = split_spec(&spec);
+        let requested_key: Option<String> = if idx_num & STATS_IDX_KEY != 0 {
+            let key: Option<String> = args.get(1)?;
+            if key.is_none() {
+                self.rows.clear();
+                self.pos = 0;
+                return Ok(());
+            }
+            key
+        } else {
+            None
+        };
         let _bind = DbGuard::bind(self.db);
         let module = detect_module(&database, &table)?;
 
         let opt_ts = |v: Option<i64>| v.map_or(Value::Null, Value::Integer);
-        let mut rows: Vec<(&'static str, Value)> =
-            vec![("module", Value::Text(module.name().to_owned()))];
-        {
+        let wanted = |key: &str| requested_key.as_deref().is_none_or(|wanted| wanted == key);
+        let mut rows: Vec<(&'static str, Value)> = Vec::new();
+        if wanted("module") {
+            rows.push(("module", Value::Text(module.name().to_owned())));
+        }
+        if requested_key.as_deref() == Some("module") {
+            self.rows = rows;
+            self.pos = 0;
+            return Ok(());
+        }
+        if wanted("retention") || wanted("index_keys") {
             // F2 retention (native ts units), NULL when unset.
             let conn = shared::current_conn().map_err(module_err)?;
-            let retention =
-                crate::shadow_meta::load_retention(&conn, &database, &table).map_err(module_err)?;
-            rows.push(("retention", opt_ts(retention)));
+            if wanted("retention") {
+                let retention = crate::shadow_meta::load_retention(&conn, &database, &table)
+                    .map_err(module_err)?;
+                rows.push(("retention", opt_ts(retention)));
+            }
             // The persisted indexed-metadata allowlist, comma-joined;
             // NULL when the module has none. Public so hosts can compare
             // a desired allowlist against the store's without touching
             // private shadow storage.
-            let index_keys =
-                crate::shadow_meta::load_meta_text(&conn, &database, &table, "index_keys")
-                    .map_err(module_err)?;
-            rows.push(("index_keys", index_keys.map_or(Value::Null, Value::Text)));
+            if wanted("index_keys") {
+                let index_keys =
+                    crate::shadow_meta::load_meta_text(&conn, &database, &table, "index_keys")
+                        .map_err(module_err)?;
+                rows.push(("index_keys", index_keys.map_or(Value::Null, Value::Text)));
+            }
+        }
+        if matches!(requested_key.as_deref(), Some("retention" | "index_keys")) {
+            self.rows = rows;
+            self.pos = 0;
+            return Ok(());
+        }
+        if requested_key.as_deref() == Some("index_bytes") {
+            self.rows = vec![("index_bytes", Value::Null)];
+            self.pos = 0;
+            return Ok(());
+        }
+        if requested_key.as_deref() == Some("timestamp_unit") {
+            if module == TimelessModule::Logs {
+                let conn = shared::current_conn().map_err(module_err)?;
+                let timestamp_unit =
+                    crate::shadow_meta::load_meta_text(&conn, &database, &table, "timestamp_unit")
+                        .map_err(module_err)?;
+                rows.push((
+                    "timestamp_unit",
+                    timestamp_unit.map_or(Value::Null, Value::Text),
+                ));
+            }
+            self.rows = rows;
+            self.pos = 0;
+            return Ok(());
         }
         match module {
             TimelessModule::Metrics => {
@@ -4840,7 +4809,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     .map_err(module_err)?;
                 let ingest_raw_total = shared.engine.load_ingest_raw_total().map_err(module_err)?;
                 let gate = shared.write_gate.profile();
-                let storage = log_storage_summary(&database, &table)?;
+                let storage = shared.engine.storage_stats().map_err(module_err)?;
                 let timestamp_unit = {
                     let conn = shared::current_conn().map_err(module_err)?;
                     crate::shadow_meta::load_meta_text(&conn, &database, &table, "timestamp_unit")
@@ -4864,34 +4833,33 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(block_over_target as i64),
                     ),
                     ("buffered_entries", Value::Integer(buffered as i64)),
-                    ("disk_entries", Value::Integer(storage.disk_entries)),
+                    ("disk_entries", Value::Integer(storage.disk_entries as i64)),
                     (
                         "total_entries",
-                        Value::Integer(storage.disk_entries.saturating_add(buffered as i64)),
+                        Value::Integer(storage.disk_entries.saturating_add(buffered as u64) as i64),
                     ),
-                    ("bytes_on_disk", Value::Integer(storage.bytes_on_disk)),
-                    ("raw_bytes", Value::Integer(storage.raw_bytes)),
+                    (
+                        "bytes_on_disk",
+                        Value::Integer(storage.bytes_on_disk as i64),
+                    ),
+                    ("raw_bytes", Value::Integer(storage.raw_bytes as i64)),
                     (
                         "compressed_bytes",
-                        Value::Integer(storage.bytes_on_disk.saturating_sub(storage.raw_bytes)),
+                        Value::Integer(
+                            storage.bytes_on_disk.saturating_sub(storage.raw_bytes) as i64
+                        ),
                     ),
-                    (
-                        "terms",
-                        Value::Integer(count_rows(&database, &table, "terms")?),
-                    ),
-                    (
-                        "index_bytes",
-                        log_index_bytes(&database, &table).map_or(Value::Null, Value::Integer),
-                    ),
+                    ("terms", Value::Integer(storage.term_rows as i64)),
+                    ("index_bytes", Value::Null),
                     ("ts_min", opt_ts(ts_min)),
                     ("ts_max", opt_ts(ts_max)),
                     (
                         "optimize_source_entries",
-                        Value::Integer(storage.optimize_source_entries),
+                        Value::Integer(storage.optimize_source_entries as i64),
                     ),
                     (
                         "optimize_source_bytes",
-                        Value::Integer(storage.optimize_source_bytes),
+                        Value::Integer(storage.optimize_source_bytes as i64),
                     ),
                     (
                         "ingest_batch_count",
@@ -5197,7 +5165,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     .map_err(module_err)?;
                 let ingest_raw_total = shared.engine.load_ingest_raw_total().map_err(module_err)?;
                 let gate = shared.write_gate.profile();
-                let storage = trace_storage_summary(&database, &table)?;
+                let storage = shared.engine.storage_stats().map_err(module_err)?;
                 let attribute_index_fields = shared.engine.config().attribute_indexes.len();
                 let (_, block_mean_span, block_max_span, block_over_target) =
                     shared.engine.block_span_stats();
@@ -5222,27 +5190,31 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         "total_spans",
                         Value::Integer(disk_spans.saturating_add(counted_buffered) as i64),
                     ),
-                    ("bytes_on_disk", Value::Integer(storage.bytes_on_disk)),
-                    ("raw_bytes", Value::Integer(storage.raw_bytes)),
+                    (
+                        "bytes_on_disk",
+                        Value::Integer(storage.bytes_on_disk as i64),
+                    ),
+                    ("raw_bytes", Value::Integer(storage.raw_bytes as i64)),
                     (
                         "compressed_bytes",
-                        Value::Integer(storage.bytes_on_disk.saturating_sub(storage.raw_bytes)),
+                        Value::Integer(
+                            storage.bytes_on_disk.saturating_sub(storage.raw_bytes) as i64
+                        ),
                     ),
                     (
                         "duration_bounded_blocks",
-                        Value::Integer(storage.duration_bounded_blocks),
+                        Value::Integer(storage.duration_bounded_blocks as i64),
                     ),
                     (
                         "duration_unknown_blocks",
-                        Value::Integer(storage.duration_unknown_blocks),
+                        Value::Integer(
+                            (blocks as u64).saturating_sub(storage.duration_bounded_blocks) as i64,
+                        ),
                     ),
-                    (
-                        "terms",
-                        Value::Integer(count_rows(&database, &table, "terms")?),
-                    ),
+                    ("terms", Value::Integer(storage.term_rows as i64)),
                     (
                         "trace_index_rows",
-                        Value::Integer(count_rows(&database, &table, "trace_blocks")?),
+                        Value::Integer(storage.trace_index_rows as i64),
                     ),
                     (
                         "attribute_index_fields",
@@ -5250,30 +5222,22 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ),
                     (
                         "attribute_bloom_rows",
-                        Value::Integer(count_rows(&database, &table, "attribute_blooms")?),
+                        Value::Integer(storage.attribute_bloom_rows as i64),
                     ),
                     (
                         "attribute_bloom_bytes",
-                        Value::Integer(sum_blob_bytes(
-                            &database,
-                            &table,
-                            "attribute_blooms",
-                            "bits",
-                        )?),
+                        Value::Integer(storage.attribute_bloom_bytes as i64),
                     ),
-                    (
-                        "index_bytes",
-                        trace_index_bytes(&database, &table).map_or(Value::Null, Value::Integer),
-                    ),
+                    ("index_bytes", Value::Null),
                     ("ts_min", opt_ts(ts_min)),
                     ("ts_max", opt_ts(ts_max)),
                     (
                         "optimize_source_entries",
-                        Value::Integer(storage.optimize_source_entries),
+                        Value::Integer(storage.optimize_source_entries as i64),
                     ),
                     (
                         "optimize_source_bytes",
-                        Value::Integer(storage.optimize_source_bytes),
+                        Value::Integer(storage.optimize_source_bytes as i64),
                     ),
                     ("query_count", Value::Integer(query.query_count as i64)),
                     (
@@ -5536,6 +5500,9 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ),
                 ]);
             }
+        }
+        if let Some(key) = requested_key.as_deref() {
+            rows.retain(|(candidate, _)| *candidate == key);
         }
         self.rows = rows;
         self.pos = 0;

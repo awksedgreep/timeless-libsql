@@ -656,8 +656,10 @@ rewrites the file compactly (and can enable auto-vacuum for the future).
 
 When you measure storage or quote a compression number, use the public
 counters, not the file size: `bytes_on_disk` in `timeless_stats(...)` is the
-data-block payload alone, and `index_bytes` is the index overhead beside it.
-The file additionally contains WAL frames, freelist pages, and btree
+data-block payload alone. `index_bytes` is intentionally `NULL` because exact
+per-index allocation requires a complete `dbstat` walk; use whole-database
+page/file accounting when that operational cost is appropriate. The file
+additionally contains WAL frames, freelist pages, and btree
 overhead — operational facts worth watching (`dbhealth` graphs them), but
 none of them belong inside a compression ratio.
 

@@ -687,6 +687,31 @@ fn logs_optimize(extension: &Path, database: &Path) -> Result<()> {
         .execute("INSERT INTO budgeted(budgeted) VALUES('optimize:0')", [])
         .expect_err("zero optimize budget accepted");
     ensure!(error.to_string().contains("budget must be positive"));
+    connection.execute("DELETE FROM logs_meta WHERE k GLOB 'stats_*'", [])?;
+    let legacy = stats(&connection, "logs")?;
+    ensure!(stat(&legacy, "disk_entries")? == 10_240);
+    connection.execute_batch("BEGIN")?;
+    connection.execute(
+        "INSERT INTO logs(logs) VALUES(?1)",
+        params![blobs::log_batch(50_000, 1, 1)],
+    )?;
+    connection.execute("INSERT INTO logs(logs) VALUES('flush')", [])?;
+    connection.execute_batch("ROLLBACK")?;
+    ensure!(scalar_i64(
+        &connection,
+        "SELECT COUNT(*) FROM logs_meta WHERE k GLOB 'stats_*'"
+    )? == 0);
+    ensure!(stat(&stats(&connection, "logs")?, "disk_entries")? == 10_240);
+    connection.execute(
+        "INSERT INTO logs(logs) VALUES(?1)",
+        params![blobs::log_batch(50_000, 1, 1)],
+    )?;
+    connection.execute("INSERT INTO logs(logs) VALUES('flush')", [])?;
+    ensure!(scalar_i64(
+        &connection,
+        "SELECT COUNT(*) FROM logs_meta WHERE k GLOB 'stats_*'"
+    )? == 6);
+    ensure!(stat(&stats(&connection, "logs")?, "disk_entries")? == 10_241);
     println!("PASS: size-tiered optimize bounds rewrites and budgets work");
     Ok(())
 }
@@ -750,7 +775,7 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     ensure!(stat(&current, "query_stable_location_snapshots")? == 2);
     ensure!(stat(&current, "query_snapshot_payload_max_bytes")? == 0);
     ensure!(stat(&current, "query_blocks_skipped_by_bound")? >= 2);
-    ensure!(stat(&current, "index_bytes")? > 0);
+    ensure!(matches!(current.get("index_bytes"), Some(None)));
     ensure!(stat(&current, "optimize_source_entries")? == 12);
     ensure!(stat(&current, "optimize_source_bytes")? > 0);
     ensure!(
@@ -809,14 +834,17 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     // Simulate a database produced before duration extrema existed. Apply the
     // explicit additive upgrade, then conservatively decode legacy blocks.
     let legacy = Connection::open(database)?;
-    legacy.execute_batch("DROP TABLE traces_duration_bounds")?;
+    legacy.execute_batch(
+        "DROP TABLE traces_duration_bounds;
+         DELETE FROM traces_meta WHERE k GLOB 'stats_*';",
+    )?;
     drop(legacy);
 
     let reopened = open(extension, database)?;
     reopened.query_row("SELECT timeless_upgrade('traces')", [], |_| Ok(()))?;
     ensure!(scalar_i64(&reopened, "SELECT COUNT(*) FROM traces")? == 12);
     let reopened_stats = stats(&reopened, "traces")?;
-    ensure!(stat(&reopened_stats, "index_bytes")? > 0);
+    ensure!(matches!(reopened_stats.get("index_bytes"), Some(None)));
     ensure!(stat(&reopened_stats, "optimize_source_entries")? == 12);
     ensure!(stat(&reopened_stats, "optimize_source_bytes")? > 0);
     ensure!(stat(&reopened_stats, "duration_bounded_blocks")? == 0);
@@ -847,6 +875,10 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     let rolled_back_backfill = stats(&reopened, "traces")?;
     ensure!(stat(&rolled_back_backfill, "duration_bounded_blocks")? == 0);
     ensure!(stat(&rolled_back_backfill, "duration_unknown_blocks")? == 1);
+    ensure!(scalar_i64(
+        &reopened,
+        "SELECT COUNT(*) FROM traces_meta WHERE k GLOB 'stats_*'"
+    )? == 0);
     reopened.execute("INSERT INTO traces(traces) VALUES('optimize')", [])?;
     let optimized = stats(&reopened, "traces")?;
     ensure!(stat(&optimized, "duration_bounded_blocks")? > 0);
@@ -855,6 +887,10 @@ fn trace_reads(extension: &Path, database: &Path) -> Result<()> {
     ensure!(stat(&optimized, "optimize_duration_backfill_entries")? == 24);
     ensure!(stat(&optimized, "optimize_duration_backfill_input_bytes")? > 0);
     ensure!(stat(&optimized, "optimize_duration_backfill_total_ns")? > 0);
+    ensure!(scalar_i64(
+        &reopened,
+        "SELECT COUNT(*) FROM traces_meta WHERE k GLOB 'stats_*'"
+    )? == 9);
     let before_rewritten_miss = stats(&reopened, "traces")?;
     ensure!(
         scalar_i64(

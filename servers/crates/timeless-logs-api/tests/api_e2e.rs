@@ -176,7 +176,10 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     assert!(stats.ingest_buffer_append_ns > 0);
     assert_eq!(stats.flush_count, 1);
     assert_eq!(stats.flush_entries, 8_192);
-    assert!(stats.index_size > 0, "index_size is allocated bytes");
+    assert_eq!(
+        stats.index_size, 0,
+        "routine stats omit the expensive whole-database index walk"
+    );
     assert!(stats.term_postings > 0);
     assert!(stats.flush_total_ns > 0);
     assert!(stats.flush_partition_ns > 0);

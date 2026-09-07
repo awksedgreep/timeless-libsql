@@ -194,6 +194,19 @@ pub struct BlockMeta {
     pub codec: u8,
 }
 
+/// Persisted accounting maintained by SQL-backed block stores. Keeping these
+/// totals beside the rows makes routine health/statistics reads independent of
+/// posting-list and payload table size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockStorageStats {
+    pub disk_entries: u64,
+    pub bytes_on_disk: u64,
+    pub raw_bytes: u64,
+    pub optimize_source_entries: u64,
+    pub optimize_source_bytes: u64,
+    pub term_rows: u64,
+}
+
 /// A fully-encoded block ready to persist: payload bytes + the metadata
 /// the store must record + the terms that index it. What flush() and
 /// optimize() hand to the store.
@@ -238,6 +251,12 @@ pub trait BlockStore: Send + Sync {
     /// handlers even while the virtual table is decoding blocks in Rust.
     fn check_cancelled(&self) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Constant-time persisted accounting when the backend supports it.
+    /// In-memory/test stores may retain the zero-valued default.
+    fn storage_stats(&self) -> Result<BlockStorageStats, String> {
+        Ok(BlockStorageStats::default())
     }
 
     /// Persist one block and its terms. Same-operation term insert:

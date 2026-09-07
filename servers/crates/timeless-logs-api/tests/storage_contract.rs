@@ -22,6 +22,18 @@ async fn exposition_and_stats_json_reconcile_with_engine_timeless_stats() {
     let storage = Storage::start(database.clone(), extension.clone().into(), 1, 8).unwrap();
     let app = router(storage.clone());
 
+    let response = app
+        .clone()
+        .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let ready: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ready["status"], "ready");
+    assert!(ready.get("build").is_some());
+    assert_eq!(ready.as_object().unwrap().len(), 2);
+
     // Seed past the extension's 8,192-entry buffer so blocks reach disk,
     // then take the ordered durability barrier.
     let response = app
@@ -75,7 +87,10 @@ async fn exposition_and_stats_json_reconcile_with_engine_timeless_stats() {
     let output_total = series_value(&text, "timeless_logs_compression_output_bytes_total");
     let raw_ingested = series_value(&text, "timeless_logs_raw_ingested_bytes_total");
     assert!(storage_bytes > 0, "storage_bytes={storage_bytes}");
-    assert!(index_bytes > 0, "index_bytes={index_bytes}");
+    assert_eq!(
+        index_bytes, 0,
+        "routine stats omit the expensive whole-database index walk"
+    );
     assert!(input_total > 0, "input_total={input_total}");
     assert!(output_total > 0, "output_total={output_total}");
     assert!(
@@ -117,7 +132,7 @@ async fn exposition_and_stats_json_reconcile_with_engine_timeless_stats() {
     // database must agree exactly with what the server exported.
     let engine = engine_stats(&database, Path::new(&extension));
     assert_eq!(engine["bytes_on_disk"], storage_bytes);
-    assert_eq!(engine["index_bytes"], index_bytes);
+    assert!(!engine.contains_key("index_bytes"));
     assert_eq!(engine["compression_input_bytes_total"], input_total);
     assert_eq!(engine["compression_output_bytes_total"], output_total);
     assert_eq!(engine["ingest_raw_bytes_total"], raw_ingested);
@@ -147,11 +162,49 @@ fn engine_stats(database: &Path, extension: &Path) -> HashMap<String, i64> {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
         })
         .unwrap();
-    rows.filter_map(|row| {
-        let (key, value) = row.unwrap();
-        value.map(|value| (key, value))
-    })
-    .collect()
+    let values: HashMap<String, i64> = rows
+        .filter_map(|row| {
+            let (key, value) = row.unwrap();
+            value.map(|value| (key, value))
+        })
+        .collect();
+    let actual: (i64, i64, i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(entry_count),0),
+                    COALESCE(SUM(length(data)),0),
+                    COALESCE(SUM(CASE WHEN codec IN (1,6) THEN length(data) ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < 8192
+                                      THEN entry_count ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < 8192
+                                      THEN length(data) ELSE 0 END),0),
+                    (SELECT COUNT(*) FROM logs_terms)
+               FROM logs_blocks",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            values["disk_entries"],
+            values["bytes_on_disk"],
+            values["raw_bytes"],
+            values["optimize_source_entries"],
+            values["optimize_source_bytes"],
+            values["terms"],
+        ),
+        actual,
+        "durable log counters must match shadow-row ground truth"
+    );
+    values
 }
 
 fn ingest_request(body: String) -> Request<Body> {

@@ -37,7 +37,7 @@ pub fn router_with_limits(storage: Storage, limits: LogsQueryLimits) -> Router {
         .expect("LogsQL router limits must be valid");
     Router::new()
         .route("/live", get(liveness))
-        .route("/ready", get(health))
+        .route("/ready", get(readiness))
         .route("/health", get(health))
         .route("/metrics", get(self_metrics))
         .route("/insert/jsonline", post(ingest))
@@ -55,6 +55,24 @@ pub fn router_with_limits(storage: Storage, limits: LogsQueryLimits) -> Router {
 
 async fn liveness() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "alive"})))
+}
+
+async fn readiness(State(storage): State<Storage>) -> impl IntoResponse {
+    if !storage.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "not_ready", "reason": "shutting_down"})),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ready",
+            "build": server_build_identity("logs")
+        })),
+    )
+        .into_response()
 }
 
 async fn health(State(storage): State<Storage>) -> impl IntoResponse {

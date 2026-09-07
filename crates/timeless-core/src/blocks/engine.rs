@@ -3070,6 +3070,11 @@ impl BlockEngine {
         self.stats_with_after_index(|| {})
     }
 
+    /// Store-maintained persisted accounting for routine health surfaces.
+    pub fn storage_stats(&self) -> Result<crate::blocks::BlockStorageStats, String> {
+        self.store.storage_stats()
+    }
+
     /// Block ts-span shape, payload-free (index metadata only).
     ///
     /// Block pruning is by ts range, so the WIDTH of a block decides how

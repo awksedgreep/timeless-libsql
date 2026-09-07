@@ -31,7 +31,7 @@ pub fn router_with_limits(storage: Storage, limits: TracesQueryLimits) -> Router
     Router::new()
         .route("/live", get(liveness))
         .route("/ready", get(readiness))
-        .route("/health", get(readiness))
+        .route("/health", get(health))
         .route("/metrics", get(self_metrics))
         .route("/select/traces/stats", get(stats))
         .route("/select/jaeger/api/services", get(services))
@@ -64,6 +64,24 @@ async fn liveness() -> impl IntoResponse {
 }
 
 async fn readiness(State(storage): State<Storage>) -> Response {
+    if !storage.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "not_ready", "reason": "shutting_down"})),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ready",
+            "build": server_build_identity("traces")
+        })),
+    )
+        .into_response()
+}
+
+async fn health(State(storage): State<Storage>) -> Response {
     if !storage.is_ready() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

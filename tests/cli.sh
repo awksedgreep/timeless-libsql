@@ -403,10 +403,20 @@ got=$(sqlite3 "$RLDB" <<SQL
 .load $EXT
 SELECT COUNT(*), (SELECT COUNT(*) FROM logs WHERE message LIKE 'bulk-%') FROM logs;
 SELECT t.term FROM logs_terms t LEFT JOIN logs_blocks b ON t.block_id = b.id WHERE b.id IS NULL;
+SELECT 'acct',
+  (SELECT value FROM timeless_stats('logs') WHERE key='disk_entries') =
+    (SELECT COALESCE(SUM(entry_count),0) FROM logs_blocks),
+  (SELECT value FROM timeless_stats('logs') WHERE key='bytes_on_disk') =
+    (SELECT COALESCE(SUM(length(data)),0) FROM logs_blocks),
+  (SELECT value FROM timeless_stats('logs') WHERE key='raw_bytes') =
+    (SELECT COALESCE(SUM(CASE WHEN codec IN (1,6) THEN length(data) ELSE 0 END),0) FROM logs_blocks),
+  (SELECT value FROM timeless_stats('logs') WHERE key='terms') =
+    (SELECT COUNT(*) FROM logs_terms);
 PRAGMA integrity_check;
 SQL
 )
-check_eq "logs rollback state survives reopen, no dangling terms" "$got" "2|0
+check_eq "logs rollback state survives reopen with exact accounting" "$got" "2|0
+acct|1|1|1|1
 ok"
 
 # ---------------------------------------------------------------------------
@@ -451,10 +461,22 @@ SELECT hex(tb.trace_id) FROM traces_trace_blocks tb LEFT JOIN traces_blocks b ON
 SELECT t.term FROM traces_terms t LEFT JOIN traces_blocks b ON t.block_id = b.id WHERE b.id IS NULL;
 SELECT d.block_id FROM traces_duration_bounds d LEFT JOIN traces_blocks b ON d.block_id = b.id WHERE b.id IS NULL;
 SELECT b.id FROM traces_blocks b LEFT JOIN traces_duration_bounds d ON d.block_id = b.id WHERE d.block_id IS NULL;
+SELECT 'acct',
+  (SELECT value FROM timeless_stats('traces') WHERE key='bytes_on_disk') =
+    (SELECT COALESCE(SUM(length(data)),0) FROM traces_blocks),
+  (SELECT value FROM timeless_stats('traces') WHERE key='raw_bytes') =
+    (SELECT COALESCE(SUM(CASE WHEN codec=1 THEN length(data) ELSE 0 END),0) FROM traces_blocks),
+  (SELECT value FROM timeless_stats('traces') WHERE key='duration_bounded_blocks') =
+    (SELECT COUNT(*) FROM traces_duration_bounds),
+  (SELECT value FROM timeless_stats('traces') WHERE key='terms') =
+    (SELECT COUNT(*) FROM traces_terms),
+  (SELECT value FROM timeless_stats('traces') WHERE key='trace_index_rows') =
+    (SELECT COUNT(*) FROM traces_trace_blocks);
 PRAGMA integrity_check;
 SQL
 )
-check_eq "traces rollback state survives reopen, no dangling index rows" "$got" "2|0
+check_eq "traces rollback state survives reopen with exact accounting" "$got" "2|0
+acct|1|1|1|1|1
 ok"
 
 # ---------------------------------------------------------------------------
@@ -1356,24 +1378,49 @@ SELECT 'catcount', (SELECT COUNT(*) FROM timeless_series('m')) =
                    (SELECT COUNT(DISTINCT name || labels) FROM m);
 .print -- stats: module row + a few load-bearing keys per module type
 SELECT 'sm', key, value FROM timeless_stats('m')
- WHERE key IN ('module','series','buffered_points','disk_points');
+ WHERE key IN ('module','series','buffered_points','disk_points') ORDER BY key;
 SELECT 'sl', key, value FROM timeless_stats('l')
- WHERE key IN ('module','blocks','buffered_entries','terms');
+ WHERE key IN ('module','blocks','buffered_entries','terms') ORDER BY key;
 SELECT 'st', key, value FROM timeless_stats('t')
  WHERE key IN ('module','buffered_spans','disk_spans','total_spans','ts_min',
                'query_count','query_cancelled','query_candidate_blocks','query_payload_blocks_read',
-               'query_decoded_spans','query_matched_spans','query_returned_spans');
-.print -- metrics avoids full-db accounting; logs/traces keep public accounting
+               'query_decoded_spans','query_matched_spans','query_returned_spans') ORDER BY key;
+.print -- routine stats avoid full-db index accounting for every signal
 INSERT INTO l(l) VALUES ('flush');
 INSERT INTO t(t) VALUES ('flush');
 SELECT 'public',
        (SELECT value IS NULL FROM timeless_stats('m') WHERE key='index_bytes'),
-       (SELECT value > 0 FROM timeless_stats('l') WHERE key='index_bytes'),
+       (SELECT value IS NULL FROM timeless_stats('l') WHERE key='index_bytes'),
        (SELECT value FROM timeless_stats('l') WHERE key='optimize_source_entries'),
        (SELECT value > 0 FROM timeless_stats('l') WHERE key='optimize_source_bytes'),
-       (SELECT value > 0 FROM timeless_stats('t') WHERE key='index_bytes'),
+       (SELECT value IS NULL FROM timeless_stats('t') WHERE key='index_bytes'),
        (SELECT value FROM timeless_stats('t') WHERE key='optimize_source_entries'),
        (SELECT value > 0 FROM timeless_stats('t') WHERE key='optimize_source_bytes');
+.print -- durable counters exactly match their shadow rows
+SELECT 'logacct',
+       (SELECT value FROM timeless_stats('l') WHERE key='disk_entries') =
+         (SELECT COALESCE(SUM(entry_count),0) FROM l_blocks),
+       (SELECT value FROM timeless_stats('l') WHERE key='bytes_on_disk') =
+         (SELECT COALESCE(SUM(length(data)),0) FROM l_blocks),
+       (SELECT value FROM timeless_stats('l') WHERE key='raw_bytes') =
+         (SELECT COALESCE(SUM(CASE WHEN codec IN (1,6) THEN length(data) ELSE 0 END),0) FROM l_blocks),
+       (SELECT value FROM timeless_stats('l') WHERE key='terms') =
+         (SELECT COUNT(*) FROM l_terms);
+SELECT 'traceacct',
+       (SELECT value FROM timeless_stats('t') WHERE key='bytes_on_disk') =
+         (SELECT COALESCE(SUM(length(data)),0) FROM t_blocks),
+       (SELECT value FROM timeless_stats('t') WHERE key='raw_bytes') =
+         (SELECT COALESCE(SUM(CASE WHEN codec=1 THEN length(data) ELSE 0 END),0) FROM t_blocks),
+       (SELECT value FROM timeless_stats('t') WHERE key='duration_bounded_blocks') =
+         (SELECT COUNT(*) FROM t_duration_bounds),
+       (SELECT value FROM timeless_stats('t') WHERE key='terms') =
+         (SELECT COUNT(*) FROM t_terms),
+       (SELECT value FROM timeless_stats('t') WHERE key='trace_index_rows') =
+         (SELECT COUNT(*) FROM t_trace_blocks),
+       (SELECT value FROM timeless_stats('t') WHERE key='attribute_bloom_rows') =
+         (SELECT COUNT(*) FROM t_attribute_blooms),
+       (SELECT value FROM timeless_stats('t') WHERE key='attribute_bloom_bytes') =
+         (SELECT COALESCE(SUM(length(bits)),0) FROM t_attribute_blooms);
 .print -- prune reflected in catalog
 INSERT INTO m(m) VALUES ('flush');
 INSERT INTO m(m) VALUES ('prune:160');
@@ -1387,30 +1434,34 @@ cat|cpu|{"host":"b"}|150|150|1|1|0'
 check_eq "catalog count == DISTINCT series over raw vtab" \
   "$(grep '^catcount|' <<<"$got")" "catcount|1"
 check_eq "metrics stats keys" "$(grep '^sm|' <<<"$got")" \
-'sm|module|timeless_metrics
-sm|series|2
+'sm|buffered_points|1
 sm|disk_points|3
-sm|buffered_points|1'
+sm|module|timeless_metrics
+sm|series|2'
 check_eq "logs stats keys" "$(grep '^sl|' <<<"$got")" \
-'sl|module|timeless_logs
-sl|blocks|0
+'sl|blocks|0
 sl|buffered_entries|1
+sl|module|timeless_logs
 sl|terms|0'
 check_eq "traces stats keys" "$(grep '^st|' <<<"$got")" \
-'st|module|timeless_traces
-st|buffered_spans|1
+'st|buffered_spans|1
 st|disk_spans|0
-st|total_spans|1
-st|ts_min|5000
-st|query_count|0
+st|module|timeless_traces
 st|query_cancelled|0
 st|query_candidate_blocks|0
-st|query_payload_blocks_read|0
+st|query_count|0
 st|query_decoded_spans|0
 st|query_matched_spans|0
-st|query_returned_spans|0'
-check_eq "metrics omits full-db accounting; logs/traces retain public accounting" \
+st|query_payload_blocks_read|0
+st|query_returned_spans|0
+st|total_spans|1
+st|ts_min|5000'
+check_eq "all signal stats omit full-db index accounting" \
   "$(grep '^public|' <<<"$got")" "public|1|1|1|1|1|1|1"
+check_eq "logs durable storage counters match shadow rows" \
+  "$(grep '^logacct|' <<<"$got")" "logacct|1|1|1|1"
+check_eq "traces durable storage counters match shadow rows" \
+  "$(grep '^traceacct|' <<<"$got")" "traceacct|1|1|1|1|1|1|1"
 # prune is CHUNK-granular: cpu-a's {100,200} chunk straddles the cutoff
 # and survives whole; cpu-b's chunk dies, leaving an empty cataloged
 # series (empty series persist — documented limit).
@@ -1544,7 +1595,8 @@ INSERT INTO m(m) VALUES ('rollup');
 ROLLBACK;
 SELECT 'postrb', COUNT(*) FROM timeless_rollup('m', 'cpu', NULL, 60, 2000, 99999, 'count');
 SELECT 'postrb_rows', COUNT(*) FROM m_chunks WHERE resolution > 0 AND ts_min >= 2000;
-SELECT 'stats', key, value FROM timeless_stats('m') WHERE key IN ('rollup_tiers','rollup_chunks');
+SELECT 'stats', key, value FROM timeless_stats('m')
+ WHERE key IN ('rollup_tiers','rollup_chunks') ORDER BY key;
 SQL
 )
 tvf_rows=$(grep '^tvf|' <<<"$got" | sed 's/^tvf|//')
@@ -1563,8 +1615,8 @@ $(grep -E '^postrb_rows\|' <<<"$got")" \
 postrb_rows|0'
 check_eq "stats expose ladder + rollup chunk count" \
   "$(grep '^stats|' <<<"$got")" \
-'stats|rollup_tiers|60:0,300:0
-stats|rollup_chunks|2'
+'stats|rollup_chunks|2
+stats|rollup_tiers|60:0,300:0'
 # Reopen recovery: fresh process sees the rolled buckets.
 got=$(sqlite3 "$F3DB" ".load $EXT" \
   "SELECT COUNT(*) FROM timeless_rollup('m', 'cpu', NULL, 60, 0, 99999, 'count');")

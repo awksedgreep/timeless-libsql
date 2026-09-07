@@ -47,6 +47,9 @@ The server provides:
 See the [server API reference](../../../docs/SERVER_API_REFERENCE.md#complete-route-inventory)
 for exact methods, scopes, parameters, and envelopes.
 
+`/ready` is a constant-time process-readiness and build-identity probe;
+`/health` adds storage and queue accounting.
+
 ## Storage and compression series
 
 `GET /metrics` and `GET /select/logsql/stats` publish the storage split as
@@ -55,9 +58,9 @@ bytes:
 
 - `timeless_logs_storage_bytes` — data block payload bytes on disk, the only
   stored side of a compression ratio (JSON `total_bytes`);
-- `timeless_logs_index_bytes` — term index bytes on disk, reported beside
-  compression series, never inside them (JSON `index_size`; also exported as
-  the pre-existing `timeless_logs_index_size_bytes`);
+- `timeless_logs_index_bytes` — a compatibility gauge currently reported as
+  `0` (JSON `index_size` is also `0`), because exact allocation would require
+  a complete `dbstat` walk on every routine stats request;
 - `timeless_logs_wal_bytes`, `timeless_logs_freelist_bytes`, and
   `timeless_logs_database_file_bytes` — operational gauges, never part of a
   compression number;

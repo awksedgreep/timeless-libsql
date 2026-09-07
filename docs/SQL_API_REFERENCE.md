@@ -534,9 +534,18 @@ keys. Every module also reports `module`, `retention` (native timestamp
 units, NULL when unset), and `index_keys` (the persisted indexed-metadata
 allowlist, comma-joined, NULL when the module has none) — the public way for
 hosts to compare desired store policy against the store's persisted policy.
-`index_bytes` is an INTEGER when SQLite's `dbstat` module is available
-and NULL otherwise; it counts the signal's physical posting/catalog/index
-b-trees, not the database file or result payload.
+`index_bytes` is retained as an additive compatibility key but is `NULL` for
+all three signals. Exact per-index allocation requires a complete `dbstat`
+walk, so routine stats deliberately omit it. Whole-database page, freelist,
+WAL, and file accounting remains available from SQLite and the signal servers.
+Equality on `key` is pushed into the TVF, so capability probes such as
+`WHERE key='module'` avoid constructing unrelated statistics.
+
+Logs and traces maintain their payload, optimizer-source, and posting-list
+totals transactionally in table metadata. Trace duration, trace-id, and
+attribute-Bloom totals use the same counters. A database created by an older
+extension is aggregated once per process and cached; its next storage mutation
+persists the counters in the same host transaction.
 
 | Signal | Public storage and maintenance keys |
 |---|---|

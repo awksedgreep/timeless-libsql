@@ -188,13 +188,13 @@ async fn release_backup_preserves_rich_spans_and_is_no_clobber() {
     assert_eq!(live_stats.checkpoint_errors, 0);
     assert!(live_stats.backup_total_ns > 0);
     assert!(live_stats.checkpoint_total_ns > 0);
-    assert!(live_stats.sqlite_index_bytes > 0);
+    assert_eq!(live_stats.sqlite_index_bytes, 0);
 
     assert_fixture_persisted(&backup, &extension);
     let restored = Storage::start(backup, extension, 1, 8, Some(DEFAULT_RETENTION)).unwrap();
     let restored_stats = restored.stats().await.unwrap();
     assert_eq!(restored_stats.total_spans, 1);
-    assert!(restored_stats.sqlite_index_bytes > 0);
+    assert_eq!(restored_stats.sqlite_index_bytes, 0);
     restored.shutdown().await.unwrap();
     storage.shutdown().await.unwrap();
 }
@@ -268,8 +268,12 @@ async fn session_two_owns_lifecycle_durability_and_cold_reopen() {
     let ready = get_json(&app, "/ready").await;
     assert_eq!(ready.0, StatusCode::OK);
     assert_eq!(ready.1["status"], "ready");
-    assert_eq!(ready.1["capability"], TRACE_CAPABILITY);
-    assert_eq!(ready.1["module"], "timeless_traces");
+    assert!(ready.1.get("capability").is_none());
+    assert!(ready.1.get("module").is_none());
+    let health = get_json(&app, "/health").await;
+    assert_eq!(health.0, StatusCode::OK);
+    assert_eq!(health.1["capability"], TRACE_CAPABILITY);
+    assert_eq!(health.1["module"], "timeless_traces");
 
     // Invalid input and oversized bodies never reach storage admission.
     let absent_otlp = post_body(&app, "/insert/opentelemetry/v1/traces", b"{}").await;
@@ -1104,7 +1108,10 @@ async fn metrics_exposition_reconciles_storage_series_with_timeless_stats() {
     let compression_output = sample(&text, "timeless_traces_compression_output_bytes_total");
     let raw_ingested = sample(&text, "timeless_traces_raw_ingested_bytes_total");
     assert!(storage_bytes > 0, "optimize left no block payload bytes");
-    assert!(index_bytes > 0, "trace shadow indexes must have bytes");
+    assert_eq!(
+        index_bytes, 0,
+        "routine stats omit the expensive whole-database index walk"
+    );
     assert!(wal_bytes >= 0);
     assert!(
         compression_input > 0 && compression_output > 0,
@@ -1157,7 +1164,59 @@ async fn metrics_exposition_reconciles_storage_series_with_timeless_stats() {
         .unwrap()
     };
     assert_eq!(engine("bytes_on_disk"), storage_bytes);
-    assert_eq!(engine("index_bytes"), index_bytes);
+    let index_bytes: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM timeless_stats('traces') WHERE key='index_bytes'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_bytes, None);
+    let actual: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(length(data)),0),
+                    COALESCE(SUM(CASE WHEN codec=1 THEN length(data) ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN codec=1 OR entry_count < 8192
+                                      THEN entry_count ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN codec=1 OR entry_count < 8192
+                                      THEN length(data) ELSE 0 END),0),
+                    (SELECT COUNT(*) FROM traces_duration_bounds),
+                    (SELECT COUNT(*) FROM traces_terms),
+                    (SELECT COUNT(*) FROM traces_trace_blocks),
+                    (SELECT COUNT(*) FROM traces_attribute_blooms),
+                    (SELECT COALESCE(SUM(length(bits)),0) FROM traces_attribute_blooms)
+               FROM traces_blocks",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            engine("bytes_on_disk"),
+            engine("raw_bytes"),
+            engine("optimize_source_entries"),
+            engine("optimize_source_bytes"),
+            engine("duration_bounded_blocks"),
+            engine("terms"),
+            engine("trace_index_rows"),
+            engine("attribute_bloom_rows"),
+            engine("attribute_bloom_bytes"),
+        ),
+        actual,
+        "durable trace counters must match shadow-row ground truth"
+    );
     assert_eq!(engine("compression_input_bytes_total"), compression_input);
     assert_eq!(engine("compression_output_bytes_total"), compression_output);
     assert_eq!(engine("ingest_raw_bytes_total"), raw_ingested);

@@ -23,9 +23,11 @@
 //!     `WHERE trace_id = x'...'` never scans anything.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use timeless_core::spans::SpanStorageStats;
 use timeless_core::{
     span_attribute_bloom_checksum, validate_span_attribute_bloom, BlockLoc, BlockMeta,
     EncodedSpanBlock, SpanAttributeBloom, SpanAttributeFilter, SpanBlockStore, SpanDurationBounds,
@@ -96,6 +98,16 @@ CREATE TABLE IF NOT EXISTS {attributes} (
   PRIMARY KEY(scope, path, block_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
+INSERT OR IGNORE INTO {meta}(k, v) VALUES
+  ('stats_block_bytes', 0),
+  ('stats_raw_bytes', 0),
+  ('stats_optimize_source_entries', 0),
+  ('stats_optimize_source_bytes', 0),
+  ('stats_duration_bounded_blocks', 0),
+  ('stats_term_rows', 0),
+  ('stats_trace_index_rows', 0),
+  ('stats_attribute_bloom_rows', 0),
+  ('stats_attribute_bloom_bytes', 0);
 "#
     )
 }
@@ -193,6 +205,13 @@ pub(crate) struct ShadowSpanStore {
     validate_attribute_rows_sql: String,
     missing_duration_sql: String,
     update_duration_sql: String,
+    duration_exists_sql: String,
+    stats_counter_sql: String,
+    stats_fallback_sql: String,
+    ensure_stats_sql: String,
+    initialize_stats_sql: String,
+    adjust_stats_sql: String,
+    stats_fallback: Mutex<Option<SpanStorageStats>>,
     save_meta_sql: String,
     load_meta_sql: String,
     /// "DELETE FROM ... IN (" prefixes, completed per call with the id
@@ -207,7 +226,10 @@ pub(crate) struct ShadowSpanStore {
     /// prepare_cached).
     query_base: String,
     term_select: String,
+    blocks_table: String,
     terms_table: String,
+    traces_table: String,
+    durations_table: String,
     attribute_blooms_table: String,
     /// The hero query, fully preformatted (fixed shape).
     query_trace_sql: String,
@@ -270,6 +292,72 @@ impl ShadowSpanStore {
                 "INSERT OR REPLACE INTO {durations} \
                  (block_id, duration_min, duration_max) VALUES (?3, ?1, ?2)"
             ),
+            duration_exists_sql: format!(
+                "SELECT EXISTS(SELECT 1 FROM {durations} WHERE block_id=?1)"
+            ),
+            stats_counter_sql: format!(
+                "SELECT (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_block_bytes'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_raw_bytes'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_optimize_source_entries'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_optimize_source_bytes'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_duration_bounded_blocks'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_term_rows'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_trace_index_rows'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_attribute_bloom_rows'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_attribute_bloom_bytes')"
+            ),
+            stats_fallback_sql: format!(
+                "SELECT COALESCE(SUM(length(data)),0), \
+                        COALESCE(SUM(CASE WHEN codec=1 THEN length(data) ELSE 0 END),0), \
+                        COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
+                                          THEN entry_count ELSE 0 END),0), \
+                        COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
+                                          THEN length(data) ELSE 0 END),0), \
+                        (SELECT COUNT(*) FROM {durations}), \
+                        (SELECT COUNT(*) FROM {terms}), \
+                        (SELECT COUNT(*) FROM {traces}), \
+                        (SELECT COUNT(*) FROM {attributes}), \
+                        (SELECT COALESCE(SUM(length(bits)),0) FROM {attributes}) \
+                 FROM {blocks}",
+                target = crate::traces_vtab::MERGE_TARGET_ENTRIES,
+            ),
+            ensure_stats_sql: format!(
+                "INSERT OR IGNORE INTO {meta}(k,v) \
+                 SELECT 'stats_block_bytes', COALESCE(SUM(length(data)),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_raw_bytes', \
+                   COALESCE(SUM(CASE WHEN codec=1 THEN length(data) ELSE 0 END),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_optimize_source_entries', \
+                   COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
+                                     THEN entry_count ELSE 0 END),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_optimize_source_bytes', \
+                   COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
+                                     THEN length(data) ELSE 0 END),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_duration_bounded_blocks', COUNT(*) FROM {durations} \
+                 UNION ALL SELECT 'stats_term_rows', COUNT(*) FROM {terms} \
+                 UNION ALL SELECT 'stats_trace_index_rows', COUNT(*) FROM {traces} \
+                 UNION ALL SELECT 'stats_attribute_bloom_rows', COUNT(*) FROM {attributes} \
+                 UNION ALL SELECT 'stats_attribute_bloom_bytes', \
+                   COALESCE(SUM(length(bits)),0) FROM {attributes}",
+                target = crate::traces_vtab::MERGE_TARGET_ENTRIES,
+            ),
+            initialize_stats_sql: format!(
+                "INSERT OR IGNORE INTO {meta}(k,v) VALUES \
+                 ('stats_block_bytes',?1),('stats_raw_bytes',?2), \
+                 ('stats_optimize_source_entries',?3),('stats_optimize_source_bytes',?4), \
+                 ('stats_duration_bounded_blocks',?5),('stats_term_rows',?6), \
+                 ('stats_trace_index_rows',?7),('stats_attribute_bloom_rows',?8), \
+                 ('stats_attribute_bloom_bytes',?9)"
+            ),
+            adjust_stats_sql: format!(
+                "INSERT INTO {meta}(k,v) VALUES \
+                 ('stats_block_bytes',?1),('stats_raw_bytes',?2), \
+                 ('stats_optimize_source_entries',?3),('stats_optimize_source_bytes',?4), \
+                 ('stats_duration_bounded_blocks',?5),('stats_term_rows',?6), \
+                 ('stats_trace_index_rows',?7),('stats_attribute_bloom_rows',?8), \
+                 ('stats_attribute_bloom_bytes',?9) \
+                 ON CONFLICT(k) DO UPDATE SET v=CAST(v AS INTEGER)+excluded.v"
+            ),
+            stats_fallback: Mutex::new(None),
             save_meta_sql: format!("INSERT OR REPLACE INTO {meta} (k, v) VALUES (?1, ?2)"),
             load_meta_sql: format!("SELECT v FROM {meta} WHERE k = ?1"),
             delete_blocks_prefix: format!("DELETE FROM {blocks} WHERE id IN ("),
@@ -285,8 +373,11 @@ impl ShadowSpanStore {
                  AND (d.duration_min IS NULL OR d.duration_min <= ?4)"
             ),
             term_select: format!("SELECT block_id FROM {terms} WHERE term = ?"),
+            blocks_table: blocks.clone(),
             terms_table: terms.clone(),
-            attribute_blooms_table: attributes,
+            traces_table: traces.clone(),
+            durations_table: durations.clone(),
+            attribute_blooms_table: attributes.clone(),
             // One PK probe of the trace index (WITHOUT ROWID: the probe
             // IS the b-tree walk), then metadata rows for the matching
             // blocks. ORDER BY ts_min keeps downstream merges
@@ -310,6 +401,173 @@ impl ShadowSpanStore {
         shared::current_conn()
     }
 
+    fn stats_from_values(values: [i64; 9]) -> SpanStorageStats {
+        SpanStorageStats {
+            bytes_on_disk: values[0].max(0) as u64,
+            raw_bytes: values[1].max(0) as u64,
+            optimize_source_entries: values[2].max(0) as u64,
+            optimize_source_bytes: values[3].max(0) as u64,
+            duration_bounded_blocks: values[4].max(0) as u64,
+            term_rows: values[5].max(0) as u64,
+            trace_index_rows: values[6].max(0) as u64,
+            attribute_bloom_rows: values[7].max(0) as u64,
+            attribute_bloom_bytes: values[8].max(0) as u64,
+        }
+    }
+
+    fn read_storage_counters(&self, conn: &Connection) -> Result<Option<SpanStorageStats>, String> {
+        let values: [Option<i64>; 9] = conn
+            .query_row(&self.stats_counter_sql, [], |row| {
+                Ok([
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ])
+            })
+            .map_err(|error| format!("read trace storage counters failed: {error}"))?;
+        let Some(values) = values.into_iter().collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        Ok(Some(Self::stats_from_values(values.try_into().unwrap())))
+    }
+
+    fn scan_storage_stats(&self, conn: &Connection) -> Result<SpanStorageStats, String> {
+        conn.query_row(&self.stats_fallback_sql, [], |row| {
+            Ok(Self::stats_from_values([
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ]))
+        })
+        .map_err(|error| format!("scan trace storage accounting failed: {error}"))
+    }
+
+    fn ensure_storage_stats(&self, conn: &Connection) -> Result<(), String> {
+        if self.read_storage_counters(conn)?.is_some() {
+            return Ok(());
+        }
+        let cached = *self
+            .stats_fallback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(stats) = cached {
+            conn.execute(
+                &self.initialize_stats_sql,
+                params![
+                    stats.bytes_on_disk as i64,
+                    stats.raw_bytes as i64,
+                    stats.optimize_source_entries as i64,
+                    stats.optimize_source_bytes as i64,
+                    stats.duration_bounded_blocks as i64,
+                    stats.term_rows as i64,
+                    stats.trace_index_rows as i64,
+                    stats.attribute_bloom_rows as i64,
+                    stats.attribute_bloom_bytes as i64,
+                ],
+            )
+            .map_err(|error| format!("initialize cached trace storage counters failed: {error}"))?;
+        } else {
+            conn.execute(&self.ensure_stats_sql, [])
+                .map_err(|error| format!("initialize trace storage counters failed: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn adjust_storage_stats(&self, conn: &Connection, delta: [i64; 9]) -> Result<(), String> {
+        conn.execute(&self.adjust_stats_sql, params_from_iter(delta))
+            .map_err(|error| format!("update trace storage counters failed: {error}"))?;
+        Ok(())
+    }
+
+    fn block_delta(
+        block: &EncodedSpanBlock,
+        duration_bounds: Option<SpanDurationBounds>,
+    ) -> Result<[i64; 9], String> {
+        let entries = i64::from(block.meta.entry_count);
+        let bytes = i64::try_from(block.data.len())
+            .map_err(|_| "trace block bytes exceed i64::MAX".to_string())?;
+        let raw = block.meta.codec == 1;
+        let optimize_source =
+            raw || (block.meta.entry_count as usize) < crate::traces_vtab::MERGE_TARGET_ENTRIES;
+        let terms = i64::try_from(block.terms.len())
+            .map_err(|_| "trace term count exceeds i64::MAX".to_string())?;
+        let traces = i64::try_from(block.trace_ids.len())
+            .map_err(|_| "trace index count exceeds i64::MAX".to_string())?;
+        let bloom_rows = i64::try_from(block.attribute_blooms.len())
+            .map_err(|_| "trace attribute bloom count exceeds i64::MAX".to_string())?;
+        let bloom_bytes = block
+            .attribute_blooms
+            .iter()
+            .try_fold(0_i64, |total, bloom| {
+                let bytes = i64::try_from(bloom.bits.len())
+                    .map_err(|_| "trace attribute bloom bytes exceed i64::MAX".to_string())?;
+                total
+                    .checked_add(bytes)
+                    .ok_or_else(|| "trace attribute bloom bytes exceed i64::MAX".to_string())
+            })?;
+        Ok([
+            bytes,
+            if raw { bytes } else { 0 },
+            if optimize_source { entries } else { 0 },
+            if optimize_source { bytes } else { 0 },
+            i64::from(duration_bounds.is_some()),
+            terms,
+            traces,
+            bloom_rows,
+            bloom_bytes,
+        ])
+    }
+
+    fn selected_storage_stats(&self, conn: &Connection, ids: &str) -> Result<[i64; 9], String> {
+        let sql = format!(
+            "SELECT COALESCE(SUM(length(data)),0), \
+                    COALESCE(SUM(CASE WHEN codec=1 THEN length(data) ELSE 0 END),0), \
+                    COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
+                                      THEN entry_count ELSE 0 END),0), \
+                    COALESCE(SUM(CASE WHEN codec=1 OR entry_count < {target} \
+                                      THEN length(data) ELSE 0 END),0), \
+                    (SELECT COUNT(*) FROM {durations} WHERE block_id IN ({ids})), \
+                    (SELECT COUNT(*) FROM {terms} WHERE block_id IN ({ids})), \
+                    (SELECT COUNT(*) FROM {traces} WHERE block_id IN ({ids})), \
+                    (SELECT COUNT(*) FROM {attributes} WHERE block_id IN ({ids})), \
+                    (SELECT COALESCE(SUM(length(bits)),0) FROM {attributes} \
+                       WHERE block_id IN ({ids})) \
+             FROM {blocks} WHERE id IN ({ids})",
+            target = crate::traces_vtab::MERGE_TARGET_ENTRIES,
+            blocks = self.blocks_table,
+            terms = self.terms_table,
+            traces = self.traces_table,
+            durations = self.durations_table,
+            attributes = self.attribute_blooms_table,
+        );
+        conn.query_row(&sql, [], |row| {
+            Ok([
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ])
+        })
+        .map_err(|error| format!("read removed trace accounting failed: {error}"))
+    }
+
     /// INSERT one block row + its duration, term, and trace-index rows.
     /// The caller's enclosing host transaction makes the operation atomic.
     fn insert_block(
@@ -318,6 +576,7 @@ impl ShadowSpanStore {
         block: &EncodedSpanBlock,
         duration_bounds: Option<SpanDurationBounds>,
     ) -> Result<BlockLoc, String> {
+        self.ensure_storage_stats(conn)?;
         let mut stmt = conn
             .prepare_cached(&self.insert_block_sql)
             .map_err(|e| format!("prepare block insert failed: {e}"))?;
@@ -343,19 +602,23 @@ impl ShadowSpanStore {
         let mut tstmt = conn
             .prepare_cached(&self.insert_term_sql)
             .map_err(|e| format!("prepare term insert failed: {e}"))?;
+        let mut inserted_terms = 0_i64;
         for term in &block.terms {
-            tstmt
+            inserted_terms += tstmt
                 .execute(params![term, id])
-                .map_err(|e| format!("term insert ({term:?}) failed: {e}"))?;
+                .map_err(|e| format!("term insert ({term:?}) failed: {e}"))?
+                as i64;
         }
 
         let mut trstmt = conn
             .prepare_cached(&self.insert_trace_sql)
             .map_err(|e| format!("prepare trace-index insert failed: {e}"))?;
+        let mut inserted_traces = 0_i64;
         for tid in &block.trace_ids {
-            trstmt
+            inserted_traces += trstmt
                 .execute(params![&tid[..], id])
-                .map_err(|e| format!("trace-index insert failed: {e}"))?;
+                .map_err(|e| format!("trace-index insert failed: {e}"))?
+                as i64;
         }
         let mut astmt = conn
             .prepare_cached(&self.insert_attribute_bloom_sql)
@@ -380,6 +643,10 @@ impl ShadowSpanStore {
                     )
                 })?;
         }
+        let mut delta = Self::block_delta(block, duration_bounds)?;
+        delta[5] = inserted_terms;
+        delta[6] = inserted_traces;
+        self.adjust_storage_stats(conn, delta)?;
         Ok(BlockLoc { id })
     }
 
@@ -395,6 +662,8 @@ impl ShadowSpanStore {
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        self.ensure_storage_stats(conn)?;
+        let removed = self.selected_storage_stats(conn, &list)?;
         conn.execute(&format!("{}{})", self.delete_terms_prefix, list), [])
             .map_err(|e| format!("term delete failed: {e}"))?;
         conn.execute(&format!("{}{})", self.delete_traces_prefix, list), [])
@@ -408,6 +677,7 @@ impl ShadowSpanStore {
         .map_err(|error| format!("trace attribute bloom delete failed: {error}"))?;
         conn.execute(&format!("{}{})", self.delete_blocks_prefix, list), [])
             .map_err(|e| format!("block delete failed: {e}"))?;
+        self.adjust_storage_stats(conn, removed.map(|value| -value))?;
         Ok(())
     }
 
@@ -441,6 +711,23 @@ impl SpanBlockStore for ShadowSpanStore {
         // its shared lock until the statement ends, so row ids captured by
         // xFilter remain readable while xNext streams payloads.
         true
+    }
+
+    fn storage_stats(&self) -> Result<SpanStorageStats, String> {
+        let conn = Self::conn()?;
+        if let Some(stats) = self.read_storage_counters(&conn)? {
+            return Ok(stats);
+        }
+        let mut fallback = self
+            .stats_fallback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(stats) = *fallback {
+            return Ok(stats);
+        }
+        let stats = self.scan_storage_stats(&conn)?;
+        *fallback = Some(stats);
+        Ok(stats)
     }
 
     /// Batch insert for the status-partitioned flush (up to three
@@ -638,10 +925,22 @@ impl SpanBlockStore for ShadowSpanStore {
         updates: &[(BlockLoc, SpanDurationBounds)],
     ) -> Result<(), String> {
         let conn = Self::conn()?;
+        self.ensure_storage_stats(&conn)?;
         let mut statement = conn
             .prepare_cached(&self.update_duration_sql)
             .map_err(|error| format!("prepare duration-bound update failed: {error}"))?;
+        let mut added = 0_i64;
         for (location, bounds) in updates {
+            let existed = conn
+                .query_row(&self.duration_exists_sql, [location.id], |row| {
+                    row.get::<_, bool>(0)
+                })
+                .map_err(|error| {
+                    format!(
+                        "read duration-bound accounting for block {} failed: {error}",
+                        location.id
+                    )
+                })?;
             let changed = statement
                 .execute(params![bounds.min_ns, bounds.max_ns, location.id])
                 .map_err(|error| {
@@ -656,7 +955,11 @@ impl SpanBlockStore for ShadowSpanStore {
                     location.id
                 ));
             }
+            if !existed {
+                added += 1;
+            }
         }
+        self.adjust_storage_stats(&conn, [0, 0, 0, 0, added, 0, 0, 0, 0])?;
         Ok(())
     }
 

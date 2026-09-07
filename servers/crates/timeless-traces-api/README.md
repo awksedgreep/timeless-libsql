@@ -44,8 +44,9 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 ## Implemented endpoints
 
 - `GET /live` reports process liveness without touching SQLite.
-- `GET /ready` and `GET /health` verify a live reader and expose the negotiated
-  `timeless_traces/rich-span-batch-v2` capability.
+- `GET /ready` is a constant-time process-readiness and build-identity probe.
+  `GET /health` adds the negotiated `timeless_traces/rich-span-batch-v2`
+  capability plus storage and queue accounting.
 - `GET /select/traces/stats` reports extension, SQLite-file, connection, and
   exact request/span/body queue watermarks, including the honest storage
   split (`bytes_on_disk`, `sqlite_index_bytes`, `database_wal_bytes`,
@@ -68,6 +69,8 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   and prune; buffered spans are not yet counted. A compression ratio
   divides raw ingested by storage bytes; index, WAL, freelist, and
   whole-file sizes are separate series and never part of the ratio.
+  Exact per-index allocation is intentionally unavailable on routine paths,
+  so the `sqlite_index_bytes` compatibility field and gauge are `0`.
 - `GET|POST /api/v1/flush` is an ordered completion and durability barrier. Its
   response identifies the admitted request watermark covered by the flush.
 - `POST /api/v1/backup` flushes, drains actionable optimize backlog,

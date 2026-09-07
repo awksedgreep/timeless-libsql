@@ -17,9 +17,14 @@
 //!     against the blocks' ts range — the whole point of keeping term
 //!     storage on the store side of the seam.
 
+use std::sync::Mutex;
+
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
-use timeless_core::{BlockLoc, BlockMeta, BlockStore, EncodedBlock};
+use timeless_core::{
+    blocks::{is_raw_codec, BlockStorageStats},
+    BlockLoc, BlockMeta, BlockStore, EncodedBlock,
+};
 
 use crate::{shared, sql_ident};
 
@@ -59,6 +64,13 @@ CREATE TABLE IF NOT EXISTS {terms} (
   PRIMARY KEY(term, block_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
+INSERT OR IGNORE INTO {meta}(k, v) VALUES
+  ('stats_disk_entries', 0),
+  ('stats_block_bytes', 0),
+  ('stats_raw_bytes', 0),
+  ('stats_optimize_source_entries', 0),
+  ('stats_optimize_source_bytes', 0),
+  ('stats_term_rows', 0);
 "#
     )
 }
@@ -79,6 +91,12 @@ pub(crate) struct ShadowBlockStore {
     insert_term_sql: String,
     read_sql: String,
     scan_sql: String,
+    stats_counter_sql: String,
+    stats_fallback_sql: String,
+    ensure_stats_sql: String,
+    initialize_stats_sql: String,
+    adjust_stats_sql: String,
+    stats_fallback: Mutex<Option<BlockStorageStats>>,
     save_meta_sql: String,
     load_meta_sql: String,
     /// "DELETE FROM ... IN (" prefixes, completed per call with the id
@@ -86,6 +104,8 @@ pub(crate) struct ShadowBlockStore {
     delete_blocks_prefix: String,
     delete_terms_prefix: String,
     purge_term_prefix_sql: String,
+    blocks_table: String,
+    terms_table: String,
     /// query_terms building blocks (the term count varies per query, so
     /// the final SQL is assembled per call; prepare_cached keyed by the
     /// SQL string means each distinct term-count is prepared once).
@@ -112,11 +132,61 @@ impl ShadowBlockStore {
             // scan() runs at every xConnect and needs metadata only —
             // never the payload blobs.
             scan_sql: format!("SELECT id, ts_min, ts_max, entry_count, codec FROM {blocks}"),
+            stats_counter_sql: format!(
+                "SELECT (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_disk_entries'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_block_bytes'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_raw_bytes'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_optimize_source_entries'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_optimize_source_bytes'), \
+                        (SELECT CAST(v AS INTEGER) FROM {meta} WHERE k='stats_term_rows')"
+            ),
+            stats_fallback_sql: format!(
+                "SELECT COALESCE(SUM(entry_count),0), \
+                        COALESCE(SUM(length(data)),0), \
+                        COALESCE(SUM(CASE WHEN codec IN (1,6) THEN length(data) ELSE 0 END),0), \
+                        COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
+                                          THEN entry_count ELSE 0 END),0), \
+                        COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
+                                          THEN length(data) ELSE 0 END),0), \
+                        (SELECT COUNT(*) FROM {terms}) FROM {blocks}",
+                target = crate::logs_vtab::MERGE_TARGET_ENTRIES,
+            ),
+            ensure_stats_sql: format!(
+                "INSERT OR IGNORE INTO {meta}(k,v) \
+                 SELECT 'stats_disk_entries', COALESCE(SUM(entry_count),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_block_bytes', COALESCE(SUM(length(data)),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_raw_bytes', \
+                   COALESCE(SUM(CASE WHEN codec IN (1,6) THEN length(data) ELSE 0 END),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_optimize_source_entries', \
+                   COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
+                                     THEN entry_count ELSE 0 END),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_optimize_source_bytes', \
+                   COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
+                                     THEN length(data) ELSE 0 END),0) FROM {blocks} \
+                 UNION ALL SELECT 'stats_term_rows', COUNT(*) FROM {terms}",
+                target = crate::logs_vtab::MERGE_TARGET_ENTRIES,
+            ),
+            initialize_stats_sql: format!(
+                "INSERT OR IGNORE INTO {meta}(k,v) VALUES \
+                 ('stats_disk_entries',?1),('stats_block_bytes',?2),('stats_raw_bytes',?3), \
+                 ('stats_optimize_source_entries',?4),('stats_optimize_source_bytes',?5), \
+                 ('stats_term_rows',?6)"
+            ),
+            adjust_stats_sql: format!(
+                "INSERT INTO {meta}(k,v) VALUES \
+                 ('stats_disk_entries',?1),('stats_block_bytes',?2),('stats_raw_bytes',?3), \
+                 ('stats_optimize_source_entries',?4),('stats_optimize_source_bytes',?5), \
+                 ('stats_term_rows',?6) \
+                 ON CONFLICT(k) DO UPDATE SET v=CAST(v AS INTEGER)+excluded.v"
+            ),
+            stats_fallback: Mutex::new(None),
             save_meta_sql: format!("INSERT OR REPLACE INTO {meta} (k, v) VALUES (?1, ?2)"),
             load_meta_sql: format!("SELECT v FROM {meta} WHERE k = ?1"),
             delete_blocks_prefix: format!("DELETE FROM {blocks} WHERE id IN ("),
             delete_terms_prefix: format!("DELETE FROM {terms} WHERE block_id IN ("),
             purge_term_prefix_sql: format!("DELETE FROM {terms} WHERE term >= ?1 AND term < ?2"),
+            blocks_table: blocks.clone(),
+            terms_table: terms.clone(),
             // Selects the meta columns alongside the id: query_terms
             // returns (loc, meta) pairs so callers never re-read rows
             // this query already visited (Session 5 friction fix).
@@ -134,10 +204,138 @@ impl ShadowBlockStore {
         shared::current_conn()
     }
 
+    fn stats_from_values(values: [i64; 6]) -> BlockStorageStats {
+        BlockStorageStats {
+            disk_entries: values[0].max(0) as u64,
+            bytes_on_disk: values[1].max(0) as u64,
+            raw_bytes: values[2].max(0) as u64,
+            optimize_source_entries: values[3].max(0) as u64,
+            optimize_source_bytes: values[4].max(0) as u64,
+            term_rows: values[5].max(0) as u64,
+        }
+    }
+
+    fn read_storage_counters(
+        &self,
+        conn: &Connection,
+    ) -> Result<Option<BlockStorageStats>, String> {
+        let values: [Option<i64>; 6] = conn
+            .query_row(&self.stats_counter_sql, [], |row| {
+                Ok([
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ])
+            })
+            .map_err(|error| format!("read log storage counters failed: {error}"))?;
+        let Some(values) = values.into_iter().collect::<Option<Vec<_>>>() else {
+            return Ok(None);
+        };
+        Ok(Some(Self::stats_from_values(values.try_into().unwrap())))
+    }
+
+    fn scan_storage_stats(&self, conn: &Connection) -> Result<BlockStorageStats, String> {
+        conn.query_row(&self.stats_fallback_sql, [], |row| {
+            Ok(Self::stats_from_values([
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ]))
+        })
+        .map_err(|error| format!("scan log storage accounting failed: {error}"))
+    }
+
+    fn ensure_storage_stats(&self, conn: &Connection) -> Result<(), String> {
+        if self.read_storage_counters(conn)?.is_some() {
+            return Ok(());
+        }
+        let cached = *self
+            .stats_fallback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(stats) = cached {
+            conn.execute(
+                &self.initialize_stats_sql,
+                params![
+                    stats.disk_entries as i64,
+                    stats.bytes_on_disk as i64,
+                    stats.raw_bytes as i64,
+                    stats.optimize_source_entries as i64,
+                    stats.optimize_source_bytes as i64,
+                    stats.term_rows as i64,
+                ],
+            )
+            .map_err(|error| format!("initialize cached log storage counters failed: {error}"))?;
+        } else {
+            conn.execute(&self.ensure_stats_sql, [])
+                .map_err(|error| format!("initialize log storage counters failed: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn adjust_storage_stats(&self, conn: &Connection, delta: [i64; 6]) -> Result<(), String> {
+        conn.execute(&self.adjust_stats_sql, params_from_iter(delta))
+            .map_err(|error| format!("update log storage counters failed: {error}"))?;
+        Ok(())
+    }
+
+    fn block_delta(block: &EncodedBlock) -> Result<[i64; 6], String> {
+        let entries = i64::from(block.meta.entry_count);
+        let bytes = i64::try_from(block.data.len())
+            .map_err(|_| "log block bytes exceed i64::MAX".to_string())?;
+        let raw = is_raw_codec(block.meta.codec);
+        let optimize_source =
+            raw || (block.meta.entry_count as usize) < crate::logs_vtab::MERGE_TARGET_ENTRIES;
+        let terms = i64::try_from(block.terms.len())
+            .map_err(|_| "log term count exceeds i64::MAX".to_string())?;
+        Ok([
+            entries,
+            bytes,
+            if raw { bytes } else { 0 },
+            if optimize_source { entries } else { 0 },
+            if optimize_source { bytes } else { 0 },
+            terms,
+        ])
+    }
+
+    fn selected_storage_stats(&self, conn: &Connection, ids: &str) -> Result<[i64; 6], String> {
+        let sql = format!(
+            "SELECT COALESCE(SUM(entry_count),0), COALESCE(SUM(length(data)),0), \
+                    COALESCE(SUM(CASE WHEN codec IN (1,6) THEN length(data) ELSE 0 END),0), \
+                    COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
+                                      THEN entry_count ELSE 0 END),0), \
+                    COALESCE(SUM(CASE WHEN codec IN (1,6) OR entry_count < {target} \
+                                      THEN length(data) ELSE 0 END),0), \
+                    (SELECT COUNT(*) FROM {terms} WHERE block_id IN ({ids})) \
+             FROM {blocks} WHERE id IN ({ids})",
+            target = crate::logs_vtab::MERGE_TARGET_ENTRIES,
+            terms = self.terms_table,
+            blocks = self.blocks_table,
+        );
+        conn.query_row(&sql, [], |row| {
+            Ok([
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ])
+        })
+        .map_err(|error| format!("read removed log accounting failed: {error}"))
+    }
+
     /// INSERT one block row + its term rows. The caller's enclosing host
     /// transaction makes the pair atomic — a block is never visible
     /// without its posting-list entries.
     fn insert_block(&self, conn: &Connection, block: &EncodedBlock) -> Result<BlockLoc, String> {
+        self.ensure_storage_stats(conn)?;
         let mut stmt = conn
             .prepare_cached(&self.insert_block_sql)
             .map_err(|e| format!("prepare block insert failed: {e}"))?;
@@ -156,11 +354,16 @@ impl ShadowBlockStore {
         let mut tstmt = conn
             .prepare_cached(&self.insert_term_sql)
             .map_err(|e| format!("prepare term insert failed: {e}"))?;
+        let mut inserted_terms = 0_i64;
         for term in &block.terms {
-            tstmt
+            inserted_terms += tstmt
                 .execute(params![term, id])
-                .map_err(|e| format!("term insert ({term:?}) failed: {e}"))?;
+                .map_err(|e| format!("term insert ({term:?}) failed: {e}"))?
+                as i64;
         }
+        let mut delta = Self::block_delta(block)?;
+        delta[5] = inserted_terms;
+        self.adjust_storage_stats(conn, delta)?;
         Ok(BlockLoc { id })
     }
 
@@ -176,10 +379,13 @@ impl ShadowBlockStore {
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        self.ensure_storage_stats(conn)?;
+        let removed = self.selected_storage_stats(conn, &list)?;
         conn.execute(&format!("{}{})", self.delete_terms_prefix, list), [])
             .map_err(|e| format!("term delete failed: {e}"))?;
         conn.execute(&format!("{}{})", self.delete_blocks_prefix, list), [])
             .map_err(|e| format!("block delete failed: {e}"))?;
+        self.adjust_storage_stats(conn, removed.map(|value| -value))?;
         Ok(())
     }
 }
@@ -199,6 +405,23 @@ impl BlockStore for ShadowBlockStore {
         Self::conn()?
             .query_row("SELECT 1", [], |_| Ok(()))
             .map_err(|error| format!("log query cancellation checkpoint failed: {error}"))
+    }
+
+    fn storage_stats(&self) -> Result<BlockStorageStats, String> {
+        let conn = Self::conn()?;
+        if let Some(stats) = self.read_storage_counters(&conn)? {
+            return Ok(stats);
+        }
+        let mut fallback = self
+            .stats_fallback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(stats) = *fallback {
+            return Ok(stats);
+        }
+        let stats = self.scan_storage_stats(&conn)?;
+        *fallback = Some(stats);
+        Ok(stats)
     }
 
     fn put_block(&self, block: &EncodedBlock) -> Result<BlockLoc, String> {
@@ -368,14 +591,27 @@ impl BlockStore for ShadowBlockStore {
         let upper = String::from_utf8(upper)
             .map_err(|_| "purge_term_prefix: prefix bound is not UTF-8".to_string())?;
         let conn = Self::conn()?;
+        self.ensure_storage_stats(&conn)?;
         let removed = conn
             .execute(&self.purge_term_prefix_sql, params![prefix, upper])
             .map_err(|e| format!("term purge ({prefix:?}) failed: {e}"))?;
+        self.adjust_storage_stats(&conn, [0, 0, 0, 0, 0, -(removed as i64)])?;
         Ok(removed as u64)
     }
 
     fn replace_terms(&self, loc: &BlockLoc, terms: &[String]) -> Result<(), String> {
         let conn = Self::conn()?;
+        self.ensure_storage_stats(&conn)?;
+        let previous: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE block_id=?1",
+                    self.terms_table
+                ),
+                [loc.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("read reindex term accounting failed: {error}"))?;
 
         conn.execute(&format!("{}{})", self.delete_terms_prefix, loc.id), [])
             .map_err(|e| format!("reindex term delete failed: {e}"))?;
@@ -384,10 +620,14 @@ impl BlockStore for ShadowBlockStore {
             .prepare_cached(&self.insert_term_sql)
             .map_err(|e| format!("prepare reindex term insert failed: {e}"))?;
 
+        let mut inserted = 0_i64;
         for term in terms {
-            stmt.execute(params![term, loc.id])
-                .map_err(|e| format!("reindex term insert ({term:?}) failed: {e}"))?;
+            inserted += stmt
+                .execute(params![term, loc.id])
+                .map_err(|e| format!("reindex term insert ({term:?}) failed: {e}"))?
+                as i64;
         }
+        self.adjust_storage_stats(&conn, [0, 0, 0, 0, 0, inserted - previous])?;
 
         Ok(())
     }

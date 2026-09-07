@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
@@ -1482,8 +1482,8 @@ fn verify_capability(
         ));
     }
 
-    let values = stat_values(conn)?;
-    match values.get("module") {
+    let module = stat_value(conn, "module")?;
+    match module.as_ref() {
         Some(SqlValue::Text(module)) if module == "timeless_traces" => {}
         value => {
             return Err(format!(
@@ -1495,7 +1495,8 @@ fn verify_capability(
         .map(|duration| duration.as_secs())
         .map(|seconds| seconds.saturating_mul(1_000_000_000))
         .map(|native| i64::try_from(native).unwrap_or(i64::MAX));
-    let actual_retention = optional_integer(values.get("retention"));
+    let retention_value = stat_value(conn, "retention")?;
+    let actual_retention = optional_integer(retention_value.as_ref());
     if enforce_retention && actual_retention != expected_retention {
         return Err(format!(
             "traces retention mismatch: server requested {expected_retention:?} ns but database stores {actual_retention:?} ns"
@@ -1675,6 +1676,16 @@ fn stat_values(conn: &Connection) -> Result<HashMap<String, SqlValue>, String> {
         values.insert(key, value);
     }
     Ok(values)
+}
+
+fn stat_value(conn: &Connection, key: &str) -> Result<Option<SqlValue>, String> {
+    conn.query_row(
+        "SELECT value FROM timeless_stats('traces') WHERE key=?1",
+        [key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| format!("read public trace stat {key:?}: {error}"))
 }
 
 fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {

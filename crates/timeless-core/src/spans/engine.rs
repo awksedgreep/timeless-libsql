@@ -2601,6 +2601,11 @@ impl SpanBlockEngine {
         self.stats_with_after_index(|| {})
     }
 
+    /// Store-maintained persisted accounting for routine health surfaces.
+    pub fn storage_stats(&self) -> Result<crate::spans::SpanStorageStats, String> {
+        self.store.storage_stats()
+    }
+
     /// (persisted spans, buffered spans) from block metadata plus the live
     /// buffer, without decoding payloads. The transition guard prevents a
     /// flush from moving the same spans between both sides mid-snapshot.
