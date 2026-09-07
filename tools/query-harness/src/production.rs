@@ -4,7 +4,7 @@ use std::io::{self, Read};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -345,6 +345,45 @@ impl Server {
         values
     }
 
+    fn log_path(&self) -> PathBuf {
+        self.log_dir.join(format!(
+            "{}-{}-g{}.log",
+            self.signal.name(),
+            self.port,
+            self.generation
+        ))
+    }
+
+    fn diagnostic(&mut self) -> Value {
+        let process = match self.child.as_mut().map(Child::try_wait) {
+            None => json!({"state": "absent"}),
+            Some(Ok(None)) => json!({"state": "running"}),
+            Some(Ok(Some(status))) => json!({
+                "state": "exited",
+                "status": status.to_string(),
+                "code": status.code(),
+                "signal": status.signal(),
+            }),
+            Some(Err(error)) => json!({
+                "state": "unknown",
+                "error": error.to_string(),
+            }),
+        };
+        let log_path = self.log_path();
+        let log = fs::read_to_string(&log_path)
+            .unwrap_or_else(|error| format!("read {}: {error}", log_path.display()));
+        let reversed = log.chars().rev().take(16_000).collect::<String>();
+        json!({
+            "pid": self.pid(),
+            "port": self.port,
+            "generation": self.generation,
+            "database": self.database,
+            "log": log_path,
+            "log_tail": reversed.chars().rev().collect::<String>(),
+            "process": process,
+        })
+    }
+
     fn start(&mut self, client: &Client, limits: ChildLimits, timeout: Duration) -> Result<()> {
         if self
             .child
@@ -355,12 +394,7 @@ impl Server {
         }
         self.generation += 1;
         fs::create_dir_all(&self.log_dir)?;
-        let log_path = self.log_dir.join(format!(
-            "{}-{}-g{}.log",
-            self.signal.name(),
-            self.port,
-            self.generation
-        ));
+        let log_path = self.log_path();
         let output = File::options().create(true).append(true).open(&log_path)?;
         let error = output.try_clone()?;
         let mut command = Command::new(&self.binary);
@@ -2268,6 +2302,17 @@ fn run_gate(config: &Config, root: &Path, temporary: Option<TempDir>) -> Result<
     stop.store(true, Ordering::Release);
     active.store(true, Ordering::Release);
     let join_result = join_workers(&mut workers, Duration::from_secs(5));
+    let server_diagnostics = if execution.is_err() || join_result.is_err() {
+        Some(Map::from_iter(states.values().map(|state| {
+            let diagnostic = match state.server() {
+                Ok(mut server) => server.diagnostic(),
+                Err(error) => json!({"error": format!("{error:#}")}),
+            };
+            (state.signal.name().to_owned(), diagnostic)
+        })))
+    } else {
+        None
+    };
     for state in states.values() {
         let _ = state.server().and_then(|mut server| server.kill());
     }
@@ -2284,6 +2329,9 @@ fn run_gate(config: &Config, root: &Path, temporary: Option<TempDir>) -> Result<
         }
         report["finished_at"] = json!(now());
         report["faults"] = Value::Array(events);
+    }
+    if let Some(diagnostics) = server_diagnostics {
+        report["server_diagnostics"] = Value::Object(diagnostics);
     }
     if let Some(parent) = config.output.parent() {
         fs::create_dir_all(parent)?;

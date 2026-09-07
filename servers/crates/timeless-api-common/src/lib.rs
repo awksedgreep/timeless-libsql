@@ -862,6 +862,23 @@ pub async fn shutdown_with_deadline(
     }
 }
 
+/// Keep serving without a deadline until shutdown begins, then bound only the
+/// graceful drain. Applying [`shutdown_with_deadline`] directly to the server
+/// future turns the drain ceiling into a process-uptime ceiling and exits a
+/// healthy server after `deadline` even when no signal was received.
+pub async fn shutdown_after_signal_with_deadline(
+    deadline: Duration,
+    signal: &'static str,
+    shutdown_started: impl Future<Output = ()>,
+    drain: impl Future<Output = (Result<(), String>, Result<(), String>)>,
+) -> (Result<(), String>, Result<(), String>) {
+    tokio::pin!(drain);
+    tokio::select! {
+        pair = &mut drain => pair,
+        () = shutdown_started => shutdown_with_deadline(deadline, signal, &mut drain).await,
+    }
+}
+
 #[cfg(test)]
 mod shutdown_deadline_tests {
     use super::*;
@@ -890,6 +907,43 @@ mod shutdown_deadline_tests {
             started.elapsed() >= Duration::from_millis(50),
             "deadline must actually bound the wait"
         );
+    }
+
+    #[tokio::test]
+    async fn deadline_does_not_limit_healthy_pre_signal_runtime() {
+        let started = Instant::now();
+        let (served, storage) = shutdown_after_signal_with_deadline(
+            Duration::from_millis(10),
+            "t",
+            pending::<()>(),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                (Ok(()), Ok(()))
+            },
+        )
+        .await;
+        assert_eq!((served, storage), (Ok(()), Ok(())));
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "deadline must not start before a shutdown signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn signalled_drain_still_uses_the_deadline() {
+        let started = Instant::now();
+        let (served, storage) = shutdown_after_signal_with_deadline(
+            Duration::from_millis(25),
+            "t",
+            std::future::ready(()),
+            async {
+                pending::<()>().await;
+                (Ok(()), Ok(()))
+            },
+        )
+        .await;
+        assert!(served.is_err() && storage.is_err());
+        assert!(started.elapsed() >= Duration::from_millis(25));
     }
 }
 

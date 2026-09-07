@@ -13,12 +13,15 @@ mod tail;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use timeless_api_common::{
-    maintenance_task, protect_router, shutdown_signal, validate_loopback, AuthConfig,
+    maintenance_task, protect_router, shutdown_after_signal_with_deadline, shutdown_signal,
+    validate_loopback, AuthConfig,
 };
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 
 pub use api::{router, router_with_limits};
 pub use logsql::{
@@ -183,7 +186,12 @@ pub async fn run(config: Config) -> Result<(), String> {
         |storage| async move { storage.schedule_wal_checkpoint().await },
     );
 
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    let shutdown_started = Arc::new(Notify::new());
+    let shutdown_notice = Arc::clone(&shutdown_started);
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown_notice.notify_one();
+    });
     let drain = async {
         let served = server.await.map_err(|e| format!("serve API: {e}"));
         flush_task.abort();
@@ -192,9 +200,10 @@ pub async fn run(config: Config) -> Result<(), String> {
         let shutdown = storage.shutdown().await;
         (served, shutdown)
     };
-    let (served, shutdown) = timeless_api_common::shutdown_with_deadline(
+    let (served, shutdown) = shutdown_after_signal_with_deadline(
         timeless_api_common::SHUTDOWN_DEADLINE,
         "timeless-logs-api",
+        shutdown_started.notified(),
         drain,
     )
     .await;

@@ -118,6 +118,15 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Signal servers no longer treat the graceful-shutdown deadline as a
+  30-second uptime limit.** Metrics, logs, and traces wrapped the complete
+  Axum serve future in the drain timeout, so a healthy process exited after 30
+  seconds without receiving SIGTERM or Ctrl-C. The deadline now starts only
+  after the shutdown signal is observed; normal serving is unbounded, while
+  maintenance teardown, final flush/checkpoint, and storage joins retain the
+  same 30-second ceiling. The production fault gate now also captures child
+  exit status and log tails when a server disappears.
+
 - **Metrics rollup indexes now scale as compact grouped arrays instead of a
   per-row metadata B-tree.** Each `(series, resolution)` owns one sorted vector
   of 32-byte row entries, preserving duplicate timestamps by durable rowid
