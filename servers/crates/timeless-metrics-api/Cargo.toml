@@ -10,6 +10,9 @@ axum = "0.8"
 bytes = "1"
 form_urlencoded = "1"
 fs2 = "0.4"
+opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace"] }
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 promql-parser = "=0.10.0"
 chrono = { version = "0.4", default-features = false }
@@ -21,5 +24,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 timeless-api-common = { path = "../timeless-api-common" }
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["testing", "trace"] }
 tempfile = "3"
+timeless-traces-api = { path = "../timeless-traces-api" }
 tower = { version = "0.5", features = ["util"] }

@@ -100,6 +100,11 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
+    let otel_traces_endpoint =
+        match optional_string_from_env("TIMELESS_METRICS_OTEL_TRACES_ENDPOINT") {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        };
     let prom_query_limits = PromQueryLimits {
         max_points_per_series: match positive_usize_from_env(
             "TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES",
@@ -156,6 +161,7 @@ async fn main() -> ExitCode {
         compact_interval,
         retention_interval,
         rollups,
+        otel_traces_endpoint,
         prom_query_limits,
         auth,
         ..defaults
@@ -240,6 +246,15 @@ fn rollups_from_env(name: &str, default: Option<&str>) -> Result<Option<String>,
         ));
     }
     Ok(Some(value.to_owned()))
+}
+
+fn optional_string_from_env(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(value) if value.trim().is_empty() => Err(format!("{name} must not be empty")),
+        Ok(value) => Ok(Some(value.trim().to_owned())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("{name} is not valid Unicode: {error}")),
+    }
 }
 
 #[cfg(test)]

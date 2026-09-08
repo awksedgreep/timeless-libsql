@@ -21,6 +21,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
 use crate::scrape::{ScrapeController, ScrapeTargetSet, ScrapeTargetSetReport};
+use crate::telemetry::CompactionTelemetry;
 
 /// Maximum raw series and rollup groups handled by one scheduled maintenance
 /// transaction. Production-scale compact/rollup sweeps are resumed across
@@ -749,6 +750,23 @@ impl Storage {
     }
 
     pub async fn schedule_compact(&self) -> Result<(), String> {
+        self.schedule_compact_with_telemetry(None).await
+    }
+
+    pub(crate) async fn schedule_compact_with_telemetry(
+        &self,
+        telemetry: Option<&CompactionTelemetry>,
+    ) -> Result<(), String> {
+        let read_retries_before = telemetry
+            .map(|_| profile_lock(&self.0.profile).read_retries)
+            .unwrap_or(0);
+        let mut trace = telemetry.map(|telemetry| {
+            telemetry.start(
+                COMPACT_STEP_WORK_ITEMS,
+                COMPACT_STEP_WORK_ITEMS,
+                COMPACT_STEP_PAUSE,
+            )
+        });
         let mut steps = 0_u64;
         let mut total_ns = 0_u64;
         let mut step_max_ns = 0_u64;
@@ -772,6 +790,9 @@ impl Storage {
             steps = steps.saturating_add(1);
             total_ns = total_ns.saturating_add(step_ns);
             step_max_ns = step_max_ns.max(step_ns);
+            if let Some(trace) = trace.as_mut() {
+                trace.record_step(steps, step_ns, matches!(step, Ok(true)));
+            }
             match step {
                 Err(error) => break Err(error),
                 Ok(false) => break Ok(()),
@@ -779,6 +800,12 @@ impl Storage {
             }
         };
         record_compaction(&self.0.profile, steps, total_ns, step_max_ns, &result);
+        if let Some(trace) = trace {
+            let read_retries = profile_lock(&self.0.profile)
+                .read_retries
+                .saturating_sub(read_retries_before);
+            trace.finish(steps, total_ns, step_max_ns, read_retries, &result);
+        }
         result
     }
 

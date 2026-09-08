@@ -14,6 +14,18 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- **Optional, deliberately scoped OpenTelemetry tracing for scheduled metrics
+  compaction.** Setting `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` emits one
+  OTLP/HTTP protobuf span per compact/rollup sweep and events only for committed
+  steps taking at least 50 ms. The span records step totals, the maximum step,
+  reader retries during the sweep, transaction budgets, and success or error.
+  Export uses a 256-span drop-on-full background queue, 64-span batches, and a
+  two-second timeout, so unavailable observability cannot backpressure the data
+  plane. HTTP requests, individual samples/chunks, the logs and traces servers,
+  and other OTel signals remain explicitly out of this initial slice.
+
 ### Fixed
 
 - **Scheduled metrics compaction no longer holds the sole writer gate for an

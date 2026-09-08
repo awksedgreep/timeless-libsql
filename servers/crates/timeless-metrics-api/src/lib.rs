@@ -9,6 +9,7 @@ mod promql;
 mod query;
 mod scrape;
 mod storage;
+mod telemetry;
 mod victoria;
 
 use std::net::SocketAddr;
@@ -108,6 +109,9 @@ pub struct Config {
     /// unchanged and creates new databases without rollups; `Some("none")`
     /// disables an existing ladder, while another value replaces it.
     pub rollups: Option<String>,
+    /// Full OTLP/HTTP traces endpoint. Unset disables the deliberately narrow
+    /// metrics-compaction instrumentation slice.
+    pub otel_traces_endpoint: Option<String>,
     pub prom_query_limits: PromQueryLimits,
     pub auth: AuthConfig,
 }
@@ -129,6 +133,7 @@ impl Default for Config {
             retention_interval: Duration::from_secs(60 * 60),
             raw_retention: DEFAULT_RAW_RETENTION,
             rollups: None,
+            otel_traces_endpoint: None,
             prom_query_limits: PromQueryLimits::default(),
             auth: AuthConfig::disabled(),
         }
@@ -161,6 +166,7 @@ impl Config {
             return Err("maintenance and retention intervals must be positive".into());
         }
         self.prom_query_limits.validate()?;
+        telemetry::validate_endpoint(self.otel_traces_endpoint.as_deref())?;
         self.auth.preflight()?;
         Ok(())
     }
@@ -168,6 +174,10 @@ impl Config {
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
+    let telemetry = telemetry::Telemetry::initialize(config.otel_traces_endpoint.as_deref())?;
+    if telemetry.is_some() {
+        println!("timeless-metrics-api OpenTelemetry compaction tracing enabled");
+    }
     let storage = Storage::start_with_queue_bytes_and_rollups(
         config.database_path.clone(),
         config.extension_path.clone(),
@@ -191,10 +201,15 @@ pub async fn run(config: Config) -> Result<(), String> {
         storage.clone(),
         |storage| async move { storage.schedule_flush().await },
     );
+    let compaction_telemetry = telemetry.as_ref().map(telemetry::Telemetry::compaction);
     let compact_task = maintenance_task(
         config.compact_interval,
-        storage.clone(),
-        |storage| async move { storage.schedule_compact().await },
+        (storage.clone(), compaction_telemetry),
+        |(storage, telemetry)| async move {
+            storage
+                .schedule_compact_with_telemetry(telemetry.as_ref())
+                .await
+        },
     );
     let retention_task = maintenance_task(
         config.retention_interval,
@@ -233,6 +248,11 @@ pub async fn run(config: Config) -> Result<(), String> {
         drain,
     )
     .await;
+    if let Some(telemetry) = telemetry {
+        if let Err(error) = telemetry.shutdown() {
+            eprintln!("timeless-metrics-api: {error}");
+        }
+    }
     served.and(shutdown)
 }
 
