@@ -326,11 +326,100 @@ fn rollup_produce_query_watermark_retention() {
 
     let indexed = engine2.info().rollup_chunk_count;
     engine2.set_rollups(Vec::new());
-    let (deleted, more, errors) = engine2.clear_rollups_batch();
-    assert!(errors.is_empty(), "clear errors: {errors:?}");
-    assert_eq!(deleted, indexed);
-    assert!(!more);
+    let mut deleted_total = 0;
+    loop {
+        let (deleted, more, errors) = engine2.clear_rollups_bounded(1);
+        assert!(errors.is_empty(), "clear errors: {errors:?}");
+        assert!(deleted <= 1, "bounded cleanup exceeded its chunk budget");
+        deleted_total += deleted;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(deleted_total, indexed);
     assert_eq!(engine2.info().rollup_chunk_count, 0);
+}
+
+#[test]
+fn bounded_metrics_maintenance_drains_across_commit_sized_steps() {
+    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let series_ids: Vec<i64> = (0..3)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("bounded_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+
+    // Two flushes leave two small PCO chunks per series, making all three
+    // series eligible for compaction without relying on raw encoding.
+    for epoch in 0..2 {
+        for &series_id in &series_ids {
+            for offset in 0..10 {
+                engine.write_point(series_id, epoch * 1_000 + offset * 10, offset as f64);
+            }
+        }
+        engine.flush_all().unwrap();
+    }
+
+    let mut compacted = 0;
+    let mut compact_steps = 0;
+    loop {
+        let (series, _chunks, more) = engine.compact_partitions_bounded(i64::MAX, 1).unwrap();
+        assert!(series <= 1, "one step exceeded its series budget");
+        compacted += series;
+        compact_steps += 1;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(compacted, 3);
+    assert_eq!(compact_steps, 3);
+    for &series_id in &series_ids {
+        assert_eq!(
+            engine
+                .query_range_by_id(series_id, i64::MIN, i64::MAX)
+                .unwrap()
+                .len(),
+            20,
+            "bounded compaction preserves every raw point"
+        );
+    }
+
+    let tier = RollupTier {
+        resolution: 60,
+        retention: 0,
+    };
+    engine.set_rollups(vec![tier]);
+    let (first_chunks, _first_buckets, first_more) = engine.rollup_bounded(1).unwrap();
+    assert_eq!(first_chunks, 1);
+    assert!(first_more);
+
+    // Opening another connection reapplies the same persisted ladder. That
+    // idempotent setup must not rewind an in-progress shared-engine cycle.
+    engine.set_rollups(vec![tier]);
+    let mut rolled = first_chunks;
+    let mut rollup_steps = 1;
+    loop {
+        let (chunks, _buckets, more) = engine.rollup_bounded(1).unwrap();
+        assert!(chunks <= 1, "one step exceeded its group budget");
+        rolled += chunks;
+        rollup_steps += 1;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(rolled, 3);
+    assert_eq!(rollup_steps, 3);
+    for &series_id in &series_ids {
+        assert!(
+            !engine
+                .query_rollup_by_id(series_id, 60, i64::MIN, i64::MAX)
+                .unwrap()
+                .is_empty(),
+            "each series is visited across the bounded rollup cycle"
+        );
+    }
 }
 
 /// THE LADDER'S PURPOSE: raw ages out, coarse survives. Raw retention

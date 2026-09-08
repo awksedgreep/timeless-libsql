@@ -22,6 +22,13 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
 use crate::scrape::{ScrapeController, ScrapeTargetSet, ScrapeTargetSetReport};
 
+/// Maximum raw series and rollup groups handled by one scheduled maintenance
+/// transaction. Production-scale compact/rollup sweeps are resumed across
+/// many commits so reads and ingestion never wait behind one full sweep.
+const COMPACT_STEP_WORK_ITEMS: usize = 64;
+/// Leave a deliberate reader-admission window between maintenance writes.
+const COMPACT_STEP_PAUSE: Duration = Duration::from_millis(10);
+
 /// The release migration and embedded Elixir engine have always used
 /// `metric_samples`. The POC server used `metrics` before the release boundary
 /// was established, so it remains a supported single-table database shape.
@@ -123,6 +130,7 @@ pub struct StorageStats {
     pub api_read_cancelled: u64,
     pub api_read_total_ns: u64,
     pub api_read_errors: u64,
+    pub api_read_retries: u64,
     pub api_read_frame_bytes: u64,
     pub api_read_response_bytes: u64,
     pub api_read_result_series: u64,
@@ -136,7 +144,9 @@ pub struct StorageStats {
     pub scheduled_flush_total_ns: u64,
     pub scheduled_flush_errors: u64,
     pub compact_count: u64,
+    pub compact_step_count: u64,
     pub compact_total_ns: u64,
+    pub compact_step_max_ns: u64,
     pub compact_errors: u64,
     pub prune_count: u64,
     pub prune_total_ns: u64,
@@ -225,6 +235,7 @@ struct ApiProfile {
     read_cancelled: u64,
     read_total_ns: u64,
     read_errors: u64,
+    read_retries: u64,
     read_frame_bytes: u64,
     read_response_bytes: u64,
     read_result_series: u64,
@@ -238,7 +249,9 @@ struct ApiProfile {
     scheduled_flush_total_ns: u64,
     scheduled_flush_errors: u64,
     compact_count: u64,
+    compact_step_count: u64,
     compact_total_ns: u64,
+    compact_step_max_ns: u64,
     compact_errors: u64,
     prune_count: u64,
     prune_total_ns: u64,
@@ -298,7 +311,7 @@ enum WriteCommand {
         explicit: bool,
         reply: oneshot::Sender<Result<FlushReport, String>>,
     },
-    Compact(oneshot::Sender<Result<(), String>>),
+    CompactStep(oneshot::Sender<(Result<bool, String>, u64)>),
     Prune {
         cutoff_seconds: i64,
         reply: oneshot::Sender<Result<(), String>>,
@@ -316,7 +329,7 @@ enum ReadCommand {
     Query {
         request: Box<ReadRequest>,
         cancelled: Arc<AtomicBool>,
-        reply: oneshot::Sender<Result<ReadOutput, String>>,
+        reply: oneshot::Sender<(Result<ReadOutput, String>, u64)>,
     },
     Shutdown,
 }
@@ -736,15 +749,37 @@ impl Storage {
     }
 
     pub async fn schedule_compact(&self) -> Result<(), String> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.0
-            .writer
-            .send(WriteCommand::Compact(reply_tx))
-            .await
-            .map_err(|_| "SQLite writer is not running".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "SQLite writer stopped before compact completed".to_string())?
+        let mut steps = 0_u64;
+        let mut total_ns = 0_u64;
+        let mut step_max_ns = 0_u64;
+        let result = loop {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if self
+                .0
+                .writer
+                .send(WriteCommand::CompactStep(reply_tx))
+                .await
+                .is_err()
+            {
+                break Err("SQLite writer is not running".to_string());
+            }
+            let (step, step_ns) = match reply_rx.await {
+                Ok(reply) => reply,
+                Err(_) => {
+                    break Err("SQLite writer stopped before compact completed".to_string());
+                }
+            };
+            steps = steps.saturating_add(1);
+            total_ns = total_ns.saturating_add(step_ns);
+            step_max_ns = step_max_ns.max(step_ns);
+            match step {
+                Err(error) => break Err(error),
+                Ok(false) => break Ok(()),
+                Ok(true) => tokio::time::sleep(COMPACT_STEP_PAUSE).await,
+            }
+        };
+        record_compaction(&self.0.profile, steps, total_ns, step_max_ns, &result);
+        result
     }
 
     /// Best-effort periodic TRUNCATE checkpoint so the WAL file cannot keep
@@ -888,14 +923,17 @@ impl Storage {
         {
             cancellation.disarm();
             let error = "SQLite reader is not running".to_string();
-            record_read_completion(&self.0.profile, started, &Err(error.clone()));
+            record_read_completion(&self.0.profile, started, 0, &Err(error.clone()));
             return Err(error);
         }
-        let result = reply_rx
-            .await
-            .unwrap_or_else(|_| Err("SQLite reader stopped before query completed".to_string()));
+        let (result, retries) = reply_rx.await.unwrap_or_else(|_| {
+            (
+                Err("SQLite reader stopped before query completed".to_string()),
+                0,
+            )
+        });
         cancellation.disarm();
-        record_read_completion(&self.0.profile, started, &result);
+        record_read_completion(&self.0.profile, started, retries, &result);
         result
     }
 
@@ -968,13 +1006,18 @@ impl Drop for ReadCancellation {
 fn record_read_completion(
     profile: &StdMutex<ApiProfile>,
     started: Instant,
+    retries: u64,
     result: &Result<ReadOutput, String>,
 ) {
     let mut profile = profile_lock(profile);
     profile.read_in_flight = profile.read_in_flight.saturating_sub(1);
     profile.read_total_ns = profile.read_total_ns.saturating_add(elapsed_ns(started));
+    profile.read_retries = profile.read_retries.saturating_add(retries);
     match result {
         Ok(output) => {
+            if profile.last_error.as_deref().is_some_and(is_retryable_read) {
+                profile.last_error = None;
+            }
             profile.read_frame_bytes = profile
                 .read_frame_bytes
                 .saturating_add(output.frame_bytes as u64);
@@ -1101,23 +1144,18 @@ fn writer_main(
                 };
                 let _ = reply.send(result);
             }
-            WriteCommand::Compact(reply) => {
+            WriteCommand::CompactStep(reply) => {
                 let started = Instant::now();
-                let result = run_command(&conn, table, "compact", "compact and roll up metrics")
-                    .and_then(|()| {
+                let result =
+                    run_compact_step(&conn, table, COMPACT_STEP_WORK_ITEMS).and_then(|more| {
                         if cleanup_rollups {
-                            run_command(
-                                &conn,
-                                table,
-                                "clear-rollups",
-                                "clear disabled metrics rollups",
-                            )
+                            run_clear_rollup_step(&conn, table, COMPACT_STEP_WORK_ITEMS)
+                                .map(|clear_more| more || clear_more)
                         } else {
-                            Ok(())
+                            Ok(more)
                         }
                     });
-                record_maintenance(&profile, Maintenance::Compact, started.elapsed(), &result);
-                let _ = reply.send(result);
+                let _ = reply.send((result, elapsed_ns(started)));
             }
             WriteCommand::Prune {
                 cutoff_seconds,
@@ -1226,6 +1264,7 @@ fn reader_main(
                 reply,
             } => {
                 let progress_cancelled = Arc::clone(&cancelled);
+                let mut retries = 0_u64;
                 let result = conn
                     .progress_handler(
                         1_000,
@@ -1242,7 +1281,7 @@ fn reader_main(
                                     &cancelled,
                                 )
                             },
-                            || {},
+                            || retries = retries.saturating_add(1),
                         )
                     });
                 let cleared = conn.progress_handler(0, None::<fn() -> bool>);
@@ -1253,7 +1292,7 @@ fn reader_main(
                         Err(format!("clear query cancellation handler: {error}"))
                     }
                 };
-                let _ = reply.send(result);
+                let _ = reply.send((result, retries));
             }
             ReadCommand::Shutdown => return Ok(()),
         }
@@ -1526,6 +1565,44 @@ fn run_command(
     .map_err(|error| format!("{context}: {error}"))
 }
 
+fn run_compact_step(
+    conn: &Connection,
+    table: MetricsTable,
+    work_items: usize,
+) -> Result<bool, String> {
+    let command = format!("compact-step:{work_items}");
+    run_continuation_command(conn, table, &command, "run bounded metrics compaction")
+}
+
+fn run_clear_rollup_step(
+    conn: &Connection,
+    table: MetricsTable,
+    work_items: usize,
+) -> Result<bool, String> {
+    let command = format!("clear-rollups-step:{work_items}");
+    run_continuation_command(conn, table, &command, "clear disabled metrics rollups")
+}
+
+fn run_continuation_command(
+    conn: &Connection,
+    table: MetricsTable,
+    command: &str,
+    context: &str,
+) -> Result<bool, String> {
+    conn.execute(
+        &format!("INSERT INTO {0}({0}) VALUES (?1)", table.name()),
+        [command],
+    )
+    .map_err(|error| format!("{context}: {error}"))?;
+    match conn.last_insert_rowid() {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(format!(
+            "{context} returned invalid continuation marker {value}"
+        )),
+    }
+}
+
 fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats, String> {
     let values = stat_values(conn, table)?;
     let integer = |key: &str| match values.get(key) {
@@ -1706,6 +1783,7 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.api_read_cancelled = profile.read_cancelled;
     stats.api_read_total_ns = profile.read_total_ns;
     stats.api_read_errors = profile.read_errors;
+    stats.api_read_retries = profile.read_retries;
     stats.api_read_frame_bytes = profile.read_frame_bytes;
     stats.api_read_response_bytes = profile.read_response_bytes;
     stats.api_read_result_series = profile.read_result_series;
@@ -1719,7 +1797,9 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.scheduled_flush_total_ns = profile.scheduled_flush_total_ns;
     stats.scheduled_flush_errors = profile.scheduled_flush_errors;
     stats.compact_count = profile.compact_count;
+    stats.compact_step_count = profile.compact_step_count;
     stats.compact_total_ns = profile.compact_total_ns;
+    stats.compact_step_max_ns = profile.compact_step_max_ns;
     stats.compact_errors = profile.compact_errors;
     stats.prune_count = profile.prune_count;
     stats.prune_total_ns = profile.prune_total_ns;
@@ -1851,8 +1931,25 @@ fn record_queue_completion(
 }
 
 enum Maintenance {
-    Compact,
     Prune,
+}
+
+fn record_compaction(
+    profile: &StdMutex<ApiProfile>,
+    steps: u64,
+    total_ns: u64,
+    step_max_ns: u64,
+    result: &Result<(), String>,
+) {
+    let mut profile = profile_lock(profile);
+    profile.compact_count = profile.compact_count.saturating_add(1);
+    profile.compact_step_count = profile.compact_step_count.saturating_add(steps);
+    profile.compact_total_ns = profile.compact_total_ns.saturating_add(total_ns);
+    profile.compact_step_max_ns = profile.compact_step_max_ns.max(step_max_ns);
+    if let Err(error) = result {
+        profile.compact_errors = profile.compact_errors.saturating_add(1);
+        profile.last_error = Some(error.clone());
+    }
 }
 
 fn record_maintenance(
@@ -1864,13 +1961,6 @@ fn record_maintenance(
     let mut profile = profile_lock(profile);
     let ns = duration_ns(duration);
     match operation {
-        Maintenance::Compact => {
-            profile.compact_count = profile.compact_count.saturating_add(1);
-            profile.compact_total_ns = profile.compact_total_ns.saturating_add(ns);
-            if result.is_err() {
-                profile.compact_errors = profile.compact_errors.saturating_add(1);
-            }
-        }
         Maintenance::Prune => {
             profile.prune_count = profile.prune_count.saturating_add(1);
             profile.prune_total_ns = profile.prune_total_ns.saturating_add(ns);
@@ -1921,7 +2011,7 @@ fn retry_read<T>(
     }
 }
 
-fn is_retryable_read(error: &str) -> bool {
+pub(crate) fn is_retryable_read(error: &str) -> bool {
     error.contains("active write transaction")
         || error.contains("pending writer transaction")
         || error.contains("database is locked")

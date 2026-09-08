@@ -305,9 +305,9 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_COMMAND_QUEUE_BATCHES` | metrics | `256` | Writer-command queue capacity in admitted request batches. |
 | `TIMELESS_METRICS_QUEUE_BYTES` | metrics | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
 | `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |
-| `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` | metrics | `300` | Public compact/rollup cadence. |
+| `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` | metrics | `300` | Public compact/rollup sweep cadence. Each sweep uses resumable transactions capped at 64 raw series and 64 rollup groups, with a reader-admission pause between commits. |
 | `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` | metrics | `3600` | Seven-day raw-retention prune check cadence. |
-| `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows in bounded 65,536-row batches. The HTTP API does not require persisted rollups. |
+| `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows through the same 64-row transaction budget. The HTTP API does not require persisted rollups. |
 | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Evaluation-grid points per series; valid range 1–11,000. |
 | `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` | metrics | `100000` | Final serialized result points. |
 | `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Cumulative storage and intermediate evaluation points. |

@@ -14,6 +14,22 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Scheduled metrics compaction no longer holds the sole writer gate for an
+  entire production-scale sweep (issue #50).** Live diagnosis found 64
+  compact/rollup passes averaging 7.2 seconds while discovery retried writer
+  conflicts for only five seconds. The metrics server now drains raw
+  compaction and rollup work through resumable SQLite transactions capped at
+  64 raw series and 64 rollup groups
+  transactions, with a reader-admission pause between commits. Rollup
+  watermark lookup is constant-time instead of scanning every historical
+  chunk in a group. JSON stats expose maintenance step count, maximum step
+  time, and read retries separately from stats retries. A conflict that still
+  exhausts the bounded retry window is returned as retryable HTTP 503 with
+  `Retry-After: 1`, rather than a raw internal 500, and a successful read
+  clears a latched transient busy error.
+
 ## [0.8.2] — 2026-09-07
 
 ### Fixed

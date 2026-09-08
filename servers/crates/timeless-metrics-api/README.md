@@ -26,6 +26,11 @@ The exact public storage contract is in the
   encoded through the extension's public ingestion contracts.
 - The process-owned Prometheus scrape loop parses targets in Rust and feeds
   the same bounded writer path. Elixir is not in the scrape or ingest path.
+- Scheduled compact/rollup sweeps resume across SQLite transactions capped at
+  64 raw series and 64 rollup groups, and pause between commits for reader
+  admission. JSON stats
+  expose `compact_step_count`, `compact_step_max_ns`, and `api_read_retries`
+  so maintenance interference is directly observable.
 - A successful ingest response follows the route-specific admission/completion
   contract. `POST /api/v1/flush` is the ordered durability barrier.
 - SIGINT/SIGTERM stops admission, drains accepted work, flushes, checkpoints

@@ -15,7 +15,9 @@
 //! SQLite TYPE and then (for blobs) by the first byte:
 //!
 //!   TEXT  → maintenance/configuration command: `flush` | `compact` |
-//!           `prune:<unix_ts>` | `rollups:none|<ladder>` | `clear-rollups`
+//!           `compact-step:<groups>` | `prune:<unix_ts>` |
+//!           `rollups:none|<ladder>` | `clear-rollups` |
+//!           `clear-rollups-step:<chunks>`
 //!           (the FTS5 idiom: an insert that sets only the hidden column
 //!           runs maintenance instead of storing a row).
 //!   BLOB, first byte 0x01
@@ -457,6 +459,32 @@ impl MetricsTab {
             // F3: compaction is the natural rollup moment (both are
             // "reorganize storage" maintenance).
             self.shared.engine.rollup().map_err(module_err)?;
+        } else if let Some(raw_budget) = cmd.strip_prefix("compact-step:") {
+            let budget: usize = raw_budget.trim().parse().map_err(|_| {
+                module_err(format!(
+                    "compact-step: expected 'compact-step:<positive groups>', got {cmd:?}"
+                ))
+            })?;
+            if budget == 0 {
+                return Err(module_err(
+                    "compact-step: group budget must be positive".into(),
+                ));
+            }
+            // One public INSERT is one SQLite transaction and therefore one
+            // writer-gate hold. Bound raw-series and rollup-group work to the
+            // same small budget; the server repeats this command with a pause
+            // between transactions until both backlogs complete a cycle.
+            let (_, _, raw_more) = self
+                .shared
+                .engine
+                .compact_partitions_bounded(i64::MAX, budget)
+                .map_err(module_err)?;
+            let (_, _, rollup_more) = self
+                .shared
+                .engine
+                .rollup_bounded(budget)
+                .map_err(module_err)?;
+            return Ok(i64::from(raw_more || rollup_more));
         } else if cmd == "rollup" {
             // F3: produce settled buckets for every declared tier. A
             // no-op (0 chunks) without a rollups= ladder.
@@ -486,6 +514,31 @@ impl MetricsTab {
                 .map_err(module_err)?;
                 self.shared.engine.set_rollups_transactional(tiers);
             }
+        } else if let Some(raw_budget) = cmd.strip_prefix("clear-rollups-step:") {
+            if !self.shared.engine.rollup_tiers().is_empty() {
+                return Err(module_err(
+                    "clear-rollups-step requires rollups:none first; refusing to delete an active tier"
+                        .into(),
+                ));
+            }
+            let budget: usize = raw_budget.trim().parse().map_err(|_| {
+                module_err(format!(
+                    "clear-rollups-step: expected 'clear-rollups-step:<positive chunks>', got {cmd:?}"
+                ))
+            })?;
+            if budget == 0 {
+                return Err(module_err(
+                    "clear-rollups-step: chunk budget must be positive".into(),
+                ));
+            }
+            let (_deleted, more, errors) = self.shared.engine.clear_rollups_bounded(budget);
+            if !errors.is_empty() {
+                return Err(module_err(format!(
+                    "clear-rollups-step errors: {}",
+                    errors.join("; ")
+                )));
+            }
+            return Ok(i64::from(more));
         } else if cmd == "clear-rollups" {
             if !self.shared.engine.rollup_tiers().is_empty() {
                 return Err(module_err(
@@ -515,8 +568,9 @@ impl MetricsTab {
             }
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'compact', 'rollup', \
-                 'rollups:none|<ladder>', 'clear-rollups', 'prune:<unix_ts>'"
+                "unknown command {cmd:?}; supported: 'flush', 'compact', \
+                 'compact-step:<groups>', 'rollup', 'rollups:none|<ladder>', \
+                 'clear-rollups', 'clear-rollups-step:<chunks>', 'prune:<unix_ts>'"
             )));
         }
         Ok(0)

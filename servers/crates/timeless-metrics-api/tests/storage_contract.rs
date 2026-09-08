@@ -10,6 +10,116 @@ use timeless_metrics_api::{
 };
 use tower::ServiceExt;
 
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_available() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start_with_queue_bytes_and_rollups(
+        directory.path().join("bounded-compact.db"),
+        extension,
+        2,
+        128,
+        DEFAULT_RAW_RETENTION,
+        Storage::DEFAULT_QUEUE_BYTES,
+        Some("60s@0"),
+    )
+    .unwrap();
+
+    // Two durable small chunks for each of 70 series exceed the production
+    // 64-series step budget and force at least two SQLite transactions.
+    for epoch in 0..2 {
+        for series in 0..70 {
+            let batch = named_series_batch(
+                &format!("bounded_compact_{series}"),
+                &[(1_700_000_000 + epoch * 120, series as f64)],
+            );
+            storage.submit_named_batch(batch, 1).await.unwrap();
+        }
+        storage.flush().await.unwrap();
+    }
+
+    let app = router(storage.clone());
+    let compact_storage = storage.clone();
+    let compact = tokio::spawn(async move { compact_storage.schedule_compact().await });
+
+    // A continuation always pauses for reader admission before the next
+    // transaction. Exercise the real discovery route while that sweep is
+    // still in progress rather than only checking it afterward.
+    let discovery = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        get_json(&app, "/api/v1/label/__name__/values"),
+    )
+    .await
+    .expect("discovery remains responsive during bounded compaction");
+    assert_eq!(discovery.0, StatusCode::OK, "{}", discovery.1);
+    compact.await.unwrap().unwrap();
+
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.compact_count, 1);
+    assert!(stats.compact_step_count >= 2, "{stats:?}");
+    assert!(stats.compact_step_max_ns > 0);
+    assert!(stats.compact_step_max_ns <= stats.compact_total_ns);
+    assert_eq!(stats.api_read_errors, 0);
+    assert_eq!(stats.admitted_points, stats.completed_points);
+    assert_eq!(stats.queued_points, 0);
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn exhausted_writer_conflict_is_retryable_observable_and_recovers() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("writer-conflict.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+
+    // Hold a real extension write transaction longer than the five-second
+    // reader retry budget. The fail-fast read permit must not deadlock; the
+    // exhausted request becomes an explicit retryable API response.
+    let writer = open_with_extension(&database, &extension);
+    writer
+        .execute_batch(
+            "BEGIN;
+             INSERT INTO metric_samples(name, ts, value, labels)
+             VALUES ('held_writer', 1700000000, 1.0, '{}');",
+        )
+        .unwrap();
+    let blocked = get_json(&app, "/api/v1/label/__name__/values").await;
+    assert_eq!(blocked.0, StatusCode::SERVICE_UNAVAILABLE, "{}", blocked.1);
+    assert_eq!(blocked.1["error"], "temporarily_unavailable");
+    assert_eq!(blocked.1["reason"], "storage_busy");
+    writer.execute_batch("ROLLBACK;").unwrap();
+
+    let recovered = get_json(&app, "/api/v1/label/__name__/values").await;
+    assert_eq!(recovered.0, StatusCode::OK, "{}", recovered.1);
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.api_read_errors, 1);
+    assert!(stats.api_read_retries > 0);
+    assert_eq!(stats.api_stats_retries, 0);
+    assert_eq!(
+        stats.last_error, None,
+        "successful recovery clears busy state"
+    );
+    assert_eq!(stats.admitted_points, stats.completed_points);
+    assert_eq!(stats.failed_points, 0);
+    assert_eq!(stats.queued_points, 0);
+
+    drop(writer);
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
 /// A backup occupies the single writer for its whole duration — flush,
 /// the entire optimize backlog, a WAL checkpoint, then the copy — so
 /// every queued ingest waits behind it. Overlapping requests must be

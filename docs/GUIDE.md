@@ -584,6 +584,7 @@ command column. All are safe to run anytime, transactional, and idempotent.
 ```sql
 INSERT INTO metrics(metrics) VALUES ('flush');      -- persist the buffer (all tables)
 INSERT INTO metrics(metrics) VALUES ('compact');    -- metrics: merge small chunks
+INSERT INTO metrics(metrics) VALUES ('compact-step:64'); -- bounded metrics maintenance
 INSERT INTO logs(logs)       VALUES ('optimize');   -- logs/traces: re-encode into
 INSERT INTO traces(traces)   VALUES ('optimize');   --   larger, better-compressed blocks
 INSERT INTO logs(logs)       VALUES ('optimize:65536'); -- bounded logs source entries
@@ -595,6 +596,12 @@ INSERT INTO traces(traces)   VALUES ('optimize:65536'); -- bounded trace source 
   blocks, which cost a little disk and read speed. Run this occasionally
   (e.g. daily, or after a big backfill) to merge them into optimally
   compressed blocks. Never required for correctness.
+- **`compact-step:<groups>`** — bounds one metrics transaction to the given
+  number of raw series and rollup groups. `last_insert_rowid()` is `1` while
+  the current sweep has more work and `0` when complete. The metrics server
+  caps each step at 64 raw series and 64 rollup groups, with a short
+  reader-admission pause between commits; direct SQLite hosts should likewise
+  commit between repetitions.
 - **`optimize:<entries>`** — the same optimizer with a per-call source-work
   budget for logs or traces. One complete planner group may exceed the budget
   so a call always makes progress. Inspect `optimize_pending_*`,
@@ -808,9 +815,11 @@ INSERT INTO traces(trace_id, span_id, name, service, start_ts) VALUES (...);   -
 'flush'        -- persist buffer; do this at your loss-tolerance cadence
 'optimize'     -- logs/traces: merge + recompress blocks (occasionally)
 'compact'      -- metrics/dbhealth: merge small chunks (occasionally)
+'compact-step:<groups>' -- metrics: bounded resumable compact/rollup work
 'prune:<ts>'   -- retention; ts in the table's own unit (s / ms / ns)
 'rollups:none' -- metrics: disable future persisted rollups
 'clear-rollups'-- metrics: delete at most 65,536 disabled-tier chunks
+'clear-rollups-step:<chunks>' -- metrics: smaller resumable cleanup transaction
 'sample'       -- dbhealth only: snapshot SQLite health counters now
 
 -- QUERY (accelerated predicates)

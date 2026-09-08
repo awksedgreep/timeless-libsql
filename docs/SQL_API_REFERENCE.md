@@ -201,12 +201,19 @@ previously resolved `series_id`. Use the hidden command column for:
   table-scoped series id through `last_insert_rowid()`.
 - `flush` drains every series buffer into compressed chunks.
 - `compact` merges eligible metric chunks and runs declared rollups.
+- `compact-step:<groups>` performs the same maintenance for at most that many
+  raw series and that many `(rollup tier, series)` groups. It returns `1`
+  through `last_insert_rowid()` when another step remains in the current
+  cycle, otherwise `0`. Commit between repeated steps so readers and ingestion
+  can enter between maintenance transactions.
 - `rollup` builds settled buckets for the declared ladder.
 - `rollups:none` disables future persisted rollup production;
   `rollups:<ladder>` transactionally replaces the declared ladder.
 - `clear-rollups` removes at most 65,536 persisted rollup chunks and refuses
   to run until the ladder is disabled. Repeat until `timeless_stats` reports
   `rollup_chunks = 0`.
+- `clear-rollups-step:<chunks>` uses an explicit smaller transaction budget
+  and the same `last_insert_rowid()` continuation marker.
 - `prune:<unix-seconds>` removes whole raw chunks older than the explicit
   cutoff. Declared rollup retention is applied by maintenance; use the
   bounded `clear-rollups` command for an explicit full-tier removal.

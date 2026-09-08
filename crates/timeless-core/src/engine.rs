@@ -173,6 +173,14 @@ impl RollupIndex {
         self.groups.get(group).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Rollup chunks are appended in coverage order: a new chunk starts one
+    /// tick after the prior watermark. Groups are sorted by `(min_ts, rowid)`,
+    /// so the final entry carries the maximum durable coverage without an
+    /// O(chunks-per-group) scan on every maintenance pass.
+    fn watermark(&self, group: &RollupGroupKey) -> Option<i64> {
+        self.entries(group).last().map(|entry| entry.max_ts)
+    }
+
     fn contains_rowid(&self, group: &RollupGroupKey, rowid: i64) -> bool {
         self.entries(group).iter().any(|entry| entry.rowid == rowid)
     }
@@ -831,6 +839,11 @@ pub struct Engine {
     rollup_index: RwLock<RollupIndex>,
     /// The declared ladder (ascending resolutions). Empty = no rollups.
     rollup_tiers: Mutex<Vec<RollupTier>>,
+    /// Next `(tier, series)` ordinal for bounded rollup maintenance. The
+    /// cursor is process-local scheduling state, not durable data: completing
+    /// one full cycle resets it to zero, and a restart simply begins a fresh
+    /// idempotent cycle.
+    rollup_maintenance_cursor: AtomicUsize,
     /// F2 retention window in NATIVE ts units; 0 = disabled. Set from
     /// the persisted table argument after construction (idempotent —
     /// every connection loads the same _meta value).
@@ -1516,6 +1529,7 @@ impl Engine {
             append_wm: Mutex::new(primed_wm),
             rollup_index: RwLock::new(rollup_index),
             rollup_tiers: Mutex::new(Vec::new()),
+            rollup_maintenance_cursor: AtomicUsize::new(0),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
         };
@@ -2395,12 +2409,33 @@ impl Engine {
     /// when no surviving index entry references them (batch files are
     /// shared across series).
     pub fn compact_partitions(&self, cutoff_ts: i64) -> EngineResult<(usize, usize)> {
-        let out = self.compact_partitions_inner(cutoff_ts)?;
+        let (series, chunks, more) = self.compact_partitions_inner(cutoff_ts, usize::MAX)?;
+        debug_assert!(!more);
         self.apply_retention()?;
-        Ok(out)
+        Ok((series, chunks))
     }
 
-    fn compact_partitions_inner(&self, cutoff_ts: i64) -> EngineResult<(usize, usize)> {
+    /// Compact at most `max_series` eligible series in one transaction.
+    /// Unlike [`Self::compact_partitions`], this deliberately leaves retention
+    /// to its separately scheduled bounded path. Repeated calls drain the raw
+    /// backlog while giving the SQLite host a commit boundary between steps.
+    /// Returns `(series_compacted, chunks_replaced, more_may_remain)`.
+    pub fn compact_partitions_bounded(
+        &self,
+        cutoff_ts: i64,
+        max_series: usize,
+    ) -> EngineResult<(usize, usize, bool)> {
+        if max_series == 0 {
+            return Err("bounded compaction requires a positive series budget".into());
+        }
+        self.compact_partitions_inner(cutoff_ts, max_series)
+    }
+
+    fn compact_partitions_inner(
+        &self,
+        cutoff_ts: i64,
+        max_series: usize,
+    ) -> EngineResult<(usize, usize, bool)> {
         const SMALL_CHUNK_POINTS: u32 = 16 * 1024;
         const MAX_OUTPUT_POINTS: usize = 32 * 1024;
         const COMPACTION_LEVEL: usize = 12;
@@ -2412,7 +2447,7 @@ impl Engine {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Ok((0, 0));
+            return Ok((0, 0, false));
         }
         let _guard = ColdFlushGuard {
             flag: &self.compaction_running,
@@ -2421,7 +2456,7 @@ impl Engine {
 
         // Group eligible chunks by series: all raw chunks, plus pco
         // chunks small enough that merging improves the ratio.
-        let mut candidates: HashMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> = HashMap::new();
+        let mut candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> = BTreeMap::new();
         {
             let index = self.index_read();
             for (chunk_key, meta) in index.iter() {
@@ -2439,8 +2474,11 @@ impl Engine {
             chunks.len() >= 2 || chunks.iter().any(|(_, m)| m.encoding == ENC_RAW)
         });
 
-        if candidates.is_empty() {
-            return Ok((0, 0));
+        let more = candidates.len() > max_series;
+        let candidates = candidates.into_iter().take(max_series);
+
+        if candidates.len() == 0 {
+            return Ok((0, 0, false));
         }
 
         // Phase 1: re-encode every replacement chunk in memory — nothing
@@ -2469,7 +2507,7 @@ impl Engine {
         }
 
         if plans.is_empty() {
-            return Ok((0, 0));
+            return Ok((0, 0, more));
         }
 
         // Old storage units are deletable only if no surviving
@@ -2536,7 +2574,7 @@ impl Engine {
 
         let series_compacted = plans.len();
         let chunks_replaced = plans.iter().map(|(_, chunks, _)| chunks.len()).sum();
-        Ok((series_compacted, chunks_replaced))
+        Ok((series_compacted, chunks_replaced, more))
     }
 
     fn drain_partition_if<F>(
@@ -4162,7 +4200,11 @@ impl Engine {
 
     /// Configure the ladder (idempotent per connect, like set_retention).
     pub fn set_rollups(&self, tiers: Vec<RollupTier>) {
-        *self.rollup_tiers.lock().unwrap_or_else(|e| e.into_inner()) = tiers;
+        let mut current = self.rollup_tiers.lock().unwrap_or_else(|e| e.into_inner());
+        if *current != tiers {
+            *current = tiers;
+            self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+        }
     }
 
     /// Change the persisted ladder from a vtab command while recording the
@@ -4182,6 +4224,7 @@ impl Engine {
                 .get_or_insert_with(|| current.clone());
         }
         *current = tiers;
+        self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
     }
 
     pub fn rollup_tiers(&self) -> Vec<RollupTier> {
@@ -4222,12 +4265,32 @@ impl Engine {
     /// with NO engine locks held (invariant 1); index recording is
     /// journaled for rollback.
     pub fn rollup(&self) -> EngineResult<(usize, usize)> {
+        let (chunks, buckets, more) = self.rollup_inner(None)?;
+        debug_assert!(!more);
+        Ok((chunks, buckets))
+    }
+
+    /// Visit at most `max_groups` `(tier, series)` groups in one transaction.
+    /// Repeated calls resume from a process-local cursor until a complete
+    /// idempotent cycle has been visited. This bounds scheduled writer-gate
+    /// ownership even when a database has millions of existing rollup chunks.
+    /// Returns `(chunks_written, buckets_written, more_groups_in_cycle)`.
+    pub fn rollup_bounded(&self, max_groups: usize) -> EngineResult<(usize, usize, bool)> {
+        if max_groups == 0 {
+            return Err("bounded rollup requires a positive group budget".into());
+        }
+        self.rollup_inner(Some(max_groups))
+    }
+
+    fn rollup_inner(&self, max_groups: Option<usize>) -> EngineResult<(usize, usize, bool)> {
         let tiers = self.rollup_tiers();
         if tiers.is_empty() {
-            return Ok((0, 0));
+            self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+            return Ok((0, 0, false));
         }
         let Some(high_water) = self.raw_high_water() else {
-            return Ok((0, 0));
+            self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+            return Ok((0, 0, false));
         };
 
         let series_ids: Vec<i64> = {
@@ -4239,8 +4302,30 @@ impl Engine {
             ids
         };
 
+        if series_ids.is_empty() {
+            self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+            return Ok((0, 0, false));
+        }
+        let group_count = tiers
+            .len()
+            .checked_mul(series_ids.len())
+            .ok_or_else(|| "rollup maintenance group count exceeds usize::MAX".to_string())?;
+        let (group_start, group_end, more) = match max_groups {
+            None => (0, group_count, false),
+            Some(limit) => {
+                let start = self
+                    .rollup_maintenance_cursor
+                    .load(Ordering::Relaxed)
+                    .min(group_count);
+                let end = start.saturating_add(limit).min(group_count);
+                (start, end, end < group_count)
+            }
+        };
+
         let mut batch: Vec<EncodedRollupChunk> = Vec::new();
-        for tier in &tiers {
+        for group_ordinal in group_start..group_end {
+            let tier = &tiers[group_ordinal / series_ids.len()];
+            let sid = series_ids[group_ordinal % series_ids.len()];
             let r = tier.resolution;
             // Eligible buckets: B + R - 1 <= high_water - R (one full
             // bucket of settle). produce_to is that last coverage end.
@@ -4252,47 +4337,39 @@ impl Engine {
                 None => continue,
             };
             let produce_to = last_bucket + r - 1;
-            for &sid in &series_ids {
-                let group = RollupGroupKey {
-                    series_id: sid,
-                    resolution: r,
-                };
-                let watermark = {
-                    let rollups = self.rollup_read();
-                    rollups
-                        .entries(&group)
-                        .iter()
-                        .map(|entry| entry.max_ts)
-                        .max()
-                };
-                let start = match watermark {
-                    Some(w) if w >= produce_to => continue,
-                    Some(w) => w.saturating_add(1),
-                    None => i64::MIN,
-                };
-                let samples = self.query_range_by_id(sid, start, produce_to)?;
-                if samples.is_empty() {
-                    continue;
-                }
-                let buckets = rollup_buckets(&samples, r)?;
-                let payload = encode_rollup_payload(&buckets)?;
-                // encode_rollup_payload already rejected counts over
-                // u32::MAX, so this cannot wrap.
-                let bucket_count = u32::try_from(buckets.len()).map_err(|_| {
-                    format!("rollup chunk: {} buckets exceeds u32::MAX", buckets.len())
-                })?;
-                batch.push(EncodedRollupChunk {
-                    series_id: sid,
-                    resolution: r,
-                    min_ts: buckets[0].bucket_ts,
-                    max_ts: buckets[buckets.len() - 1].bucket_ts + r - 1,
-                    bucket_count,
-                    payload,
-                });
+            let group = RollupGroupKey {
+                series_id: sid,
+                resolution: r,
+            };
+            let watermark = self.rollup_read().watermark(&group);
+            let start = match watermark {
+                Some(w) if w >= produce_to => continue,
+                Some(w) => w.saturating_add(1),
+                None => i64::MIN,
+            };
+            let samples = self.query_range_by_id(sid, start, produce_to)?;
+            if samples.is_empty() {
+                continue;
             }
+            let buckets = rollup_buckets(&samples, r)?;
+            let payload = encode_rollup_payload(&buckets)?;
+            // encode_rollup_payload already rejected counts over
+            // u32::MAX, so this cannot wrap.
+            let bucket_count = u32::try_from(buckets.len())
+                .map_err(|_| format!("rollup chunk: {} buckets exceeds u32::MAX", buckets.len()))?;
+            batch.push(EncodedRollupChunk {
+                series_id: sid,
+                resolution: r,
+                min_ts: buckets[0].bucket_ts,
+                max_ts: buckets[buckets.len() - 1].bucket_ts + r - 1,
+                bucket_count,
+                payload,
+            });
         }
         if batch.is_empty() {
-            return Ok((0, 0));
+            self.rollup_maintenance_cursor
+                .store(if more { group_end } else { 0 }, Ordering::Relaxed);
+            return Ok((0, 0, more));
         }
 
         // NO engine locks here: multi-row store DML can re-enter the
@@ -4340,7 +4417,9 @@ impl Engine {
                 journal.rollup_added.insert(key);
             }
         }
-        Ok((batch.len(), buckets_total))
+        self.rollup_maintenance_cursor
+            .store(if more { group_end } else { 0 }, Ordering::Relaxed);
+        Ok((batch.len(), buckets_total, more))
     }
 
     /// Read rolled buckets for one series/tier overlapping [start, stop].
@@ -4506,9 +4585,19 @@ impl Engine {
     /// Callers must disable the ladder first or maintenance could recreate the
     /// rows. Returns (deleted, more_may_remain, errors).
     pub fn clear_rollups_batch(&self) -> (usize, bool, Vec<String>) {
+        self.clear_rollups_bounded(ROLLUP_CLEAR_DELETE_BATCH)
+    }
+
+    /// Delete at most `max_chunks` persisted rollup rows. This smaller public
+    /// primitive lets a host align cleanup with its own maintenance transaction
+    /// budget instead of using the larger operator-oriented default batch.
+    pub fn clear_rollups_bounded(&self, max_chunks: usize) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
         let mut journal = self.txn_guard();
         let mut rollups = self.rollup_write();
+        if max_chunks == 0 {
+            return (0, !rollups.groups.is_empty(), Vec::new());
+        }
         let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
             .groups
             .iter()
@@ -4517,10 +4606,10 @@ impl Engine {
                     .iter()
                     .map(|entry| ((*group, entry.min_ts, entry.rowid), *entry))
             })
-            .take(ROLLUP_CLEAR_DELETE_BATCH + 1)
+            .take(max_chunks.saturating_add(1))
             .collect();
-        let more = victims.len() > ROLLUP_CLEAR_DELETE_BATCH;
-        victims.truncate(ROLLUP_CLEAR_DELETE_BATCH);
+        let more = victims.len() > max_chunks;
+        victims.truncate(max_chunks);
         if victims.is_empty() {
             return (0, false, Vec::new());
         }

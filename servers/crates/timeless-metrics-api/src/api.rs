@@ -286,7 +286,7 @@ async fn read_route(
             Bytes::from(output.body),
         )
             .into_response(),
-        Ok(Err(error)) => server_error(error),
+        Ok(Err(error)) => read_error(error),
     }
 }
 
@@ -317,6 +317,9 @@ async fn prometheus_read_route(
             Bytes::from(output.body),
         )
             .into_response(),
+        Ok(Err(error)) if crate::storage::is_retryable_read(&error) => {
+            retryable_prometheus_read_error(error)
+        }
         Ok(Err(error)) => prometheus_error(StatusCode::UNPROCESSABLE_ENTITY, "execution", error),
     }
 }
@@ -616,6 +619,37 @@ fn server_error(error: String) -> Response {
         .into_response()
 }
 
+fn read_error(error: String) -> Response {
+    if !crate::storage::is_retryable_read(&error) {
+        return server_error(error);
+    }
+    eprintln!("timeless-metrics-api: transient read conflict: {error}");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({
+            "status": "error",
+            "error": "temporarily_unavailable",
+            "reason": "storage_busy"
+        })),
+    )
+        .into_response()
+}
+
+fn retryable_prometheus_read_error(error: String) -> Response {
+    eprintln!("timeless-metrics-api: transient read conflict: {error}");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({
+            "status": "error",
+            "errorType": "unavailable",
+            "error": "storage is temporarily busy; retry request"
+        })),
+    )
+        .into_response()
+}
+
 fn client_error(error: String) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -638,4 +672,34 @@ fn prometheus_error(status: StatusCode, error_type: &str, error: String) -> Resp
         Json(json!({"status": "error", "errorType": error_type, "error": error})),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writer_gate_exhaustion_is_a_retryable_service_response() {
+        let response = read_error(
+            "collect metric discovery: table metric_samples read is blocked by another \
+             connection's active write transaction — retry, as for SQLITE_BUSY"
+                .into(),
+        );
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+
+        let prometheus = retryable_prometheus_read_error(
+            "database is busy while collecting metric discovery".into(),
+        );
+        assert_eq!(prometheus.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(prometheus.headers().get(header::RETRY_AFTER).unwrap(), "1");
+    }
+
+    #[test]
+    fn non_retryable_storage_failures_remain_internal_errors() {
+        assert_eq!(
+            read_error("corrupt metrics frame".into()).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }
