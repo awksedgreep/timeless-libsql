@@ -13,8 +13,8 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 |---:|---|---|---|---|
 | 0 | [#50](https://github.com/awksedgreep/timeless-libsql/issues/50) metrics discovery writer-gate exhaustion | P0 | externally pending | Deploy a build containing `ef81a38` to the affected environment; observe at least one active scheduled sweep; record `compact_step_max_ns`, `api_read_errors`, discovery behavior, ingestion accounting, and container health; then close the issue. |
 | 1 | [#51](https://github.com/awksedgreep/timeless-libsql/issues/51) LogsQL opaque internal errors | P0 | externally pending | The repository fix and local real-extension verification are complete. Re-run the reported requests against the affected deployment, retain the server-side detail for any remaining `query_execution` fault, and close when production behavior is confirmed. |
-| 2 | [#49](https://github.com/awksedgreep/timeless-libsql/issues/49) LogsQL cancellation-counter flake | P1 | in progress | Make the `replace` and `replace_regexp` timeout/cancellation assertions deterministic under load, run the focused test repeatedly, and pass the real-extension suite. |
-| 3 | [#48](https://github.com/awksedgreep/timeless-libsql/issues/48) WriterGate pointer ABA | P1 | pending | Key connection ownership by pointer plus monotonic generation and prove reused synthetic pointer identities cannot take the re-entrant path. |
+| 2 | [#49](https://github.com/awksedgreep/timeless-libsql/issues/49) LogsQL cancellation-counter flake | P1 | done | The `replace`/`replace_regexp` cancellation regression now reaches reader-owned work before asserting the counter; 20 consecutive focused runs and all 93 logs real-extension tests pass. |
+| 3 | [#48](https://github.com/awksedgreep/timeless-libsql/issues/48) WriterGate pointer ABA | P1 | in progress | Key connection ownership by pointer plus monotonic generation and prove reused synthetic pointer identities cannot take the re-entrant path. |
 | 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | pending | Reconcile the umbrella after #51; split any remaining cross-server envelope or `field_values` contract into focused leaf issues and close the completed audit. |
 | 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | pending | First establish the repeated-arrival growth curve and phase byte counters, then implement and verify byte-bounded, size-tiered raw conversion and compressed merges. |
 | 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | pending | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested. |
@@ -59,6 +59,16 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 - Made the POST form reject unknown time aliases explicitly. Added safe
   `storage_busy`/503 classification and a non-sensitive `query_execution`
   reason for unexpected executor failures.
+
+## Issue #49 completion
+
+- Gave the `replace` and `replace_regexp` cancellation cases 5 ms of
+  pre-reader headroom, matching the existing `extract_regexp` disposition.
+- Kept the 16,384-row expanding transforms, timeout response, storage
+  cancellation counter, in-flight drain, and reader-reuse assertions intact.
+- Passed the complete focused scenario 20 consecutive times, then passed all
+  93 logs real-extension tests, logs clippy with warnings denied, formatting,
+  and diff checks.
 
 ## Tracker reconciliation
 

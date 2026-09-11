@@ -28,6 +28,14 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **The LogsQL `replace`/`replace_regexp` cancellation contract no longer has
+  a 1 ms pre-reader race in its production-gate regression (issue #49).** The
+  HTTP deadline includes request parsing and regex compilation, but the storage
+  cancellation counter begins only after reader admission. The focused test
+  now leaves the same small amount of pre-reader headroom already used by its
+  `extract_regexp` sibling, while still forcing and verifying cancellation of
+  the 16,384-row transform.
+
 - **LogsQL field-qualified text matchers retain their actual semantics (issue
   #51).** The simple non-boolean parser path handled exact, typed, and several
   function filters directly but accidentally skipped case-insensitive, regex,

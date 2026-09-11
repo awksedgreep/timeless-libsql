@@ -16476,7 +16476,10 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     let replace_timeout = router_with_limits(
         storage.clone(),
         LogsQueryLimits {
-            deadline: Duration::from_millis(1),
+            // This assertion is about cancellation after the storage reader
+            // accepts the query. A 1 ms HTTP deadline can expire during
+            // request parsing before Storage::pipeline owns cancellable work.
+            deadline: Duration::from_millis(5),
             ..LogsQueryLimits::default()
         },
     )
@@ -16509,7 +16512,10 @@ async fn session_ten_logsql_limits_cancel_errors_and_direct_sql_reuse_the_reader
     let replace_regexp_timeout = router_with_limits(
         storage.clone(),
         LogsQueryLimits {
-            deadline: Duration::from_millis(1),
+            // Regex compilation is covered by the HTTP deadline but happens
+            // before Storage::pipeline enters the cancellable reader. Keep
+            // enough headroom to test reader cancellation deterministically.
+            deadline: Duration::from_millis(5),
             ..LogsQueryLimits::default()
         },
     )
