@@ -542,7 +542,7 @@ contract and a compatibility-line change.
 |---|---:|---|
 | Unsupported route/parameter/capability | 422 | `{"error":"unsupported_capability","reason":"..."}`; LogsQL may add `message`. |
 | Malformed LogsQL | 400 | `{"error":"invalid_query","reason":"malformed_logsql","message":"..."}` |
-| Invalid native logs query parameter | 400 | `{"error":"invalid_query","reason":"invalid_query_parameter","parameter":"start|end|order"}` |
+| Invalid native logs query parameter | 400 | `{"error":"invalid_query","reason":"invalid_query_parameter","parameter":"start\|end\|order"}` |
 | Other native query validation | 400 | `{"error":"invalid_query","reason":"query_validation","message":"..."}` |
 | Invalid administration JSON | 400 | `{"error":"invalid_request","reason":"invalid_json_body"}` |
 | Invalid scrape-target set | 400 | `{"error":"invalid_request","reason":"scrape_target_validation","message":"..."}` |
@@ -551,7 +551,7 @@ contract and a compatibility-line change.
 | Native query timeout | 504 | `{"error":"timeout","reason":"query_deadline","deadline_ms":N}` |
 | Retryable native storage contention | 503 | `{"error":"temporarily_unavailable","reason":"storage_busy"}` plus `Retry-After`. |
 | Overlapping backup | 409 | `{"error":"conflict","reason":"backup_in_progress"}` |
-| Internal native handler fault | 500 | `{"error":"internal","reason":"query_execution|stats_execution|flush_execution|backup_execution"}` |
+| Internal native handler fault | 500 | `{"error":"internal","reason":"query_execution\|stats_execution\|flush_execution\|backup_execution"}` |
 
 Compatibility routes retain their established protocol shapes and are not
 silently migrated to native contract v1:
