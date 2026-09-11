@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::rejection::QueryRejection;
+use axum::extract::rejection::{FormRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Extension, Form, Query, State};
 use axum::http::{header, Response, StatusCode};
 use axum::response::IntoResponse;
@@ -425,6 +425,7 @@ async fn field_values(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QueryForm {
     query: Option<String>,
     allow_partial_response: Option<String>,
@@ -456,8 +457,12 @@ async fn tail_get(
 async fn tail_post(
     State(storage): State<Storage>,
     Extension(limits): Extension<LogsQueryLimits>,
-    Form(form): Form<QueryForm>,
+    form: Result<Form<QueryForm>, FormRejection>,
 ) -> Response<Body> {
+    let Form(form) = match form {
+        Ok(form) => form,
+        Err(_) => return client_error("unsupported_query_parameters"),
+    };
     tail(storage, limits, form).await
 }
 
@@ -949,8 +954,12 @@ fn query_backed_values_state_bytes(values: &[String]) -> Result<usize, String> {
 async fn query_post(
     State(storage): State<Storage>,
     Extension(limits): Extension<LogsQueryLimits>,
-    Form(form): Form<QueryForm>,
+    form: Result<Form<QueryForm>, FormRejection>,
 ) -> impl IntoResponse {
+    let Form(form) = match form {
+        Ok(form) => form,
+        Err(_) => return client_error("unsupported_query_parameters"),
+    };
     let Some(query) = form.query.as_deref() else {
         return logsql_error(LogsqlError {
             kind: LogsqlErrorKind::Malformed,
@@ -1242,6 +1251,18 @@ fn timeout_error(reported_deadline: Duration) -> Response<Body> {
 }
 
 fn query_execution_error(error: String) -> Response<Body> {
+    if crate::storage::is_retryable_read(&error) {
+        eprintln!("timeless-logs-api: transient query read conflict: {error}");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            Json(json!({
+                "error": "temporarily_unavailable",
+                "reason": "storage_busy"
+            })),
+        )
+            .into_response();
+    }
     if error.starts_with("LogsQL coalesce destination conflict:")
         || error.starts_with("LogsQL copy destination conflict:")
         || error.starts_with("LogsQL rename destination conflict:")
@@ -1323,7 +1344,15 @@ fn query_execution_error(error: String) -> Response<Body> {
     {
         return query_limit_error("max_response_bytes", limit);
     }
-    server_error(error)
+    // The request reached the query executor, so distinguish this stable
+    // server-fault class from malformed LogsQL without exposing SQLite
+    // details, file paths, stored values, or other internals.
+    eprintln!("timeless-logs-api: internal query execution error: {error}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": "internal", "reason": "query_execution"})),
+    )
+        .into_response()
 }
 
 type QueryLimit = (&'static str, usize);
@@ -1763,6 +1792,32 @@ fn micros_to_native(micros: i64, timestamp_unit: TimestampUnit) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+
+    async fn response_json(response: Response<Body>) -> Value {
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn query_execution_faults_are_classified_without_leaking_details() {
+        let busy = query_execution_error(
+            "table logs read is blocked by another connection's active write transaction".into(),
+        );
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.headers().get(header::RETRY_AFTER).unwrap(), "1");
+        let busy_body = response_json(busy).await;
+        assert_eq!(busy_body["error"], "temporarily_unavailable");
+        assert_eq!(busy_body["reason"], "storage_busy");
+
+        let internal = query_execution_error(
+            "prepare query: database path /secret/customer.db is corrupt".into(),
+        );
+        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let internal_body = response_json(internal).await;
+        assert_eq!(internal_body["error"], "internal");
+        assert_eq!(internal_body["reason"], "query_execution");
+        assert!(!internal_body.to_string().contains("/secret/customer.db"));
+    }
 
     #[test]
     fn unparseable_timestamps_fall_back_to_receipt_time() {

@@ -2296,13 +2296,7 @@ fn retry_read_with_cancellation<T>(
         }
         match operation() {
             Ok(value) => return Ok(value),
-            Err(error)
-                if std::time::Instant::now() < deadline
-                    && (error.contains("active write transaction")
-                        || error.contains("pending writer transaction")
-                        || error.contains("database is locked")
-                        || error.contains("database is busy")) =>
-            {
+            Err(error) if std::time::Instant::now() < deadline && is_retryable_read(&error) => {
                 if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
                     return Err("logs query cancelled".into());
                 }
@@ -2311,6 +2305,13 @@ fn retry_read_with_cancellation<T>(
             Err(error) => return Err(error),
         }
     }
+}
+
+pub(crate) fn is_retryable_read(error: &str) -> bool {
+    error.contains("active write transaction")
+        || error.contains("pending writer transaction")
+        || error.contains("database is locked")
+        || error.contains("database is busy")
 }
 
 fn cancellable_read<T>(

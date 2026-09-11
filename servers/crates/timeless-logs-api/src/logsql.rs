@@ -10688,12 +10688,49 @@ fn apply_metadata_filter(
         return Ok(());
     }
     if !typed {
+        if let Some(predicate) = parse_case_insensitive_filter(value)? {
+            append_predicate(spec, predicate_for_field(predicate, &log_field(&path)));
+            return Ok(());
+        }
         if let Some(matcher) = parse_pattern_match_filter(value)? {
             append_predicate(
                 spec,
                 LogPredicate::PatternMatch {
                     field: log_field(&path),
                     matcher,
+                },
+            );
+            return Ok(());
+        }
+        if let Some(regex) = parse_regexp_filter(value)? {
+            append_predicate(
+                spec,
+                LogPredicate::Regex {
+                    field: log_field(&path),
+                    regex,
+                },
+            );
+            return Ok(());
+        }
+        if let Some(value) = parse_substring_filter(value)? {
+            append_predicate(
+                spec,
+                LogPredicate::Substring {
+                    field: log_field(&path),
+                    value,
+                    case_insensitive: false,
+                },
+            );
+            return Ok(());
+        }
+        if let Some((value, phrase)) = parse_prefix_filter(value)? {
+            append_predicate(
+                spec,
+                LogPredicate::Prefix {
+                    field: log_field(&path),
+                    value,
+                    phrase,
+                    case_insensitive: false,
                 },
             );
             return Ok(());
@@ -12488,6 +12525,46 @@ mod tests {
         assert!(parse_at(r#"~"alp(ha|ine)""#, TimestampUnit::Microseconds, 0).is_ok());
         assert!(parse_at(r#"~"(?i)^alpha$""#, TimestampUnit::Microseconds, 0).is_ok());
         assert!(parse_at(r#"~"(""#, TimestampUnit::Microseconds, 0).is_err());
+    }
+
+    #[test]
+    fn field_qualified_text_matchers_keep_their_match_semantics() {
+        let regexp = parse_at(r#"_msg:~"(?i)bootfile""#, TimestampUnit::Microseconds, 0).unwrap();
+        assert!(matches!(
+            regexp.spec.predicate,
+            Some(LogPredicate::Regex {
+                field: LogField::Message,
+                ..
+            })
+        ));
+
+        let insensitive = parse_at("_msg:i(BOOTFILE)", TimestampUnit::Microseconds, 0).unwrap();
+        assert!(matches!(
+            insensitive.spec.predicate,
+            Some(LogPredicate::Word {
+                field: LogField::Message,
+                case_insensitive: true,
+                ..
+            })
+        ));
+
+        let substring = parse_at("_msg:*bootfile*", TimestampUnit::Microseconds, 0).unwrap();
+        assert!(matches!(
+            substring.spec.predicate,
+            Some(LogPredicate::Substring {
+                field: LogField::Message,
+                ..
+            })
+        ));
+
+        let prefix = parse_at("_msg:boot*", TimestampUnit::Microseconds, 0).unwrap();
+        assert!(matches!(
+            prefix.spec.predicate,
+            Some(LogPredicate::Prefix {
+                field: LogField::Message,
+                ..
+            })
+        ));
     }
 
     #[test]

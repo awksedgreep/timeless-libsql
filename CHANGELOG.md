@@ -28,6 +28,18 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **LogsQL field-qualified text matchers retain their actual semantics (issue
+  #51).** The simple non-boolean parser path handled exact, typed, and several
+  function filters directly but accidentally skipped case-insensitive, regex,
+  substring, and prefix matchers after a field name, compiling inputs such as
+  `_msg:~"(?i)bootfile"` as literal exact values. Those matchers now use the
+  same typed predicate forms as logical/filter-pipeline expressions. The POST
+  form also rejects unsupported `_time`, `time`, `start`, and `end` parameters
+  explicitly instead of ignoring them; time bounds remain part of the LogsQL
+  expression. Retryable query read conflicts return HTTP 503 with
+  `Retry-After`, and unexpected executor faults carry the non-sensitive
+  `query_execution` reason instead of an unclassified internal envelope.
+
 - **Scheduled metrics compaction no longer holds the sole writer gate for an
   entire production-scale sweep (issue #50).** Live diagnosis found 64
   compact/rollup passes averaging 7.2 seconds while discovery retried writer

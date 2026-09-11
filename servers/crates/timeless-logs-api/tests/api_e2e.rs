@@ -13770,6 +13770,156 @@ async fn session_ten_quoted_phrase_matches_victorialogs_case_and_bytes_and_reope
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn issue_51_logsql_query_errors_are_actionable_and_valid_filters_execute() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("issue-51-logsql.db");
+    let storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let now = chrono::Utc::now().timestamp_micros();
+    let body = [
+        serde_json::json!({
+            "_time": now - 4,
+            "_msg": "assigned bootfile pxelinux.0",
+            "level": "info",
+            "case": "bootfile"
+        }),
+        serde_json::json!({
+            "_time": now - 3,
+            "_msg": "render completed",
+            "level": "info",
+            "case": "render"
+        }),
+        serde_json::json!({
+            "_time": now - 2,
+            "_msg": "decoded TLV option",
+            "level": "info",
+            "case": "tlv"
+        }),
+        serde_json::json!({
+            "_time": now - 1,
+            "_msg": "worker terminating",
+            "level": "info",
+            "case": "terminating"
+        }),
+    ]
+    .into_iter()
+    .map(|row| row.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn cases(app: &axum::Router, query: &str) -> Vec<String> {
+        let mut cases = pipeline_rows(app, &format!("{query} | fields case | limit 100"))
+            .await
+            .into_iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cases.sort();
+        cases
+    }
+
+    async fn assert_valid_filters(app: &axum::Router) {
+        assert_eq!(cases(app, "_time:20m bootfile").await, ["bootfile"]);
+        assert_eq!(
+            cases(app, "_msg:*").await,
+            ["bootfile", "render", "terminating", "tlv"]
+        );
+        for (query, expected) in [
+            (r#"_msg:~"(?i)bootfile""#, "bootfile"),
+            (r#"_msg:~"(?i)render""#, "render"),
+            (r#"_msg:~"(?i)tlv""#, "tlv"),
+            (r#"_msg:~"(?i)terminating""#, "terminating"),
+        ] {
+            assert_eq!(cases(app, query).await, [expected], "{query}");
+        }
+        assert!(cases(app, r#"_msg:~"(?i)not-present""#).await.is_empty());
+    }
+
+    assert_valid_filters(&app).await;
+
+    let work_limited = router_with_limits(
+        storage.clone(),
+        LogsQueryLimits {
+            max_result_rows: 100,
+            max_work_rows: 1,
+            ..LogsQueryLimits::default()
+        },
+    )
+    .oneshot(logsql_request("_msg:bootfile | limit 100"))
+    .await
+    .unwrap();
+    assert_eq!(work_limited.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let work_limited_body = serde_json::from_slice::<serde_json::Value>(
+        &to_bytes(work_limited.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(work_limited_body["error"], "query_limit");
+    assert_eq!(work_limited_body["reason"], "max_work_rows");
+
+    for body in [
+        "query=bootfile&_time=15m",
+        "query=bootfile&time=15m",
+        "query=bootfile&start=15m&end=now",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(logsql_form_request(body))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        let response_body = serde_json::from_slice::<serde_json::Value>(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response_body["error"], "unsupported_capability", "{body}");
+        assert_eq!(
+            response_body["reason"], "unsupported_query_parameters",
+            "{body}"
+        );
+    }
+
+    storage.schedule_optimize().await.unwrap();
+    assert_valid_filters(&app).await;
+    storage.flush().await.unwrap();
+    storage.shutdown().await.unwrap();
+
+    let reopened = Storage::start_with_timestamp_unit(
+        database,
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    assert_valid_filters(&router(reopened.clone())).await;
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
 async fn session_eighteen_sequence_filters_are_ordered_rich_bounded_and_reopenable() {
     let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
         .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
@@ -16778,6 +16928,15 @@ fn logsql_request(query: &str) -> Request<Body> {
         .uri("/select/logsql/query")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(encoded))
+        .unwrap()
+}
+
+fn logsql_form_request(body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/select/logsql/query")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_owned()))
         .unwrap()
 }
 

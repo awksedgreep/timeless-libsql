@@ -257,9 +257,15 @@ and defaults to 1,000 values.
 `POST /select/logsql/query` uses an URL-encoded form with required `query` and
 optional `allow_partial_response`. `false` is the complete fail-closed mode.
 `true` fails explicitly because one authoritative SQLite owner cannot produce
-an honest distributed partial result. The complete shipped grammar, strict
-errors, rich values, ordering, and intentional VictoriaLogs differences are
-in the [LogsQL matrix](LOGSQL_FEATURE_MATRIX.md) and
+an honest distributed partial result. Other form fields, including `_time`,
+`time`, `start`, and `end`, fail with `unsupported_query_parameters`; time
+bounds belong inside the LogsQL expression. Query syntax errors return
+`invalid_query`, bounded work exhaustion returns `query_limit`, retryable
+storage contention returns HTTP 503 plus `Retry-After`, and an unexpected
+executor fault returns `internal` with reason `query_execution` while retaining
+its sensitive detail only in the server log. The complete shipped grammar,
+strict errors, rich values, ordering, and intentional VictoriaLogs differences
+are in the [LogsQL matrix](LOGSQL_FEATURE_MATRIX.md) and
 [query cookbook](QUERIES.md#bounded-log-queries).
 
 ## Trace requests
