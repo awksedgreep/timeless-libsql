@@ -9,18 +9,20 @@ reachable from `main`.
 
 ## Current publication status
 
-`v0.8.2` was tagged from `main` at
-`2a6a3c9` (deadlock-free cold initialization of legacy logs/traces storage
-statistics) on 2026-09-07 (UTC). GitHub Actions run `34139129795` built,
+`v0.8.3` was tagged from `main` at
+`54a3278` (bounded size-tiered metrics compaction, stable native errors, and
+LogsQL/query hardening) on 2026-09-11 (UTC). GitHub Actions run `34560679467`
+built,
 identity-checked, install/remove-drilled, and uploaded all four intended
 Linux/macOS archives;
 its checksum job downloaded the whole matrix, produced and verified the
 complete outer `SHA256SUMS`; and the workflow published the
-[`v0.8.2` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.2)
+[`v0.8.3` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.3)
 with the four archives plus `SHA256SUMS` as permanent release assets. This is
 the current download channel. Complete published releases also exist for
-`v0.8.1`, `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`,
-`v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
+`v0.8.2`, `v0.8.1`, `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back
+through `v0.7.1`, `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and
+`v0.4.2`.
 
 For history: some tags record source only, because their artifact runs failed
 and the fix became the next patch — `v0.7.0` (authctl missed the `--version`
