@@ -746,23 +746,7 @@ impl AuthVerifier {
         // there is no second clock to reconcile — and revocation in
         // particular must take effect promptly rather than be softened by
         // a skew allowance.
-        if claims.exp.saturating_add(CLOCK_SKEW_SECONDS) <= now {
-            return Err(AuthError::unauthorized("expired_token"));
-        }
-        if claims.exp <= claims.iat
-            || claims.exp.saturating_sub(claims.iat) > policy.max_token_seconds
-        {
-            return Err(AuthError::unauthorized("token_lifetime_exceeded"));
-        }
-        if claims.nbf > now.saturating_add(CLOCK_SKEW_SECONDS)
-            || claims.iat > now.saturating_add(CLOCK_SKEW_SECONDS)
-            || key.not_before > now.saturating_add(CLOCK_SKEW_SECONDS)
-        {
-            return Err(AuthError::unauthorized("token_not_yet_valid"));
-        }
-        if key.revoked || key.expires_at <= now {
-            return Err(AuthError::unauthorized("revoked_key"));
-        }
+        validate_temporal_claims(&claims, key, &policy, now)?;
         if claims.iss != policy.issuer {
             return Err(AuthError::unauthorized("wrong_issuer"));
         }
@@ -813,6 +797,31 @@ impl AuthVerifier {
             limits: claims.limits,
         })
     }
+}
+
+fn validate_temporal_claims(
+    claims: &TokenClaims,
+    key: &PolicyKey,
+    policy: &PolicyFile,
+    now: i64,
+) -> Result<(), AuthError> {
+    if claims.exp.saturating_add(CLOCK_SKEW_SECONDS) <= now {
+        return Err(AuthError::unauthorized("expired_token"));
+    }
+    if claims.exp <= claims.iat || claims.exp.saturating_sub(claims.iat) > policy.max_token_seconds
+    {
+        return Err(AuthError::unauthorized("token_lifetime_exceeded"));
+    }
+    if claims.nbf > now.saturating_add(CLOCK_SKEW_SECONDS)
+        || claims.iat > now.saturating_add(CLOCK_SKEW_SECONDS)
+        || key.not_before > now.saturating_add(CLOCK_SKEW_SECONDS)
+    {
+        return Err(AuthError::unauthorized("token_not_yet_valid"));
+    }
+    if key.revoked || key.expires_at <= now {
+        return Err(AuthError::unauthorized("revoked_key"));
+    }
+    Ok(())
 }
 
 fn validate_policy(policy: &PolicyFile, signal: &str, tenant: &str) -> Result<(), AuthError> {
@@ -1240,6 +1249,8 @@ mod tests {
         write_policy(&policy_path, &signing, 1, &[]);
         let config = AuthConfig::enforced("metrics", "tenant-a", &policy_path);
         config.preflight().unwrap();
+        let policy = config.verifier.as_ref().unwrap().policy().unwrap();
+        let key = &policy.keys[0];
         let app = protect_router(
             Router::new().route("/api/v1/query", get(|| async { "ok" })),
             config,
@@ -1270,29 +1281,29 @@ mod tests {
             "a token one second past exp is inside the skew allowance"
         );
 
-        // The far edge of the allowance is still accepted...
+        // Pin the exact allowance boundary against the captured verifier
+        // time. Driving this edge through middleware would read the wall
+        // clock again and race the next one-second tick.
+        let verify_at_captured_time = |value: Value| {
+            let claims: TokenClaims = serde_json::from_value(value).unwrap();
+            validate_temporal_claims(&claims, key, &policy, now)
+        };
         let edge = skewed(-CLOCK_SKEW_SECONDS + 1);
-        assert_eq!(
-            request(&app, "/api/v1/query", Some(&token(&signing, edge)))
-                .await
-                .0,
-            StatusCode::OK
-        );
+        assert!(verify_at_captured_time(edge).is_ok());
 
         // ...and one second past it is not. The allowance is bounded, not
         // an open-ended extension of token lifetime.
-        let outside = skewed(-CLOCK_SKEW_SECONDS - 1);
-        let (status, body) = request(&app, "/api/v1/query", Some(&token(&signing, outside))).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body["reason"], json!("expired_token"));
+        let outside = verify_at_captured_time(skewed(-CLOCK_SKEW_SECONDS - 1)).unwrap_err();
+        assert_eq!(outside.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(outside.code, "expired_token");
 
         // The symmetric direction keeps working: a future nbf beyond the
         // allowance is still rejected.
         let mut future = claims(now);
         future["nbf"] = json!(now + CLOCK_SKEW_SECONDS + 60);
-        let (status, body) = request(&app, "/api/v1/query", Some(&token(&signing, future))).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body["reason"], json!("token_not_yet_valid"));
+        let future = verify_at_captured_time(future).unwrap_err();
+        assert_eq!(future.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(future.code, "token_not_yet_valid");
 
         let _ = fs::remove_dir_all(&root);
     }
