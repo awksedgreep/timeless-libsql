@@ -60,6 +60,18 @@ async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_avail
     assert!(stats.compact_step_count >= 2, "{stats:?}");
     assert!(stats.compact_step_max_ns > 0);
     assert!(stats.compact_step_max_ns <= stats.compact_total_ns);
+    assert_eq!(stats.extension_compaction_raw_steps, 70);
+    assert_eq!(stats.extension_compaction_raw_chunks, 140);
+    assert_eq!(stats.extension_compaction_raw_points, 140);
+    assert_eq!(stats.extension_compaction_raw_input_bytes, 140 * 16);
+    assert!(stats.extension_compaction_raw_output_bytes > 0);
+    assert!(stats.extension_compaction_raw_total_ns > 0);
+    assert_eq!(stats.extension_compaction_merge_steps, 0);
+    assert_eq!(stats.extension_compaction_merge_chunks, 0);
+    assert_eq!(stats.extension_compaction_merge_points, 0);
+    assert_eq!(stats.extension_compaction_merge_input_bytes, 0);
+    assert_eq!(stats.extension_compaction_merge_output_bytes, 0);
+    assert_eq!(stats.extension_compaction_merge_total_ns, 0);
     assert_eq!(stats.api_read_errors, 0);
     assert_eq!(stats.admitted_points, stats.completed_points);
     assert_eq!(stats.queued_points, 0);

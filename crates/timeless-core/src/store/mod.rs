@@ -64,6 +64,10 @@ pub struct ChunkMeta {
     /// legacy formats leave it absent and use the decode fallback.
     pub max_ts_val: Option<f64>,
     pub point_count: u32,
+    /// Encoded timestamp + value payload bytes, excluding backend framing.
+    /// Kept in the index so maintenance can enforce byte budgets without
+    /// reading candidate blobs just to size a plan.
+    pub payload_bytes: u64,
     pub min_val: f64,
     pub max_val: f64,
     pub sum_val: f64,
@@ -89,6 +93,10 @@ pub struct EncodedChunk {
 }
 
 impl EncodedChunk {
+    pub fn payload_bytes(&self) -> u64 {
+        (self.ts_bytes.len() as u64).saturating_add(self.val_bytes.len() as u64)
+    }
+
     /// Index metadata for this chunk once the store has placed it at `loc`.
     pub fn meta(&self, loc: ChunkLoc) -> ChunkMeta {
         ChunkMeta {
@@ -96,6 +104,7 @@ impl EncodedChunk {
             max_ts: self.max_ts,
             max_ts_val: Some(self.max_ts_val),
             point_count: self.point_count,
+            payload_bytes: self.payload_bytes(),
             min_val: self.min_val,
             max_val: self.max_val,
             sum_val: self.sum_val,

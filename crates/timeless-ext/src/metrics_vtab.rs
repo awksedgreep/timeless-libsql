@@ -15,7 +15,7 @@
 //! SQLite TYPE and then (for blobs) by the first byte:
 //!
 //!   TEXT  → maintenance/configuration command: `flush` | `compact` |
-//!           `compact-step:<groups>` | `prune:<unix_ts>` |
+//!           `compact-step:<series>[:<points>:<bytes>]` | `prune:<unix_ts>` |
 //!           `rollups:none|<ladder>` | `clear-rollups` |
 //!           `clear-rollups-step:<chunks>`
 //!           (the FTS5 idiom: an insert that sets only the hidden column
@@ -101,7 +101,10 @@ const FLUSH_THRESHOLD: usize = 4096; // points per series before auto-queue
 const MIN_FLUSH_SIZE: usize = 0; // flush everything, however small
 const COMPRESSION_LEVEL: usize = 8; // pco level
 const MEMORY_BUDGET: usize = 256 * 1024 * 1024; // 256 MiB of buffers
-const DEFER_COMPRESSION: bool = false; // compress at flush, not later
+                                                // Keep ingest flushes cheap and make first compression an explicit bounded
+                                                // maintenance phase. The size-tiered planner never mixes these raw arrivals
+                                                // directly into an existing compressed tail.
+const DEFER_COMPRESSION: bool = true;
 /// F2 retention unit conversion: metrics ts is epoch SECONDS.
 const NATIVE_PER_SECOND: i64 = 1;
 const PLAN_LIMIT: &str = "limit";
@@ -465,15 +468,29 @@ impl MetricsTab {
             // "reorganize storage" maintenance).
             self.shared.engine.rollup().map_err(module_err)?;
         } else if let Some(raw_budget) = cmd.strip_prefix("compact-step:") {
-            let budget: usize = raw_budget.trim().parse().map_err(|_| {
+            let invalid = || {
                 module_err(format!(
-                    "compact-step: expected 'compact-step:<positive groups>', got {cmd:?}"
+                    "compact-step: expected 'compact-step:<positive series>[:<positive points>:<positive bytes>]', got {cmd:?}"
                 ))
-            })?;
-            if budget == 0 {
-                return Err(module_err(
-                    "compact-step: group budget must be positive".into(),
-                ));
+            };
+            let parts: Vec<_> = raw_budget.trim().split(':').collect();
+            if !matches!(parts.len(), 1 | 3) {
+                return Err(invalid());
+            }
+            let series: usize = parts[0].parse().map_err(|_| invalid())?;
+            let (points, bytes) = if parts.len() == 3 {
+                (
+                    parts[1].parse().map_err(|_| invalid())?,
+                    parts[2].parse().map_err(|_| invalid())?,
+                )
+            } else {
+                (
+                    timeless_core::METRICS_COMPACTION_STEP_INPUT_POINTS,
+                    timeless_core::METRICS_COMPACTION_STEP_INPUT_BYTES,
+                )
+            };
+            if series == 0 || points == 0 || bytes == 0 {
+                return Err(invalid());
             }
             // One public INSERT is one SQLite transaction and therefore one
             // writer-gate hold. Bound raw-series and rollup-group work to the
@@ -482,12 +499,19 @@ impl MetricsTab {
             let (_, _, raw_more) = self
                 .shared
                 .engine
-                .compact_partitions_bounded(i64::MAX, budget)
+                .compact_partitions_budgeted(
+                    i64::MAX,
+                    timeless_core::MetricsCompactionBudget {
+                        max_series: series,
+                        max_input_points: points,
+                        max_input_bytes: bytes,
+                    },
+                )
                 .map_err(module_err)?;
             let (_, _, rollup_more) = self
                 .shared
                 .engine
-                .rollup_bounded(budget)
+                .rollup_bounded(series)
                 .map_err(module_err)?;
             return Ok(i64::from(raw_more || rollup_more));
         } else if cmd == "rollup" {
@@ -574,7 +598,8 @@ impl MetricsTab {
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'flush', 'compact', \
-                 'compact-step:<groups>', 'rollup', 'rollups:none|<ladder>', \
+                 'compact-step:<series>[:<points>:<bytes>]', 'rollup', \
+                 'rollups:none|<ladder>', \
                  'clear-rollups', 'clear-rollups-step:<chunks>', 'prune:<unix_ts>'"
             )));
         }

@@ -26,11 +26,13 @@ The exact public storage contract is in the
   encoded through the extension's public ingestion contracts.
 - The process-owned Prometheus scrape loop parses targets in Rust and feeds
   the same bounded writer path. Elixir is not in the scrape or ingest path.
-- Scheduled compact/rollup sweeps resume across SQLite transactions capped at
-  64 raw series and 64 rollup groups, and pause between commits for reader
-  admission. JSON stats
-  expose `compact_step_count`, `compact_step_max_ns`, and `api_read_retries`
-  so maintenance interference is directly observable.
+- Flushes persist raw metrics quickly. Scheduled compact/rollup sweeps perform
+  first compression separately from size-tiered compressed merges and resume
+  across SQLite transactions capped at 64 metrics series, 262,144 source points,
+  4 MiB encoded input, and 64 rollup groups. They pause between commits for
+  reader admission. JSON stats expose the `extension_compaction_raw_*` and
+  `extension_compaction_merge_*` phase families alongside
+  `compact_step_count`, `compact_step_max_ns`, and `api_read_retries`.
 - Optional first-party OpenTelemetry export is deliberately limited to those
   scheduled compact/rollup sweeps. Set
   `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` to a full OTLP/HTTP endpoint such as
@@ -143,3 +145,19 @@ TIMELESS_EXT_TEST_PATH="$PWD/target/release/libtimeless_ext.so" \
 
 The complete ordering, query-contract, oracle, performance, cancellation,
 fault, soak, and packaging gates are in [TESTING.md](../../../TESTING.md).
+
+For the issue #52 repeated-arrival release curve, use a new database path:
+
+```sh
+cargo run --release --manifest-path servers/Cargo.toml \
+  --bin metrics_compaction_bench -- \
+  target/release/libtimeless_ext.so /tmp/metrics-compaction.db 32 \
+  > /tmp/metrics-compaction.json
+```
+
+The driver prebuilds one fixed 320-series × 1,024-point payload, then starts a
+fresh worker and shifts timestamps before each ingest clock so payload
+synthesis cannot inflate compaction timing or RSS. The
+JSON records each completed append/flush/compact round's active-sweep and mean
+step latency, cumulative step high-water, phase input/output bytes and points,
+chunk footprint, RSS, and HWM. The worker refuses to overwrite its database.

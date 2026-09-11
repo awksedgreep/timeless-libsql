@@ -51,6 +51,7 @@ impl ChunkStore for ScriptedStore {
                 max_ts: c.max_ts,
                 max_ts_val: Some(c.max_ts_val),
                 point_count: c.point_count,
+                payload_bytes: (c.ts_bytes.len() + c.val_bytes.len()) as u64,
                 min_val: c.min_val,
                 max_val: c.max_val,
                 sum_val: c.sum_val,

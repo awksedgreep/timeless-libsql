@@ -251,11 +251,13 @@ impl ShadowTableStore {
                 // resolution = 0: the RAW index only — rollup rows (F3)
                 // have their own scan and their own in-memory index.
                 "SELECT id, series_id, ts_min, ts_max, max_ts_val, point_count, \
-                 min_val, max_val, sum_val, encoding FROM {chunks} \
+                min_val, max_val, sum_val, encoding, \
+                 length(ts_data) + length(val_data) FROM {chunks} \
                  WHERE resolution = 0"
             ),
             scan_rollups_sql: format!(
-                "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding \
+                "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding, \
+                 length(ts_data) + length(val_data) \
                  FROM {chunks} WHERE resolution > 0 ORDER BY id"
             ),
             insert_rollup_sql: format!(
@@ -326,11 +328,13 @@ impl ShadowTableStore {
             ),
             scan_since_sql: format!(
                 "SELECT id, series_id, ts_min, ts_max, max_ts_val, point_count, \
-                 min_val, max_val, sum_val, encoding FROM {chunks} \
+                min_val, max_val, sum_val, encoding, \
+                 length(ts_data) + length(val_data) FROM {chunks} \
                  WHERE resolution = 0 AND id > ?1"
             ),
             scan_rollups_since_sql: format!(
-                "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding \
+                "SELECT id, series_id, resolution, ts_min, ts_max, point_count, encoding, \
+                 length(ts_data) + length(val_data) \
                  FROM {chunks} WHERE resolution > 0 AND id > ?1 ORDER BY id"
             ),
         }
@@ -466,6 +470,7 @@ impl ShadowTableStore {
                         value => Some(Self::stat_from_sql(value, "max_ts_val")?),
                     },
                     point_count: r.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
+                    payload_bytes: r.get::<_, i64>(10).map_err(|e| e.to_string())?.max(0) as u64,
                     min_val: get_stat(6, "min_val")?,
                     max_val: get_stat(7, "max_val")?,
                     sum_val: get_stat(8, "sum_val")?,
@@ -498,6 +503,7 @@ impl ShadowTableStore {
                         max_ts: r.get(4)?,
                         max_ts_val: None,
                         point_count: r.get::<_, i64>(5)? as u32,
+                        payload_bytes: r.get::<_, i64>(7)?.max(0) as u64,
                         min_val: 0.0,
                         max_val: 0.0,
                         sum_val: 0.0,
@@ -956,6 +962,7 @@ impl ChunkStore for ShadowTableStore {
                     max_ts: row.get(4).map_err(|e| e.to_string())?,
                     max_ts_val: None,
                     point_count: row.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
+                    payload_bytes: row.get::<_, i64>(7).map_err(|e| e.to_string())?.max(0) as u64,
                     min_val: 0.0,
                     max_val: 0.0,
                     sum_val: 0.0,

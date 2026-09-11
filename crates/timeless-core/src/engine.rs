@@ -21,6 +21,10 @@ fn partition_vec_memory(timestamps: &[i64], values: &[f64]) -> usize {
     (timestamps.len() + values.len()) * 8
 }
 
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
 pub type EngineResult<T> = Result<T, String>;
 
 const BATCH_CHUNK_SIZE: usize = 1000;
@@ -28,6 +32,35 @@ const BATCH_CHUNK_SIZE: usize = 1000;
 /// Chunks newer than this are never compacted: the recent window keeps
 /// small chunks so narrow dashboard queries stay cheap.
 const COMPACT_MIN_AGE_SECS: i64 = 3600;
+
+/// Target size of one compressed metrics chunk. Size-tiered compaction may
+/// briefly plan up to 125% of this many input points so two half-full peers
+/// can converge instead of remaining stranded just above the target.
+pub const METRICS_COMPACTION_TARGET_POINTS: usize = 32 * 1024;
+
+/// Default per-transaction compaction budgets used by the public bounded
+/// command. A single pre-existing source larger than either budget is allowed
+/// through so maintenance cannot deadlock on legacy/oversized chunks; normal
+/// raw and compressed groups are capped by the target above.
+pub const METRICS_COMPACTION_STEP_INPUT_POINTS: usize = 256 * 1024;
+pub const METRICS_COMPACTION_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetricsCompactionBudget {
+    pub max_series: usize,
+    pub max_input_points: usize,
+    pub max_input_bytes: u64,
+}
+
+impl MetricsCompactionBudget {
+    pub const fn for_series(max_series: usize) -> Self {
+        Self {
+            max_series,
+            max_input_points: METRICS_COMPACTION_STEP_INPUT_POINTS,
+            max_input_bytes: METRICS_COMPACTION_STEP_INPUT_BYTES,
+        }
+    }
+}
 
 /// Keep automatic retention work bounded. A large pre-existing backlog is
 /// drained over successive maintenance passes instead of allocating and
@@ -68,6 +101,37 @@ struct PartitionKey {
 /// the chunk-index shadowing fix (2026-07-22, see git history).)
 type ChunkKey = (PartitionKey, i64, u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MetricsCompactionKind {
+    RawCompression,
+    CompressedMerge,
+}
+
+struct MetricsCompactionGroup {
+    key: PartitionKey,
+    sources: Vec<(ChunkKey, ChunkMeta)>,
+    kind: MetricsCompactionKind,
+}
+
+#[derive(Default)]
+struct MetricsCompactionOutcome {
+    series_compacted: usize,
+    chunks_replaced: usize,
+    more: bool,
+    raw_steps: u64,
+    raw_chunks: u64,
+    raw_points: u64,
+    raw_input_bytes: u64,
+    raw_output_bytes: u64,
+    raw_total_ns: u64,
+    merge_steps: u64,
+    merge_chunks: u64,
+    merge_points: u64,
+    merge_input_bytes: u64,
+    merge_output_bytes: u64,
+    merge_total_ns: u64,
+}
+
 /// A rollup index group. The series/tier identity is stored once for all of
 /// its chunks instead of repeated in every B-tree key.
 #[derive(Hash, Eq, PartialEq, Clone, Debug, Copy)]
@@ -104,6 +168,7 @@ impl RollupIndexEntry {
             max_ts: self.max_ts,
             max_ts_val: None,
             point_count: self.point_count,
+            payload_bytes: 0,
             min_val: 0.0,
             max_val: 0.0,
             sum_val: 0.0,
@@ -776,6 +841,18 @@ pub struct Engine {
     buffer_memory: AtomicUsize,
     cold_flush_running: AtomicBool,
     compaction_running: AtomicBool,
+    compaction_raw_steps: AtomicU64,
+    compaction_raw_chunks: AtomicU64,
+    compaction_raw_points: AtomicU64,
+    compaction_raw_input_bytes: AtomicU64,
+    compaction_raw_output_bytes: AtomicU64,
+    compaction_raw_total_ns: AtomicU64,
+    compaction_merge_steps: AtomicU64,
+    compaction_merge_chunks: AtomicU64,
+    compaction_merge_points: AtomicU64,
+    compaction_merge_input_bytes: AtomicU64,
+    compaction_merge_output_bytes: AtomicU64,
+    compaction_merge_total_ns: AtomicU64,
     /// Fast resolution cache: hash(metric, labels) → series_id.
     /// Persists across batches — steady-state scraping is pure cache hits.
     resolve_cache: DashMap<u64, i64>,
@@ -1502,6 +1579,18 @@ impl Engine {
             buffer_memory: AtomicUsize::new(0),
             cold_flush_running: AtomicBool::new(false),
             compaction_running: AtomicBool::new(false),
+            compaction_raw_steps: AtomicU64::new(0),
+            compaction_raw_chunks: AtomicU64::new(0),
+            compaction_raw_points: AtomicU64::new(0),
+            compaction_raw_input_bytes: AtomicU64::new(0),
+            compaction_raw_output_bytes: AtomicU64::new(0),
+            compaction_raw_total_ns: AtomicU64::new(0),
+            compaction_merge_steps: AtomicU64::new(0),
+            compaction_merge_chunks: AtomicU64::new(0),
+            compaction_merge_points: AtomicU64::new(0),
+            compaction_merge_input_bytes: AtomicU64::new(0),
+            compaction_merge_output_bytes: AtomicU64::new(0),
+            compaction_merge_total_ns: AtomicU64::new(0),
             resolve_cache: DashMap::new(),
             prometheus_ingest_batches: AtomicU64::new(0),
             prometheus_ingest_points: AtomicU64::new(0),
@@ -2396,29 +2485,40 @@ impl Engine {
 
     // ── Compaction ───────────────────────────────────────────────────
 
-    /// Merge each series' raw and undersized chunks into large pco chunks
-    /// at maximum compression. Only chunks entirely older than `cutoff_ts`
-    /// are eligible — the recent window stays in small/raw chunks so
-    /// narrow dashboard queries never pay whole-chunk decompression.
-    ///
-    /// Crash safety lives in the store: `replace_chunks` persists the
-    /// replacements and removes the old storage units such that a crash
-    /// at any point either leaves the pre-compaction state or is
-    /// completed by the store's recovery on the next start (fs backend:
-    /// the pending/manifest/rename protocol). Old units are removed only
-    /// when no surviving index entry references them (batch files are
-    /// shared across series).
+    /// Drain every currently actionable raw-compression and size-tiered merge
+    /// group. Each internal step is point- and byte-bounded so even this
+    /// convenience API does not construct one store-sized decode buffer.
     pub fn compact_partitions(&self, cutoff_ts: i64) -> EngineResult<(usize, usize)> {
-        let (series, chunks, more) = self.compact_partitions_inner(cutoff_ts, usize::MAX)?;
-        debug_assert!(!more);
+        let mut series = 0usize;
+        let mut chunks = 0usize;
+        loop {
+            let outcome = self.compact_partitions_inner(
+                cutoff_ts,
+                MetricsCompactionBudget::for_series(usize::MAX),
+            )?;
+            series = series.saturating_add(outcome.series_compacted);
+            chunks = chunks.saturating_add(outcome.chunks_replaced);
+            if !outcome.more {
+                break;
+            }
+        }
         self.apply_retention()?;
         Ok((series, chunks))
     }
 
-    /// Compact at most `max_series` eligible series in one transaction.
+    /// Compact at most `max_series` eligible series in one transaction, also
+    /// capped by [`METRICS_COMPACTION_STEP_INPUT_POINTS`] and
+    /// [`METRICS_COMPACTION_STEP_INPUT_BYTES`].
     /// Unlike [`Self::compact_partitions`], this deliberately leaves retention
     /// to its separately scheduled bounded path. Repeated calls drain the raw
-    /// backlog while giving the SQLite host a commit boundary between steps.
+    /// and merge backlog while giving the SQLite host a commit boundary
+    /// between steps.
+    ///
+    /// Raw chunks are compressed only with raw peers. Existing compressed
+    /// chunks merge only when their output is at least half the target size
+    /// and at least twice the largest input. This size-tiered rule prevents a
+    /// newly arrived raw chunk from rewriting one ever-growing compressed
+    /// tail on every maintenance call.
     /// Returns `(series_compacted, chunks_replaced, more_may_remain)`.
     pub fn compact_partitions_bounded(
         &self,
@@ -2428,16 +2528,32 @@ impl Engine {
         if max_series == 0 {
             return Err("bounded compaction requires a positive series budget".into());
         }
-        self.compact_partitions_inner(cutoff_ts, max_series)
+        self.compact_partitions_budgeted(cutoff_ts, MetricsCompactionBudget::for_series(max_series))
+    }
+
+    /// Detailed bounded entry point used by hosts that make the point and
+    /// encoded-byte ceilings part of their maintenance policy.
+    pub fn compact_partitions_budgeted(
+        &self,
+        cutoff_ts: i64,
+        budget: MetricsCompactionBudget,
+    ) -> EngineResult<(usize, usize, bool)> {
+        if budget.max_series == 0 || budget.max_input_points == 0 || budget.max_input_bytes == 0 {
+            return Err("bounded compaction budgets must all be positive".into());
+        }
+        let outcome = self.compact_partitions_inner(cutoff_ts, budget)?;
+        Ok((
+            outcome.series_compacted,
+            outcome.chunks_replaced,
+            outcome.more,
+        ))
     }
 
     fn compact_partitions_inner(
         &self,
         cutoff_ts: i64,
-        max_series: usize,
-    ) -> EngineResult<(usize, usize, bool)> {
-        const SMALL_CHUNK_POINTS: u32 = 16 * 1024;
-        const MAX_OUTPUT_POINTS: usize = 32 * 1024;
+        budget: MetricsCompactionBudget,
+    ) -> EngineResult<MetricsCompactionOutcome> {
         const COMPACTION_LEVEL: usize = 12;
 
         // Single-flight: the cold-flush timer and the explicit NIF may
@@ -2447,50 +2563,72 @@ impl Engine {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Ok((0, 0, false));
+            return Ok(MetricsCompactionOutcome::default());
         }
         let _guard = ColdFlushGuard {
             flag: &self.compaction_running,
         };
         let _transition = self.transition_write();
 
-        // Group eligible chunks by series: all raw chunks, plus pco
-        // chunks small enough that merging improves the ratio.
-        let mut candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> = BTreeMap::new();
-        {
-            let index = self.index_read();
-            for (chunk_key, meta) in index.iter() {
-                let eligible = meta.max_ts < cutoff_ts
-                    && (meta.encoding == ENC_RAW || meta.point_count < SMALL_CHUNK_POINTS);
-                if eligible {
-                    candidates
-                        .entry(chunk_key.0)
-                        .or_default()
-                        .push((*chunk_key, meta.clone()));
-                }
-            }
+        // Snapshot eligible metadata. Planning never reads payloads and never
+        // mixes raw conversion with compressed merging in one group.
+        let planned = Self::plan_metrics_compaction(self.metrics_compaction_candidates(cutoff_ts));
+        if planned.is_empty() {
+            return Ok(MetricsCompactionOutcome::default());
         }
-        candidates.retain(|_, chunks| {
-            chunks.len() >= 2 || chunks.iter().any(|(_, m)| m.encoding == ENC_RAW)
-        });
 
-        let more = candidates.len() > max_series;
-        let candidates = candidates.into_iter().take(max_series);
-
-        if candidates.len() == 0 {
-            return Ok((0, 0, false));
+        // Select complete groups until any budget is exhausted. One first
+        // oversized group is admitted as a progress exception for legacy
+        // chunks written before these limits existed.
+        let mut selected = Vec::new();
+        let mut selected_series = HashSet::new();
+        let mut selected_points = 0usize;
+        let mut selected_bytes = 0u64;
+        let mut budget_limited = false;
+        for group in planned {
+            let points = group.sources.iter().fold(0usize, |total, (_, meta)| {
+                total.saturating_add(meta.point_count as usize)
+            });
+            let bytes = group.sources.iter().fold(0u64, |total, (_, meta)| {
+                total.saturating_add(meta.payload_bytes)
+            });
+            let new_series = !selected_series.contains(&group.key);
+            let exceeds_series = new_series && selected_series.len() >= budget.max_series;
+            let exceeds_points = selected_points.saturating_add(points) > budget.max_input_points;
+            let exceeds_bytes = selected_bytes.saturating_add(bytes) > budget.max_input_bytes;
+            if !selected.is_empty() && (exceeds_series || exceeds_points || exceeds_bytes) {
+                budget_limited = true;
+                break;
+            }
+            selected_points = selected_points.saturating_add(points);
+            selected_bytes = selected_bytes.saturating_add(bytes);
+            selected_series.insert(group.key);
+            selected.push(group);
         }
 
         // Phase 1: re-encode every replacement chunk in memory — nothing
         // is persisted or visible to queries yet. `add` holds the chunks
         // in plan order; each plan records how many are its own.
-        let mut plans: Vec<(PartitionKey, Vec<(ChunkKey, ChunkMeta)>, usize)> = Vec::new();
+        let mut plans: Vec<(MetricsCompactionGroup, usize)> = Vec::new();
         let mut add: Vec<EncodedChunk> = Vec::new();
+        let mut outcome = MetricsCompactionOutcome {
+            more: budget_limited,
+            ..MetricsCompactionOutcome::default()
+        };
 
-        for (key, chunks) in candidates {
-            let mut points: Vec<(i64, f64)> = Vec::new();
-            for (_, meta) in &chunks {
-                points.extend(self.read_chunk_data(meta, i64::MIN, i64::MAX)?);
+        for group in selected {
+            let phase_started = Instant::now();
+            let expected_points = group.sources.iter().fold(0usize, |total, (_, meta)| {
+                total.saturating_add(meta.point_count as usize)
+            });
+            let mut points: Vec<(i64, f64)> = Vec::with_capacity(expected_points);
+            let mut input_bytes = 0u64;
+            for (_, meta) in &group.sources {
+                let bytes = self.store.read_chunk(&meta.loc)?;
+                input_bytes = input_bytes
+                    .saturating_add(bytes.ts().len() as u64)
+                    .saturating_add(bytes.val().len() as u64);
+                points.extend(Self::decode_chunk_data(meta, &bytes, i64::MIN, i64::MAX)?);
             }
             if points.is_empty() {
                 continue;
@@ -2498,23 +2636,49 @@ impl Engine {
             points.sort_unstable_by_key(|&(ts, _)| ts);
 
             let mut new_count = 0;
-            for slice in points.chunks(MAX_OUTPUT_POINTS) {
+            let mut output_bytes = 0u64;
+            for slice in points.chunks(METRICS_COMPACTION_TARGET_POINTS) {
                 let (ts, vals): (Vec<i64>, Vec<f64>) = slice.iter().copied().unzip();
-                add.push(self.encode_partition(&key, &ts, &vals, ENC_PCO, COMPACTION_LEVEL)?);
+                let encoded =
+                    self.encode_partition(&group.key, &ts, &vals, ENC_PCO, COMPACTION_LEVEL)?;
+                output_bytes = output_bytes.saturating_add(encoded.payload_bytes());
+                add.push(encoded);
                 new_count += 1;
             }
-            plans.push((key, chunks, new_count));
+            let elapsed = elapsed_ns(phase_started);
+            match group.kind {
+                MetricsCompactionKind::RawCompression => {
+                    outcome.raw_steps += 1;
+                    outcome.raw_chunks += group.sources.len() as u64;
+                    outcome.raw_points += points.len() as u64;
+                    outcome.raw_input_bytes = outcome.raw_input_bytes.saturating_add(input_bytes);
+                    outcome.raw_output_bytes =
+                        outcome.raw_output_bytes.saturating_add(output_bytes);
+                    outcome.raw_total_ns = outcome.raw_total_ns.saturating_add(elapsed);
+                }
+                MetricsCompactionKind::CompressedMerge => {
+                    outcome.merge_steps += 1;
+                    outcome.merge_chunks += group.sources.len() as u64;
+                    outcome.merge_points += points.len() as u64;
+                    outcome.merge_input_bytes =
+                        outcome.merge_input_bytes.saturating_add(input_bytes);
+                    outcome.merge_output_bytes =
+                        outcome.merge_output_bytes.saturating_add(output_bytes);
+                    outcome.merge_total_ns = outcome.merge_total_ns.saturating_add(elapsed);
+                }
+            }
+            plans.push((group, new_count));
         }
 
         if plans.is_empty() {
-            return Ok((0, 0, more));
+            return Ok(outcome);
         }
 
         // Old storage units are deletable only if no surviving
         // (non-replaced) index entry still references them.
         let removed: HashSet<ChunkKey> = plans
             .iter()
-            .flat_map(|(_, chunks, _)| chunks.iter().map(|(k, _)| *k))
+            .flat_map(|(group, _)| group.sources.iter().map(|(key, _)| *key))
             .collect();
         let deletable: Vec<ChunkLoc> = {
             let index = self.index_read();
@@ -2526,7 +2690,7 @@ impl Engine {
             let mut seen: HashSet<ChunkLoc> = HashSet::new();
             plans
                 .iter()
-                .flat_map(|(_, chunks, _)| chunks.iter().map(|(_, m)| m.loc.unit()))
+                .flat_map(|(group, _)| group.sources.iter().map(|(_, meta)| meta.loc.unit()))
                 .filter(|u| !survivors.contains(u) && seen.insert(u.clone()))
                 .collect()
         };
@@ -2547,8 +2711,8 @@ impl Engine {
         self.store.replace_chunks(&add, &deletable, &mut |locs| {
             let mut index = self.index_write();
             let mut next = 0;
-            for (key, chunks, new_count) in &plans {
-                for (chunk_key, meta) in chunks {
+            for (group, new_count) in &plans {
+                for (chunk_key, meta) in &group.sources {
                     if let Some(j) = j.as_deref_mut() {
                         if !j.added.remove(chunk_key) {
                             j.removed.push((*chunk_key, meta.clone()));
@@ -2561,7 +2725,7 @@ impl Engine {
                     // Fresh chunk_seq → the key cannot collide with any
                     // existing entry, so no shadowed-meta journaling is
                     // needed (see index_insert_new).
-                    let k = (*key, meta.min_ts, self.next_chunk_seq());
+                    let k = (group.key, meta.min_ts, self.next_chunk_seq());
                     if let Some(j) = j.as_deref_mut() {
                         j.added.insert(k);
                     }
@@ -2572,9 +2736,175 @@ impl Engine {
         })?;
         drop(j);
 
-        let series_compacted = plans.len();
-        let chunks_replaced = plans.iter().map(|(_, chunks, _)| chunks.len()).sum();
-        Ok((series_compacted, chunks_replaced, more))
+        outcome.series_compacted = plans
+            .iter()
+            .map(|(group, _)| group.key)
+            .collect::<HashSet<_>>()
+            .len();
+        outcome.chunks_replaced = plans.iter().map(|(group, _)| group.sources.len()).sum();
+        if !outcome.more {
+            // Every size-tier boundary is a real transaction boundary: only
+            // after replacements are committed can their output unlock a
+            // larger tier. A metadata-only re-plan lets a full sweep drain
+            // that next tier without merging it in the same transaction.
+            outcome.more =
+                !Self::plan_metrics_compaction(self.metrics_compaction_candidates(cutoff_ts))
+                    .is_empty();
+        }
+        self.record_metrics_compaction(&outcome);
+        Ok(outcome)
+    }
+
+    fn metrics_compaction_candidates(
+        &self,
+        cutoff_ts: i64,
+    ) -> BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> {
+        let index = self.index_read();
+        let mut candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> = BTreeMap::new();
+        for (chunk_key, meta) in index.iter() {
+            let eligible = meta.max_ts < cutoff_ts
+                && (meta.encoding == ENC_RAW
+                    || meta.point_count < METRICS_COMPACTION_TARGET_POINTS as u32);
+            if eligible {
+                candidates
+                    .entry(chunk_key.0)
+                    .or_default()
+                    .push((*chunk_key, meta.clone()));
+            }
+        }
+        candidates
+    }
+
+    fn plan_metrics_compaction(
+        candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>>,
+    ) -> Vec<MetricsCompactionGroup> {
+        let mut groups = Vec::new();
+        for (key, chunks) in candidates {
+            let (mut raw, compressed): (Vec<_>, Vec<_>) = chunks
+                .into_iter()
+                .partition(|(_, meta)| meta.encoding == ENC_RAW);
+
+            // Raw conversion is unconditional and oldest-first. Pack only raw
+            // peers up to the normal output target; an oversized source gets
+            // its own progress group and is split during encoding.
+            raw.sort_by_key(|(_, meta)| (meta.min_ts, meta.max_ts));
+            let mut current = Vec::new();
+            let mut current_points = 0usize;
+            for source in raw {
+                let points = source.1.point_count as usize;
+                if !current.is_empty()
+                    && current_points.saturating_add(points) > METRICS_COMPACTION_TARGET_POINTS
+                {
+                    groups.push(MetricsCompactionGroup {
+                        key,
+                        sources: std::mem::take(&mut current),
+                        kind: MetricsCompactionKind::RawCompression,
+                    });
+                    current_points = 0;
+                }
+                current_points = current_points.saturating_add(points);
+                current.push(source);
+            }
+            if !current.is_empty() {
+                groups.push(MetricsCompactionGroup {
+                    key,
+                    sources: current,
+                    kind: MetricsCompactionKind::RawCompression,
+                });
+            }
+
+            Self::plan_metrics_compressed_groups(key, compressed, &mut groups);
+        }
+        // First compression always wins over optional merges. Within each
+        // phase, oldest data advances first so old/backfilled series cannot be
+        // starved by a hot tail that keeps appending.
+        groups.sort_by_key(|group| {
+            (
+                group.kind,
+                group
+                    .sources
+                    .iter()
+                    .map(|(_, meta)| meta.min_ts)
+                    .min()
+                    .unwrap_or(i64::MAX),
+                group.key,
+            )
+        });
+        groups
+    }
+
+    fn plan_metrics_compressed_groups(
+        key: PartitionKey,
+        mut chunks: Vec<(ChunkKey, ChunkMeta)>,
+        groups: &mut Vec<MetricsCompactionGroup>,
+    ) {
+        chunks.sort_by_key(|(_, meta)| (meta.point_count, meta.min_ts, meta.max_ts));
+        let merge_limit = METRICS_COMPACTION_TARGET_POINTS
+            .saturating_add(METRICS_COMPACTION_TARGET_POINTS.div_ceil(4));
+        let mut current = Vec::new();
+        let mut current_points = 0usize;
+        for source in chunks {
+            let points = source.1.point_count as usize;
+            if !current.is_empty() && current_points.saturating_add(points) > merge_limit {
+                Self::push_metrics_compressed_group(key, std::mem::take(&mut current), groups);
+                current_points = 0;
+            }
+            current_points = current_points.saturating_add(points);
+            current.push(source);
+        }
+        Self::push_metrics_compressed_group(key, current, groups);
+    }
+
+    fn push_metrics_compressed_group(
+        key: PartitionKey,
+        sources: Vec<(ChunkKey, ChunkMeta)>,
+        groups: &mut Vec<MetricsCompactionGroup>,
+    ) {
+        if sources.len() < 2 {
+            return;
+        }
+        let points = sources.iter().fold(0usize, |total, (_, meta)| {
+            total.saturating_add(meta.point_count as usize)
+        });
+        let largest = sources
+            .iter()
+            .map(|(_, meta)| meta.point_count as usize)
+            .max()
+            .unwrap_or(0);
+        let minimum_fill = METRICS_COMPACTION_TARGET_POINTS.div_ceil(2);
+        if points < minimum_fill || points < largest.saturating_mul(2) {
+            return;
+        }
+        groups.push(MetricsCompactionGroup {
+            key,
+            sources,
+            kind: MetricsCompactionKind::CompressedMerge,
+        });
+    }
+
+    fn record_metrics_compaction(&self, outcome: &MetricsCompactionOutcome) {
+        for (counter, value) in [
+            (&self.compaction_raw_steps, outcome.raw_steps),
+            (&self.compaction_raw_chunks, outcome.raw_chunks),
+            (&self.compaction_raw_points, outcome.raw_points),
+            (&self.compaction_raw_input_bytes, outcome.raw_input_bytes),
+            (&self.compaction_raw_output_bytes, outcome.raw_output_bytes),
+            (&self.compaction_raw_total_ns, outcome.raw_total_ns),
+            (&self.compaction_merge_steps, outcome.merge_steps),
+            (&self.compaction_merge_chunks, outcome.merge_chunks),
+            (&self.compaction_merge_points, outcome.merge_points),
+            (
+                &self.compaction_merge_input_bytes,
+                outcome.merge_input_bytes,
+            ),
+            (
+                &self.compaction_merge_output_bytes,
+                outcome.merge_output_bytes,
+            ),
+            (&self.compaction_merge_total_ns, outcome.merge_total_ns),
+        ] {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
     }
 
     fn drain_partition_if<F>(
@@ -5281,6 +5611,20 @@ impl Engine {
             file_count,
             oldest_ts,
             newest_ts,
+            compaction_raw_steps: self.compaction_raw_steps.load(Ordering::Relaxed),
+            compaction_raw_chunks: self.compaction_raw_chunks.load(Ordering::Relaxed),
+            compaction_raw_points: self.compaction_raw_points.load(Ordering::Relaxed),
+            compaction_raw_input_bytes: self.compaction_raw_input_bytes.load(Ordering::Relaxed),
+            compaction_raw_output_bytes: self.compaction_raw_output_bytes.load(Ordering::Relaxed),
+            compaction_raw_total_ns: self.compaction_raw_total_ns.load(Ordering::Relaxed),
+            compaction_merge_steps: self.compaction_merge_steps.load(Ordering::Relaxed),
+            compaction_merge_chunks: self.compaction_merge_chunks.load(Ordering::Relaxed),
+            compaction_merge_points: self.compaction_merge_points.load(Ordering::Relaxed),
+            compaction_merge_input_bytes: self.compaction_merge_input_bytes.load(Ordering::Relaxed),
+            compaction_merge_output_bytes: self
+                .compaction_merge_output_bytes
+                .load(Ordering::Relaxed),
+            compaction_merge_total_ns: self.compaction_merge_total_ns.load(Ordering::Relaxed),
             prometheus_ingest_batches: self.prometheus_ingest_batches.load(Ordering::Relaxed),
             prometheus_ingest_points: self.prometheus_ingest_points.load(Ordering::Relaxed),
             prometheus_ingest_errors: self.prometheus_ingest_errors.load(Ordering::Relaxed),
@@ -5357,6 +5701,18 @@ pub struct EngineInfo {
     pub file_count: usize,
     pub oldest_ts: Option<i64>,
     pub newest_ts: Option<i64>,
+    pub compaction_raw_steps: u64,
+    pub compaction_raw_chunks: u64,
+    pub compaction_raw_points: u64,
+    pub compaction_raw_input_bytes: u64,
+    pub compaction_raw_output_bytes: u64,
+    pub compaction_raw_total_ns: u64,
+    pub compaction_merge_steps: u64,
+    pub compaction_merge_chunks: u64,
+    pub compaction_merge_points: u64,
+    pub compaction_merge_input_bytes: u64,
+    pub compaction_merge_output_bytes: u64,
+    pub compaction_merge_total_ns: u64,
     pub prometheus_ingest_batches: u64,
     pub prometheus_ingest_points: u64,
     pub prometheus_ingest_errors: u64,
@@ -5483,6 +5839,7 @@ mod decode_tests {
             max_ts: 1_000 + n as i64,
             max_ts_val: None,
             point_count,
+            payload_bytes: data.len() as u64,
             min_val: 0.0,
             max_val: 0.0,
             sum_val: 0.0,

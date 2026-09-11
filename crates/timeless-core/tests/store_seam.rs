@@ -24,6 +24,9 @@ impl ChunkStore for FaultyBatchStore {
         remove: &[ChunkLoc],
         on_committed: &mut dyn FnMut(&[ChunkLoc]),
     ) -> Result<Vec<ChunkLoc>, String> {
+        if self.mode.load(Ordering::SeqCst) == 3 {
+            return Err("injected compaction replacement failure".into());
+        }
         self.inner.replace_chunks(add, remove, on_committed)
     }
 
@@ -146,6 +149,68 @@ fn with_store_recovers_fs_data() {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compaction_failure_restart_and_backfill_preserve_exact_metrics() {
+    let dir = temp_dir("compact_failure_restart_backfill");
+    let mode = Arc::new(AtomicU8::new(0));
+    let labels = HashMap::new();
+    let engine = Engine::with_store(
+        Box::new(FaultyBatchStore {
+            inner: FsStore::new(dir.clone()).unwrap(),
+            mode: mode.clone(),
+        }),
+        100_000,
+        0,
+        8,
+        64 * 1024 * 1024,
+        true,
+    )
+    .unwrap();
+    let sid = engine.resolve_cached("failure_restart", &labels).unwrap();
+    for ts in 0..32_768i64 {
+        engine.write_point(sid, ts, ts as f64);
+    }
+    engine.flush_all().unwrap();
+
+    mode.store(3, Ordering::SeqCst);
+    let error = engine.compact_partitions(i64::MAX).unwrap_err();
+    assert_eq!(error, "injected compaction replacement failure");
+    let rows = engine.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
+    assert_eq!(rows.len(), 32_768);
+    assert_eq!(rows.first(), Some(&(0, 0.0)));
+    assert_eq!(rows.last(), Some(&(32_767, 32_767.0)));
+
+    mode.store(0, Ordering::SeqCst);
+    engine.compact_partitions(i64::MAX).unwrap();
+    drop(engine);
+
+    let reopened = Engine::with_store(
+        Box::new(FaultyBatchStore {
+            inner: FsStore::new(dir.clone()).unwrap(),
+            mode,
+        }),
+        100_000,
+        0,
+        8,
+        64 * 1024 * 1024,
+        true,
+    )
+    .unwrap();
+    let sid = reopened.resolve_cached("failure_restart", &labels).unwrap();
+    for ts in -1024..0i64 {
+        reopened.write_point(sid, ts, ts as f64);
+    }
+    reopened.flush_all().unwrap();
+    reopened.compact_partitions(i64::MAX).unwrap();
+
+    let rows = reopened.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
+    assert_eq!(rows.len(), 33_792);
+    assert_eq!(rows.first(), Some(&(-1024, -1024.0)));
+    assert_eq!(rows.last(), Some(&(32_767, 32_767.0)));
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

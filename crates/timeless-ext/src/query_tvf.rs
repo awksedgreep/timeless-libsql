@@ -4695,6 +4695,54 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ("ts_min", opt_ts(info.oldest_ts)),
                     ("ts_max", opt_ts(info.newest_ts)),
                     (
+                        "compaction_raw_steps",
+                        Value::Integer(info.compaction_raw_steps as i64),
+                    ),
+                    (
+                        "compaction_raw_chunks",
+                        Value::Integer(info.compaction_raw_chunks as i64),
+                    ),
+                    (
+                        "compaction_raw_points",
+                        Value::Integer(info.compaction_raw_points as i64),
+                    ),
+                    (
+                        "compaction_raw_input_bytes",
+                        Value::Integer(info.compaction_raw_input_bytes as i64),
+                    ),
+                    (
+                        "compaction_raw_output_bytes",
+                        Value::Integer(info.compaction_raw_output_bytes as i64),
+                    ),
+                    (
+                        "compaction_raw_total_ns",
+                        Value::Integer(info.compaction_raw_total_ns as i64),
+                    ),
+                    (
+                        "compaction_merge_steps",
+                        Value::Integer(info.compaction_merge_steps as i64),
+                    ),
+                    (
+                        "compaction_merge_chunks",
+                        Value::Integer(info.compaction_merge_chunks as i64),
+                    ),
+                    (
+                        "compaction_merge_points",
+                        Value::Integer(info.compaction_merge_points as i64),
+                    ),
+                    (
+                        "compaction_merge_input_bytes",
+                        Value::Integer(info.compaction_merge_input_bytes as i64),
+                    ),
+                    (
+                        "compaction_merge_output_bytes",
+                        Value::Integer(info.compaction_merge_output_bytes as i64),
+                    ),
+                    (
+                        "compaction_merge_total_ns",
+                        Value::Integer(info.compaction_merge_total_ns as i64),
+                    ),
+                    (
                         "prometheus_ingest_batches",
                         Value::Integer(info.prometheus_ingest_batches as i64),
                     ),

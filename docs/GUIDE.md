@@ -584,7 +584,8 @@ command column. All are safe to run anytime, transactional, and idempotent.
 ```sql
 INSERT INTO metrics(metrics) VALUES ('flush');      -- persist the buffer (all tables)
 INSERT INTO metrics(metrics) VALUES ('compact');    -- metrics: merge small chunks
-INSERT INTO metrics(metrics) VALUES ('compact-step:64'); -- bounded metrics maintenance
+INSERT INTO metrics(metrics) VALUES ('compact-step:64'); -- defaults: 262144 points / 4 MiB
+INSERT INTO metrics(metrics) VALUES ('compact-step:64:131072:2097152'); -- explicit ceilings
 INSERT INTO logs(logs)       VALUES ('optimize');   -- logs/traces: re-encode into
 INSERT INTO traces(traces)   VALUES ('optimize');   --   larger, better-compressed blocks
 INSERT INTO logs(logs)       VALUES ('optimize:65536'); -- bounded logs source entries
@@ -596,10 +597,13 @@ INSERT INTO traces(traces)   VALUES ('optimize:65536'); -- bounded trace source 
   blocks, which cost a little disk and read speed. Run this occasionally
   (e.g. daily, or after a big backfill) to merge them into optimally
   compressed blocks. Never required for correctness.
-- **`compact-step:<groups>`** — bounds one metrics transaction to the given
-  number of raw series and rollup groups. `last_insert_rowid()` is `1` while
-  the current sweep has more work and `0` when complete. The metrics server
-  caps each step at 64 raw series and 64 rollup groups, with a short
+- **`compact-step:<series>[:<points>:<bytes>]`** — bounds one metrics
+  transaction by source series, decoded points, and encoded payload bytes;
+  point/byte defaults are 262,144 and 4 MiB. One pre-existing oversized source
+  is allowed so legacy data cannot strand maintenance. `last_insert_rowid()`
+  is `1` while the current sweep has more work and `0` when complete. The
+  metrics server caps each step at 64 metrics series, 262,144 source points, 4 MiB of encoded
+  metrics payload, and 64 rollup groups, with a short
   reader-admission pause between commits; direct SQLite hosts should likewise
   commit between repetitions.
 - **`optimize:<entries>`** — the same optimizer with a per-call source-work

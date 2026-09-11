@@ -28,6 +28,16 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Metrics compaction is size-tiered and bounded by actual source work
+  (issue #52).** Metrics flushes now persist raw chunks for a cheap first
+  durability boundary; maintenance compresses raw peers separately from
+  compressed merges. Compressed chunks merge only when the result is at least
+  half full and at least twice the largest input, preventing each new append
+  from rewriting one growing tail. Scheduled transactions are capped at 64
+  series, 262,144 input points, and 4 MiB of encoded input, and cumulative
+  raw/merge step, chunk, point, byte, and elapsed-time counters are available
+  through `timeless_stats`, the metrics stats API, and compaction spans.
+
 - **Timeless-native HTTP errors now use one versioned contract (issue #46).**
   Native query, discovery, administration, and maintenance failures contain
   stable `error` and `reason` codes, with optional client-safe detail and no

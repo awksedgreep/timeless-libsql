@@ -199,11 +199,16 @@ previously resolved `series_id`. Use the hidden command column for:
 
 - `resolve`, supplied with `name` and optional `labels`, returns the durable
   table-scoped series id through `last_insert_rowid()`.
-- `flush` drains every series buffer into compressed chunks.
-- `compact` merges eligible metric chunks and runs declared rollups.
-- `compact-step:<groups>` performs the same maintenance for at most that many
-  raw series and that many `(rollup tier, series)` groups. It returns `1`
-  through `last_insert_rowid()` when another step remains in the current
+- `flush` drains every series buffer into raw durable chunks; scheduled or
+  explicit compaction performs the CPU-heavy first compression later.
+- `compact` drains eligible size-tiered metric work in bounded internal steps
+  and runs declared rollups.
+- `compact-step:<series>[:<points>:<bytes>]` performs one maintenance step for
+  at most that many metrics series and that many `(rollup tier, series)` groups.
+  Metrics source work also defaults to 262,144 points and 4 MiB of encoded
+  payload; the optional positive point/byte values override those ceilings.
+  One pre-existing oversized source is admitted as a progress exception. It
+  returns `1` through `last_insert_rowid()` when another step remains in the current
   cycle, otherwise `0`. Commit between repeated steps so readers and ingestion
   can enter between maintenance transactions.
 - `rollup` builds settled buckets for the declared ladder.
@@ -556,7 +561,7 @@ persists the counters in the same host transaction.
 
 | Signal | Public storage and maintenance keys |
 |---|---|
-| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
+| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `ingest_raw_bytes_total`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
 | traces | `blocks`, `raw_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `ingest_raw_bytes_total`, `duration_bounded_blocks`, `duration_unknown_blocks`, `attribute_index_fields`, `attribute_bloom_rows`, `attribute_bloom_bytes`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
 

@@ -487,7 +487,7 @@ fn metrics_query_cannot_read_deleted_location_during_compaction() {
         pause: pause.clone(),
     };
     let engine =
-        Arc::new(Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap());
+        Arc::new(Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, true).unwrap());
     let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
     engine.write_point(sid, 1, 1.0);
     engine.flush_all().unwrap();

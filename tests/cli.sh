@@ -259,9 +259,9 @@ check_eq "prune:1000000 removes expired chunks + rows" "$got" "$expected"
 
 # ---------------------------------------------------------------------------
 echo "== section 5: compact command merges chunks =="
-# Two flushes give 'net' two small pco chunks; 'compact' (POC cutoff =
-# i64::MAX) must merge them into one via ShadowTableStore.replace_chunks,
-# with the data unchanged afterwards.
+# Two flushes give 'net' two raw chunks; 'compact' (POC cutoff = i64::MAX)
+# must first-compress them together via ShadowTableStore.replace_chunks, with
+# the data unchanged afterwards.
 got=$(sqlite3 "$DB" <<SQL
 .load $EXT
 INSERT INTO metrics(name, ts, value) VALUES ('net', 3000000, 1.0);
@@ -314,6 +314,13 @@ ROLLBACK;
 SELECT 'chunks_post', COUNT(*) FROM metrics_chunks;
 SELECT 'rows_post', name, ts, value FROM metrics ORDER BY ts;
 BEGIN;
+INSERT INTO metrics(metrics) VALUES ('compact');
+SELECT 'compact_in_txn', COUNT(*) FILTER (WHERE encoding = 0) FROM metrics_chunks;
+ROLLBACK;
+SELECT 'compact_post',
+  (SELECT COUNT(*) FILTER (WHERE encoding = 1) FROM metrics_chunks),
+  COUNT(*) FROM metrics;
+BEGIN;
 INSERT INTO metrics(name, ts, value) SELECT 'big', 1000 + value, 0.5 FROM generate_series(1, 5000);
 ROLLBACK;
 SELECT 'big_post', COUNT(*) FROM metrics WHERE name = 'big';
@@ -335,6 +342,8 @@ chunks_in_txn|3
 chunks_post|1
 rows_post|base|100|1.0
 rows_post|base|200|2.0
+compact_in_txn|1
+compact_post|1|2
 big_post|0
 ok'
 check_eq "metrics rollback: buffered + intra-txn flush + auto-queue" "$got" "$expected"

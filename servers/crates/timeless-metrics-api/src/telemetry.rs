@@ -118,10 +118,72 @@ pub(crate) struct CompactionTelemetry {
     tracer: opentelemetry_sdk::trace::SdkTracer,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CompactionWork {
+    pub(crate) raw_steps: u64,
+    pub(crate) raw_chunks: u64,
+    pub(crate) raw_points: u64,
+    pub(crate) raw_input_bytes: u64,
+    pub(crate) raw_output_bytes: u64,
+    pub(crate) raw_total_ns: u64,
+    pub(crate) merge_steps: u64,
+    pub(crate) merge_chunks: u64,
+    pub(crate) merge_points: u64,
+    pub(crate) merge_input_bytes: u64,
+    pub(crate) merge_output_bytes: u64,
+    pub(crate) merge_total_ns: u64,
+}
+
+impl CompactionWork {
+    pub(crate) fn delta_from(self, before: Self) -> Self {
+        Self {
+            raw_steps: self.raw_steps.saturating_sub(before.raw_steps),
+            raw_chunks: self.raw_chunks.saturating_sub(before.raw_chunks),
+            raw_points: self.raw_points.saturating_sub(before.raw_points),
+            raw_input_bytes: self.raw_input_bytes.saturating_sub(before.raw_input_bytes),
+            raw_output_bytes: self
+                .raw_output_bytes
+                .saturating_sub(before.raw_output_bytes),
+            raw_total_ns: self.raw_total_ns.saturating_sub(before.raw_total_ns),
+            merge_steps: self.merge_steps.saturating_sub(before.merge_steps),
+            merge_chunks: self.merge_chunks.saturating_sub(before.merge_chunks),
+            merge_points: self.merge_points.saturating_sub(before.merge_points),
+            merge_input_bytes: self
+                .merge_input_bytes
+                .saturating_sub(before.merge_input_bytes),
+            merge_output_bytes: self
+                .merge_output_bytes
+                .saturating_sub(before.merge_output_bytes),
+            merge_total_ns: self.merge_total_ns.saturating_sub(before.merge_total_ns),
+        }
+    }
+
+    pub(crate) fn add(&mut self, step: Self) {
+        self.raw_steps = self.raw_steps.saturating_add(step.raw_steps);
+        self.raw_chunks = self.raw_chunks.saturating_add(step.raw_chunks);
+        self.raw_points = self.raw_points.saturating_add(step.raw_points);
+        self.raw_input_bytes = self.raw_input_bytes.saturating_add(step.raw_input_bytes);
+        self.raw_output_bytes = self.raw_output_bytes.saturating_add(step.raw_output_bytes);
+        self.raw_total_ns = self.raw_total_ns.saturating_add(step.raw_total_ns);
+        self.merge_steps = self.merge_steps.saturating_add(step.merge_steps);
+        self.merge_chunks = self.merge_chunks.saturating_add(step.merge_chunks);
+        self.merge_points = self.merge_points.saturating_add(step.merge_points);
+        self.merge_input_bytes = self
+            .merge_input_bytes
+            .saturating_add(step.merge_input_bytes);
+        self.merge_output_bytes = self
+            .merge_output_bytes
+            .saturating_add(step.merge_output_bytes);
+        self.merge_total_ns = self.merge_total_ns.saturating_add(step.merge_total_ns);
+    }
+}
+
 impl CompactionTelemetry {
     pub(crate) fn start(
         &self,
-        raw_series_budget: usize,
+        metrics_series_budget: usize,
+        metrics_point_budget: usize,
+        metrics_byte_budget: u64,
         rollup_group_budget: usize,
         reader_admission_pause: Duration,
     ) -> CompactionTrace {
@@ -134,8 +196,16 @@ impl CompactionTelemetry {
             KeyValue::new("timeless.signal", "metrics"),
             KeyValue::new("timeless.maintenance.operation", "compact_rollup"),
             KeyValue::new(
-                "timeless.compaction.raw_series_budget",
-                bounded_i64(raw_series_budget as u64),
+                "timeless.compaction.metrics_series_budget",
+                bounded_i64(metrics_series_budget as u64),
+            ),
+            KeyValue::new(
+                "timeless.compaction.metrics_input_point_budget",
+                bounded_i64(metrics_point_budget as u64),
+            ),
+            KeyValue::new(
+                "timeless.compaction.metrics_input_byte_budget",
+                bounded_i64(metrics_byte_budget),
             ),
             KeyValue::new(
                 "timeless.compaction.rollup_group_budget",
@@ -159,7 +229,13 @@ pub(crate) struct CompactionTrace {
 }
 
 impl CompactionTrace {
-    pub(crate) fn record_step(&mut self, step: u64, elapsed_ns: u64, continues: bool) {
+    pub(crate) fn record_step(
+        &mut self,
+        step: u64,
+        elapsed_ns: u64,
+        continues: bool,
+        work: CompactionWork,
+    ) {
         if elapsed_ns < duration_ns(SLOW_STEP) {
             return;
         }
@@ -173,6 +249,14 @@ impl CompactionTrace {
                     bounded_i64(elapsed_ns),
                 ),
                 KeyValue::new("timeless.compaction.step.continues", continues),
+                KeyValue::new(
+                    "timeless.compaction.step.raw_input_bytes",
+                    bounded_i64(work.raw_input_bytes),
+                ),
+                KeyValue::new(
+                    "timeless.compaction.step.merge_input_bytes",
+                    bounded_i64(work.merge_input_bytes),
+                ),
             ],
         );
     }
@@ -183,6 +267,7 @@ impl CompactionTrace {
         total_ns: u64,
         max_step_ns: u64,
         read_retries: u64,
+        work: CompactionWork,
         result: &Result<(), String>,
     ) {
         self.span.set_attributes([
@@ -196,6 +281,51 @@ impl CompactionTrace {
             KeyValue::new(
                 "timeless.compaction.api_read_retries",
                 bounded_i64(read_retries),
+            ),
+            KeyValue::new("timeless.compaction.raw.steps", bounded_i64(work.raw_steps)),
+            KeyValue::new(
+                "timeless.compaction.raw.chunks",
+                bounded_i64(work.raw_chunks),
+            ),
+            KeyValue::new(
+                "timeless.compaction.raw.points",
+                bounded_i64(work.raw_points),
+            ),
+            KeyValue::new(
+                "timeless.compaction.raw.input_bytes",
+                bounded_i64(work.raw_input_bytes),
+            ),
+            KeyValue::new(
+                "timeless.compaction.raw.output_bytes",
+                bounded_i64(work.raw_output_bytes),
+            ),
+            KeyValue::new(
+                "timeless.compaction.raw.elapsed_ns",
+                bounded_i64(work.raw_total_ns),
+            ),
+            KeyValue::new(
+                "timeless.compaction.merge.steps",
+                bounded_i64(work.merge_steps),
+            ),
+            KeyValue::new(
+                "timeless.compaction.merge.chunks",
+                bounded_i64(work.merge_chunks),
+            ),
+            KeyValue::new(
+                "timeless.compaction.merge.points",
+                bounded_i64(work.merge_points),
+            ),
+            KeyValue::new(
+                "timeless.compaction.merge.input_bytes",
+                bounded_i64(work.merge_input_bytes),
+            ),
+            KeyValue::new(
+                "timeless.compaction.merge.output_bytes",
+                bounded_i64(work.merge_output_bytes),
+            ),
+            KeyValue::new(
+                "timeless.compaction.merge.elapsed_ns",
+                bounded_i64(work.merge_total_ns),
             ),
         ]);
         match result {
@@ -255,14 +385,40 @@ mod tests {
             tracer: provider.tracer("test"),
         };
 
-        let mut trace = telemetry.start(64, 64, Duration::from_millis(10));
-        trace.record_step(1, duration_ns(Duration::from_millis(49)), true);
-        trace.record_step(2, duration_ns(Duration::from_millis(50)), true);
+        let mut trace = telemetry.start(
+            64,
+            256 * 1024,
+            4 * 1024 * 1024,
+            64,
+            Duration::from_millis(10),
+        );
+        let work = CompactionWork {
+            raw_steps: 1,
+            raw_chunks: 2,
+            raw_points: 1024,
+            raw_input_bytes: 16_384,
+            raw_output_bytes: 2048,
+            raw_total_ns: 20,
+            merge_steps: 1,
+            merge_chunks: 2,
+            merge_points: 16_384,
+            merge_input_bytes: 4096,
+            merge_output_bytes: 3072,
+            merge_total_ns: 30,
+        };
+        trace.record_step(
+            1,
+            duration_ns(Duration::from_millis(49)),
+            true,
+            CompactionWork::default(),
+        );
+        trace.record_step(2, duration_ns(Duration::from_millis(50)), true, work);
         trace.finish(
             3,
             duration_ns(Duration::from_millis(80)),
             duration_ns(Duration::from_millis(50)),
             7,
+            work,
             &Ok(()),
         );
 
@@ -281,6 +437,14 @@ mod tests {
             "timeless.compaction.api_read_retries",
             7_i64
         )));
+        assert!(spans[0].attributes.contains(&KeyValue::new(
+            "timeless.compaction.raw.input_bytes",
+            16_384_i64
+        )));
+        assert!(spans[0].attributes.contains(&KeyValue::new(
+            "timeless.compaction.merge.input_bytes",
+            4096_i64
+        )));
         assert_eq!(spans[0].status, Status::Ok);
     }
 
@@ -294,13 +458,22 @@ mod tests {
             tracer: provider.tracer("test"),
         };
 
-        telemetry.start(64, 64, Duration::from_millis(10)).finish(
-            1,
-            10,
-            10,
-            0,
-            &Err("writer unavailable".into()),
-        );
+        telemetry
+            .start(
+                64,
+                256 * 1024,
+                4 * 1024 * 1024,
+                64,
+                Duration::from_millis(10),
+            )
+            .finish(
+                1,
+                10,
+                10,
+                0,
+                CompactionWork::default(),
+                &Err("writer unavailable".into()),
+            );
 
         let spans = exporter.get_finished_spans().unwrap();
         assert_eq!(spans.len(), 1);

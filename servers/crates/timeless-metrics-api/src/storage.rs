@@ -21,12 +21,15 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
 use crate::scrape::{ScrapeController, ScrapeTargetSet, ScrapeTargetSetReport};
-use crate::telemetry::CompactionTelemetry;
+use crate::telemetry::{CompactionTelemetry, CompactionWork};
 
-/// Maximum raw series and rollup groups handled by one scheduled maintenance
-/// transaction. Production-scale compact/rollup sweeps are resumed across
-/// many commits so reads and ingestion never wait behind one full sweep.
+/// Maximum metrics series and rollup groups handled by one scheduled
+/// maintenance transaction. Production-scale compact/rollup sweeps are
+/// resumed across many commits so reads and ingestion never wait behind one
+/// full sweep.
 const COMPACT_STEP_WORK_ITEMS: usize = 64;
+const COMPACT_STEP_INPUT_POINTS: usize = 256 * 1024;
+const COMPACT_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
 /// Leave a deliberate reader-admission window between maintenance writes.
 const COMPACT_STEP_PAUSE: Duration = Duration::from_millis(10);
 
@@ -162,6 +165,18 @@ pub struct StorageStats {
     pub extension_prometheus_ingest_points: i64,
     pub extension_prometheus_ingest_errors: i64,
     pub extension_prometheus_ingest_total_ns: i64,
+    pub extension_compaction_raw_steps: i64,
+    pub extension_compaction_raw_chunks: i64,
+    pub extension_compaction_raw_points: i64,
+    pub extension_compaction_raw_input_bytes: i64,
+    pub extension_compaction_raw_output_bytes: i64,
+    pub extension_compaction_raw_total_ns: i64,
+    pub extension_compaction_merge_steps: i64,
+    pub extension_compaction_merge_chunks: i64,
+    pub extension_compaction_merge_points: i64,
+    pub extension_compaction_merge_input_bytes: i64,
+    pub extension_compaction_merge_output_bytes: i64,
+    pub extension_compaction_merge_total_ns: i64,
     pub extension_raw_batch_query_count: i64,
     pub extension_raw_batch_query_total_ns: i64,
     pub extension_raw_batch_query_series_considered: i64,
@@ -312,7 +327,7 @@ enum WriteCommand {
         explicit: bool,
         reply: oneshot::Sender<Result<FlushReport, String>>,
     },
-    CompactStep(oneshot::Sender<(Result<bool, String>, u64)>),
+    CompactStep(oneshot::Sender<(Result<CompactStepResult, String>, u64)>),
     Prune {
         cutoff_seconds: i64,
         reply: oneshot::Sender<Result<(), String>>,
@@ -323,6 +338,11 @@ enum WriteCommand {
     },
     WalCheckpoint(oneshot::Sender<Result<(), String>>),
     Shutdown(oneshot::Sender<Result<(), String>>),
+}
+
+struct CompactStepResult {
+    more: bool,
+    work: CompactionWork,
 }
 
 enum ReadCommand {
@@ -763,6 +783,8 @@ impl Storage {
         let mut trace = telemetry.map(|telemetry| {
             telemetry.start(
                 COMPACT_STEP_WORK_ITEMS,
+                COMPACT_STEP_INPUT_POINTS,
+                COMPACT_STEP_INPUT_BYTES,
                 COMPACT_STEP_WORK_ITEMS,
                 COMPACT_STEP_PAUSE,
             )
@@ -770,6 +792,7 @@ impl Storage {
         let mut steps = 0_u64;
         let mut total_ns = 0_u64;
         let mut step_max_ns = 0_u64;
+        let mut work = CompactionWork::default();
         let result = loop {
             let (reply_tx, reply_rx) = oneshot::channel();
             if self
@@ -790,13 +813,22 @@ impl Storage {
             steps = steps.saturating_add(1);
             total_ns = total_ns.saturating_add(step_ns);
             step_max_ns = step_max_ns.max(step_ns);
+            if let Ok(step) = &step {
+                work.add(step.work);
+            }
             if let Some(trace) = trace.as_mut() {
-                trace.record_step(steps, step_ns, matches!(step, Ok(true)));
+                trace.record_step(
+                    steps,
+                    step_ns,
+                    step.as_ref().is_ok_and(|step| step.more),
+                    step.as_ref()
+                        .map_or_else(|_| CompactionWork::default(), |step| step.work),
+                );
             }
             match step {
                 Err(error) => break Err(error),
-                Ok(false) => break Ok(()),
-                Ok(true) => tokio::time::sleep(COMPACT_STEP_PAUSE).await,
+                Ok(step) if !step.more => break Ok(()),
+                Ok(_) => tokio::time::sleep(COMPACT_STEP_PAUSE).await,
             }
         };
         record_compaction(&self.0.profile, steps, total_ns, step_max_ns, &result);
@@ -804,7 +836,7 @@ impl Storage {
             let read_retries = profile_lock(&self.0.profile)
                 .read_retries
                 .saturating_sub(read_retries_before);
-            trace.finish(steps, total_ns, step_max_ns, read_retries, &result);
+            trace.finish(steps, total_ns, step_max_ns, read_retries, work, &result);
         }
         result
     }
@@ -1173,15 +1205,23 @@ fn writer_main(
             }
             WriteCommand::CompactStep(reply) => {
                 let started = Instant::now();
-                let result =
-                    run_compact_step(&conn, table, COMPACT_STEP_WORK_ITEMS).and_then(|more| {
-                        if cleanup_rollups {
-                            run_clear_rollup_step(&conn, table, COMPACT_STEP_WORK_ITEMS)
-                                .map(|clear_more| more || clear_more)
-                        } else {
-                            Ok(more)
-                        }
-                    });
+                let result = compaction_work(&conn, table).and_then(|before| {
+                    run_compact_step(&conn, table, COMPACT_STEP_WORK_ITEMS)
+                        .and_then(|more| {
+                            if cleanup_rollups {
+                                run_clear_rollup_step(&conn, table, COMPACT_STEP_WORK_ITEMS)
+                                    .map(|clear_more| more || clear_more)
+                            } else {
+                                Ok(more)
+                            }
+                        })
+                        .and_then(|more| {
+                            compaction_work(&conn, table).map(|after| CompactStepResult {
+                                more,
+                                work: after.delta_from(before),
+                            })
+                        })
+                });
                 let _ = reply.send((result, elapsed_ns(started)));
             }
             WriteCommand::Prune {
@@ -1597,7 +1637,8 @@ fn run_compact_step(
     table: MetricsTable,
     work_items: usize,
 ) -> Result<bool, String> {
-    let command = format!("compact-step:{work_items}");
+    let command =
+        format!("compact-step:{work_items}:{COMPACT_STEP_INPUT_POINTS}:{COMPACT_STEP_INPUT_BYTES}");
     run_continuation_command(conn, table, &command, "run bounded metrics compaction")
 }
 
@@ -1692,6 +1733,18 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
         extension_prometheus_ingest_points: integer("prometheus_ingest_points"),
         extension_prometheus_ingest_errors: integer("prometheus_ingest_errors"),
         extension_prometheus_ingest_total_ns: integer("prometheus_ingest_total_ns"),
+        extension_compaction_raw_steps: integer("compaction_raw_steps"),
+        extension_compaction_raw_chunks: integer("compaction_raw_chunks"),
+        extension_compaction_raw_points: integer("compaction_raw_points"),
+        extension_compaction_raw_input_bytes: integer("compaction_raw_input_bytes"),
+        extension_compaction_raw_output_bytes: integer("compaction_raw_output_bytes"),
+        extension_compaction_raw_total_ns: integer("compaction_raw_total_ns"),
+        extension_compaction_merge_steps: integer("compaction_merge_steps"),
+        extension_compaction_merge_chunks: integer("compaction_merge_chunks"),
+        extension_compaction_merge_points: integer("compaction_merge_points"),
+        extension_compaction_merge_input_bytes: integer("compaction_merge_input_bytes"),
+        extension_compaction_merge_output_bytes: integer("compaction_merge_output_bytes"),
+        extension_compaction_merge_total_ns: integer("compaction_merge_total_ns"),
         extension_raw_batch_query_count: integer("raw_batch_query_count"),
         extension_raw_batch_query_total_ns: integer("raw_batch_query_total_ns"),
         extension_raw_batch_query_series_considered: integer("raw_batch_query_series_considered"),
@@ -1740,6 +1793,31 @@ fn stat_values(
         values.insert(key, value);
     }
     Ok(values)
+}
+
+fn compaction_work(conn: &Connection, table: MetricsTable) -> Result<CompactionWork, String> {
+    let values = stat_values(conn, table)?;
+    let counter = |key: &str| -> u64 {
+        match values.get(key) {
+            Some(SqlValue::Integer(value)) => (*value).max(0) as u64,
+            Some(SqlValue::Real(value)) => (*value).max(0.0) as u64,
+            _ => 0,
+        }
+    };
+    Ok(CompactionWork {
+        raw_steps: counter("compaction_raw_steps"),
+        raw_chunks: counter("compaction_raw_chunks"),
+        raw_points: counter("compaction_raw_points"),
+        raw_input_bytes: counter("compaction_raw_input_bytes"),
+        raw_output_bytes: counter("compaction_raw_output_bytes"),
+        raw_total_ns: counter("compaction_raw_total_ns"),
+        merge_steps: counter("compaction_merge_steps"),
+        merge_chunks: counter("compaction_merge_chunks"),
+        merge_points: counter("compaction_merge_points"),
+        merge_input_bytes: counter("compaction_merge_input_bytes"),
+        merge_output_bytes: counter("compaction_merge_output_bytes"),
+        merge_total_ns: counter("compaction_merge_total_ns"),
+    })
 }
 
 fn optional_integer(value: Option<&SqlValue>) -> Option<i64> {

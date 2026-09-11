@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use timeless_core::{
     ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, Engine,
@@ -49,6 +49,7 @@ impl ChunkStore for MemChunkStore {
                 max_ts: cp.max_ts,
                 max_ts_val: Some(cp.max_ts_val),
                 point_count: cp.point_count,
+                payload_bytes: (cp.ts_bytes.len() + cp.val_bytes.len()) as u64,
                 min_val: cp.min_val,
                 max_val: cp.max_val,
                 sum_val: cp.sum_val,
@@ -152,6 +153,7 @@ impl ChunkStore for MemChunkStore {
                 max_ts: cp.max_ts,
                 max_ts_val: None,
                 point_count: cp.bucket_count,
+                payload_bytes: cp.payload.len() as u64,
                 min_val: 0.0,
                 max_val: 0.0,
                 sum_val: 0.0,
@@ -186,6 +188,58 @@ impl ChunkStore for MemChunkStore {
     fn sweep_cache(&self) {}
 }
 
+#[derive(Clone)]
+struct SharedMemChunkStore(Arc<MemChunkStore>);
+
+impl ChunkStore for SharedMemChunkStore {
+    fn put_chunks(&self, chunks: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String> {
+        self.0.put_chunks(chunks)
+    }
+
+    fn replace_chunks(
+        &self,
+        add: &[EncodedChunk],
+        remove: &[ChunkLoc],
+        on_committed: &mut dyn FnMut(&[ChunkLoc]),
+    ) -> Result<Vec<ChunkLoc>, String> {
+        self.0.replace_chunks(add, remove, on_committed)
+    }
+
+    fn read_chunk(&self, loc: &ChunkLoc) -> Result<ChunkBytes, String> {
+        self.0.read_chunk(loc)
+    }
+
+    fn delete_chunks(&self, locs: &[ChunkLoc]) -> Vec<String> {
+        self.0.delete_chunks(locs)
+    }
+
+    fn scan(&self) -> Result<Vec<StoredChunk>, String> {
+        self.0.scan()
+    }
+
+    fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
+        self.0.scan_rollups()
+    }
+
+    fn put_rollup_chunks(&self, chunks: &[EncodedRollupChunk]) -> Result<Vec<ChunkLoc>, String> {
+        self.0.put_rollup_chunks(chunks)
+    }
+
+    fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
+        self.0.save_registry(bytes)
+    }
+
+    fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
+        self.0.load_registry()
+    }
+
+    fn storage_stats(&self) -> (u64, usize) {
+        self.0.storage_stats()
+    }
+
+    fn sweep_cache(&self) {}
+}
+
 fn new_engine(store: Box<dyn ChunkStore>) -> Engine {
     Engine::with_store(store, 1_000_000, 0, 3, 64 << 20, false).unwrap()
 }
@@ -194,51 +248,34 @@ fn labels() -> HashMap<String, String> {
     HashMap::new()
 }
 
+fn compressed_chunk(series_id: i64, start_ts: i64, point_count: usize) -> EncodedChunk {
+    let timestamps: Vec<i64> = (0..point_count)
+        .map(|offset| start_ts + offset as i64)
+        .collect();
+    let values: Vec<f64> = timestamps
+        .iter()
+        .map(|timestamp| *timestamp as f64)
+        .collect();
+    let config = pco::ChunkConfig::default();
+    EncodedChunk {
+        series_id,
+        min_ts: timestamps[0],
+        max_ts: *timestamps.last().unwrap(),
+        max_ts_val: *values.last().unwrap(),
+        point_count: point_count as u32,
+        min_val: values[0],
+        max_val: *values.last().unwrap(),
+        sum_val: values.iter().sum(),
+        encoding: timeless_core::store::ENC_PCO,
+        ts_bytes: pco::standalone::simple_compress(&timestamps, &config).unwrap(),
+        val_bytes: pco::standalone::simple_compress(&values, &config).unwrap(),
+    }
+}
+
 #[test]
 fn rollup_produce_query_watermark_retention() {
-    let store = std::sync::Arc::new(MemChunkStore::new());
-
-    struct Shared(std::sync::Arc<MemChunkStore>);
-    impl ChunkStore for Shared {
-        fn put_chunks(&self, c: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String> {
-            self.0.put_chunks(c)
-        }
-        fn replace_chunks(
-            &self,
-            a: &[EncodedChunk],
-            r: &[ChunkLoc],
-            f: &mut dyn FnMut(&[ChunkLoc]),
-        ) -> Result<Vec<ChunkLoc>, String> {
-            self.0.replace_chunks(a, r, f)
-        }
-        fn read_chunk(&self, l: &ChunkLoc) -> Result<ChunkBytes, String> {
-            self.0.read_chunk(l)
-        }
-        fn delete_chunks(&self, l: &[ChunkLoc]) -> Vec<String> {
-            self.0.delete_chunks(l)
-        }
-        fn scan(&self) -> Result<Vec<StoredChunk>, String> {
-            self.0.scan()
-        }
-        fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
-            self.0.scan_rollups()
-        }
-        fn put_rollup_chunks(&self, c: &[EncodedRollupChunk]) -> Result<Vec<ChunkLoc>, String> {
-            self.0.put_rollup_chunks(c)
-        }
-        fn save_registry(&self, b: &[u8]) -> Result<(), String> {
-            self.0.save_registry(b)
-        }
-        fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
-            self.0.load_registry()
-        }
-        fn storage_stats(&self) -> (u64, usize) {
-            self.0.storage_stats()
-        }
-        fn sweep_cache(&self) {}
-    }
-
-    let engine = new_engine(Box::new(Shared(store.clone())));
+    let store = Arc::new(MemChunkStore::new());
+    let engine = new_engine(Box::new(SharedMemChunkStore(store.clone())));
     engine.set_rollups(vec![
         RollupTier {
             resolution: 60,
@@ -278,7 +315,7 @@ fn rollup_produce_query_watermark_retention() {
     assert_eq!(engine.rollup().unwrap(), (0, 0));
 
     // Recovery: a fresh engine over the same store sees the same buckets.
-    let engine2 = new_engine(Box::new(Shared(store.clone())));
+    let engine2 = new_engine(Box::new(SharedMemChunkStore(store.clone())));
     assert_eq!(
         engine2.info().rollup_chunk_count,
         chunks,
@@ -342,7 +379,15 @@ fn rollup_produce_query_watermark_retention() {
 
 #[test]
 fn bounded_metrics_maintenance_drains_across_commit_sized_steps() {
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
     let series_ids: Vec<i64> = (0..3)
         .map(|number| {
             engine
@@ -351,8 +396,9 @@ fn bounded_metrics_maintenance_drains_across_commit_sized_steps() {
         })
         .collect();
 
-    // Two flushes leave two small PCO chunks per series, making all three
-    // series eligible for compaction without relying on raw encoding.
+    // Two flushes leave two raw chunks per series. Raw conversion is always
+    // actionable even though these tiny groups are intentionally too small
+    // for a later compressed merge.
     for epoch in 0..2 {
         for &series_id in &series_ids {
             for offset in 0..10 {
@@ -418,6 +464,199 @@ fn bounded_metrics_maintenance_drains_across_commit_sized_steps() {
                 .unwrap()
                 .is_empty(),
             "each series is visited across the bounded rollup cycle"
+        );
+    }
+}
+
+#[test]
+fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail() {
+    const ROUNDS: usize = 64;
+    const POINTS_PER_ROUND: usize = 1024;
+
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_id = engine.resolve_cached("tiered", &labels()).unwrap();
+    let mut previous_merge_points = 0u64;
+
+    for round in 0..ROUNDS {
+        for offset in 0..POINTS_PER_ROUND {
+            let ts = (round * POINTS_PER_ROUND + offset) as i64;
+            engine.write_point(series_id, ts, ts as f64);
+        }
+        engine.flush_all().unwrap();
+
+        loop {
+            let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+            if !more {
+                break;
+            }
+        }
+
+        let expected = (round + 1) * POINTS_PER_ROUND;
+        let points = engine
+            .query_range_by_id(series_id, i64::MIN, i64::MAX)
+            .unwrap();
+        assert_eq!(points.len(), expected);
+        assert_eq!(points.first().unwrap().0, 0);
+        assert_eq!(points.last().unwrap().0, expected as i64 - 1);
+
+        let info = engine.info();
+        let merge_points = info
+            .compaction_merge_points
+            .saturating_sub(previous_merge_points);
+        assert!(
+            merge_points <= timeless_core::METRICS_COMPACTION_TARGET_POINTS as u64,
+            "one fixed append rewrote {merge_points} compressed points"
+        );
+        previous_merge_points = info.compaction_merge_points;
+    }
+
+    let ingested = (ROUNDS * POINTS_PER_ROUND) as u64;
+    let info = engine.info();
+    assert_eq!(info.compaction_raw_points, ingested);
+    assert_eq!(info.compaction_raw_input_bytes, ingested * 16);
+    assert!(info.compaction_raw_output_bytes < info.compaction_raw_input_bytes);
+    assert_eq!(info.compaction_merge_points, ingested + ingested / 2);
+    assert!(info.compaction_merge_input_bytes > 0);
+    assert!(info.compaction_merge_output_bytes > 0);
+    assert_eq!(
+        engine
+            .query_range_by_id(series_id, i64::MIN, i64::MAX)
+            .unwrap()
+            .len(),
+        ingested as usize
+    );
+}
+
+#[test]
+fn compressed_merge_reports_a_newly_unlocked_next_tier() {
+    const CHUNKS: usize = 6;
+    const POINTS_PER_CHUNK: usize = 8 * 1024;
+    // Five equal peers fill the planner's 125%-of-target group. Its 40K
+    // replacement splits into 32K + 8K; that remainder and the sixth 8K
+    // source form a newly actionable tier only after the first swap commits.
+    let store = Arc::new(MemChunkStore::new());
+    let registry_engine = Engine::with_store(
+        Box::new(SharedMemChunkStore(store.clone())),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_id = registry_engine
+        .resolve_cached("cascade", &labels())
+        .unwrap();
+    registry_engine.flush_all().unwrap();
+    drop(registry_engine);
+    let chunks: Vec<_> = (0..CHUNKS)
+        .map(|chunk| {
+            compressed_chunk(
+                series_id,
+                (chunk * POINTS_PER_CHUNK) as i64,
+                POINTS_PER_CHUNK,
+            )
+        })
+        .collect();
+    store.put_chunks(&chunks).unwrap();
+    let engine = Engine::with_store(
+        Box::new(SharedMemChunkStore(store)),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+
+    let (_, first_sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+    assert_eq!(first_sources, 5);
+    assert!(more, "the committed 8K remainder unlocks another tier");
+
+    let (_, second_sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+    assert_eq!(second_sources, 2);
+    assert!(!more);
+    let info = engine.info();
+    assert_eq!(info.compaction_merge_steps, 2);
+    assert_eq!(
+        info.compaction_merge_points,
+        (5 * POINTS_PER_CHUNK + 2 * POINTS_PER_CHUNK) as u64
+    );
+    assert_eq!(
+        engine
+            .query_range_by_id(series_id, i64::MIN, i64::MAX)
+            .unwrap()
+            .len(),
+        CHUNKS * POINTS_PER_CHUNK
+    );
+}
+
+#[test]
+fn bounded_metrics_compaction_caps_each_transaction_by_input_points_and_bytes() {
+    const SERIES: usize = 9;
+    const POINTS: usize = timeless_core::METRICS_COMPACTION_TARGET_POINTS;
+
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        128 << 20,
+        true,
+    )
+    .unwrap();
+    let series_ids: Vec<_> = (0..SERIES)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("budget_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    for &series_id in &series_ids {
+        for offset in 0..POINTS {
+            engine.write_point(series_id, offset as i64, offset as f64);
+        }
+    }
+    engine.flush_all().unwrap();
+
+    let before = engine.info();
+    let (series, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+    let after = engine.info();
+    assert_eq!(series, 8, "point budget should admit eight target groups");
+    assert!(more);
+    assert_eq!(
+        after.compaction_raw_points - before.compaction_raw_points,
+        timeless_core::METRICS_COMPACTION_STEP_INPUT_POINTS as u64
+    );
+    assert_eq!(
+        after.compaction_raw_input_bytes - before.compaction_raw_input_bytes,
+        timeless_core::METRICS_COMPACTION_STEP_INPUT_BYTES
+    );
+
+    let before = after;
+    let (series, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+    let after = engine.info();
+    assert_eq!(series, 1);
+    assert!(!more);
+    assert_eq!(
+        after.compaction_raw_points - before.compaction_raw_points,
+        POINTS as u64
+    );
+    for series_id in series_ids {
+        assert_eq!(
+            engine
+                .query_range_by_id(series_id, i64::MIN, i64::MAX)
+                .unwrap()
+                .len(),
+            POINTS
         );
     }
 }

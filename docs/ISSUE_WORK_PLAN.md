@@ -16,7 +16,7 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 | 2 | [#49](https://github.com/awksedgreep/timeless-libsql/issues/49) LogsQL cancellation-counter flake | P1 | done | The `replace`/`replace_regexp` cancellation regression now reaches reader-owned work before asserting the counter; 20 consecutive focused runs and all 93 logs real-extension tests pass. |
 | 3 | [#48](https://github.com/awksedgreep/timeless-libsql/issues/48) WriterGate pointer ABA | P1 | done | Writer/read ownership now uses a generation-stamped connection identity; the synthetic pointer-reuse regression proves the later connection cannot re-enter, read through, or release the leaked holder. |
 | 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | externally pending | Repository work is complete: native JSON error contract v1 is implemented and tested without changing Prometheus/MetricsQL, Jaeger, OTLP, or Victoria-compatible ingest shapes. Post the reconciliation evidence to the issue and close it. |
-| 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | pending | First establish the repeated-arrival growth curve and phase byte counters, then implement and verify byte-bounded, size-tiered raw conversion and compressed merges. |
+| 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | externally pending | Repository work is complete: the planner, hard source-work budgets, phase counters, correctness fixtures, full gates, and production-shaped release curve are recorded. Post the evidence to the issue and close it. |
 | 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | pending | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested. |
 | 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | pending | Add bounded maintenance summary spans and prove trace ingest/export cannot recurse. |
 | 8 | [#54](https://github.com/awksedgreep/timeless-libsql/issues/54) request and contention tracing | P3 | pending | Add sampled, redacted, cardinality-bounded request spans with measured disabled/enabled overhead and nonblocking export. |
@@ -140,6 +140,33 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
   real-extension metrics lifecycle/discovery/timeout and logs backup tests;
   the signal lifecycle test with its required signal permission; formatting;
   and common/metrics/logs/traces clippy with warnings denied.
+
+## Issue #52 execution checklist
+
+- [x] Make first compression explicit: metrics flushes persist raw payloads,
+  and compaction groups raw chunks only with raw peers.
+- [x] Replace append-to-tail merging with size tiers. Compressed groups must
+  be at least half the 32,768-point target and at least twice their largest
+  source.
+- [x] Carry exact encoded payload bytes in chunk metadata across SQLite and
+  filesystem reopen; plan without pre-reading blobs.
+- [x] Cap each scheduled metrics transaction at 64 series, 262,144 source
+  points, and 4 MiB encoded input (with a one-source progress exception), then
+  retain the existing reader-admission pause.
+- [x] Expose raw/merge step, chunk, point, input/output byte, and elapsed-time
+  counters through `timeless_stats`, server stats, and the compaction span.
+- [x] Pin the repeated-arrival curve: 64 fixed 1,024-point append/compact
+  rounds rewrite at most 32,768 compressed points in any round and 1.5x
+  points cumulatively, with exact query results after every round.
+- [x] Cover reader publication, restart, late/backfilled data, injected store
+  failure, and host-transaction rollback without changing query results.
+- [x] Run the production-shaped 320-series release harness with fixed
+  prebuilt payloads; record active-sweep/per-step latency, raw/merge bytes,
+  and RSS by tier, separately from ingest pacing. Evidence:
+  `docs/evidence/2026-09-10_metrics_size_tiered_compaction.md`.
+- [x] Run complete root/server/shell/query-oracle gates and publish the
+  benchmark artifact.
+- [ ] Update GitHub issue #52 with the reconciliation evidence and close it.
 
 ## Tracker reconciliation
 

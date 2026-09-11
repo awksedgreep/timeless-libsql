@@ -697,6 +697,7 @@ impl FsStore {
 
     fn read_pco1_header(path: &PathBuf) -> Result<Vec<StoredChunk>, String> {
         let mut file = File::open(path).map_err(|e| e.to_string())?;
+        let file_len = file.metadata().map_err(|e| e.to_string())?.len();
         let fixed = read_exact_at(&mut file, 0, 31)?;
         if &fixed[0..4] != b"PCO1" {
             return Err("invalid".into());
@@ -745,7 +746,7 @@ impl FsStore {
             // + 24 bytes of value stats, then both columns length-prefixed
             // with exactly point_count × 8 bytes each.
             let expected_len = 59 + pk_len + point_count as usize * 16;
-            let actual_len = file.metadata().map_err(|e| e.to_string())?.len() as usize;
+            let actual_len = file_len as usize;
             if actual_len != expected_len {
                 return Err(format!(
                     "PCO1 RAW file is {actual_len} bytes, expected {expected_len} \
@@ -761,6 +762,7 @@ impl FsStore {
                 max_ts,
                 max_ts_val: None,
                 point_count,
+                payload_bytes: file_len.saturating_sub((59 + pk_len) as u64),
                 min_val,
                 max_val,
                 sum_val,
@@ -826,11 +828,18 @@ impl FsStore {
                     "PCB1 table entry has inverted ts range [{min_ts}, {max_ts}]"
                 ));
             }
-            if encoding == ENC_RAW && data_len != point_count * 16 {
-                return Err(format!(
-                    "PCB1 RAW entry is {data_len} bytes, expected {} for {point_count} points",
-                    point_count * 16
-                ));
+            if encoding == ENC_RAW {
+                // Each PCB1 slot includes two u32 column-length prefixes in
+                // addition to the exact 16-byte RAW point payload.
+                let expected_len = point_count
+                    .checked_mul(16)
+                    .and_then(|bytes| bytes.checked_add(8))
+                    .ok_or_else(|| "PCB1 RAW entry length overflow".to_string())?;
+                if data_len != expected_len {
+                    return Err(format!(
+                        "PCB1 RAW entry is {data_len} bytes, expected {expected_len} for {point_count} points"
+                    ));
+                }
             }
             results.push(StoredChunk {
                 series_id,
@@ -839,6 +848,7 @@ impl FsStore {
                     max_ts,
                     max_ts_val: None,
                     point_count,
+                    payload_bytes: data_len.saturating_sub(8) as u64,
                     min_val,
                     max_val,
                     sum_val,
@@ -1115,6 +1125,31 @@ mod tests {
             ts_bytes: ts.to_be_bytes().to_vec(),
             val_bytes: (ts as f64).to_be_bytes().to_vec(),
         }
+    }
+
+    #[test]
+    fn raw_batch_reopens_without_quarantine() {
+        let dir = temp_dir("raw-batch-reopen");
+        let store = FsStore::new(dir.clone()).unwrap();
+        store
+            .put_chunks(&[raw_chunk(7, 1_000), raw_chunk(8, 2_000)])
+            .unwrap();
+        drop(store);
+
+        let reopened = FsStore::new(dir.clone()).unwrap();
+        let mut chunks = reopened.scan().unwrap();
+        chunks.sort_by_key(|chunk| chunk.series_id);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(reopened.quarantined_file_count(), 0);
+        for (chunk, expected_ts) in chunks.iter().zip([1_000i64, 2_000]) {
+            assert_eq!(chunk.meta.encoding, ENC_RAW);
+            assert_eq!(chunk.meta.payload_bytes, 16);
+            let bytes = reopened.read_chunk(&chunk.meta.loc).unwrap();
+            assert_eq!(bytes.ts(), expected_ts.to_be_bytes());
+            assert_eq!(bytes.val(), (expected_ts as f64).to_be_bytes());
+        }
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
