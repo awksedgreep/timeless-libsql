@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-api-common"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-authctl"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-logs-api"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-metrics-api"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "axum",
  "bytes",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "timeless-traces-api"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
