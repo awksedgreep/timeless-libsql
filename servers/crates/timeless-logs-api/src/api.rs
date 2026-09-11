@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::rejection::{FormRejection, QueryRejection};
+use axum::extract::rejection::{FormRejection, JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Extension, Form, Query, State};
 use axum::http::{header, Response, StatusCode};
 use axum::response::IntoResponse;
@@ -16,8 +16,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use timeless_api_common::{
-    build_info, server_build_identity, BackupRequest, Exposition, PROMETHEUS_CONTENT_TYPE,
-    RESULT_ROWS_HEADER,
+    build_info, native_error, native_internal_error, server_build_identity, BackupRequest,
+    Exposition, PROMETHEUS_CONTENT_TYPE, RESULT_ROWS_HEADER,
 };
 
 use crate::logsql::{self, LogsqlError, LogsqlErrorKind, LogsqlOutput, LogsqlPlan};
@@ -102,7 +102,7 @@ async fn health(State(storage): State<Storage>) -> impl IntoResponse {
             })),
         )
             .into_response(),
-        Err(error) => server_error(error),
+        Err(error) => server_error("stats_execution", error),
     }
 }
 
@@ -274,7 +274,7 @@ async fn self_metrics(State(storage): State<Storage>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(error) => server_error(error),
+        Err(error) => compatibility_server_error(error),
     }
 }
 
@@ -304,7 +304,7 @@ async fn ingest(
             Json(json!({"entries": count, "errors": errors})),
         )
             .into_response(),
-        Err(error) => server_error(error),
+        Err(error) => compatibility_server_error(error),
     }
 }
 
@@ -420,7 +420,7 @@ async fn field_values(
                 Err(BoundedJsonError::Limit) => {
                     query_limit_error("max_response_bytes", limits.max_response_bytes)
                 }
-                Err(BoundedJsonError::Encode(error)) => server_error(error),
+                Err(BoundedJsonError::Encode(error)) => server_error("query_execution", error),
             }
         }
     }
@@ -488,7 +488,7 @@ async fn tail(storage: Storage, limits: LogsQueryLimits, form: QueryForm) -> Res
     if let Err(error) =
         resolve_query_backed_predicate(&storage, &mut predicate, &mut resolution).await
     {
-        return server_error(error);
+        return server_error("query_execution", error);
     }
     let predicate = match predicate {
         crate::LogPredicate::True => None,
@@ -1031,7 +1031,7 @@ async fn query_post(
                     Err(BoundedJsonError::Limit) => {
                         query_limit_error("max_response_bytes", execution_limits.max_response_bytes)
                     }
-                    Err(BoundedJsonError::Encode(error)) => server_error(error),
+                    Err(BoundedJsonError::Encode(error)) => server_error("query_execution", error),
                 }
             }
         }
@@ -1083,7 +1083,7 @@ async fn pipeline_response(
             return if body.exceeded {
                 query_limit_error("max_response_bytes", limits.max_response_bytes)
             } else {
-                server_error("encode LogsQL pipeline response".into())
+                server_error("query_execution", "encode LogsQL pipeline response".into())
             };
         }
     }
@@ -1133,7 +1133,7 @@ async fn query_response(
                     Err(_) if body.exceeded => {
                         return query_limit_error("max_response_bytes", limits.max_response_bytes)
                     }
-                    Err(error) => return server_error(error),
+                    Err(error) => return server_error("query_execution", error),
                 }
             }
             let body = body.into_inner();
@@ -1146,32 +1146,40 @@ async fn query_response(
 async fn stats(State(storage): State<Storage>) -> impl IntoResponse {
     match storage.stats().await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
-        Err(error) => server_error(error),
+        Err(error) => server_error("stats_execution", error),
     }
 }
 
 async fn flush(State(storage): State<Storage>) -> impl IntoResponse {
     match storage.flush().await {
         Ok(()) => (StatusCode::OK, Json(json!({"status": "ok"}))).into_response(),
-        Err(error) => server_error(error),
+        Err(error) => server_error("flush_execution", error),
     }
 }
 
 async fn backup(
     State(storage): State<Storage>,
-    Json(request): Json<BackupRequest>,
+    request: Result<Json<BackupRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(_) => {
+            return native_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid_json_body",
+            )
+        }
+    };
     match storage.backup(request.destination).await {
         Ok(report) => (StatusCode::OK, Json(report)).into_response(),
         // A backup is already occupying the writer. That is a transient
         // conflict the caller can retry, not an internal fault, so it must
         // not be flattened into 500 by the generic error path.
-        Err(error) if error == timeless_api_common::BACKUP_IN_PROGRESS => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "conflict", "reason": error})),
-        )
-            .into_response(),
-        Err(error) => server_error(error),
+        Err(error) if error == timeless_api_common::BACKUP_IN_PROGRESS => {
+            native_error(StatusCode::CONFLICT, "conflict", "backup_in_progress")
+        }
+        Err(error) => server_error("backup_execution", error),
     }
 }
 
@@ -1184,12 +1192,14 @@ fn ndjson_response(body: Vec<u8>, rows: usize) -> Response<Body> {
         .unwrap()
 }
 
-fn server_error(error: String) -> Response<Body> {
-    // Storage and SQLite internals must not reach clients (table/TVF
-    // names, file paths, busy-state detail): log server-side and return
-    // a stable envelope. This crate has no tracing dependency; the
-    // binary's stderr is the log sink.
-    eprintln!("timeless-logs-api: internal error: {error}");
+fn server_error(reason: &'static str, error: String) -> Response<Body> {
+    native_internal_error("logs", reason, error)
+}
+
+/// VictoriaLogs-compatible ingest and Prometheus self-metrics keep their
+/// established response shape.
+fn compatibility_server_error(error: String) -> Response<Body> {
+    eprintln!("timeless-logs-api: compatibility endpoint internal error: {error}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"error": "internal"})),
@@ -1361,12 +1371,7 @@ fn query_execution_error(error: String) -> Response<Body> {
     // The request reached the query executor, so distinguish this stable
     // server-fault class from malformed LogsQL without exposing SQLite
     // details, file paths, stored values, or other internals.
-    eprintln!("timeless-logs-api: internal query execution error: {error}");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "internal", "reason": "query_execution"})),
-    )
-        .into_response()
+    server_error("query_execution", error)
 }
 
 type QueryLimit = (&'static str, usize);
@@ -1901,6 +1906,26 @@ mod tests {
         assert_eq!(internal_body["error"], "internal");
         assert_eq!(internal_body["reason"], "query_execution");
         assert!(!internal_body.to_string().contains("/secret/customer.db"));
+    }
+
+    #[tokio::test]
+    async fn native_handler_errors_include_a_stable_operation_reason() {
+        let response = server_error(
+            "stats_execution",
+            "open /secret/customer.db: permission denied".into(),
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_json(response).await,
+            json!({"error": "internal", "reason": "stats_execution"})
+        );
+
+        let compatibility = compatibility_server_error("sensitive storage detail".into());
+        assert_eq!(compatibility.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_json(compatibility).await,
+            json!({"error": "internal"})
+        );
     }
 
     #[test]

@@ -109,7 +109,7 @@ A backup occupies the signal's single writer for its whole duration — flush,
 the entire optimize backlog, a WAL checkpoint, then the copy — so queued
 ingest waits behind it. At most one runs per process at a time: an
 overlapping `POST /api/v1/backup` is answered `409 Conflict` with
-`{"error":"conflict","reason":"a backup is already running"}` rather than
+`{"error":"conflict","reason":"backup_in_progress"}` rather than
 queued, so repeating the call costs the writer nothing. Retry after the
 in-flight backup completes.
 
@@ -522,23 +522,47 @@ serving. Do not replace a live database file behind an owner process.
 
 ## Error envelopes
 
-The auth envelope is documented above. Signal handlers use these additional
-stable families:
+The auth envelope is documented above. Timeless-native query, discovery,
+administration, and maintenance handlers use **native JSON error contract
+v1**. Every unsuccessful JSON body in that boundary contains stable,
+machine-readable `error` and `reason` strings:
+
+```json
+{"error":"invalid_query","reason":"query_validation","message":"metric is required"}
+```
+
+`message` is optional and contains only client-safe diagnostics. Internal
+storage, SQLite, schema, and filesystem detail is logged server-side and is
+never returned. Families may add a documented `parameter`, `limit`, or
+`deadline_ms` value. Contract v1 is the documentation identifier rather than
+an extra wire field; an incompatible envelope change requires a newly named
+contract and a compatibility-line change.
 
 | Family | Status | Shape |
 |---|---:|---|
 | Unsupported route/parameter/capability | 422 | `{"error":"unsupported_capability","reason":"..."}`; LogsQL may add `message`. |
 | Malformed LogsQL | 400 | `{"error":"invalid_query","reason":"malformed_logsql","message":"..."}` |
 | Invalid native logs query parameter | 400 | `{"error":"invalid_query","reason":"invalid_query_parameter","parameter":"start|end|order"}` |
+| Other native query validation | 400 | `{"error":"invalid_query","reason":"query_validation","message":"..."}` |
+| Invalid administration JSON | 400 | `{"error":"invalid_request","reason":"invalid_json_body"}` |
+| Invalid scrape-target set | 400 | `{"error":"invalid_request","reason":"scrape_target_validation","message":"..."}` |
 | LogsQL execution conflict | 422 | `{"error":"query_execution","reason":"field_conflict","message":"..."}` |
-| Logs query limit | 422 | `{"error":"query_limit",...}` with reason `max_result_rows`, `max_work_rows`, or `max_response_bytes` and numeric `limit`. |
-| Logs query timeout | 504 | `{"error":"timeout","reason":"query_deadline","deadline_ms":N}` |
-| Prometheus/MetricsQL parse | 400 | `{"status":"error","errorType":"bad_data","error":"..."}` |
-| Prometheus/MetricsQL execution/limit | 422 | Same envelope with `errorType="execution"`. |
-| Prometheus/MetricsQL timeout | 504 | Same envelope with `errorType="timeout"`. |
-| Native metrics server/client | 500/400 | `{"status":"error","error":"..."}` |
-| Native logs server | 500 | `{"error":"..."}` |
-| Native traces server/client | 500 or route-specific 400/413 | `{"status":"error","error":"..."}` or `{"error":"..."}` |
+| Native query limit | 422 | `{"error":"query_limit",...}` with reason `max_result_rows`, `max_work_rows`, or `max_response_bytes` and numeric `limit`. |
+| Native query timeout | 504 | `{"error":"timeout","reason":"query_deadline","deadline_ms":N}` |
+| Retryable native storage contention | 503 | `{"error":"temporarily_unavailable","reason":"storage_busy"}` plus `Retry-After`. |
+| Overlapping backup | 409 | `{"error":"conflict","reason":"backup_in_progress"}` |
+| Internal native handler fault | 500 | `{"error":"internal","reason":"query_execution|stats_execution|flush_execution|backup_execution"}` |
+
+Compatibility routes retain their established protocol shapes and are not
+silently migrated to native contract v1:
+
+| Compatibility boundary | Error contract |
+|---|---|
+| Prometheus and MetricsQL query/discovery routes | `{"status":"error","errorType":"...","error":"..."}`; parse is 400/`bad_data`, execution or limit is 422/`execution`, timeout is 504/`timeout`, and retryable storage contention is 503/`unavailable` plus `Retry-After`. |
+| Jaeger query/discovery routes | Existing Jaeger handler bodies, including bare client diagnostics and `{"status":"error","error":"internal"}` for internal faults. |
+| OTLP trace ingest | Existing collector response/error contract, including `{"partialSuccess":{}}` on success. |
+| VictoriaMetrics/VictoriaLogs-compatible ingest and Prometheus text `/metrics` | Existing ingestion error bodies and text exposition behavior. |
+| Liveness/readiness/health probe state | Existing probe `status` bodies; internal health-stat collection faults use native `stats_execution`. |
 
 Unknown parameters and unsupported language constructs fail explicitly; no
 server silently delegates to Elixir or another query implementation. Detailed

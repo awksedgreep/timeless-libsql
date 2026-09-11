@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Path, RawQuery, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -8,8 +9,8 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use serde_json::json;
 use timeless_api_common::{
-    build_info, server_build_identity, BackupRequest, Exposition, PROMETHEUS_CONTENT_TYPE,
-    RESULT_ROWS_HEADER,
+    build_info, native_error, native_error_with_message, native_internal_error,
+    server_build_identity, BackupRequest, Exposition, PROMETHEUS_CONTENT_TYPE, RESULT_ROWS_HEADER,
 };
 
 use crate::query::{self, Params, ReadRequest};
@@ -45,8 +46,11 @@ pub fn router_with_limits(storage: Storage, limits: PromQueryLimits) -> Router {
         .route("/api/v1/labels", get(labels))
         .route("/api/v1/label/{name}/values", get(label_values))
         .route("/api/v1/series", get(series))
-        .route("/prometheus/api/v1/labels", get(labels))
-        .route("/prometheus/api/v1/label/{name}/values", get(label_values))
+        .route("/prometheus/api/v1/labels", get(prometheus_labels))
+        .route(
+            "/prometheus/api/v1/label/{name}/values",
+            get(prometheus_label_values),
+        )
         .route("/prometheus/api/v1/series", get(prometheus_series))
         .route(
             "/prometheus/api/v1/query",
@@ -220,6 +224,35 @@ async fn label_values(
     .await
 }
 
+async fn prometheus_labels(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    prometheus_read_route(
+        storage,
+        limits,
+        query::labels_request(&params(query, &body)),
+    )
+    .await
+}
+
+async fn prometheus_label_values(
+    State(storage): State<Storage>,
+    Extension(limits): Extension<PromQueryLimits>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    prometheus_read_route(
+        storage,
+        limits,
+        query::label_values_request(&params(query, &body), name),
+    )
+    .await
+}
+
 async fn series(
     State(storage): State<Storage>,
     Extension(limits): Extension<PromQueryLimits>,
@@ -240,7 +273,7 @@ async fn prometheus_series(
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    read_route(
+    prometheus_read_route(
         storage,
         limits,
         query::series_request(&params(query, &body), true),
@@ -266,17 +299,7 @@ async fn read_route(
         Err(error) => return client_error(error),
     };
     match tokio::time::timeout(limits.deadline, storage.read(request)).await {
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(json!({
-                "status": "error",
-                "error": format!(
-                    "query exceeded the {}ms execution deadline",
-                    limits.deadline.as_millis()
-                ),
-            })),
-        )
-            .into_response(),
+        Err(_) => native_query_timeout(limits.deadline),
         Ok(Ok(output)) => (
             StatusCode::OK,
             [
@@ -334,7 +357,7 @@ async fn import_victoria(State(storage): State<Storage>, body: Bytes) -> Respons
     let encode_started = Instant::now();
     let blob = match batch.encode() {
         Ok(blob) => blob,
-        Err(error) => return server_error(error),
+        Err(error) => return compatibility_server_error(error),
     };
     let encode_duration = encode_started.elapsed();
     match storage
@@ -349,14 +372,14 @@ async fn import_victoria(State(storage): State<Storage>, body: Bytes) -> Respons
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => server_error(error),
+        Err(error) => compatibility_server_error(error),
     }
 }
 
 async fn import_prometheus(State(storage): State<Storage>, body: Bytes) -> Response {
     match storage.submit_prometheus(body).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => server_error(error),
+        Err(error) => compatibility_server_error(error),
     }
 }
 
@@ -373,11 +396,26 @@ async fn scrape_targets(State(storage): State<Storage>) -> Response {
 
 async fn replace_scrape_targets(
     State(storage): State<Storage>,
-    Json(targets): Json<ScrapeTargetSet>,
+    targets: Result<Json<ScrapeTargetSet>, JsonRejection>,
 ) -> Response {
+    let Json(targets) = match targets {
+        Ok(targets) => targets,
+        Err(_) => {
+            return native_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid_json_body",
+            )
+        }
+    };
     match storage.replace_scrape_targets(targets).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => server_error(error),
+        Err(error) => native_error_with_message(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "scrape_target_validation",
+            error,
+        ),
     }
 }
 
@@ -419,14 +457,14 @@ async fn health(State(storage): State<Storage>) -> Response {
             })),
         )
             .into_response(),
-        Err(error) => server_error(error),
+        Err(error) => server_error("stats_execution", error),
     }
 }
 
 async fn stats(State(storage): State<Storage>) -> Response {
     match storage.stats().await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
-        Err(error) => server_error(error),
+        Err(error) => server_error("stats_execution", error),
     }
 }
 
@@ -572,7 +610,7 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
             )
                 .into_response()
         }
-        Err(error) => server_error(error),
+        Err(error) => compatibility_server_error(error),
     }
 }
 
@@ -583,22 +621,33 @@ async fn flush(State(storage): State<Storage>) -> Response {
             report.api_request_ns = duration_ns(started.elapsed());
             (StatusCode::OK, Json(report)).into_response()
         }
-        Err(error) => server_error(error),
+        Err(error) => server_error("flush_execution", error),
     }
 }
 
-async fn backup(State(storage): State<Storage>, Json(request): Json<BackupRequest>) -> Response {
+async fn backup(
+    State(storage): State<Storage>,
+    request: Result<Json<BackupRequest>, JsonRejection>,
+) -> Response {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(_) => {
+            return native_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid_json_body",
+            )
+        }
+    };
     match storage.backup(request.destination).await {
         Ok(report) => (StatusCode::OK, Json(report)).into_response(),
         // A backup is already occupying the writer. That is a transient
         // conflict the caller can retry, not an internal fault, so it must
         // not be flattened into 500 by the generic error path.
-        Err(error) if error == timeless_api_common::BACKUP_IN_PROGRESS => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "conflict", "reason": error})),
-        )
-            .into_response(),
-        Err(error) => server_error(error),
+        Err(error) if error == timeless_api_common::BACKUP_IN_PROGRESS => {
+            native_error(StatusCode::CONFLICT, "conflict", "backup_in_progress")
+        }
+        Err(error) => server_error("backup_execution", error),
     }
 }
 
@@ -606,12 +655,13 @@ fn duration_ns(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn server_error(error: String) -> Response {
-    // Storage and SQLite internals must not reach clients (table/TVF
-    // names, file paths, busy-state detail): log server-side and return
-    // a stable envelope. This crate has no tracing dependency; the
-    // binary's stderr is the log sink.
-    eprintln!("timeless-metrics-api: internal error: {error}");
+fn server_error(reason: &'static str, error: String) -> Response {
+    native_internal_error("metrics", reason, error)
+}
+
+/// Compatibility endpoints retain the established Prometheus/Victoria shape.
+fn compatibility_server_error(error: String) -> Response {
+    eprintln!("timeless-metrics-api: compatibility endpoint internal error: {error}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"status": "error", "error": "internal"})),
@@ -621,19 +671,18 @@ fn server_error(error: String) -> Response {
 
 fn read_error(error: String) -> Response {
     if !crate::storage::is_retryable_read(&error) {
-        return server_error(error);
+        return server_error("query_execution", error);
     }
     eprintln!("timeless-metrics-api: transient read conflict: {error}");
-    (
+    let mut response = native_error(
         StatusCode::SERVICE_UNAVAILABLE,
-        [(header::RETRY_AFTER, "1")],
-        Json(json!({
-            "status": "error",
-            "error": "temporarily_unavailable",
-            "reason": "storage_busy"
-        })),
-    )
-        .into_response()
+        "temporarily_unavailable",
+        "storage_busy",
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, "1".parse().unwrap());
+    response
 }
 
 fn retryable_prometheus_read_error(error: String) -> Response {
@@ -651,9 +700,22 @@ fn retryable_prometheus_read_error(error: String) -> Response {
 }
 
 fn client_error(error: String) -> Response {
-    (
+    native_error_with_message(
         StatusCode::BAD_REQUEST,
-        Json(json!({"status": "error", "error": error})),
+        "invalid_query",
+        "query_validation",
+        error,
+    )
+}
+
+fn native_query_timeout(deadline: std::time::Duration) -> Response {
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({
+            "error": "timeout",
+            "reason": "query_deadline",
+            "deadline_ms": deadline.as_millis()
+        })),
     )
         .into_response()
 }
@@ -677,9 +739,15 @@ fn prometheus_error(status: StatusCode, error_type: &str, error: String) -> Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use serde_json::Value;
 
-    #[test]
-    fn writer_gate_exhaustion_is_a_retryable_service_response() {
+    async fn response_json(response: Response) -> Value {
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn writer_gate_exhaustion_is_a_retryable_service_response() {
         let response = read_error(
             "collect metric discovery: table metric_samples read is blocked by another \
              connection's active write transaction — retry, as for SQLITE_BUSY"
@@ -687,19 +755,51 @@ mod tests {
         );
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+        assert_eq!(
+            response_json(response).await,
+            json!({"error": "temporarily_unavailable", "reason": "storage_busy"})
+        );
 
         let prometheus = retryable_prometheus_read_error(
             "database is busy while collecting metric discovery".into(),
         );
         assert_eq!(prometheus.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(prometheus.headers().get(header::RETRY_AFTER).unwrap(), "1");
+        assert_eq!(
+            response_json(prometheus).await,
+            json!({
+                "status": "error",
+                "errorType": "unavailable",
+                "error": "storage is temporarily busy; retry request"
+            })
+        );
     }
 
-    #[test]
-    fn non_retryable_storage_failures_remain_internal_errors() {
+    #[tokio::test]
+    async fn native_query_errors_use_stable_codes_without_internal_detail() {
+        let invalid = client_error("metric is required".into());
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
-            read_error("corrupt metrics frame".into()).status(),
-            StatusCode::INTERNAL_SERVER_ERROR
+            response_json(invalid).await,
+            json!({
+                "error": "invalid_query",
+                "reason": "query_validation",
+                "message": "metric is required"
+            })
+        );
+
+        let timeout = native_query_timeout(std::time::Duration::from_millis(25));
+        assert_eq!(timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response_json(timeout).await,
+            json!({"error": "timeout", "reason": "query_deadline", "deadline_ms": 25})
+        );
+
+        let internal = read_error("corrupt metrics frame at /secret/customer.db".into());
+        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_json(internal).await,
+            json!({"error": "internal", "reason": "query_execution"})
         );
     }
 }

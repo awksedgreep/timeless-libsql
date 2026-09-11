@@ -170,6 +170,15 @@ async fn tail_rejects_a_kind_or_status_outside_the_enumerated_set() {
             StatusCode::BAD_REQUEST,
             "{query} should be rejected"
         );
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"], "invalid_query");
+        assert_eq!(body["reason"], "query_validation");
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid dashboard span"));
     }
 }
 
@@ -242,6 +251,16 @@ async fn tail_rejects_attributes_that_are_not_a_json_object() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "error": "invalid_query",
+            "reason": "query_validation",
+            "message": "attributes must be a JSON object of string values"
+        })
+    );
 }
 
 /// Reads frames until one carries a span, skipping keepalive newlines.

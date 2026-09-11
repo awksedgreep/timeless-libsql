@@ -28,6 +28,14 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Timeless-native HTTP errors now use one versioned contract (issue #46).**
+  Native query, discovery, administration, and maintenance failures contain
+  stable `error` and `reason` codes, with optional client-safe detail and no
+  leaked storage internals. Invalid administration JSON now fails in that
+  envelope, and overlapping backups use `backup_in_progress`. Prometheus,
+  MetricsQL, Jaeger, OTLP, Victoria-compatible ingest, and Prometheus text
+  exposition retain their established compatibility shapes.
+
 - **Native logs query parameters fail closed (issue #46).** Malformed or
   overflowing `start`/`end` bounds now return a stable 400 response instead of
   disappearing into an unbounded query, and unsupported `order` values no
@@ -139,7 +147,7 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   waits behind it. Concurrent `POST /api/v1/backup` requests each queued
   another full backup, letting an authorized caller stall ingest for as long
   as it kept calling. All three signals now admit one backup at a time and
-  answer `409 Conflict` with reason `a backup is already running` otherwise,
+  answer `409 Conflict` with reason `backup_in_progress` otherwise,
   making a repeated request O(1) for the writer. The route is already behind
   the maintenance scope, so this closes the remaining half of the finding.
 

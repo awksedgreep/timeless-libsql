@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use axum::body::{to_bytes, Body, Bytes};
-use axum::extract::rejection::QueryRejection;
+use axum::extract::rejection::{FormRejection, JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Extension, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -9,8 +9,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 use timeless_api_common::{
-    build_info, server_build_identity, BackupRequest, Exposition, VerifiedClaims,
-    PROMETHEUS_CONTENT_TYPE, RESULT_ROWS_HEADER,
+    build_info, native_error, native_error_with_message, native_internal_error,
+    server_build_identity, BackupRequest, Exposition, VerifiedClaims, PROMETHEUS_CONTENT_TYPE,
+    RESULT_ROWS_HEADER,
 };
 
 use crate::otlp;
@@ -126,7 +127,7 @@ async fn health(State(storage): State<Storage>) -> Response {
             })),
         )
             .into_response(),
-        Err(error) => server_error(StatusCode::SERVICE_UNAVAILABLE, error),
+        Err(error) => native_server_error("stats_execution", error),
     }
 }
 
@@ -289,14 +290,14 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
             )
                 .into_response()
         }
-        Err(error) => server_error(StatusCode::SERVICE_UNAVAILABLE, error),
+        Err(error) => compatibility_server_error(StatusCode::SERVICE_UNAVAILABLE, error),
     }
 }
 
 async fn stats(State(storage): State<Storage>) -> Response {
     match storage.stats().await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
-        Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        Err(error) => native_server_error("stats_execution", error),
     }
 }
 
@@ -304,7 +305,7 @@ async fn services(
     State(storage): State<Storage>,
     Extension(limits): Extension<TracesQueryLimits>,
 ) -> Response {
-    read_response(storage, limits, ReadRequest::Services).await
+    read_response(storage, limits, ReadRequest::Services, ReadProtocol::Jaeger).await
 }
 
 async fn operations(
@@ -312,7 +313,13 @@ async fn operations(
     Extension(limits): Extension<TracesQueryLimits>,
     Path(service): Path<String>,
 ) -> Response {
-    read_response(storage, limits, ReadRequest::Operations { service }).await
+    read_response(
+        storage,
+        limits,
+        ReadRequest::Operations { service },
+        ReadProtocol::Jaeger,
+    )
+    .await
 }
 
 async fn trace_by_id(
@@ -320,7 +327,13 @@ async fn trace_by_id(
     Extension(limits): Extension<TracesQueryLimits>,
     Path(trace_id): Path<String>,
 ) -> Response {
-    read_response(storage, limits, ReadRequest::Trace { trace_id }).await
+    read_response(
+        storage,
+        limits,
+        ReadRequest::Trace { trace_id },
+        ReadProtocol::Jaeger,
+    )
+    .await
 }
 
 async fn search_traces(
@@ -333,8 +346,8 @@ async fn search_traces(
         Err(_) => return unsupported_query_parameters(),
     };
     match ReadRequest::search(params) {
-        Ok(request) => read_response(storage, limits, request).await,
-        Err(error) => client_error(StatusCode::BAD_REQUEST, error),
+        Ok(request) => read_response(storage, limits, request, ReadProtocol::Jaeger).await,
+        Err(error) => compatibility_client_error(StatusCode::BAD_REQUEST, error),
     }
 }
 
@@ -343,7 +356,13 @@ async fn dashboard_trace(
     Extension(limits): Extension<TracesQueryLimits>,
     Path(trace_id): Path<String>,
 ) -> Response {
-    read_response(storage, limits, ReadRequest::DashboardTrace { trace_id }).await
+    read_response(
+        storage,
+        limits,
+        ReadRequest::DashboardTrace { trace_id },
+        ReadProtocol::Native,
+    )
+    .await
 }
 
 async fn dashboard_search(
@@ -356,43 +375,35 @@ async fn dashboard_search(
         Err(_) => return unsupported_query_parameters(),
     };
     match ReadRequest::dashboard_search(params) {
-        Ok(request) => read_response(storage, limits, request).await,
-        Err(error) => client_error(StatusCode::BAD_REQUEST, error),
+        Ok(request) => read_response(storage, limits, request, ReadProtocol::Native).await,
+        Err(error) => native_query_error(error),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ReadProtocol {
+    Jaeger,
+    Native,
 }
 
 async fn read_response(
     storage: Storage,
     limits: TracesQueryLimits,
     request: ReadRequest,
+    protocol: ReadProtocol,
 ) -> Response {
     // The reader actor has no notion of a deadline: bound every search
     // at the HTTP layer so one unbounded request cannot pin a reader
     // (and its SQLite connection) indefinitely.
     let output = match tokio::time::timeout(limits.deadline, storage.read(request)).await {
-        Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({
-                    "status": "error",
-                    "error": format!(
-                        "query exceeded the {}ms execution deadline",
-                        limits.deadline.as_millis()
-                    ),
-                })),
-            )
-                .into_response();
-        }
+        Err(_) => return read_timeout(protocol, limits.deadline),
         Ok(Err(error)) => {
-            return server_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+            return read_server_error(protocol, error);
         }
         Ok(Ok(output)) => output,
     };
     if output.body.len() > limits.max_response_bytes {
-        return client_error(
-            StatusCode::BAD_REQUEST,
-            format!("response exceeds {} bytes", limits.max_response_bytes),
-        );
+        return read_limit_error(protocol, limits.max_response_bytes);
     }
     (
         StatusCode::OK,
@@ -431,22 +442,33 @@ async fn flush(State(storage): State<Storage>) -> Response {
                 .insert("data_plane".into(), data_plane);
             (StatusCode::OK, Json(body)).into_response()
         }
-        Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        Err(error) => native_server_error("flush_execution", error),
     }
 }
 
-async fn backup(State(storage): State<Storage>, Json(request): Json<BackupRequest>) -> Response {
+async fn backup(
+    State(storage): State<Storage>,
+    request: Result<Json<BackupRequest>, JsonRejection>,
+) -> Response {
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(_) => {
+            return native_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "invalid_json_body",
+            )
+        }
+    };
     match storage.backup(request.destination).await {
         Ok(report) => (StatusCode::OK, Json(report)).into_response(),
         // A backup is already occupying the writer. That is a transient
         // conflict the caller can retry, not an internal fault, so it must
         // not be flattened into 500 by the generic error path.
-        Err(error) if error == timeless_api_common::BACKUP_IN_PROGRESS => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "conflict", "reason": error})),
-        )
-            .into_response(),
-        Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        Err(error) if error == timeless_api_common::BACKUP_IN_PROGRESS => {
+            native_error(StatusCode::CONFLICT, "conflict", "backup_in_progress")
+        }
+        Err(error) => native_server_error("backup_execution", error),
     }
 }
 
@@ -464,7 +486,7 @@ async fn ingest_otlp(
         Ok(body) => body,
         Err(_) => {
             storage.record_ingest_rejection(0, offered_bytes.unwrap_or(MAX_BODY_BYTES + 1));
-            return client_error(
+            return compatibility_client_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("request body exceeds {MAX_BODY_BYTES} bytes"),
             );
@@ -491,11 +513,11 @@ async fn ingest_otlp(
             Ok(decoded) => decoded,
             Err(error) if error.starts_with("decompressed protobuf exceeds") => {
                 storage.record_ingest_rejection(0, body_bytes);
-                return client_error(StatusCode::PAYLOAD_TOO_LARGE, error);
+                return compatibility_client_error(StatusCode::PAYLOAD_TOO_LARGE, error);
             }
             Err(error) => {
                 storage.record_ingest_rejection(0, body_bytes);
-                return client_error(StatusCode::BAD_REQUEST, error);
+                return compatibility_client_error(StatusCode::BAD_REQUEST, error);
             }
         }
     } else {
@@ -518,7 +540,7 @@ async fn ingest_otlp(
                 otlp::declared_json_spans(&decoded)
             };
             storage.record_ingest_rejection(rejected_spans, body_bytes);
-            return client_error(StatusCode::BAD_REQUEST, error);
+            return compatibility_client_error(StatusCode::BAD_REQUEST, error);
         }
     };
     let parse = parse_started.elapsed();
@@ -528,7 +550,7 @@ async fn ingest_otlp(
         Ok(batch) => batch,
         Err(error) => {
             storage.record_ingest_rejection(span_count, body_bytes);
-            return server_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+            return compatibility_server_error(StatusCode::INTERNAL_SERVER_ERROR, error);
         }
     };
     let batch_encode = encode_started.elapsed();
@@ -554,7 +576,7 @@ async fn ingest_otlp(
             )
                 .into_response()
         }
-        Err(error) => server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        Err(error) => compatibility_server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     }
 }
 
@@ -575,14 +597,21 @@ async fn tail_get(
     tail(storage, params)
 }
 
-async fn tail_post(State(storage): State<Storage>, Form(params): Form<TailParams>) -> Response {
+async fn tail_post(
+    State(storage): State<Storage>,
+    params: Result<Form<TailParams>, FormRejection>,
+) -> Response {
+    let Form(params) = match params {
+        Ok(params) => params,
+        Err(_) => return unsupported_query_parameters(),
+    };
     tail(storage, params)
 }
 
 fn tail(storage: Storage, params: TailParams) -> Response {
     let filter = match params.into_filter() {
         Ok(filter) => filter,
-        Err(error) => return client_error(StatusCode::BAD_REQUEST, error),
+        Err(error) => return native_query_error(error),
     };
     // An unfiltered tail is the whole firehose, which is a legitimate ask;
     // skipping the per-span match for it is just the cheaper way to serve it.
@@ -640,12 +669,74 @@ fn duration_ns(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn server_error(status: StatusCode, error: String) -> Response {
-    // Storage and SQLite internals must not reach clients (table/TVF
-    // names, file paths, busy-state detail): log server-side and return
-    // a stable envelope. This crate has no tracing dependency; the
-    // binary's stderr is the log sink.
-    eprintln!("timeless-traces-api: internal error: {error}");
+fn native_server_error(reason: &'static str, error: String) -> Response {
+    native_internal_error("traces", reason, error)
+}
+
+fn native_query_error(error: String) -> Response {
+    native_error_with_message(
+        StatusCode::BAD_REQUEST,
+        "invalid_query",
+        "query_validation",
+        error,
+    )
+}
+
+fn read_server_error(protocol: ReadProtocol, error: String) -> Response {
+    match protocol {
+        ReadProtocol::Jaeger => {
+            compatibility_server_error(StatusCode::INTERNAL_SERVER_ERROR, error)
+        }
+        ReadProtocol::Native => native_server_error("query_execution", error),
+    }
+}
+
+fn read_timeout(protocol: ReadProtocol, deadline: std::time::Duration) -> Response {
+    match protocol {
+        ReadProtocol::Jaeger => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({
+                "status": "error",
+                "error": format!(
+                    "query exceeded the {}ms execution deadline",
+                    deadline.as_millis()
+                ),
+            })),
+        )
+            .into_response(),
+        ReadProtocol::Native => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(json!({
+                "error": "timeout",
+                "reason": "query_deadline",
+                "deadline_ms": deadline.as_millis()
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn read_limit_error(protocol: ReadProtocol, limit: usize) -> Response {
+    match protocol {
+        ReadProtocol::Jaeger => compatibility_client_error(
+            StatusCode::BAD_REQUEST,
+            format!("response exceeds {limit} bytes"),
+        ),
+        ReadProtocol::Native => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "query_limit",
+                "reason": "max_response_bytes",
+                "limit": limit
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// Jaeger and OTLP retain their established compatibility envelopes.
+fn compatibility_server_error(status: StatusCode, error: String) -> Response {
+    eprintln!("timeless-traces-api: compatibility endpoint internal error: {error}");
     (
         status,
         Json(json!({"status": "error", "error": "internal"})),
@@ -653,7 +744,7 @@ fn server_error(status: StatusCode, error: String) -> Response {
         .into_response()
 }
 
-fn client_error(status: StatusCode, error: String) -> Response {
+fn compatibility_client_error(status: StatusCode, error: String) -> Response {
     (status, Json(json!({"error": error}))).into_response()
 }
 
@@ -674,4 +765,66 @@ fn unsupported_query_parameters() -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use serde_json::Value;
+
+    async fn response_json(response: Response) -> Value {
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_read_errors_use_stable_codes() {
+        let timeout = read_timeout(ReadProtocol::Native, std::time::Duration::from_millis(25));
+        assert_eq!(timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response_json(timeout).await,
+            json!({"error": "timeout", "reason": "query_deadline", "deadline_ms": 25})
+        );
+
+        let limit = read_limit_error(ReadProtocol::Native, 1_024);
+        assert_eq!(limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response_json(limit).await,
+            json!({
+                "error": "query_limit",
+                "reason": "max_response_bytes",
+                "limit": 1_024
+            })
+        );
+
+        let internal = read_server_error(
+            ReadProtocol::Native,
+            "database /secret/customer.db is corrupt".into(),
+        );
+        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_json(internal).await,
+            json!({"error": "internal", "reason": "query_execution"})
+        );
+    }
+
+    #[tokio::test]
+    async fn jaeger_read_errors_keep_the_compatibility_envelope() {
+        let timeout = read_timeout(ReadProtocol::Jaeger, std::time::Duration::from_millis(25));
+        assert_eq!(timeout.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response_json(timeout).await,
+            json!({
+                "status": "error",
+                "error": "query exceeded the 25ms execution deadline"
+            })
+        );
+
+        let internal = read_server_error(ReadProtocol::Jaeger, "sensitive detail".into());
+        assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response_json(internal).await,
+            json!({"status": "error", "error": "internal"})
+        );
+    }
 }

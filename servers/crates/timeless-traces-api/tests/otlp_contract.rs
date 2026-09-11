@@ -218,6 +218,24 @@ async fn dashboard_search_and_trace_return_complete_native_rich_spans() {
     let database = directory.path().join("dashboard-native.db");
     let storage = Storage::start(database, extension, 1, 4, None).unwrap();
     let app = router(storage.clone());
+
+    let invalid_backup = app
+        .clone()
+        .oneshot(Request::post("/api/v1/backup").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(invalid_backup.status(), StatusCode::BAD_REQUEST);
+    let invalid_backup = to_bytes(invalid_backup.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invalid_backup).unwrap(),
+        serde_json::json!({
+            "error": "invalid_request",
+            "reason": "invalid_json_body"
+        })
+    );
+
     let fixture = rich_json_fixture();
     assert_eq!(
         post(&app, &fixture, "application/json", None).await.0,
@@ -274,9 +292,15 @@ async fn dashboard_search_and_trace_return_complete_native_rich_spans() {
     assert_eq!(spans[0]["status_message"], "contract failure");
     assert_eq!(spans[1]["parent_span_id"], "0102030405060708");
 
+    let (status, body) = get(&app, "/select/timeless/api/spans?limit=101").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
-        get(&app, "/select/timeless/api/spans?limit=101").await.0,
-        StatusCode::BAD_REQUEST
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        serde_json::json!({
+            "error": "invalid_query",
+            "reason": "query_validation",
+            "message": "dashboard limit must be between 1 and 100"
+        })
     );
     storage.shutdown().await.unwrap();
 }

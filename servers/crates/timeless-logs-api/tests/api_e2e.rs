@@ -67,6 +67,22 @@ async fn release_backup_preserves_exact_logs_and_refuses_overwrite() {
     let storage =
         Storage::start(temp.path().join("logs.db"), extension.clone().into(), 1, 8).unwrap();
     let app = router(storage.clone());
+    let invalid_backup = app
+        .clone()
+        .oneshot(Request::post("/api/v1/backup").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(invalid_backup.status(), StatusCode::BAD_REQUEST);
+    let invalid_backup = to_bytes(invalid_backup.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&invalid_backup).unwrap(),
+        serde_json::json!({
+            "error": "invalid_request",
+            "reason": "invalid_json_body"
+        })
+    );
     assert_eq!(
         app.oneshot(ingest_request(make_lines(0, 16_384)))
             .await

@@ -7,10 +7,12 @@
 
 mod admission;
 mod auth;
+mod error;
 mod prometheus;
 
 pub use admission::{BytesGate, GatePermit};
 pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims, RESULT_ROWS_HEADER};
+pub use error::{native_error, native_error_with_message, native_internal_error};
 pub use prometheus::{build_info, Exposition, PROMETHEUS_CONTENT_TYPE};
 
 use std::fs::{File, OpenOptions};

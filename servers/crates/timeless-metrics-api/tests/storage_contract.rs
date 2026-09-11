@@ -431,6 +431,16 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     .unwrap();
     let app = router(storage.clone());
 
+    let invalid_backup = post_json(&app, "/api/v1/backup").await;
+    assert_eq!(invalid_backup.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid_backup.1,
+        serde_json::json!({
+            "error": "invalid_request",
+            "reason": "invalid_json_body"
+        })
+    );
+
     let owner_error = match Storage::start(
         database.clone(),
         extension.clone(),
@@ -815,6 +825,19 @@ async fn session_three_pins_mechanical_reads_discovery_and_reopen() {
         serde_json::json!({"status": "success", "data": ["contract_sparse", "contract_vm"]})
     );
     assert_eq!(
+        get_json(&app, "/prometheus/api/v1/labels").await.1,
+        serde_json::json!({"status": "success", "data": ["__name__", "env", "host"]})
+    );
+    assert_eq!(
+        get_json(
+            &app,
+            "/prometheus/api/v1/label/host/values?metric=contract_vm"
+        )
+        .await
+        .1,
+        serde_json::json!({"status": "success", "data": ["edge", "west"]})
+    );
+    assert_eq!(
         get_json(&app, "/api/v1/series?metric=contract_vm").await.1,
         serde_json::json!({
             "status": "success",
@@ -851,16 +874,25 @@ async fn session_three_pins_mechanical_reads_discovery_and_reopen() {
             "data": [{"__name__": "contract_sparse", "host": "edge"}]
         })
     );
+    let prometheus_error = get_json(&app, "/prometheus/api/v1/series").await;
+    assert_eq!(prometheus_error.0, StatusCode::BAD_REQUEST);
     assert_eq!(
-        get_json(&app, "/prometheus/api/v1/series").await.0,
-        StatusCode::BAD_REQUEST
+        prometheus_error.1,
+        serde_json::json!({
+            "status": "error",
+            "errorType": "bad_data",
+            "error": "missing required parameter: match[]"
+        })
     );
-    assert_eq!(
-        get_json(&app, "/api/v1/series?match%5B%5D=%7Bbad%3D~%22%5B%22%7D")
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
+    let native_error = get_json(&app, "/api/v1/series?match%5B%5D=%7Bbad%3D~%22%5B%22%7D").await;
+    assert_eq!(native_error.0, StatusCode::BAD_REQUEST);
+    assert_eq!(native_error.1["error"], "invalid_query");
+    assert_eq!(native_error.1["reason"], "query_validation");
+    assert!(native_error.1["message"]
+        .as_str()
+        .unwrap()
+        .contains("regex"));
+    assert!(native_error.1.get("status").is_none());
     let promql = get_json(&app, "/api/v1/query?query=contract_vm").await;
     assert_eq!(promql.0, StatusCode::OK);
     assert_eq!(promql.1["data"]["resultType"], "vector");
@@ -871,9 +903,9 @@ async fn session_three_pins_mechanical_reads_discovery_and_reopen() {
     assert_eq!(stats.api_latest_requests, 2);
     assert_eq!(stats.api_export_requests, 2);
     assert_eq!(stats.api_range_requests, 2);
-    assert_eq!(stats.api_discovery_requests, 6);
+    assert_eq!(stats.api_discovery_requests, 8);
     assert_eq!(stats.api_promql_requests, 1);
-    assert_eq!(stats.api_read_requests, 13);
+    assert_eq!(stats.api_read_requests, 15);
     assert!(stats.api_read_total_ns > 0);
     assert!(stats.api_read_frame_bytes > 0);
     assert!(stats.api_read_response_bytes > 0);
@@ -15888,6 +15920,9 @@ async fn native_export_honors_limits_and_deadline() {
     )
     .await;
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
-    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "timeout");
+    assert_eq!(body["reason"], "query_deadline");
+    assert_eq!(body["deadline_ms"], 1);
+    assert!(body.get("status").is_none());
     storage.shutdown().await.unwrap();
 }

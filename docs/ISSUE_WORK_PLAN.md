@@ -15,7 +15,7 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 | 1 | [#51](https://github.com/awksedgreep/timeless-libsql/issues/51) LogsQL opaque internal errors | P0 | externally pending | The repository fix and local real-extension verification are complete. Re-run the reported requests against the affected deployment, retain the server-side detail for any remaining `query_execution` fault, and close when production behavior is confirmed. |
 | 2 | [#49](https://github.com/awksedgreep/timeless-libsql/issues/49) LogsQL cancellation-counter flake | P1 | done | The `replace`/`replace_regexp` cancellation regression now reaches reader-owned work before asserting the counter; 20 consecutive focused runs and all 93 logs real-extension tests pass. |
 | 3 | [#48](https://github.com/awksedgreep/timeless-libsql/issues/48) WriterGate pointer ABA | P1 | done | Writer/read ownership now uses a generation-stamped connection identity; the synthetic pointer-reuse regression proves the later connection cannot re-enter, read through, or release the leaked holder. |
-| 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | in progress | Native logs bounds/order and the `field_values` limit policy are resolved locally. The remaining cross-server native error-envelope migration needs a focused compatibility contract; preserve Prometheus/MetricsQL and Jaeger protocol shapes. |
+| 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | externally pending | Repository work is complete: native JSON error contract v1 is implemented and tested without changing Prometheus/MetricsQL, Jaeger, OTLP, or Victoria-compatible ingest shapes. Post the reconciliation evidence to the issue and close it. |
 | 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | pending | First establish the repeated-arrival growth curve and phase byte counters, then implement and verify byte-bounded, size-tiered raw conversion and compressed merges. |
 | 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | pending | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested. |
 | 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | pending | Add bounded maintenance summary spans and prove trace ingest/export cannot recurse. |
@@ -110,14 +110,36 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
   warnings denied. The one signal-delivery lifecycle test blocked by the
   restricted sandbox passed when rerun with signal permission and the current
   release extension.
-- [ ] Define and test a versioned error contract for native routes. Recommended
-  boundary: preserve compatibility-protocol envelopes on Prometheus,
-  MetricsQL, Jaeger, and OTLP routes; standardize only Timeless-native query,
-  discovery, maintenance, and administration errors on stable `error` and
-  `reason` codes, with optional safe `message` detail.
+- [x] Define and test native JSON error contract v1. Timeless-native query,
+  discovery, maintenance, and administration errors carry stable `error` and
+  `reason` codes, with optional safe `message` detail; internal detail stays
+  server-side. Prometheus/MetricsQL, Jaeger, OTLP, Victoria-compatible ingest,
+  and Prometheus text exposition keep their established protocol shapes.
 - [ ] After that contract is implemented, update the GitHub issue with the
   reconciliation evidence and close the umbrella. External issue mutation is
   intentionally not performed by this repository-only work session.
+
+### 2026-09-10 error-contract completion
+
+- Added shared native error constructors and operation-specific internal
+  reasons for query, stats, flush, and backup failures across all three signal
+  servers. Native administration JSON rejects with `invalid_json_body`,
+  scrape-target validation is a safe 400, and overlapping backups use the
+  stable `backup_in_progress` reason.
+- Split traces reads by protocol so Jaeger retains its exact client, timeout,
+  limit, and internal envelopes while native dashboard search, trace lookup,
+  and tail use contract v1. OTLP remained on its collector contract.
+- Split Prometheus label-name, label-value, and series aliases from native
+  metrics discovery so their `status`/`errorType`/`error` contract is retained.
+  Victoria-compatible metric/log ingestion and all three Prometheus text
+  endpoints likewise keep their prior shapes.
+- Passed common (34), logs (173), metrics (78 passed, 1 extension-only
+  telemetry test skipped by the default suite), and traces (28) library tests;
+  the complete non-ignored server package suites using the current release
+  extension; all Jaeger (6), OTLP (4), and trace-tail (5) contracts; focused
+  real-extension metrics lifecycle/discovery/timeout and logs backup tests;
+  the signal lifecycle test with its required signal permission; formatting;
+  and common/metrics/logs/traces clippy with warnings denied.
 
 ## Tracker reconciliation
 
