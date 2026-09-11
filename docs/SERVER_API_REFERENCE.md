@@ -250,9 +250,13 @@ queue, not durability; call the flush route for the ordered barrier.
 Native `GET /select/logsql/query` rejects unknown parameters and accepts
 `level`, `message`, `service`, `host`, `path`, `status`, `start`, `end`,
 `limit`, `offset`, and `order`. `order` is `asc` or `desc`; bounds accept the
-documented native time forms. Field discovery requires
+documented native time forms. An invalid/overflowing bound or unsupported
+order returns HTTP 400 with `invalid_query_parameter`; it cannot silently
+widen the query. Field discovery requires
 `field=service|host|path|status`, accepts the same filters except offset/order,
-and defaults to 1,000 values.
+and defaults to 1,000 values, clamped to the deployment's
+`TIMELESS_LOGS_LOGSQL_MAX_RESULT_ROWS`. An explicit value above that ceiling is
+rejected rather than silently clamped.
 
 `POST /select/logsql/query` uses an URL-encoded form with required `query` and
 optional `allow_partial_response`. `false` is the complete fail-closed mode.
@@ -525,6 +529,7 @@ stable families:
 |---|---:|---|
 | Unsupported route/parameter/capability | 422 | `{"error":"unsupported_capability","reason":"..."}`; LogsQL may add `message`. |
 | Malformed LogsQL | 400 | `{"error":"invalid_query","reason":"malformed_logsql","message":"..."}` |
+| Invalid native logs query parameter | 400 | `{"error":"invalid_query","reason":"invalid_query_parameter","parameter":"start|end|order"}` |
 | LogsQL execution conflict | 422 | `{"error":"query_execution","reason":"field_conflict","message":"..."}` |
 | Logs query limit | 422 | `{"error":"query_limit",...}` with reason `max_result_rows`, `max_work_rows`, or `max_response_bytes` and numeric `limit`. |
 | Logs query timeout | 504 | `{"error":"timeout","reason":"query_deadline","deadline_ms":N}` |

@@ -28,6 +28,13 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Native logs query parameters fail closed (issue #46).** Malformed or
+  overflowing `start`/`end` bounds now return a stable 400 response instead of
+  disappearing into an unbounded query, and unsupported `order` values no
+  longer silently select descending order. The `field_values` default remains
+  1,000 but is explicitly clamped by the deployment result ceiling, while an
+  over-limit value supplied by the client is rejected.
+
 - **Writer-gate ownership survives SQLite connection-pointer reuse (issue
   #48).** Write holders and read permits now compare a connection's raw address
   together with a monotonically assigned registration generation. Virtual

@@ -26,6 +26,7 @@ use crate::storage::{LogEntry, QuerySpec, TimestampUnit};
 use crate::{LogsQueryLimits, Storage};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+const DEFAULT_FIELD_VALUES_LIMIT: usize = 1_000;
 
 pub fn router(storage: Storage) -> Router {
     router_with_limits(storage, LogsQueryLimits::default())
@@ -333,7 +334,10 @@ async fn query_get(
         Err(_) => return client_error("unsupported_query_parameters"),
     };
     let limit_explicit = query.limit.is_some();
-    let mut spec = get_query_spec(query, storage.timestamp_unit());
+    let mut spec = match get_query_spec(query, storage.timestamp_unit()) {
+        Ok(spec) => spec,
+        Err(parameter) => return invalid_query_parameter(parameter),
+    };
     if let Err((reason, limit)) = apply_query_limits(&mut spec, limit_explicit, limits) {
         return query_limit_error(reason, limit);
     }
@@ -367,14 +371,18 @@ async fn field_values(
     if !matches!(query.field.as_str(), "service" | "host" | "path" | "status") {
         return client_error("unsupported_log_field").into_response();
     }
-    let limit = query.limit.unwrap_or(1_000).min(if query.limit.is_some() {
-        usize::MAX
-    } else {
-        limits.max_result_rows
-    });
-    if limit > limits.max_result_rows {
-        return query_limit_error("max_result_rows", limits.max_result_rows);
-    }
+    let limit = match field_values_limit(query.limit, limits.max_result_rows) {
+        Ok(limit) => limit,
+        Err((reason, limit)) => return query_limit_error(reason, limit),
+    };
+    let ts_min = match optional_query_time(query.start.as_deref(), storage.timestamp_unit()) {
+        Ok(value) => value,
+        Err(()) => return invalid_query_parameter("start"),
+    };
+    let ts_max = match optional_query_time(query.end.as_deref(), storage.timestamp_unit()) {
+        Ok(value) => value,
+        Err(()) => return invalid_query_parameter("end"),
+    };
     let spec = QuerySpec {
         level: query.level,
         service: query.service,
@@ -383,14 +391,8 @@ async fn field_values(
         message: query.message,
         message_phrase: None,
         predicate: None,
-        ts_min: query
-            .start
-            .as_deref()
-            .and_then(|value| parse_query_time(value, storage.timestamp_unit())),
-        ts_max: query
-            .end
-            .as_deref()
-            .and_then(|value| parse_query_time(value, storage.timestamp_unit())),
+        ts_min,
+        ts_max,
         limit,
         max_work_rows: limits.max_work_rows,
         ..QuerySpec::default()
@@ -1238,6 +1240,18 @@ fn query_limit_error(reason: &str, limit: usize) -> Response<Body> {
         .into_response()
 }
 
+fn invalid_query_parameter(parameter: &'static str) -> Response<Body> {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "invalid_query",
+            "reason": "invalid_query_parameter",
+            "parameter": parameter
+        })),
+    )
+        .into_response()
+}
+
 fn timeout_error(reported_deadline: Duration) -> Response<Body> {
     (
         StatusCode::GATEWAY_TIMEOUT,
@@ -1356,6 +1370,21 @@ fn query_execution_error(error: String) -> Response<Body> {
 }
 
 type QueryLimit = (&'static str, usize);
+
+/// An omitted discovery limit is a server-selected default and may therefore
+/// be clamped to a stricter deployment ceiling. An explicit client limit is a
+/// contract request: accept it unchanged or reject it rather than silently
+/// returning fewer values.
+fn field_values_limit(
+    requested: Option<usize>,
+    max_result_rows: usize,
+) -> Result<usize, QueryLimit> {
+    match requested {
+        Some(limit) if limit > max_result_rows => Err(("max_result_rows", max_result_rows)),
+        Some(limit) => Ok(limit),
+        None => Ok(DEFAULT_FIELD_VALUES_LIMIT.min(max_result_rows)),
+    }
+}
 
 fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(), QueryLimit> {
     match plan.output {
@@ -1606,8 +1635,19 @@ async fn unsupported() -> Response<Body> {
     client_error("unsupported_route")
 }
 
-fn get_query_spec(query: GetQuery, timestamp_unit: TimestampUnit) -> QuerySpec {
-    QuerySpec {
+fn get_query_spec(
+    query: GetQuery,
+    timestamp_unit: TimestampUnit,
+) -> Result<QuerySpec, &'static str> {
+    let ts_min =
+        optional_query_time(query.start.as_deref(), timestamp_unit).map_err(|()| "start")?;
+    let ts_max = optional_query_time(query.end.as_deref(), timestamp_unit).map_err(|()| "end")?;
+    let descending = match query.order.as_deref() {
+        None | Some("desc") => true,
+        Some("asc") => false,
+        Some(_) => return Err("order"),
+    };
+    Ok(QuerySpec {
         level: query.level,
         service: query.service,
         metadata_eq: metadata_filters(query.host, query.path, query.status),
@@ -1615,19 +1655,13 @@ fn get_query_spec(query: GetQuery, timestamp_unit: TimestampUnit) -> QuerySpec {
         message: query.message,
         message_phrase: None,
         predicate: None,
-        ts_min: query
-            .start
-            .as_deref()
-            .and_then(|value| parse_query_time(value, timestamp_unit)),
-        ts_max: query
-            .end
-            .as_deref()
-            .and_then(|value| parse_query_time(value, timestamp_unit)),
+        ts_min,
+        ts_max,
         limit: query.limit.unwrap_or(100),
         offset: query.offset.unwrap_or(0),
-        descending: query.order.as_deref() != Some("asc"),
+        descending,
         max_work_rows: QuerySpec::default().max_work_rows,
-    }
+    })
 }
 
 fn metadata_filters(
@@ -1778,6 +1812,15 @@ fn parse_query_time(value: &str, timestamp_unit: TimestampUnit) -> Option<i64> {
         })
 }
 
+fn optional_query_time(
+    value: Option<&str>,
+    timestamp_unit: TimestampUnit,
+) -> Result<Option<i64>, ()> {
+    value
+        .map(|value| parse_query_time(value, timestamp_unit).ok_or(()))
+        .transpose()
+}
+
 fn now(timestamp_unit: TimestampUnit) -> i64 {
     micros_to_native(Utc::now().timestamp_micros(), timestamp_unit)
 }
@@ -1796,6 +1839,47 @@ mod tests {
 
     async fn response_json(response: Response<Body>) -> Value {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn field_values_limit_distinguishes_default_from_explicit_requests() {
+        assert_eq!(field_values_limit(None, 100_000), Ok(1_000));
+        assert_eq!(field_values_limit(None, 250), Ok(250));
+        assert_eq!(field_values_limit(Some(250), 250), Ok(250));
+        assert_eq!(
+            field_values_limit(Some(251), 250),
+            Err(("max_result_rows", 250))
+        );
+    }
+
+    #[test]
+    fn native_query_parameters_fail_closed() {
+        let query = GetQuery {
+            start: Some("not-a-time".into()),
+            ..GetQuery::default()
+        };
+        assert_eq!(
+            get_query_spec(query, TimestampUnit::Microseconds).unwrap_err(),
+            "start"
+        );
+
+        let query = GetQuery {
+            end: Some("9223372036854775808".into()),
+            ..GetQuery::default()
+        };
+        assert_eq!(
+            get_query_spec(query, TimestampUnit::Microseconds).unwrap_err(),
+            "end"
+        );
+
+        let query = GetQuery {
+            order: Some("sideways".into()),
+            ..GetQuery::default()
+        };
+        assert_eq!(
+            get_query_spec(query, TimestampUnit::Microseconds).unwrap_err(),
+            "order"
+        );
     }
 
     #[tokio::test]

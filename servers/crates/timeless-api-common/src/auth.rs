@@ -1147,7 +1147,7 @@ mod tests {
             ("logs", Method::GET, "/select/logsql/stats", "stats"),
             ("logs", Method::GET, "/select/logsql/tail", "read"),
             ("logs", Method::POST, "/select/logsql/tail", "read"),
-            ("logs", Method::GET, "/api/v1/flush", "maintenance"),
+            ("logs", Method::POST, "/api/v1/flush", "maintenance"),
             ("logs", Method::POST, "/api/v1/backup", "maintenance"),
             // Traces API.
             ("traces", Method::GET, "/live", "read"),
@@ -1188,7 +1188,6 @@ mod tests {
                 "/select/timeless/api/traces/id",
                 "read",
             ),
-            ("traces", Method::GET, "/api/v1/flush", "maintenance"),
             ("traces", Method::POST, "/api/v1/flush", "maintenance"),
             ("traces", Method::POST, "/api/v1/backup", "maintenance"),
             (

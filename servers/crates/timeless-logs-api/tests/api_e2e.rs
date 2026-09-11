@@ -244,6 +244,28 @@ async fn http_uses_the_established_8192_entry_buffer_without_request_flushes() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(&body[..], br#"{"values":["host-api"]}"#);
 
+    // Native query parameters fail closed. A malformed or overflowing bound
+    // must never disappear into `None` and widen discovery/query to all time;
+    // unknown order values must not silently become descending order.
+    for uri in [
+        "/select/logsql/query?start=not-a-time",
+        "/select/logsql/query?end=9223372036854775808",
+        "/select/logsql/query?order=sideways",
+        "/select/logsql/field_values?field=host&start=not-a-time",
+        "/select/logsql/field_values?field=host&end=9223372036854775808",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "invalid_query", "{uri}");
+        assert_eq!(body["reason"], "invalid_query_parameter", "{uri}");
+    }
+
     let response = app
         .clone()
         .oneshot(
