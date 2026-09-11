@@ -14,8 +14,8 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 | 0 | [#50](https://github.com/awksedgreep/timeless-libsql/issues/50) metrics discovery writer-gate exhaustion | P0 | externally pending | Deploy a build containing `ef81a38` to the affected environment; observe at least one active scheduled sweep; record `compact_step_max_ns`, `api_read_errors`, discovery behavior, ingestion accounting, and container health; then close the issue. |
 | 1 | [#51](https://github.com/awksedgreep/timeless-libsql/issues/51) LogsQL opaque internal errors | P0 | externally pending | The repository fix and local real-extension verification are complete. Re-run the reported requests against the affected deployment, retain the server-side detail for any remaining `query_execution` fault, and close when production behavior is confirmed. |
 | 2 | [#49](https://github.com/awksedgreep/timeless-libsql/issues/49) LogsQL cancellation-counter flake | P1 | done | The `replace`/`replace_regexp` cancellation regression now reaches reader-owned work before asserting the counter; 20 consecutive focused runs and all 93 logs real-extension tests pass. |
-| 3 | [#48](https://github.com/awksedgreep/timeless-libsql/issues/48) WriterGate pointer ABA | P1 | in progress | Key connection ownership by pointer plus monotonic generation and prove reused synthetic pointer identities cannot take the re-entrant path. |
-| 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | pending | Reconcile the umbrella after #51; split any remaining cross-server envelope or `field_values` contract into focused leaf issues and close the completed audit. |
+| 3 | [#48](https://github.com/awksedgreep/timeless-libsql/issues/48) WriterGate pointer ABA | P1 | done | Writer/read ownership now uses a generation-stamped connection identity; the synthetic pointer-reuse regression proves the later connection cannot re-enter, read through, or release the leaked holder. |
+| 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | in progress | Reconcile the umbrella after #51; split any remaining cross-server envelope or `field_values` contract into focused leaf issues and close the completed audit. |
 | 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | pending | First establish the repeated-arrival growth curve and phase byte counters, then implement and verify byte-bounded, size-tiered raw conversion and compressed merges. |
 | 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | pending | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested. |
 | 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | pending | Add bounded maintenance summary spans and prove trace ingest/export cannot recurse. |
@@ -69,6 +69,23 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 - Passed the complete focused scenario 20 consecutive times, then passed all
   93 logs real-extension tests, logs clippy with warnings denied, formatting,
   and diff checks.
+
+## Issue #48 completion
+
+- Replaced raw-pointer writer and reader identity with `(address, generation)`,
+  where each connection-lifetime registration receives a monotonic generation.
+- Captured the identity in metrics, logs, and traces virtual tables and their
+  cursors so teardown and read callbacks never re-resolve through a reused raw
+  address. Eponymous query TVFs resolve the active registered identity.
+- Made connection-pin and transactional DROP-pin cleanup generation-aware, so
+  a late old scope cannot erase resources owned by the replacement connection.
+- Added a direct synthetic ABA regression that leaves the old writer token in
+  place, registers the same address with a new generation, and proves the new
+  identity cannot re-enter, read through, or release the old holder.
+- Passed all 51 extension unit tests, extension clippy with warnings denied,
+  every functional section of `tests/cli.sh`, and all five crash-recovery
+  iterations (the crash section was rerun outside the restricted sandbox so
+  its intentional kill signal was permitted).
 
 ## Tracker reconciliation
 

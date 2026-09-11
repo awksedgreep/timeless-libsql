@@ -153,6 +153,9 @@ pub struct MetricsTab {
     /// Raw handle to the HOST connection, kept for xDestroy's DDL.
     /// pub(crate): health_vtab wraps MetricsTab and samples through it.
     pub(crate) db: *mut ffi::sqlite3,
+    /// Address plus connection-registration generation. Unlike `db`, this
+    /// cannot alias a later connection if SQLite reuses the allocation.
+    connection: shared::ConnectionIdentity,
     /// The vtab's own name — needed to drop its shadow tables.
     pub(crate) table_name: String,
     /// Owning SQLite schema ("main", "temp", or an ATTACH alias).
@@ -222,6 +225,7 @@ impl MetricsTab {
         // — dbhealth's companion report views require this.
         db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
+        let connection = shared::connection_identity(handle);
         // Bind the calling connection for the store operations below
         // (DDL, and the recovery SELECTs Engine::with_store performs
         // through ShadowTableStore). RAII: unbinds when we return.
@@ -355,6 +359,7 @@ impl MetricsTab {
             MetricsTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
+                connection,
                 table_name: table,
                 database_name: database,
                 shared: shared_engine,
@@ -422,7 +427,7 @@ impl MetricsTab {
         }
         self.shared
             .write_gate
-            .acquire(self.db as usize, &self.table_name)
+            .acquire(self.connection, &self.table_name)
             .map_err(module_err)?;
         self.gate_held = true;
         Ok(())
@@ -432,7 +437,7 @@ impl MetricsTab {
     /// (commit or rollback). No-op if this connection never wrote.
     fn release_write_gate(&mut self) {
         if self.gate_held {
-            self.shared.write_gate.release(self.db as usize);
+            self.shared.write_gate.release(self.connection);
             self.gate_held = false;
         }
     }
@@ -979,6 +984,7 @@ unsafe impl<'vtab> VTab<'vtab> for MetricsTab {
             // The cursor re-binds this connection in filter(): its
             // chunk reads must run on the connection driving the scan.
             db: self.db,
+            connection: self.connection,
             table_name: self.table_name.clone(),
             rows: Vec::new(),
             pos: 0,
@@ -1016,7 +1022,7 @@ impl CreateVTab<'_> for MetricsTab {
     /// untouched until its Weak dies: rollback reconnects with the restored
     /// instance_id, while committed recreate receives a new identity.
     fn destroy(&self) -> Result<()> {
-        shared::pin_for_drop(self.db, &self.key, &self.shared);
+        shared::pin_for_drop(self.db, self.connection, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
         schema::drop_objects(&host, &self.database_name, &self.table_name)
@@ -1307,6 +1313,7 @@ pub struct MetricsCursor<'vtab> {
     /// The connection driving this scan — filter() binds it so the
     /// engine's chunk reads run on the caller (see shared.rs).
     db: *mut ffi::sqlite3,
+    connection: shared::ConnectionIdentity,
     table_name: String,
     rows: Vec<OutRow>,
     pos: usize,
@@ -1425,7 +1432,7 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
         let _read = self
             .shared
             .write_gate
-            .acquire_read(self.db as usize, &self.table_name)
+            .acquire_read(self.connection, &self.table_name)
             .map_err(module_err)?;
         self.shared
             .engine

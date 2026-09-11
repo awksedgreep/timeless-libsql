@@ -238,6 +238,8 @@ pub struct TracesTab {
     base: ffi::sqlite3_vtab,
     /// Raw handle to the HOST connection, kept for xDestroy's DDL.
     db: *mut ffi::sqlite3,
+    /// Generation-stamped identity used by the shared writer gate.
+    connection: shared::ConnectionIdentity,
     table_name: String,
     database_name: String,
     /// Shared process-wide across connections via the R4 registry —
@@ -323,6 +325,7 @@ impl TracesTab {
         // schema reaches ordinary sqlite3 CLI users.
         db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
+        let connection = shared::connection_identity(handle);
         // Bind the calling connection for every store operation below
         // (DDL, _meta writes, recovery scans). RAII unbind.
         let _bind = DbGuard::bind(handle);
@@ -484,6 +487,7 @@ impl TracesTab {
             TracesTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
+                connection,
                 table_name: table,
                 database_name: database,
                 shared: shared_engine,
@@ -502,7 +506,7 @@ impl TracesTab {
         }
         self.shared
             .write_gate
-            .acquire(self.db as usize, &self.table_name)
+            .acquire(self.connection, &self.table_name)
             .map_err(module_err)?;
         self.gate_held = true;
         Ok(())
@@ -510,7 +514,7 @@ impl TracesTab {
 
     fn release_write_gate(&mut self) {
         if self.gate_held {
-            self.shared.write_gate.release(self.db as usize);
+            self.shared.write_gate.release(self.connection);
             self.gate_held = false;
         }
     }
@@ -991,6 +995,7 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             base: ffi::sqlite3_vtab_cursor::default(),
             shared: Arc::clone(&self.shared),
             db: self.db,
+            connection: self.connection,
             table_name: self.table_name.clone(),
             rows: Vec::new(),
             pos: 0,
@@ -1024,7 +1029,7 @@ impl CreateVTab<'_> for TracesTab {
     }
 
     fn destroy(&self) -> Result<()> {
-        shared::pin_for_drop(self.db, &self.key, &self.shared);
+        shared::pin_for_drop(self.db, self.connection, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
         // Uninstall owned companions first: removal touches only what
@@ -1351,6 +1356,7 @@ pub struct TracesCursor<'vtab> {
     shared: Arc<SharedEngine<SpanBlockEngine>>,
     /// The connection driving this scan (bound in filter()).
     db: *mut ffi::sqlite3,
+    connection: shared::ConnectionIdentity,
     table_name: String,
     /// Ordered LIMIT/OFFSET plans retain only their bounded prefix.
     rows: Vec<SpanEntry>,
@@ -1573,7 +1579,7 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         let read = self
             .shared
             .write_gate
-            .acquire_read(self.db as usize, &self.table_name)
+            .acquire_read(self.connection, &self.table_name)
             .map_err(module_err)?;
         match bounded {
             Some((order, capacity)) => {

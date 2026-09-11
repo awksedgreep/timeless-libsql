@@ -193,19 +193,27 @@ pub(crate) fn current_conn() -> Result<Connection, String> {
 // Part 3 — the writer gate
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Stable identity for one lifetime of a SQLite connection. Allocators may
+/// reuse the raw `sqlite3*` address after close, so the registration generation
+/// is part of every writer/read comparison.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub(crate) struct ConnectionIdentity {
+    address: usize,
+    generation: u64,
+}
+
 /// Serializes write transactions on one shared engine. The holder is
-/// identified by a connection id (the raw sqlite3* as usize — stable
-/// for the lifetime of the connection, and the natural "who" here
-/// because transactions are per-connection, not per-thread: sqld may
-/// run consecutive statements of one connection on different threads).
+/// identified by the connection's address plus its registration generation.
+/// Transactions are per-connection, not per-thread: sqld may run consecutive
+/// statements of one connection on different threads.
 ///
 /// Deliberately NOT a MutexGuard held across callbacks: guard lifetimes
 /// cannot span separate FFI entries. Instead the lock protects a plain
 /// holder token and a Condvar wakes waiters on release.
 #[derive(Default)]
 struct GateState {
-    /// Some(conn_id) while that connection's write txn holds the gate.
-    writer: Option<usize>,
+    /// Some(identity) while that connection's write txn holds the gate.
+    writer: Option<ConnectionIdentity>,
     /// Engine reads currently materializing on connections that started
     /// before a writer. The permit never survives a vtab xFilter callback.
     readers: usize,
@@ -292,28 +300,32 @@ impl WriterGate {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Acquire for `conn_id`, waiting up to WRITE_GATE_TIMEOUT for the
+    /// Acquire for `connection`, waiting up to WRITE_GATE_TIMEOUT for the
     /// current holder to commit/rollback. Re-entrant for the same
     /// connection (autocommit fires xBegin per statement; an explicit
     /// transaction's later statements find their own connection already
     /// holding). Timeout → clear busy-style error, never a hang (see
     /// the module-level deadlock analysis).
-    pub(crate) fn acquire(&self, conn_id: usize, table: &str) -> Result<(), String> {
-        self.acquire_timeout(conn_id, table, WRITE_GATE_TIMEOUT)
+    pub(crate) fn acquire(
+        &self,
+        connection: ConnectionIdentity,
+        table: &str,
+    ) -> Result<(), String> {
+        self.acquire_timeout(connection, table, WRITE_GATE_TIMEOUT)
     }
 
     /// Timeout-parameterized body (unit tests use a short timeout; the
     /// production path always passes WRITE_GATE_TIMEOUT).
     fn acquire_timeout(
         &self,
-        conn_id: usize,
+        connection: ConnectionIdentity,
         table: &str,
         timeout: Duration,
     ) -> Result<(), String> {
         let started = Instant::now();
         let mut waited = false;
         let mut state = self.lock();
-        if state.writer == Some(conn_id) {
+        if state.writer == Some(connection) {
             return Ok(()); // re-entrant: same connection, same txn
         }
         let deadline = Instant::now() + timeout;
@@ -352,7 +364,7 @@ impl WriterGate {
             debug_assert!(state.waiting_writers > 0);
             state.waiting_writers -= 1;
         }
-        state.writer = Some(conn_id);
+        state.writer = Some(connection);
         if waited {
             self.writer_wait_count.fetch_add(1, Ordering::Relaxed);
             self.writer_wait_ns
@@ -368,12 +380,12 @@ impl WriterGate {
     /// that the writer needs to commit. Callers may retry normally.
     pub(crate) fn acquire_read(
         &self,
-        conn_id: usize,
+        connection: ConnectionIdentity,
         table: &str,
     ) -> Result<ReadPermit<'_>, String> {
         let mut state = self.lock();
         match state.writer {
-            Some(writer) if writer == conn_id => Ok(ReadPermit {
+            Some(writer) if writer == connection => Ok(ReadPermit {
                 gate: self,
                 active: false,
                 started: None,
@@ -419,11 +431,11 @@ impl WriterGate {
         }
     }
 
-    /// Release, but only if `conn_id` is actually the holder — commit
+    /// Release, but only if `connection` is actually the holder — commit
     /// and rollback paths can call this unconditionally.
-    pub(crate) fn release(&self, conn_id: usize) {
+    pub(crate) fn release(&self, connection: ConnectionIdentity) {
         let mut state = self.lock();
-        if state.writer == Some(conn_id) {
+        if state.writer == Some(connection) {
             state.writer = None;
             self.released.notify_all();
         }
@@ -520,7 +532,7 @@ impl RegistryKey {
 /// temporary strong reference: xDestroy frees the vtab object immediately,
 /// before SQLite knows whether DROP will commit or roll back.
 struct DropPin {
-    connection: usize,
+    connection: ConnectionIdentity,
     _engine: Arc<dyn Any + Send + Sync>,
 }
 
@@ -536,6 +548,7 @@ fn drop_pins_lock() -> MutexGuard<'static, HashMap<RegistryKey, DropPin>> {
 /// by another vtab does not need an additional reference.
 pub(crate) fn pin_for_drop<E>(
     db: *mut ffi::sqlite3,
+    connection: ConnectionIdentity,
     key: &RegistryKey,
     shared: &Arc<SharedEngine<E>>,
 ) where
@@ -549,7 +562,7 @@ pub(crate) fn pin_for_drop<E>(
     drop_pins_lock().insert(
         key.clone(),
         DropPin {
-            connection: db as usize,
+            connection,
             _engine: erased,
         },
     );
@@ -576,22 +589,56 @@ pub(crate) fn pin_for_drop<E>(
 /// rotates, so a recreate builds a fresh engine under a fresh key;
 /// the stale pin holds only memory and dies with the connection.
 type ErasedEngine = Arc<dyn Any + Send + Sync>;
-type ConnectionPins = HashMap<usize, HashMap<RegistryKey, ErasedEngine>>;
+
+struct ConnectionPinState {
+    identity: ConnectionIdentity,
+    engines: HashMap<RegistryKey, ErasedEngine>,
+}
+
+type ConnectionPins = HashMap<usize, ConnectionPinState>;
 
 static CONN_PINS: LazyLock<Mutex<ConnectionPins>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn conn_pins_lock() -> MutexGuard<'static, ConnectionPins> {
     CONN_PINS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Owner of one connection's pin set. Held as `timeless_pins()`
-/// function state; its Drop is the connection-close hook.
-pub(crate) struct ConnPinScope(usize);
+/// Return the identity assigned by the connection-lifetime registration
+/// anchor. The generation-zero fallback preserves direct module-registration
+/// support for embedded callers that intentionally skip `register_telemetry`;
+/// normal extension loading always installs the anchor first.
+pub(crate) fn connection_identity(db: *mut ffi::sqlite3) -> ConnectionIdentity {
+    let address = db as usize;
+    conn_pins_lock().get(&address).map_or(
+        ConnectionIdentity {
+            address,
+            generation: 0,
+        },
+        |state| state.identity,
+    )
+}
+
+/// Owner of one connection's pin set. Held as `timeless_pins()` function
+/// state; its Drop is the connection-close hook. It retains the exact
+/// generation so a late destructor cannot erase a newer connection whose raw
+/// pointer reused the same address.
+pub(crate) struct ConnPinScope(ConnectionIdentity);
 
 impl ConnPinScope {
     pub(crate) fn new(db: *mut ffi::sqlite3) -> Self {
-        conn_pins_lock().insert(db as usize, HashMap::new());
-        ConnPinScope(db as usize)
+        let identity = ConnectionIdentity {
+            address: db as usize,
+            generation: NEXT_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed),
+        };
+        conn_pins_lock().insert(
+            identity.address,
+            ConnectionPinState {
+                identity,
+                engines: HashMap::new(),
+            },
+        );
+        ConnPinScope(identity)
     }
 
     /// Number of engines this connection currently pins — the
@@ -599,14 +646,22 @@ impl ConnPinScope {
     /// observable the test suite asserts on.
     pub(crate) fn count(&self) -> i64 {
         conn_pins_lock()
-            .get(&self.0)
-            .map_or(0, |pins| pins.len() as i64)
+            .get(&self.0.address)
+            .filter(|state| state.identity == self.0)
+            .map_or(0, |state| state.engines.len() as i64)
     }
 }
 
 impl Drop for ConnPinScope {
     fn drop(&mut self) {
-        conn_pins_lock().remove(&self.0);
+        let mut pins = conn_pins_lock();
+        if pins
+            .get(&self.0.address)
+            .is_some_and(|state| state.identity == self.0)
+        {
+            pins.remove(&self.0.address);
+        }
+        drop(pins);
         drop_pins_lock().retain(|_, pin| pin.connection != self.0);
     }
 }
@@ -620,8 +675,8 @@ pub(crate) fn pin_engine(
     key: &RegistryKey,
     engine: Arc<dyn Any + Send + Sync>,
 ) {
-    if let Some(pins) = conn_pins_lock().get_mut(&(db as usize)) {
-        pins.entry(key.clone()).or_insert(engine);
+    if let Some(state) = conn_pins_lock().get_mut(&(db as usize)) {
+        state.engines.entry(key.clone()).or_insert(engine);
     }
 }
 
@@ -780,20 +835,27 @@ mod tests {
 
     const SHORT: Duration = Duration::from_millis(150);
 
+    fn connection(address: usize) -> ConnectionIdentity {
+        ConnectionIdentity {
+            address,
+            generation: 1,
+        }
+    }
+
     #[test]
     fn gate_reentrant_for_same_connection() {
         let g = WriterGate::new();
-        g.acquire_timeout(1, "t", SHORT).unwrap();
+        g.acquire_timeout(connection(1), "t", SHORT).unwrap();
         // Same connection re-acquires instantly (explicit-txn statements
         // 2..n, and the defensive re-check in insert()).
-        g.acquire_timeout(1, "t", SHORT).unwrap();
-        g.release(1);
+        g.acquire_timeout(connection(1), "t", SHORT).unwrap();
+        g.release(connection(1));
     }
 
     #[test]
     fn gate_blocks_second_connection_until_release() {
         let g = Arc::new(WriterGate::new());
-        g.acquire_timeout(1, "t", SHORT).unwrap();
+        g.acquire_timeout(connection(1), "t", SHORT).unwrap();
 
         let g2 = Arc::clone(&g);
         let released = Arc::new(AtomicBool::new(false));
@@ -801,52 +863,89 @@ mod tests {
         let waiter = thread::spawn(move || {
             // Generous timeout: must succeed BECAUSE of the release
             // below, not by racing it.
-            g2.acquire_timeout(2, "t", Duration::from_secs(10))?;
+            g2.acquire_timeout(connection(2), "t", Duration::from_secs(10))?;
             Ok::<bool, String>(released2.load(Ordering::SeqCst))
         });
 
         thread::sleep(Duration::from_millis(50));
         released.store(true, Ordering::SeqCst);
-        g.release(1); // Condvar wakes the waiter
+        g.release(connection(1)); // Condvar wakes the waiter
         let saw_release_first = waiter.join().unwrap().unwrap();
         assert!(saw_release_first, "waiter ran before the holder released");
-        g.release(2);
+        g.release(connection(2));
     }
 
     #[test]
     fn gate_times_out_with_busy_style_error() {
         let g = WriterGate::new();
-        g.acquire_timeout(1, "metrics", SHORT).unwrap();
+        g.acquire_timeout(connection(1), "metrics", SHORT).unwrap();
         let t0 = Instant::now();
-        let err = g.acquire_timeout(2, "metrics", SHORT).unwrap_err();
+        let err = g
+            .acquire_timeout(connection(2), "metrics", SHORT)
+            .unwrap_err();
         assert!(t0.elapsed() >= SHORT, "returned before the bounded wait");
         assert!(
             err.contains("table \"metrics\" is busy"),
             "unexpected message: {err}"
         );
         // Holder unaffected by the failed acquire; release frees it.
-        g.release(1);
-        g.acquire_timeout(2, "metrics", SHORT).unwrap();
+        g.release(connection(1));
+        g.acquire_timeout(connection(2), "metrics", SHORT).unwrap();
     }
 
     #[test]
     fn gate_release_by_non_holder_is_ignored() {
         let g = WriterGate::new();
-        g.acquire_timeout(1, "t", SHORT).unwrap();
-        g.release(2); // stray release (e.g. lone xCommit) must not unlock
-        assert!(g.acquire_timeout(3, "t", SHORT).is_err());
-        g.release(1);
+        g.acquire_timeout(connection(1), "t", SHORT).unwrap();
+        g.release(connection(2)); // stray release (e.g. lone xCommit) must not unlock
+        assert!(g.acquire_timeout(connection(3), "t", SHORT).is_err());
+        g.release(connection(1));
+    }
+
+    #[test]
+    fn reused_pointer_generation_is_not_reentrant() {
+        let db = 0x7157_0048 as *mut ffi::sqlite3;
+        let old_scope = ConnPinScope::new(db);
+        let old_connection = connection_identity(db);
+        let gate = WriterGate::new();
+        gate.acquire_timeout(old_connection, "t", SHORT).unwrap();
+
+        // Model allocator ABA: registration for a later SQLite connection
+        // arrives at exactly the same raw address while the old gate token is
+        // deliberately left behind.
+        let new_scope = ConnPinScope::new(db);
+        let new_connection = connection_identity(db);
+        assert_eq!(old_connection.address, new_connection.address);
+        assert_ne!(old_connection.generation, new_connection.generation);
+
+        let err = gate
+            .acquire_timeout(new_connection, "t", SHORT)
+            .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(gate.acquire_read(new_connection, "t").is_err());
+        gate.release(new_connection);
+        assert!(
+            gate.acquire_timeout(connection(2), "t", SHORT).is_err(),
+            "the reused pointer must neither re-enter nor release the old holder"
+        );
+
+        gate.release(old_connection);
+        gate.acquire_timeout(new_connection, "t", SHORT).unwrap();
+        gate.release(new_connection);
+        drop(old_scope);
+        assert_eq!(connection_identity(db), new_connection);
+        drop(new_scope);
     }
 
     #[test]
     fn read_permit_blocks_a_writer_until_materialization_finishes() {
         let gate = Arc::new(WriterGate::new());
-        let permit = gate.acquire_read(1, "metrics").unwrap();
+        let permit = gate.acquire_read(connection(1), "metrics").unwrap();
 
         let writer_gate = Arc::clone(&gate);
         let writer = thread::spawn(move || {
-            writer_gate.acquire_timeout(2, "metrics", Duration::from_secs(10))?;
-            writer_gate.release(2);
+            writer_gate.acquire_timeout(connection(2), "metrics", Duration::from_secs(10))?;
+            writer_gate.release(connection(2));
             Ok::<(), String>(())
         });
 
@@ -862,16 +961,16 @@ mod tests {
     #[test]
     fn waiting_writer_prevents_later_readers_from_barging() {
         let gate = Arc::new(WriterGate::new());
-        let first_reader = gate.acquire_read(1, "logs").unwrap();
+        let first_reader = gate.acquire_read(connection(1), "logs").unwrap();
         let (writer_acquired_tx, writer_acquired_rx) = std::sync::mpsc::channel();
         let (release_writer_tx, release_writer_rx) = std::sync::mpsc::channel();
 
         let writer_gate = Arc::clone(&gate);
         let writer = thread::spawn(move || {
-            writer_gate.acquire_timeout(2, "logs", Duration::from_secs(10))?;
+            writer_gate.acquire_timeout(connection(2), "logs", Duration::from_secs(10))?;
             writer_acquired_tx.send(()).unwrap();
             release_writer_rx.recv().unwrap();
-            writer_gate.release(2);
+            writer_gate.release(connection(2));
             Ok::<(), String>(())
         });
 
@@ -880,7 +979,7 @@ mod tests {
             thread::yield_now();
         }
         assert_eq!(gate.profile().waiting_writers, 1);
-        let err = match gate.acquire_read(3, "logs") {
+        let err = match gate.acquire_read(connection(3), "logs") {
             Ok(_) => panic!("later reader barged ahead of a waiting writer"),
             Err(err) => err,
         };
@@ -894,38 +993,41 @@ mod tests {
         release_writer_tx.send(()).unwrap();
         writer.join().unwrap().unwrap();
 
-        drop(gate.acquire_read(3, "logs").unwrap());
+        drop(gate.acquire_read(connection(3), "logs").unwrap());
     }
 
     #[test]
     fn timed_out_writer_removes_its_reader_barrier() {
         let gate = WriterGate::new();
-        let first_reader = gate.acquire_read(1, "logs").unwrap();
-        let err = gate.acquire_timeout(2, "logs", SHORT).unwrap_err();
+        let first_reader = gate.acquire_read(connection(1), "logs").unwrap();
+        let err = gate
+            .acquire_timeout(connection(2), "logs", SHORT)
+            .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert_eq!(gate.profile().waiting_writers, 0);
 
         // The timed-out writer must not leave future readers blocked.
-        drop(gate.acquire_read(3, "logs").unwrap());
+        drop(gate.acquire_read(connection(3), "logs").unwrap());
         drop(first_reader);
     }
 
     #[test]
     fn other_connection_read_gets_busy_during_write_transaction() {
         let gate = WriterGate::new();
-        gate.acquire_timeout(1, "metrics", SHORT).unwrap();
+        gate.acquire_timeout(connection(1), "metrics", SHORT)
+            .unwrap();
 
-        let err = match gate.acquire_read(2, "metrics") {
+        let err = match gate.acquire_read(connection(2), "metrics") {
             Ok(_) => panic!("other connection acquired a read permit during a write"),
             Err(err) => err,
         };
         assert!(err.contains("active write transaction"), "{err}");
 
         // The writer connection can read its own transactional rows.
-        let own = gate.acquire_read(1, "metrics").unwrap();
+        let own = gate.acquire_read(connection(1), "metrics").unwrap();
         assert!(!own.active);
         drop(own);
-        gate.release(1);
+        gate.release(connection(1));
     }
 
     #[test]
@@ -961,7 +1063,7 @@ mod tests {
         drop_pins_lock().insert(
             k1.clone(),
             DropPin {
-                connection: 1,
+                connection: connection(1),
                 _engine: erased,
             },
         );
@@ -978,7 +1080,7 @@ mod tests {
         drop_pins_lock().insert(
             k1.clone(),
             DropPin {
-                connection: 1,
+                connection: connection(1),
                 _engine: erased,
             },
         );
@@ -1090,14 +1192,14 @@ mod tests {
             pins.insert(
                 key,
                 DropPin {
-                    connection: db as usize,
+                    connection: connection_identity(db),
                     _engine: engine,
                 },
             );
             pins.insert(
                 other_key.clone(),
                 DropPin {
-                    connection: other_db as usize,
+                    connection: connection(other_db as usize),
                     _engine: other_engine,
                 },
             );

@@ -204,7 +204,7 @@ fn read_permit<'a, E>(
 ) -> Result<shared::ReadPermit<'a>> {
     shared
         .write_gate
-        .acquire_read(db as usize, table)
+        .acquire_read(shared::connection_identity(db), table)
         .map_err(module_err)
 }
 

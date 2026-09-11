@@ -28,6 +28,13 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Writer-gate ownership survives SQLite connection-pointer reuse (issue
+  #48).** Write holders and read permits now compare a connection's raw address
+  together with a monotonically assigned registration generation. Virtual
+  tables and cursors retain that exact identity through teardown, and late
+  connection-scope cleanup cannot remove a newer registration at the same
+  address.
+
 - **The LogsQL `replace`/`replace_regexp` cancellation contract no longer has
   a 1 ms pre-reader race in its production-gate regression (issue #49).** The
   HTTP deadline includes request parsing and regex compilation, but the storage

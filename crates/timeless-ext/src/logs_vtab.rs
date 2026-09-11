@@ -235,6 +235,8 @@ pub struct LogsTab {
     base: ffi::sqlite3_vtab,
     /// Raw handle to the HOST connection, kept for xDestroy's DDL.
     db: *mut ffi::sqlite3,
+    /// Generation-stamped identity used by the shared writer gate.
+    connection: shared::ConnectionIdentity,
     table_name: String,
     database_name: String,
     /// The allowlist of indexed metadata keys, in declared-column order
@@ -347,6 +349,7 @@ impl LogsTab {
         // schema reaches ordinary sqlite3 CLI users.
         db.config(rusqlite::vtab::VTabConfig::Innocuous)?;
         let handle = unsafe { db.handle() };
+        let connection = shared::connection_identity(handle);
         // Bind the calling connection for every store operation below
         // (DDL, _meta reads/writes, recovery scans). RAII unbind.
         let _bind = DbGuard::bind(handle);
@@ -555,6 +558,7 @@ impl LogsTab {
             LogsTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
+                connection,
                 table_name: table,
                 database_name: database,
                 index_keys,
@@ -576,7 +580,7 @@ impl LogsTab {
         }
         self.shared
             .write_gate
-            .acquire(self.db as usize, &self.table_name)
+            .acquire(self.connection, &self.table_name)
             .map_err(module_err)?;
         self.gate_held = true;
         Ok(())
@@ -584,7 +588,7 @@ impl LogsTab {
 
     fn release_write_gate(&mut self) {
         if self.gate_held {
-            self.shared.write_gate.release(self.db as usize);
+            self.shared.write_gate.release(self.connection);
             self.gate_held = false;
         }
     }
@@ -1034,6 +1038,7 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             base: ffi::sqlite3_vtab_cursor::default(),
             shared: Arc::clone(&self.shared),
             db: self.db,
+            connection: self.connection,
             table_name: self.table_name.clone(),
             database_name: self.database_name.clone(),
             index_keys: self.index_keys.clone(),
@@ -1071,7 +1076,7 @@ impl CreateVTab<'_> for LogsTab {
     }
 
     fn destroy(&self) -> Result<()> {
-        shared::pin_for_drop(self.db, &self.key, &self.shared);
+        shared::pin_for_drop(self.db, self.connection, &self.key, &self.shared);
         let _bind = DbGuard::bind(self.db);
         let host = unsafe { Connection::from_handle(self.db) }?;
         schema::drop_objects(&host, &self.database_name, &self.table_name)
@@ -1306,6 +1311,7 @@ pub struct LogsCursor<'vtab> {
     shared: Arc<SharedEngine<BlockEngine>>,
     /// The connection driving this scan (bound in filter()).
     db: *mut ffi::sqlite3,
+    connection: shared::ConnectionIdentity,
     table_name: String,
     database_name: String,
     index_keys: Vec<String>,
@@ -1478,7 +1484,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
             let read = self
                 .shared
                 .write_gate
-                .acquire_read(self.db as usize, &self.table_name)
+                .acquire_read(self.connection, &self.table_name)
                 .map_err(module_err)?;
             let query = LogQuery {
                 ts_min,
