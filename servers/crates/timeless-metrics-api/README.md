@@ -50,9 +50,14 @@ The exact public storage contract is in the
   server failure, and it is observable: `StorageStats.otel_traces` and the
   `timeless_metrics_otel_traces_*` self-metrics report `disabled`, `starting`,
   `healthy`, `dropping`, or `failing` with exact queue, drop, attempt, success,
-  and failure counts plus the last error. HTTP request tracing, per-chunk
-  spans, other signals, and the logs/traces processes are not part of this
-  slice.
+  and failure counts plus the last error. Per-chunk spans and other signals
+  are not part of this slice.
+- Optional sampled request spans (`TIMELESS_METRICS_OTEL_TRACES_REQUEST_SAMPLE_RATIO`,
+  `..._REQUEST_SLOW_MS`) record 5xx, slow, sampled-parent, and a configured
+  fraction of other requests as `<METHOD> <route template>` spans with
+  method, route template, status, duration, and reason only; never headers,
+  bodies, identities, or query text. Health, readiness, self-metrics, and
+  the OTLP ingest route are excluded. See `docs/SERVER_API_REFERENCE.md`.
 - A successful ingest response follows the route-specific admission/completion
   contract. `POST /api/v1/flush` is the ordered durability barrier.
 - SIGINT/SIGTERM stops admission, drains accepted work, flushes, checkpoints

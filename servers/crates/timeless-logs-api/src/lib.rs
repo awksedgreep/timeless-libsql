@@ -32,6 +32,7 @@ pub use storage::{
     FieldCompareOp, LogEntry, LogField, LogPredicate, MetadataExact, NumericOp, PatternMatchMode,
     PatternMatcher, QuerySpec, Storage, StorageStats, StorePolicy, TimestampUnit, ValueTypeKind,
 };
+use timeless_api_common::otel::trace_requests;
 pub use timeless_api_common::otel::{
     MaintenanceTelemetry, OtelExportState, OtelHeaders, OtelTelemetry, OtelTracesConfig,
     OtelTracesStats,
@@ -189,9 +190,16 @@ pub async fn run(config: Config) -> Result<(), String> {
     if let Some(telemetry) = &telemetry {
         storage.attach_otel_health(telemetry.health());
     }
-    let app = protect_router(
-        router_with_limits(storage.clone(), config.logs_query_limits),
-        config.auth.clone(),
+    // Request tracing wraps the auth layer so rejected requests are visible
+    // by status; it never records headers, bodies, or identities.
+    let app = trace_requests(
+        protect_router(
+            router_with_limits(storage.clone(), config.logs_query_limits),
+            config.auth.clone(),
+        ),
+        telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.requests("logs", &config.otel_traces)),
     );
     let listener = TcpListener::bind(config.listen)
         .await

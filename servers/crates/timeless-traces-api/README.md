@@ -138,6 +138,10 @@ so pointing the endpoint at this server's own `/insert/opentelemetry/v1/traces`
 stores exactly the sweep spans and cannot recurse; the real-extension
 `otel_contract` test proves it. Exporter health is in
 `StorageStats.otel_traces` and the `timeless_traces_otel_traces_*` series.
+`TIMELESS_TRACES_OTEL_TRACES_REQUEST_SAMPLE_RATIO` additionally records
+sampled request spans (5xx, slow, sampled-parent, and a fraction of the rest)
+with method, route template, status, duration, and reason only; the OTLP
+ingest route is excluded, so those spans cannot recurse either.
 
 Startup acquires `<database>.timeless-traces-api.lock` before opening SQLite.
 It then validates the full rich-span schema, module identity, configured

@@ -30,14 +30,23 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use opentelemetry::trace::{Span as _, SpanKind, Status, Tracer as _, TracerProvider as _};
+use axum::extract::{MatchedPath, Request, State};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use axum::Router;
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::trace::{
+    Link, Span as _, SpanKind, Status, TraceContextExt, TraceId, Tracer as _, TracerProvider as _,
+};
 use opentelemetry::Context;
 pub use opentelemetry::KeyValue;
-use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response};
+use opentelemetry_http::{Bytes, HeaderExtractor, HttpClient, HttpError};
 use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{
-    Sampler, SdkTracer, SdkTracerProvider, Span, SpanData, SpanExporter, SpanProcessor,
+    Sampler, SamplingDecision, SamplingResult, SdkTracer, SdkTracerProvider, ShouldSample, Span,
+    SpanData, SpanExporter, SpanProcessor,
 };
 use opentelemetry_sdk::Resource;
 use serde::{Deserialize, Serialize};
@@ -49,6 +58,8 @@ pub const DEFAULT_EXPORT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_QUEUE_SPANS: usize = 65_536;
 pub const MAX_EXPORT_DELAY: Duration = Duration::from_secs(60);
 pub const MAX_EXPORT_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_REQUEST_SLOW: Duration = Duration::from_secs(1);
+pub const MAX_REQUEST_SLOW: Duration = Duration::from_secs(60);
 /// Upper bound on the retained text of the last export error.
 const LAST_ERROR_MAX_CHARS: usize = 256;
 /// Request headers the exporter owns; a configured duplicate would either
@@ -89,6 +100,13 @@ pub struct OtelTracesConfig {
     pub export_delay: Duration,
     /// Per-request HTTP timeout, also the shutdown flush budget.
     pub export_timeout: Duration,
+    /// `None` leaves HTTP request tracing off. `Some(ratio)` records every
+    /// request that fails with a 5xx, takes at least `request_slow`, or
+    /// carries a sampled W3C `traceparent`, plus `ratio` of the rest.
+    pub request_sample_ratio: Option<f64>,
+    /// A request at least this slow is always recorded when request
+    /// tracing is on.
+    pub request_slow: Duration,
 }
 
 impl Default for OtelTracesConfig {
@@ -102,6 +120,8 @@ impl Default for OtelTracesConfig {
             batch_spans: DEFAULT_BATCH_SPANS,
             export_delay: DEFAULT_EXPORT_DELAY,
             export_timeout: DEFAULT_EXPORT_TIMEOUT,
+            request_sample_ratio: None,
+            request_slow: DEFAULT_REQUEST_SLOW,
         }
     }
 }
@@ -146,11 +166,22 @@ impl OtelTracesConfig {
                 .map_err(|error| format!("invalid {}={value:?}: {error}", name("SAMPLE_RATIO")))?,
             None => defaults.sample_ratio,
         };
+        let request_sample_ratio = match optional_env(&name("REQUEST_SAMPLE_RATIO"))? {
+            Some(value) => Some(value.parse::<f64>().map_err(|error| {
+                format!(
+                    "invalid {}={value:?}: {error}",
+                    name("REQUEST_SAMPLE_RATIO")
+                )
+            })?),
+            None => defaults.request_sample_ratio,
+        };
         Ok(Self {
             endpoint,
             headers,
             ca_certificate,
             sample_ratio,
+            request_sample_ratio,
+            request_slow: millis_env(&name("REQUEST_SLOW_MS"), defaults.request_slow)?,
             queue_spans: positive_usize_env(&name("QUEUE_SPANS"), defaults.queue_spans)?,
             batch_spans: positive_usize_env(&name("BATCH_SPANS"), defaults.batch_spans)?,
             export_delay: millis_env(&name("EXPORT_DELAY_MS"), defaults.export_delay)?,
@@ -209,6 +240,20 @@ impl OtelTracesConfig {
                 "metrics OTel traces export timeout must be between 1 ms and {} ms, got {} ms",
                 MAX_EXPORT_TIMEOUT.as_millis(),
                 self.export_timeout.as_millis()
+            ));
+        }
+        if let Some(ratio) = self.request_sample_ratio {
+            if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+                return Err(format!(
+                    "metrics OTel traces request sample ratio must be between 0.0 and 1.0, got {ratio}"
+                ));
+            }
+        }
+        if self.request_slow.is_zero() || self.request_slow > MAX_REQUEST_SLOW {
+            return Err(format!(
+                "metrics OTel traces slow-request threshold must be between 1 ms and {} ms, got {} ms",
+                MAX_REQUEST_SLOW.as_millis(),
+                self.request_slow.as_millis()
             ));
         }
         if let Some(path) = &self.ca_certificate {
@@ -848,7 +893,10 @@ impl BlockingHttpClient {
 
 #[async_trait]
 impl HttpClient for BlockingHttpClient {
-    async fn send_bytes(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
+    async fn send_bytes(
+        &self,
+        request: http::Request<Bytes>,
+    ) -> Result<http::Response<Bytes>, HttpError> {
         let (parts, body) = request.into_parts();
         let url = reqwest::Url::parse(&parts.uri.to_string())?;
         let response = self
@@ -860,7 +908,7 @@ impl HttpClient for BlockingHttpClient {
         let status = response.status();
         let headers = response.headers().clone();
         let body = response.bytes()?;
-        let mut out = Response::builder().status(status).body(body)?;
+        let mut out = http::Response::builder().status(status).body(body)?;
         *out.headers_mut() = headers;
         Ok(out)
     }
@@ -921,9 +969,7 @@ impl OtelTelemetry {
                     ])
                     .build(),
             );
-        if config.sample_ratio < 1.0 {
-            builder = builder.with_sampler(Sampler::TraceIdRatioBased(config.sample_ratio));
-        }
+        builder = builder.with_sampler(maintenance_sampler(config.sample_ratio));
         let provider = builder.build();
         let tracer = provider.tracer(service);
         Ok(Some(Self {
@@ -946,6 +992,18 @@ impl OtelTelemetry {
         Arc::clone(&self.health)
     }
 
+    /// Request tracing for `signal`, or `None` when the config leaves it
+    /// off. Spans share this exporter's queue and health.
+    pub fn requests(
+        &self,
+        signal: &'static str,
+        config: &OtelTracesConfig,
+    ) -> Option<RequestTelemetry> {
+        config.request_sample_ratio.map(|ratio| {
+            RequestTelemetry::new(self.tracer.clone(), signal, ratio, config.request_slow)
+        })
+    }
+
     /// Flush what is queued, then release the exporter. The budget is twice
     /// the export timeout: one in-flight request may need the full timeout
     /// to fail, and the last sweep's span deserves one more attempt. Call
@@ -955,6 +1013,194 @@ impl OtelTelemetry {
             .shutdown_with_timeout(self.export_timeout * 2)
             .map_err(|error| format!("flush OpenTelemetry traces: {error}"))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sampled HTTP request spans
+// ---------------------------------------------------------------------------
+
+/// The provider sampler: maintenance (`Internal`) spans follow the sweep
+/// ratio; `Server` spans are only ever started by [`RequestTelemetry`] after
+/// it has already decided to record them, so they pass unconditionally.
+fn maintenance_sampler(sweep_ratio: f64) -> MaintenanceSampler {
+    MaintenanceSampler {
+        sweeps: if sweep_ratio < 1.0 {
+            Sampler::TraceIdRatioBased(sweep_ratio)
+        } else {
+            Sampler::AlwaysOn
+        },
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MaintenanceSampler {
+    sweeps: Sampler,
+}
+
+impl ShouldSample for MaintenanceSampler {
+    fn should_sample(
+        &self,
+        parent_context: Option<&Context>,
+        trace_id: TraceId,
+        name: &str,
+        span_kind: &SpanKind,
+        attributes: &[KeyValue],
+        links: &[Link],
+    ) -> SamplingResult {
+        if *span_kind == SpanKind::Server {
+            return SamplingResult {
+                decision: SamplingDecision::RecordAndSample,
+                attributes: Vec::new(),
+                trace_state: parent_context
+                    .map(|cx| cx.span().span_context().trace_state().clone())
+                    .unwrap_or_default(),
+            };
+        }
+        self.sweeps
+            .should_sample(parent_context, trace_id, name, span_kind, attributes, links)
+    }
+}
+
+/// Routes that never get a span: liveness/readiness/health and the
+/// Prometheus self-metrics are observation of the observer, and the OTLP
+/// ingest route is where these very spans land, so tracing it would
+/// recurse.
+fn request_excluded(route: &str) -> bool {
+    matches!(
+        route,
+        "/live" | "/ready" | "/health" | "/metrics" | "/insert/opentelemetry/v1/traces"
+    )
+}
+
+/// Bounded, sampled server spans. One span per recorded request named
+/// `<METHOD> <route template>` with only low-cardinality attributes: the
+/// signal, method, route template (never the raw path or query), status
+/// code, duration, why it was recorded, and the result-row count header when
+/// a query set one. No headers, bodies, identities, or client addresses.
+#[derive(Clone)]
+pub struct RequestTelemetry {
+    tracer: SdkTracer,
+    signal: &'static str,
+    ratio: f64,
+    slow: Duration,
+    propagator: Arc<TraceContextPropagator>,
+    /// xorshift64* state for the ratio decision: no allocation, no lock.
+    random: Arc<AtomicU64>,
+}
+
+impl RequestTelemetry {
+    pub fn new(tracer: SdkTracer, signal: &'static str, ratio: f64, slow: Duration) -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15)
+            | 1;
+        Self {
+            tracer,
+            signal,
+            ratio: ratio.clamp(0.0, 1.0),
+            slow,
+            propagator: Arc::new(TraceContextPropagator::new()),
+            random: Arc::new(AtomicU64::new(seed)),
+        }
+    }
+
+    fn ratio_hit(&self) -> bool {
+        if self.ratio <= 0.0 {
+            return false;
+        }
+        if self.ratio >= 1.0 {
+            return true;
+        }
+        let mut state = self.random.load(Ordering::Relaxed);
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        self.random.store(state, Ordering::Relaxed);
+        let sample = (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64;
+        sample < self.ratio
+    }
+}
+
+/// Wrap a fully built router (auth layer included, so rejected requests are
+/// visible by status) in request tracing. `None` returns the router as is.
+pub fn trace_requests(router: Router, telemetry: Option<RequestTelemetry>) -> Router {
+    match telemetry {
+        None => router,
+        Some(telemetry) => router.layer(middleware::from_fn_with_state(telemetry, record_request)),
+    }
+}
+
+async fn record_request(
+    State(telemetry): State<RequestTelemetry>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned());
+    if route.as_deref().is_some_and(request_excluded) {
+        return next.run(request).await;
+    }
+    let method = request.method().as_str().to_owned();
+    let parent = telemetry
+        .propagator
+        .extract_with_context(&Context::new(), &HeaderExtractor(request.headers()));
+    let parent_sampled = {
+        let context = parent.span().span_context().clone();
+        context.is_valid() && context.is_sampled()
+    };
+    let started_at = SystemTime::now();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let elapsed = started.elapsed();
+    let status = response.status();
+    let reason = if status.is_server_error() {
+        "error"
+    } else if elapsed >= telemetry.slow {
+        "slow"
+    } else if parent_sampled {
+        "parent"
+    } else if telemetry.ratio_hit() {
+        "ratio"
+    } else {
+        return response;
+    };
+    let route = route.unwrap_or_else(|| "unmatched".to_owned());
+    let mut attributes = vec![
+        KeyValue::new("timeless.signal", telemetry.signal),
+        KeyValue::new("http.request.method", method.clone()),
+        KeyValue::new("http.route", route.clone()),
+        KeyValue::new("http.response.status_code", i64::from(status.as_u16())),
+        KeyValue::new(
+            "timeless.request.duration_ns",
+            bounded_i64(duration_ns(elapsed)),
+        ),
+        KeyValue::new("timeless.request.sampled_reason", reason),
+    ];
+    if let Some(rows) = response
+        .headers()
+        .get(crate::RESULT_ROWS_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        attributes.push(KeyValue::new("timeless.response.result_rows", rows));
+    }
+    let mut span = telemetry
+        .tracer
+        .span_builder(format!("{method} {route}"))
+        .with_kind(SpanKind::Server)
+        .with_start_time(started_at)
+        .with_attributes(attributes)
+        .start_with_context(&telemetry.tracer, &parent);
+    if status.is_server_error() {
+        span.set_status(Status::error(status.as_u16().to_string()));
+    } else {
+        span.set_status(Status::Ok);
+    }
+    span.end();
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -1387,6 +1633,20 @@ mod tests {
                 ..config(endpoint)
             },
             "export timeout must be between 1 ms and 60000 ms",
+        );
+        expect(
+            OtelTracesConfig {
+                request_sample_ratio: Some(-0.1),
+                ..config(endpoint)
+            },
+            "request sample ratio must be between 0.0 and 1.0",
+        );
+        expect(
+            OtelTracesConfig {
+                request_slow: Duration::ZERO,
+                ..config(endpoint)
+            },
+            "slow-request threshold must be between 1 ms and 60000 ms",
         );
         expect(
             OtelTracesConfig {
@@ -1921,6 +2181,8 @@ mod tests {
                 "BATCH_SPANS",
                 "EXPORT_DELAY_MS",
                 "EXPORT_TIMEOUT_MS",
+                "REQUEST_SAMPLE_RATIO",
+                "REQUEST_SLOW_MS",
             ] {
                 std::env::remove_var(format!("{PREFIX}_{suffix}"));
             }
@@ -1930,6 +2192,7 @@ mod tests {
         let parsed = OtelTracesConfig::from_env(PREFIX, &defaults).unwrap();
         assert!(parsed.endpoint.is_none());
         assert_eq!(parsed.queue_spans, DEFAULT_QUEUE_SPANS);
+        assert_eq!(parsed.request_sample_ratio, None);
 
         std::env::set_var(format!("{PREFIX}_ENDPOINT"), "http://127.0.0.1:1/v1/traces");
         std::env::set_var(format!("{PREFIX}_HEADERS"), "x-api-key=s3cr3t");
@@ -1938,7 +2201,11 @@ mod tests {
         std::env::set_var(format!("{PREFIX}_BATCH_SPANS"), "8");
         std::env::set_var(format!("{PREFIX}_EXPORT_DELAY_MS"), "250");
         std::env::set_var(format!("{PREFIX}_EXPORT_TIMEOUT_MS"), "750");
+        std::env::set_var(format!("{PREFIX}_REQUEST_SAMPLE_RATIO"), "0.01");
+        std::env::set_var(format!("{PREFIX}_REQUEST_SLOW_MS"), "1500");
         let parsed = OtelTracesConfig::from_env(PREFIX, &defaults).unwrap();
+        assert_eq!(parsed.request_sample_ratio, Some(0.01));
+        assert_eq!(parsed.request_slow, Duration::from_millis(1500));
         assert_eq!(
             parsed.endpoint.as_deref(),
             Some("http://127.0.0.1:1/v1/traces")
@@ -1973,5 +2240,346 @@ mod tests {
         let error = OtelTracesConfig::from_env(PREFIX, &defaults).unwrap_err();
         assert!(error.contains("QUEUE_SPANS must be positive"), "{error}");
         clear();
+    }
+
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use axum::routing::{get, post};
+    use opentelemetry::trace::SpanId;
+    use std::collections::BTreeSet;
+    use tower::ServiceExt;
+
+    fn request_router(
+        ratio: f64,
+        slow: Duration,
+        sweep_ratio: f64,
+    ) -> (Router, InMemorySpanExporter, SdkTracerProvider) {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .with_sampler(maintenance_sampler(sweep_ratio))
+            .build();
+        let telemetry = RequestTelemetry::new(provider.tracer("test"), "logs", ratio, slow);
+        let router = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .route("/metrics", get(|| async { "ok" }))
+            .route(
+                "/insert/opentelemetry/v1/traces",
+                post(|| async { StatusCode::OK }),
+            )
+            .route(
+                "/items/{id}",
+                get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    "ok"
+                }),
+            )
+            .route(
+                "/rows",
+                get(|| async { ([(crate::RESULT_ROWS_HEADER, "42")], "ok") }),
+            )
+            .route("/ok", get(|| async { "ok" }));
+        (trace_requests(router, Some(telemetry)), exporter, provider)
+    }
+
+    async fn send(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+    ) -> StatusCode {
+        let mut request = HttpRequest::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn attribute_keys(span: &SpanData) -> BTreeSet<String> {
+        span.attributes
+            .iter()
+            .map(|attribute| attribute.key.to_string())
+            .collect()
+    }
+
+    fn attribute_values(span: &SpanData) -> String {
+        span.attributes
+            .iter()
+            .map(|attribute| attribute.value.to_string())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    const REQUEST_ATTRIBUTES: [&str; 6] = [
+        "timeless.signal",
+        "http.request.method",
+        "http.route",
+        "http.response.status_code",
+        "timeless.request.duration_ns",
+        "timeless.request.sampled_reason",
+    ];
+
+    #[tokio::test]
+    async fn excluded_routes_and_unsampled_requests_record_nothing() {
+        let (router, exporter, _provider) = request_router(0.0, Duration::from_secs(10), 1.0);
+        assert_eq!(send(&router, "GET", "/health", &[]).await, StatusCode::OK);
+        assert_eq!(send(&router, "GET", "/metrics", &[]).await, StatusCode::OK);
+        assert_eq!(
+            send(&router, "POST", "/insert/opentelemetry/v1/traces", &[]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&router, "GET", "/ok?secret=1", &[]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&router, "GET", "/nowhere", &[]).await,
+            StatusCode::NOT_FOUND
+        );
+        assert!(exporter.get_finished_spans().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn errors_and_slow_requests_are_always_recorded_with_templates_only() {
+        let (router, exporter, _provider) = request_router(0.0, Duration::from_millis(10), 0.0);
+        assert_eq!(
+            send(
+                &router,
+                "GET",
+                "/items/123?token=s3cr3t",
+                &[("authorization", "Bearer s3cr3t")]
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(send(&router, "GET", "/slow", &[]).await, StatusCode::OK);
+        assert_eq!(send(&router, "GET", "/rows", &[]).await, StatusCode::OK);
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 2, "{spans:?}");
+
+        let error = &spans[0];
+        assert_eq!(error.name, "GET /items/{id}");
+        assert_eq!(error.span_kind, SpanKind::Server);
+        assert!(matches!(error.status, Status::Error { .. }));
+        assert_eq!(
+            attribute_keys(error),
+            REQUEST_ATTRIBUTES
+                .iter()
+                .map(|key| key.to_string())
+                .collect()
+        );
+        assert!(error
+            .attributes
+            .contains(&KeyValue::new("http.response.status_code", 500_i64)));
+        assert!(error
+            .attributes
+            .contains(&KeyValue::new("timeless.request.sampled_reason", "error")));
+        let values = attribute_values(error);
+        assert!(
+            !values.contains("123") && !values.contains("s3cr3t"),
+            "{values}"
+        );
+
+        let slow = &spans[1];
+        assert_eq!(slow.name, "GET /slow");
+        assert!(slow
+            .attributes
+            .contains(&KeyValue::new("timeless.request.sampled_reason", "slow")));
+        assert_eq!(slow.status, Status::Ok);
+        assert!(
+            slow.end_time.duration_since(slow.start_time).unwrap() >= Duration::from_millis(30)
+        );
+    }
+
+    #[tokio::test]
+    async fn ratio_one_records_normal_requests_and_honours_traceparent() {
+        let (router, exporter, _provider) = request_router(1.0, Duration::from_secs(10), 0.0);
+        assert_eq!(send(&router, "GET", "/rows", &[]).await, StatusCode::OK);
+        assert_eq!(
+            send(
+                &router,
+                "GET",
+                "/ok",
+                &[(
+                    "traceparent",
+                    "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+                )]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&router, "GET", "/nowhere", &[]).await,
+            StatusCode::NOT_FOUND
+        );
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 3, "{spans:?}");
+
+        let rows = &spans[0];
+        assert!(rows
+            .attributes
+            .contains(&KeyValue::new("timeless.response.result_rows", 42_i64)));
+        assert!(rows
+            .attributes
+            .contains(&KeyValue::new("timeless.request.sampled_reason", "ratio")));
+
+        let child = &spans[1];
+        assert_eq!(
+            child.span_context.trace_id(),
+            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+        );
+        assert_eq!(
+            child.parent_span_id,
+            SpanId::from_hex("b7ad6b7169203331").unwrap()
+        );
+        assert!(child
+            .attributes
+            .contains(&KeyValue::new("timeless.request.sampled_reason", "parent")));
+
+        let unmatched = &spans[2];
+        assert_eq!(unmatched.name, "GET unmatched");
+        assert!(unmatched
+            .attributes
+            .contains(&KeyValue::new("http.response.status_code", 404_i64)));
+    }
+
+    #[tokio::test]
+    async fn unsampled_parent_is_respected_unless_the_request_errs() {
+        let (router, exporter, _provider) = request_router(0.0, Duration::from_secs(10), 0.0);
+        let parent = [(
+            "traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00",
+        )];
+        assert_eq!(send(&router, "GET", "/ok", &parent).await, StatusCode::OK);
+        assert!(exporter.get_finished_spans().unwrap().is_empty());
+        assert_eq!(
+            send(&router, "GET", "/items/9", &parent).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].span_context.trace_id(),
+            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_rejections_are_visible_by_status_without_credentials() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .with_sampler(maintenance_sampler(1.0))
+            .build();
+        let telemetry = RequestTelemetry::new(
+            provider.tracer("test"),
+            "metrics",
+            1.0,
+            Duration::from_secs(10),
+        );
+        let router =
+            Router::new().route("/api/v1/flush", post(|| async { StatusCode::NO_CONTENT }));
+        let router = trace_requests(
+            crate::protect_router(
+                router,
+                crate::AuthConfig::disabled().with_admin_key(Some("k3y".into())),
+            ),
+            Some(telemetry),
+        );
+        let rejected = send(
+            &router,
+            "POST",
+            "/api/v1/flush",
+            &[("x-timeless-admin-key", "wr0ng")],
+        )
+        .await;
+        assert!(rejected.is_client_error(), "{rejected}");
+        let accepted = send(
+            &router,
+            "POST",
+            "/api/v1/flush",
+            &[("x-timeless-admin-key", "k3y")],
+        )
+        .await;
+        assert_eq!(accepted, StatusCode::NO_CONTENT);
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(spans[0].name, "POST /api/v1/flush");
+        assert!(spans[0].attributes.contains(&KeyValue::new(
+            "http.response.status_code",
+            i64::from(rejected.as_u16())
+        )));
+        for span in &spans {
+            let values = attribute_values(span);
+            assert!(
+                !values.contains("k3y") && !values.contains("wr0ng"),
+                "{values}"
+            );
+            assert_eq!(
+                attribute_keys(span),
+                REQUEST_ATTRIBUTES
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect()
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_sampler_never_drops_server_spans_but_ratio_drops_sweeps() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .with_sampler(maintenance_sampler(0.0))
+            .build();
+        let tracer = provider.tracer("test");
+        MaintenanceTelemetry::new(tracer.clone(), "logs")
+            .start("optimize", Vec::new())
+            .finish(Vec::new(), &Ok(()));
+        tracer
+            .span_builder("GET /ok")
+            .with_kind(SpanKind::Server)
+            .start(&tracer)
+            .end();
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(spans[0].name, "GET /ok");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsampled_decision_path_costs_little() {
+        const REQUESTS: u32 = 2_000;
+        let plain = Router::new().route("/ok", get(|| async { "ok" }));
+        let (traced, exporter, _provider) = request_router(0.0, Duration::from_secs(10), 1.0);
+        let measure = |router: Router| async move {
+            let started = Instant::now();
+            for _ in 0..REQUESTS {
+                assert_eq!(send(&router, "GET", "/ok", &[]).await, StatusCode::OK);
+            }
+            started.elapsed() / REQUESTS
+        };
+        // Warm both once so allocator and route caches are comparable.
+        measure(plain.clone()).await;
+        measure(traced.clone()).await;
+        let plain_cost = measure(plain).await;
+        let traced_cost = measure(traced).await;
+        println!(
+            "request tracing off: {plain_cost:?}/request, on but unsampled: {traced_cost:?}/request"
+        );
+        assert!(exporter.get_finished_spans().unwrap().is_empty());
+        assert!(
+            traced_cost.saturating_sub(plain_cost) < Duration::from_millis(1),
+            "unsampled request tracing added {:?} per request",
+            traced_cost.saturating_sub(plain_cost)
+        );
     }
 }

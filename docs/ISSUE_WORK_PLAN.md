@@ -20,7 +20,28 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 | 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | externally pending | Repository work is complete: the planner, hard source-work budgets, phase counters, correctness fixtures, full gates, and production-shaped release curve are recorded. Post the evidence to the issue and close it. |
 | 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | done | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested; post the evidence to the issue and close it. |
 | 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | done | One `timeless.<signal>.optimize` span per sweep on the shared bounded exporter; the traces self-export recursion guard is a real-extension test. Post the evidence to the issue and close it. |
-| 8 | [#54](https://github.com/awksedgreep/timeless-libsql/issues/54) request and contention tracing | P3 | pending | Add sampled, redacted, cardinality-bounded request spans with measured disabled/enabled overhead and nonblocking export. |
+| 8 | [#54](https://github.com/awksedgreep/timeless-libsql/issues/54) request and contention tracing | P3 | in progress | Sampled, redacted, cardinality-bounded request spans with `traceparent` propagation, auth-boundary and exclusion tests, and a measured unsampled path are on `main`. Remaining: per-request storage-contention attributes (admission, queue, writer-gate waits, retries) and a release-build load measurement. |
+
+## Issue #54 first slice (2026-09-12)
+
+- `timeless_api_common::otel::trace_requests` wraps each server's router
+  outside the auth layer. Recording is decided after the response: 5xx,
+  slow (`REQUEST_SLOW_MS`), sampled `traceparent` parent, or the
+  `REQUEST_SAMPLE_RATIO` fraction; the span is then started with the
+  request's real start time. The provider sampler passes `Server` spans
+  unconditionally so the sweep ratio does not double-sample them.
+- Fixed attribute allowlist (signal, method, route template, status,
+  duration, reason, optional result-row count). Tests assert the exact key
+  set, that no value contains path ids, query values, or credentials, that
+  excluded routes and unmatched paths behave as documented, that `traceparent`
+  becomes the parent and an unsampled parent suppresses ordinary requests,
+  and that admin-key rejections are visible by status without the key.
+- Measured: 4.56 µs/request without the layer vs 7.74 µs with it on but
+  unsampled, 2,000 loopback requests, debug build.
+- Remaining scope, kept on the issue: per-request storage contention needs a
+  request-scoped report threaded from the storage layer into response
+  extensions (admission/queue/writer-gate waits and retries); a release-build
+  load comparison with tracing disabled, unsampled, and fully sampled.
 
 ## Issue #53 completion (2026-09-12)
 

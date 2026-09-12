@@ -16,6 +16,20 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Added
 
+- **Sampled HTTP request spans with W3C trace-context propagation (issue
+  #54, first slice).** `TIMELESS_<SIGNAL>_OTEL_TRACES_REQUEST_SAMPLE_RATIO`
+  turns on `Server` spans named `<METHOD> <route template>` for requests that
+  fail with a 5xx, take at least `..._REQUEST_SLOW_MS` (default 1000), or
+  carry a sampled `traceparent`, plus the configured fraction of the rest.
+  The attribute set is fixed: signal, method, route template, status code,
+  duration, sampling reason, and the result-row count header; never paths,
+  query strings, headers, bodies, identities, or client addresses. The layer
+  wraps auth so rejections are visible by status, excludes health/readiness/
+  self-metrics and the OTLP ingest route, and shares the bounded exporter
+  queue. Unset leaves request tracing off with no cost; the unsampled
+  decision path costs about 3 µs per request in a debug-build microbenchmark.
+  Per-request storage-contention attributes are not yet included.
+
 - **Logs and traces maintenance sweeps emit one bounded OpenTelemetry span
   each (issue #53).** `TIMELESS_LOGS_OTEL_TRACES_ENDPOINT` and
   `TIMELESS_TRACES_OTEL_TRACES_ENDPOINT` enable a `timeless.logs.optimize` /

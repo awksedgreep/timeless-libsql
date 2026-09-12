@@ -209,6 +209,32 @@ committed step of at least 50 ms carrying `timeless.maintenance.step`,
 `remaining.*` counts after it, `blocks_removed`, `blocks_written`, and the
 `raw.*` / `merge.*` group, block, entry, byte, and elapsed-time deltas.
 
+### Sampled HTTP request spans
+
+With `..._REQUEST_SAMPLE_RATIO` set, each server records a `Server` span
+named `<METHOD> <route template>` (for example `GET /api/v1/query_range`, or
+`GET unmatched` for a 404 on no route) for every request that fails with a
+5xx, takes at least the slow threshold, or carries a sampled W3C
+`traceparent`, plus the configured fraction of the rest. The incoming
+`traceparent` becomes the span's parent, so an upstream trace continues
+through the API; an unsampled parent (`-00`) suppresses the span unless the
+request errs or is slow. The attribute set is fixed and low-cardinality:
+`timeless.signal`, `http.request.method`, `http.route` (the template, never
+the raw path or query string), `http.response.status_code`,
+`timeless.request.duration_ns`, `timeless.request.sampled_reason`
+(`error`, `slow`, `parent`, or `ratio`), and `timeless.response.result_rows`
+when the response carried `x-timeless-result-rows`. No request or response
+headers, bodies, credentials, identities, client addresses, metric names,
+label values, log text, or span attributes are ever attached. The layer
+wraps the auth layer, so rejected requests are visible by status. `/live`,
+`/ready`, `/health`, `/metrics`, and the OTLP ingest route
+`/insert/opentelemetry/v1/traces` are never traced, so a traces server can
+receive its own or another server's spans without recursion. The decision
+path for an unsampled request adds about 3 µs on a debug-build loopback
+microbenchmark; per-request storage contention (admission, queue, and
+writer-gate waits) is not yet attached to these spans and remains available
+only as the aggregate `api_*_wait_ns` and retry counters in `StorageStats`.
+
 ## Metrics requests
 
 GET and POST query endpoints consume URL-encoded parameters. On POST, form
@@ -362,6 +388,8 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_OTEL_TRACES_BATCH_SPANS` | metrics | `64` | Maximum spans per export request, 1–queue size. |
 | `TIMELESS_METRICS_OTEL_TRACES_EXPORT_DELAY_MS` | metrics | `1000` | Longest a queued span waits before an export attempt, 1–60,000 ms. |
 | `TIMELESS_METRICS_OTEL_TRACES_EXPORT_TIMEOUT_MS` | metrics | `2000` | Per-request HTTP connect and response timeout, 1–60,000 ms. Shutdown flushes the queue for at most twice this budget, then discards and counts what is left. |
+| `TIMELESS_METRICS_OTEL_TRACES_REQUEST_SAMPLE_RATIO` | metrics | unset | Unset leaves HTTP request tracing off even when the endpoint is set. A value in `0.0`–`1.0` turns it on: every request that fails with a 5xx, takes at least `..._REQUEST_SLOW_MS`, or carries a sampled W3C `traceparent` is recorded, plus this fraction of the rest (`0.0` means errors, slow requests, and sampled parents only). Spans share the exporter queue and health. |
+| `TIMELESS_METRICS_OTEL_TRACES_REQUEST_SLOW_MS` | metrics | `1000` | A request at least this slow is always recorded when request tracing is on, 1–60,000 ms. |
 | `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` | metrics | `3600` | Seven-day raw-retention prune check cadence. |
 | `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows through the same 64-row transaction budget. The HTTP API does not require persisted rollups. |
 | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Evaluation-grid points per series; valid range 1–11,000. |
@@ -376,7 +404,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_LOGS_FLUSH_INTERVAL_SECS` | logs | `1` | Ordered public extension flush cadence. |
 | `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` | logs | `30` | Bounded public optimize cadence. |
 | `TIMELESS_LOGS_OTEL_TRACES_ENDPOINT` | logs | unset | Full OTLP/HTTP traces endpoint. Unset disables export with no exporter, queue, or span cost. Enabled, the logs server emits one `timeless.logs.optimize` span per scheduled optimize/retention sweep with the backlog it saw, the budget it chose, the extension's before/after block, entry, byte, and elapsed-time deltas, and an event only when the pass takes at least 50 ms. Nothing per request, entry, span, block, or ingest is traced. |
-| `TIMELESS_LOGS_OTEL_TRACES_HEADERS`, `..._HEADERS_FILE`, `..._CA_CERT`, `..._SAMPLE_RATIO`, `..._QUEUE_SPANS`, `..._BATCH_SPANS`, `..._EXPORT_DELAY_MS`, `..._EXPORT_TIMEOUT_MS` | logs | as for metrics | Same meanings, defaults, bounds, and secret handling as the `TIMELESS_METRICS_OTEL_TRACES_*` settings above. |
+| `TIMELESS_LOGS_OTEL_TRACES_HEADERS`, `..._HEADERS_FILE`, `..._CA_CERT`, `..._SAMPLE_RATIO`, `..._QUEUE_SPANS`, `..._BATCH_SPANS`, `..._EXPORT_DELAY_MS`, `..._EXPORT_TIMEOUT_MS`, `..._REQUEST_SAMPLE_RATIO`, `..._REQUEST_SLOW_MS` | logs | as for metrics | Same meanings, defaults, bounds, and secret handling as the `TIMELESS_METRICS_OTEL_TRACES_*` settings above. |
 | `TIMELESS_LOGS_LOGSQL_MAX_RESULT_ROWS` | logs | `100000` | Final rows; valid range 1–100,000. |
 | `TIMELESS_LOGS_LOGSQL_MAX_WORK_ROWS` | logs | `100000` | Cumulative decoded/examined rows and bounded state items. |
 | `TIMELESS_LOGS_LOGSQL_MAX_RESPONSE_BYTES` | logs | `16777216` | Response and bounded pipeline-state bytes. |
@@ -390,7 +418,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | traces | `1` | Ordered public extension flush cadence. |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | traces | `30` | Bounded public optimize cadence. |
 | `TIMELESS_TRACES_OTEL_TRACES_ENDPOINT` | traces | unset | Full OTLP/HTTP traces endpoint. Unset disables export with no exporter, queue, or span cost. Enabled, the traces server emits one `timeless.traces.optimize` span per scheduled optimize/retention sweep with the backlog it saw, the budget it chose, the extension's before/after block, entry, byte, and elapsed-time deltas, and an event only when the pass takes at least 50 ms. Nothing per request, entry, span, block, or ingest is traced; a traces server may export into its own OTLP ingest without recursing. |
-| `TIMELESS_TRACES_OTEL_TRACES_HEADERS`, `..._HEADERS_FILE`, `..._CA_CERT`, `..._SAMPLE_RATIO`, `..._QUEUE_SPANS`, `..._BATCH_SPANS`, `..._EXPORT_DELAY_MS`, `..._EXPORT_TIMEOUT_MS` | traces | as for metrics | Same meanings, defaults, bounds, and secret handling as the `TIMELESS_METRICS_OTEL_TRACES_*` settings above. |
+| `TIMELESS_TRACES_OTEL_TRACES_HEADERS`, `..._HEADERS_FILE`, `..._CA_CERT`, `..._SAMPLE_RATIO`, `..._QUEUE_SPANS`, `..._BATCH_SPANS`, `..._EXPORT_DELAY_MS`, `..._EXPORT_TIMEOUT_MS`, `..._REQUEST_SAMPLE_RATIO`, `..._REQUEST_SLOW_MS` | traces | as for metrics | Same meanings, defaults, bounds, and secret handling as the `TIMELESS_METRICS_OTEL_TRACES_*` settings above. |
 
 <!-- public-server-environment:end -->
 

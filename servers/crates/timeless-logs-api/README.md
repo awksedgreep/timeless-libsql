@@ -39,6 +39,12 @@ The exact public storage contract is in the
   as the metrics server's settings; export is bounded, drop-on-full, cannot
   fail the sweep or the server, and reports itself through
   `StorageStats.otel_traces` and `timeless_logs_otel_traces_*`.
+- Optional sampled request spans (`TIMELESS_LOGS_OTEL_TRACES_REQUEST_SAMPLE_RATIO`,
+  `..._REQUEST_SLOW_MS`) record 5xx, slow, sampled-parent, and a configured
+  fraction of other requests as `<METHOD> <route template>` spans with
+  method, route template, status, duration, and reason only; never headers,
+  bodies, identities, or query text. Health, readiness, self-metrics, and
+  the OTLP ingest route are excluded. See `docs/SERVER_API_REFERENCE.md`.
 - SIGINT/SIGTERM stops admission, drains accepted work, flushes, checkpoints
   WAL, closes workers, and releases the exclusive owner lease.
 

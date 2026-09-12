@@ -27,6 +27,7 @@ pub use api::{router, router_with_limits, MAX_BODY_BYTES};
 pub use storage::{
     FlushReport, IngestTimings, RuntimeWatermarks, Storage, StorageStats, TRACE_CAPABILITY,
 };
+use timeless_api_common::otel::trace_requests;
 pub use timeless_api_common::otel::{
     MaintenanceTelemetry, OtelExportState, OtelHeaders, OtelTelemetry, OtelTracesConfig,
     OtelTracesStats,
@@ -182,9 +183,16 @@ pub async fn run(config: Config) -> Result<(), String> {
     if let Some(telemetry) = &telemetry {
         storage.attach_otel_health(telemetry.health());
     }
-    let app = protect_router(
-        router_with_limits(storage.clone(), config.query_limits),
-        config.auth.clone(),
+    // Request tracing wraps the auth layer so rejected requests are visible
+    // by status; it never records headers, bodies, or identities.
+    let app = trace_requests(
+        protect_router(
+            router_with_limits(storage.clone(), config.query_limits),
+            config.auth.clone(),
+        ),
+        telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.requests("traces", &config.otel_traces)),
     );
     let listener = TcpListener::bind(config.listen)
         .await
