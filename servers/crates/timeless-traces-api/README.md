@@ -40,6 +40,8 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 | `TIMELESS_TRACES_RETENTION_SECS` | absent/inherit | preserve the stored vtab policy; positive overrides it; `0` disables it |
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | `1` | ordered extension flush interval |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | `30` | ordered, byte-budgeted extension optimize interval |
+| `TIMELESS_TRACES_OTEL_TRACES_ENDPOINT` | unset | one `timeless.traces.optimize` span per optimize sweep to this OTLP/HTTP endpoint; unset disables export entirely |
+| `TIMELESS_TRACES_OTEL_TRACES_{HEADERS,HEADERS_FILE,CA_CERT,SAMPLE_RATIO,QUEUE_SPANS,BATCH_SPANS,EXPORT_DELAY_MS,EXPORT_TIMEOUT_MS}` | as metrics | identical meaning, defaults, bounds, and secret handling to the metrics server's settings |
 
 ## Implemented endpoints
 
@@ -127,6 +129,15 @@ counters. The extension also exposes size-tiered optimize backlog and
 raw-compression/merge phase counters. The timer derives a bounded span budget
 from that exact backlog and a 32 MiB source-byte target, then invokes the
 public `optimize:<spans>` command; it never creates or reshapes blocks itself.
+
+With `TIMELESS_TRACES_OTEL_TRACES_ENDPOINT` set, that sweep is the only thing
+traced: one bounded summary span with the backlog, budget, and extension
+deltas, an event only for a pass of at least 50 ms, and nothing per request,
+span, or block. The OTLP ingest route and the writer are never instrumented,
+so pointing the endpoint at this server's own `/insert/opentelemetry/v1/traces`
+stores exactly the sweep spans and cannot recurse; the real-extension
+`otel_contract` test proves it. Exporter health is in
+`StorageStats.otel_traces` and the `timeless_traces_otel_traces_*` series.
 
 Startup acquires `<database>.timeless-traces-api.lock` before opening SQLite.
 It then validates the full rich-span schema, module identity, configured

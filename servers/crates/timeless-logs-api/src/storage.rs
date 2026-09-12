@@ -13,6 +13,9 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use timeless_api_common::otel::{
+    ExporterHealth, KeyValue, MaintenanceTelemetry, OptimizeSweepReport, OtelTracesStats,
+};
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
@@ -913,6 +916,9 @@ pub struct StorageStats {
     pub native_count_metadata_entries: i64,
     pub native_count_decoded_blocks: i64,
     pub native_count_decoded_entries: i64,
+    /// OpenTelemetry maintenance-span exporter health (issue #53/#55);
+    /// `state` is `disabled` when no endpoint is configured.
+    pub otel_traces: OtelTracesStats,
     pub optimize_count: i64,
     pub optimize_total_ns: i64,
     pub optimize_blocks_removed: i64,
@@ -993,7 +999,9 @@ enum WriteCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     Flush(Option<oneshot::Sender<Result<(), String>>>),
-    Optimize,
+    /// One bounded optimize pass; the reply (when requested) carries the
+    /// extension-stat deltas for the maintenance span.
+    Optimize(Option<oneshot::Sender<Result<OptimizeSweepReport, String>>>),
     Barrier(oneshot::Sender<()>),
     Backup {
         destination: PathBuf,
@@ -1060,6 +1068,8 @@ struct StorageInner {
     queue_capacity: usize,
     gate: BytesGate,
     tail: Arc<crate::tail::TailHub>,
+    /// Set once by the server after the exporter starts; stats read it.
+    otel_health: OnceLock<Arc<ExporterHealth>>,
 }
 
 #[derive(Clone)]
@@ -1224,6 +1234,7 @@ impl Storage {
         }
 
         Ok(Storage(Arc::new(StorageInner {
+            otel_health: OnceLock::new(),
             writer: writer_tx,
             readers,
             next_reader: AtomicUsize::new(0),
@@ -1326,11 +1337,53 @@ impl Storage {
     }
 
     pub async fn schedule_optimize(&self) -> Result<(), String> {
-        self.0
+        self.schedule_optimize_with_telemetry(None).await
+    }
+
+    /// One scheduled optimize/retention sweep. Without telemetry the
+    /// command is queued and this returns immediately, as before. With
+    /// telemetry the sweep is awaited so its one summary span carries the
+    /// writer's report; nothing per entry or block is ever emitted.
+    pub async fn schedule_optimize_with_telemetry(
+        &self,
+        telemetry: Option<&MaintenanceTelemetry>,
+    ) -> Result<(), String> {
+        let Some(telemetry) = telemetry else {
+            return self
+                .0
+                .writer
+                .send(WriteCommand::Optimize(None))
+                .await
+                .map_err(|_| "SQLite writer is not running".to_string());
+        };
+        let trace = telemetry.start(
+            "optimize",
+            vec![KeyValue::new(
+                "timeless.maintenance.operation",
+                "optimize_retention",
+            )],
+        );
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let report = match self
+            .0
             .writer
-            .send(WriteCommand::Optimize)
+            .send(WriteCommand::Optimize(Some(reply_tx)))
             .await
-            .map_err(|_| "SQLite writer is not running".to_string())
+        {
+            Err(_) => Err("SQLite writer is not running".to_string()),
+            Ok(()) => reply_rx
+                .await
+                .unwrap_or_else(|_| Err("SQLite writer stopped before optimize completed".into())),
+        };
+        let result = report.as_ref().map(|_| ()).map_err(Clone::clone);
+        trace.finish_optimize(report.as_ref().ok(), &result);
+        result
+    }
+
+    /// Expose the OpenTelemetry exporter's health through `stats()`. Only
+    /// the first attachment takes effect.
+    pub fn attach_otel_health(&self, health: Arc<ExporterHealth>) {
+        let _ = self.0.otel_health.set(health);
     }
 
     /// Best-effort periodic TRUNCATE checkpoint so the WAL file cannot keep
@@ -1595,6 +1648,12 @@ impl Storage {
         let mut stats = reply_rx
             .await
             .map_err(|_| "SQLite reader stopped before stats completed".to_string())??;
+        stats.otel_traces = self
+            .0
+            .otel_health
+            .get()
+            .map(|health| health.snapshot())
+            .unwrap_or_default();
         let profile = profile_lock(&self.0.profile);
         stats.queued_batches = profile.pending.len() as i64;
         stats.queued_entries = profile.pending.iter().map(|(_, count)| *count as i64).sum();
@@ -1776,8 +1835,12 @@ fn writer_main(
                 }
                 result?;
             }
-            WriteCommand::Optimize => {
-                optimize_backlog(&conn)?;
+            WriteCommand::Optimize(reply) => {
+                let result = optimize_sweep(&conn);
+                if let Some(reply) = reply {
+                    let _ = reply.send(result.clone());
+                }
+                result.map(|_| ())?;
             }
             WriteCommand::Barrier(reply) => {
                 let _ = reply.send(());
@@ -1840,24 +1903,55 @@ fn optimize_made_progress(before: OptimizeBacklog, after: OptimizeBacklog) -> bo
     after.actionable_entries() == 0 || after != before
 }
 
-fn optimize_backlog_state(conn: &Connection) -> Result<OptimizeBacklog, String> {
-    let stats = stat_values(conn)?;
-    let stat = |key: &str| stats.get(key).copied().unwrap_or(0).max(0) as u64;
-    Ok(OptimizeBacklog {
+fn backlog_from(stat: &dyn Fn(&str) -> u64) -> OptimizeBacklog {
+    OptimizeBacklog {
         pending_raw_blocks: stat("optimize_pending_raw_blocks"),
         pending_raw_entries: stat("optimize_pending_raw_entries"),
         merge_ready_groups: stat("optimize_merge_ready_groups"),
         merge_ready_blocks: stat("optimize_merge_ready_blocks"),
         merge_ready_entries: stat("optimize_merge_ready_entries"),
-    })
+    }
 }
 
-fn optimize_backlog(conn: &Connection) -> Result<(), String> {
-    let actionable_entries = optimize_backlog_state(conn)?.actionable_entries();
+fn optimize_backlog_state(conn: &Connection) -> Result<OptimizeBacklog, String> {
+    let stats = stat_values(conn)?;
+    let stat = |key: &str| stats.get(key).copied().unwrap_or(0).max(0) as u64;
+    Ok(backlog_from(&stat))
+}
+
+/// One scheduled pass: read the backlog, run at most one budgeted optimize,
+/// and report the extension-stat deltas. Two stats reads, as before.
+fn optimize_sweep(conn: &Connection) -> Result<OptimizeSweepReport, String> {
+    let started = Instant::now();
+    let before = stat_values(conn)?;
+    let stat_before = |key: &str| before.get(key).copied().unwrap_or(0).max(0) as u64;
+    let actionable_entries = backlog_from(&stat_before).actionable_entries();
     if actionable_entries == 0 {
-        return Ok(());
+        return Ok(OptimizeSweepReport::from_stats(
+            stat_before,
+            stat_before,
+            0,
+            elapsed_ns(started),
+        ));
     }
-    optimize_backlog_with_actionable(conn, actionable_entries)
+    let budget = optimize_entry_budget(
+        actionable_entries,
+        stat_before("optimize_source_entries"),
+        stat_before("optimize_source_bytes"),
+    );
+    conn.execute(
+        "INSERT INTO logs(logs) VALUES (?1)",
+        [format!("optimize:{budget}")],
+    )
+    .map_err(|error| format!("optimize logs with {budget}-entry budget: {error}"))?;
+    let after = stat_values(conn)?;
+    let stat_after = |key: &str| after.get(key).copied().unwrap_or(0).max(0) as u64;
+    Ok(OptimizeSweepReport::from_stats(
+        stat_before,
+        stat_after,
+        budget as u64,
+        elapsed_ns(started),
+    ))
 }
 
 fn optimize_backlog_with_actionable(
@@ -4028,6 +4122,7 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
     let index_bytes = stat("index_bytes");
     let term_postings = stat("terms");
     Ok(StorageStats {
+        otel_traces: OtelTracesStats::default(),
         total_blocks: blocks,
         total_entries: disk_entries + buffered,
         total_bytes: bytes,

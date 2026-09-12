@@ -19,8 +19,27 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 | 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | externally pending | Repository work is complete: native JSON error contract v1 is implemented and tested without changing Prometheus/MetricsQL, Jaeger, OTLP, or Victoria-compatible ingest shapes. Post the reconciliation evidence to the issue and close it. |
 | 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | externally pending | Repository work is complete: the planner, hard source-work budgets, phase counters, correctness fixtures, full gates, and production-shaped release curve are recorded. Post the evidence to the issue and close it. |
 | 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | done | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested; post the evidence to the issue and close it. |
-| 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | pending | Add bounded maintenance summary spans and prove trace ingest/export cannot recurse. |
+| 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | done | One `timeless.<signal>.optimize` span per sweep on the shared bounded exporter; the traces self-export recursion guard is a real-extension test. Post the evidence to the issue and close it. |
 | 8 | [#54](https://github.com/awksedgreep/timeless-libsql/issues/54) request and contention tracing | P3 | pending | Add sampled, redacted, cardinality-bounded request spans with measured disabled/enabled overhead and nonblocking export. |
+
+## Issue #53 completion (2026-09-12)
+
+- Moved the exporter (config, env parsing, health, bounded processor, HTTP
+  client) from the metrics server into `timeless_api_common::otel`, with a
+  shared `MaintenanceTelemetry`/`SweepTrace` vocabulary (`timeless.<signal>.
+  <operation>` span, slow-step events at 50 ms, `timeless.maintenance.*`
+  attributes) that the metrics compaction span now uses too.
+- Logs and traces writers return an `OptimizeSweepReport` per pass (backlog
+  seen, budget, `timeless_stats` before/after deltas, elapsed); the
+  `schedule_optimize_with_telemetry` path turns it into one span. Untraced
+  scheduling is unchanged (logs stays fire-and-forget without telemetry).
+- Recursion guard: only maintenance orchestration is instrumented. The traces
+  real-extension test exports into the server's own OTLP route, flushes, and
+  proves `admitted_spans == 3`, `enqueued_spans == 3`, `dropped_spans == 0`
+  after two further sweeps.
+- Health and configuration surfaces (`otel_traces` stats, `/health` state,
+  `timeless_<signal>_otel_traces_*` metrics, `TIMELESS_<SIGNAL>_OTEL_TRACES_*`
+  env) are identical across the three servers.
 
 ## Issue #55 completion (2026-09-12)
 

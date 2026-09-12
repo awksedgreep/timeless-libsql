@@ -11,6 +11,9 @@ use fs2::FileExt;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use timeless_api_common::otel::{
+    ExporterHealth, KeyValue, MaintenanceTelemetry, OptimizeSweepReport, OtelTracesStats,
+};
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
@@ -211,6 +214,9 @@ pub struct StorageStats {
     pub optimize_count: u64,
     pub optimize_total_ns: u64,
     pub optimize_errors: u64,
+    /// OpenTelemetry maintenance-span exporter health (issue #53/#55);
+    /// `state` is `disabled` when no endpoint is configured.
+    pub otel_traces: OtelTracesStats,
     pub checkpoint_count: u64,
     pub checkpoint_total_ns: u64,
     pub checkpoint_errors: u64,
@@ -350,7 +356,9 @@ enum WriteCommand {
         explicit: bool,
         reply: oneshot::Sender<Result<FlushReport, String>>,
     },
-    Optimize(oneshot::Sender<Result<(), String>>),
+    /// One bounded optimize pass; the reply carries the extension-stat
+    /// deltas for the maintenance span.
+    Optimize(oneshot::Sender<Result<OptimizeSweepReport, String>>),
     Backup {
         destination: PathBuf,
         reply: oneshot::Sender<Result<BackupReport, String>>,
@@ -396,6 +404,8 @@ struct StorageInner {
     gate: BytesGate,
     shutting_down: AtomicBool,
     tail: Arc<crate::tail::TailHub>,
+    /// Set once by the server after the exporter starts; stats read it.
+    otel_health: std::sync::OnceLock<Arc<ExporterHealth>>,
 }
 
 #[derive(Clone)]
@@ -568,6 +578,7 @@ impl Storage {
         }
 
         Ok(Self(Arc::new(StorageInner {
+            otel_health: std::sync::OnceLock::new(),
             writer: writer_tx,
             readers,
             next_reader: AtomicUsize::new(0),
@@ -795,6 +806,35 @@ impl Storage {
     }
 
     pub async fn schedule_optimize(&self) -> Result<(), String> {
+        self.schedule_optimize_with_telemetry(None).await
+    }
+
+    /// One scheduled optimize/retention sweep, optionally summarized as one
+    /// span. Only maintenance orchestration is traced: the OTLP ingest path
+    /// and the writer never emit spans, so a traces server exporting into
+    /// its own store cannot recurse.
+    pub async fn schedule_optimize_with_telemetry(
+        &self,
+        telemetry: Option<&MaintenanceTelemetry>,
+    ) -> Result<(), String> {
+        let trace = telemetry.map(|telemetry| {
+            telemetry.start(
+                "optimize",
+                vec![KeyValue::new(
+                    "timeless.maintenance.operation",
+                    "optimize_retention",
+                )],
+            )
+        });
+        let report = self.optimize_report().await;
+        let result = report.as_ref().map(|_| ()).map_err(Clone::clone);
+        if let Some(trace) = trace {
+            trace.finish_optimize(report.as_ref().ok(), &result);
+        }
+        result
+    }
+
+    async fn optimize_report(&self) -> Result<OptimizeSweepReport, String> {
         let _ordered = self.0.admission.lock().await;
         if self.0.shutting_down.load(Ordering::Acquire) {
             return Err("traces API is shutting down; optimize is closed".into());
@@ -809,6 +849,12 @@ impl Storage {
         reply_rx
             .await
             .map_err(|_| "SQLite writer stopped before optimize completed".to_string())?
+    }
+
+    /// Expose the OpenTelemetry exporter's health through `stats()`. Only
+    /// the first attachment takes effect.
+    pub fn attach_otel_health(&self, health: Arc<ExporterHealth>) {
+        let _ = self.0.otel_health.set(health);
     }
 
     /// Best-effort periodic TRUNCATE checkpoint so the WAL file cannot keep
@@ -863,6 +909,12 @@ impl Storage {
         let (mut stats, sqlite_ns, retries) = reply_rx
             .await
             .map_err(|_| "SQLite reader stopped before stats completed".to_string())??;
+        stats.otel_traces = self
+            .0
+            .otel_health
+            .get()
+            .map(|health| health.snapshot())
+            .unwrap_or_default();
         {
             let mut profile = profile_lock(&self.0.profile);
             profile.stats_count = profile.stats_count.saturating_add(1);
@@ -1118,7 +1170,7 @@ fn writer_main(
             }
             WriteCommand::Optimize(reply) => {
                 let started = Instant::now();
-                let result = optimize_backlog(&conn);
+                let result = optimize_sweep(&conn);
                 let mut api = profile_lock(&profile);
                 api.optimize_count = api.optimize_count.saturating_add(1);
                 api.optimize_total_ns = api.optimize_total_ns.saturating_add(elapsed_ns(started));
@@ -1196,27 +1248,62 @@ fn optimize_made_progress(before: OptimizeBacklog, after: OptimizeBacklog) -> bo
     after.actionable_entries() == 0 || after != before
 }
 
-fn optimize_backlog_state(conn: &Connection) -> Result<OptimizeBacklog, String> {
-    let stats = stat_values(conn)?;
-    let integer = |key: &str| match stats.get(key) {
+fn stat_integer(stats: &HashMap<String, SqlValue>, key: &str) -> u64 {
+    match stats.get(key) {
         Some(SqlValue::Integer(value)) => (*value).max(0) as u64,
+        Some(SqlValue::Real(value)) => value.max(0.0) as u64,
         _ => 0,
-    };
-    Ok(OptimizeBacklog {
-        pending_raw_blocks: integer("optimize_pending_raw_blocks"),
-        pending_raw_entries: integer("optimize_pending_raw_entries"),
-        merge_ready_groups: integer("optimize_merge_ready_groups"),
-        merge_ready_blocks: integer("optimize_merge_ready_blocks"),
-        merge_ready_entries: integer("optimize_merge_ready_entries"),
-    })
+    }
 }
 
-fn optimize_backlog(conn: &Connection) -> Result<(), String> {
-    let actionable_spans = optimize_backlog_state(conn)?.actionable_entries();
-    if actionable_spans == 0 {
-        return Ok(());
+fn backlog_from(stat: &dyn Fn(&str) -> u64) -> OptimizeBacklog {
+    OptimizeBacklog {
+        pending_raw_blocks: stat("optimize_pending_raw_blocks"),
+        pending_raw_entries: stat("optimize_pending_raw_entries"),
+        merge_ready_groups: stat("optimize_merge_ready_groups"),
+        merge_ready_blocks: stat("optimize_merge_ready_blocks"),
+        merge_ready_entries: stat("optimize_merge_ready_entries"),
     }
-    optimize_backlog_with_actionable(conn, actionable_spans)
+}
+
+fn optimize_backlog_state(conn: &Connection) -> Result<OptimizeBacklog, String> {
+    let stats = stat_values(conn)?;
+    Ok(backlog_from(&|key| stat_integer(&stats, key)))
+}
+
+/// One scheduled pass: read the backlog, run at most one budgeted optimize,
+/// and report the extension-stat deltas. Two stats reads, as before.
+fn optimize_sweep(conn: &Connection) -> Result<OptimizeSweepReport, String> {
+    let started = Instant::now();
+    let before = stat_values(conn)?;
+    let stat_before = |key: &str| stat_integer(&before, key);
+    let actionable_spans = backlog_from(&stat_before).actionable_entries();
+    if actionable_spans == 0 {
+        return Ok(OptimizeSweepReport::from_stats(
+            stat_before,
+            stat_before,
+            0,
+            elapsed_ns(started),
+        ));
+    }
+    let budget = optimize_span_budget(
+        actionable_spans,
+        stat_before("optimize_source_entries"),
+        stat_before("optimize_source_bytes"),
+    );
+    run_command(
+        conn,
+        &format!("optimize:{budget}"),
+        &format!("optimize traces with {budget}-span budget"),
+    )?;
+    let after = stat_values(conn)?;
+    let stat_after = |key: &str| stat_integer(&after, key);
+    Ok(OptimizeSweepReport::from_stats(
+        stat_before,
+        stat_after,
+        budget as u64,
+        elapsed_ns(started),
+    ))
 }
 
 fn optimize_backlog_with_actionable(

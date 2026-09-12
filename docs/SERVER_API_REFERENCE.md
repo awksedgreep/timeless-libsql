@@ -172,11 +172,12 @@ next flush. The paired
 exported alongside. The same values appear in the serialized `StorageStats`
 responses; each plane README documents its exact series list.
 
-### OpenTelemetry exporter health (metrics)
+### OpenTelemetry exporter health
 
-The metrics `StorageStats` response carries an `otel_traces` object and
-`/health` carries `otel_traces_state`, so the optional compaction-span
-exporter is observable without exporting telemetry about itself. `state` is
+Every `StorageStats` response carries an `otel_traces` object and every
+`/health` response carries `otel_traces_state`, so each server's optional
+maintenance-span exporter (metrics compaction; logs and traces optimize) is
+observable without exporting telemetry about itself. `state` is
 one of `disabled` (no endpoint), `starting` (enabled, nothing attempted or
 dropped yet), `healthy` (last export succeeded, nothing dropped since),
 `dropping` (exports succeed but the bounded queue overflowed since the last
@@ -189,11 +190,24 @@ reports the configured `sample_ratio`, `queue_capacity_spans`, `batch_spans`,
 `last_success_unix_ms`, `last_failure_unix_ms`, and a bounded `last_error`
 text (retained after a later success so its timestamp dates it). The
 Prometheus exposition renders the state as
-`timeless_metrics_otel_traces_state{state="..."}` plus the
-`timeless_metrics_otel_traces_queued_spans`, `..._queue_capacity_spans`,
+`timeless_<signal>_otel_traces_state{state="..."}` plus the
+`timeless_<signal>_otel_traces_queued_spans`, `..._queue_capacity_spans`,
 `..._enqueued_spans_total`, `..._dropped_spans_total`,
 `..._export_successes_total`, `..._export_failures_total`, and
-`..._exported_spans_total` series.
+`..._exported_spans_total` series, where `<signal>` is `metrics`, `logs`, or
+`traces`.
+
+Span vocabulary shared by the three servers: the span is
+`timeless.<signal>.<operation>` (`compaction` for metrics, `optimize` for logs
+and traces) with `timeless.signal`, `timeless.maintenance.operation`,
+`timeless.maintenance.slow_steps`, and `timeless.maintenance.result`
+(`ok`/`error`, plus `error.message`), and one `<span>.slow_step` event per
+committed step of at least 50 ms carrying `timeless.maintenance.step`,
+`.step.elapsed_ns`, and `.step.continues`. Logs and traces sweeps add
+`timeless.optimize.*` attributes: `skipped`, `elapsed_ns`, `budget_entries`,
+`budget_limited`, the `backlog.*` counts seen before the pass, the
+`remaining.*` counts after it, `blocks_removed`, `blocks_written`, and the
+`raw.*` / `merge.*` group, block, entry, byte, and elapsed-time deltas.
 
 ## Metrics requests
 
@@ -361,6 +375,8 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_LOGS_QUEUE_BYTES` | logs | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
 | `TIMELESS_LOGS_FLUSH_INTERVAL_SECS` | logs | `1` | Ordered public extension flush cadence. |
 | `TIMELESS_LOGS_OPTIMIZE_INTERVAL_SECS` | logs | `30` | Bounded public optimize cadence. |
+| `TIMELESS_LOGS_OTEL_TRACES_ENDPOINT` | logs | unset | Full OTLP/HTTP traces endpoint. Unset disables export with no exporter, queue, or span cost. Enabled, the logs server emits one `timeless.logs.optimize` span per scheduled optimize/retention sweep with the backlog it saw, the budget it chose, the extension's before/after block, entry, byte, and elapsed-time deltas, and an event only when the pass takes at least 50 ms. Nothing per request, entry, span, block, or ingest is traced. |
+| `TIMELESS_LOGS_OTEL_TRACES_HEADERS`, `..._HEADERS_FILE`, `..._CA_CERT`, `..._SAMPLE_RATIO`, `..._QUEUE_SPANS`, `..._BATCH_SPANS`, `..._EXPORT_DELAY_MS`, `..._EXPORT_TIMEOUT_MS` | logs | as for metrics | Same meanings, defaults, bounds, and secret handling as the `TIMELESS_METRICS_OTEL_TRACES_*` settings above. |
 | `TIMELESS_LOGS_LOGSQL_MAX_RESULT_ROWS` | logs | `100000` | Final rows; valid range 1–100,000. |
 | `TIMELESS_LOGS_LOGSQL_MAX_WORK_ROWS` | logs | `100000` | Cumulative decoded/examined rows and bounded state items. |
 | `TIMELESS_LOGS_LOGSQL_MAX_RESPONSE_BYTES` | logs | `16777216` | Response and bounded pipeline-state bytes. |
@@ -373,6 +389,8 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_TRACES_RETENTION_SECS` | traces | absent/inherit | If absent, preserve the vtab's stored retention (a fresh table has none); positive sets and enforces it; `0` explicitly disables it. |
 | `TIMELESS_TRACES_FLUSH_INTERVAL_SECS` | traces | `1` | Ordered public extension flush cadence. |
 | `TIMELESS_TRACES_OPTIMIZE_INTERVAL_SECS` | traces | `30` | Bounded public optimize cadence. |
+| `TIMELESS_TRACES_OTEL_TRACES_ENDPOINT` | traces | unset | Full OTLP/HTTP traces endpoint. Unset disables export with no exporter, queue, or span cost. Enabled, the traces server emits one `timeless.traces.optimize` span per scheduled optimize/retention sweep with the backlog it saw, the budget it chose, the extension's before/after block, entry, byte, and elapsed-time deltas, and an event only when the pass takes at least 50 ms. Nothing per request, entry, span, block, or ingest is traced; a traces server may export into its own OTLP ingest without recursing. |
+| `TIMELESS_TRACES_OTEL_TRACES_HEADERS`, `..._HEADERS_FILE`, `..._CA_CERT`, `..._SAMPLE_RATIO`, `..._QUEUE_SPANS`, `..._BATCH_SPANS`, `..._EXPORT_DELAY_MS`, `..._EXPORT_TIMEOUT_MS` | traces | as for metrics | Same meanings, defaults, bounds, and secret handling as the `TIMELESS_METRICS_OTEL_TRACES_*` settings above. |
 
 <!-- public-server-environment:end -->
 

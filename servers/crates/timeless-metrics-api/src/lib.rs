@@ -29,7 +29,9 @@ pub use scrape::{
     ScrapeAuth, ScrapeTarget, ScrapeTargetReport, ScrapeTargetSet, ScrapeTargetSetReport,
 };
 pub use storage::{FlushReport, Storage, StorageStats};
-pub use telemetry::{OtelExportState, OtelHeaders, OtelTracesConfig, OtelTracesStats};
+pub use timeless_api_common::otel::{
+    OtelExportState, OtelHeaders, OtelTelemetry, OtelTracesConfig, OtelTracesStats,
+};
 pub use timeless_api_common::BackupReport;
 
 pub const DEFAULT_RAW_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -175,7 +177,7 @@ impl Config {
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
-    let telemetry = telemetry::Telemetry::initialize(&config.otel_traces)?;
+    let telemetry = OtelTelemetry::initialize(&config.otel_traces, "metrics")?;
     if telemetry.is_some() {
         // Endpoint and header names only: header values are secrets.
         println!(
@@ -217,7 +219,9 @@ pub async fn run(config: Config) -> Result<(), String> {
         storage.clone(),
         |storage| async move { storage.schedule_flush().await },
     );
-    let compaction_telemetry = telemetry.as_ref().map(telemetry::Telemetry::compaction);
+    let compaction_telemetry = telemetry
+        .as_ref()
+        .map(|telemetry| telemetry::CompactionTelemetry::new(telemetry.tracer()));
     let compact_task = maintenance_task(
         config.compact_interval,
         (storage.clone(), compaction_telemetry),

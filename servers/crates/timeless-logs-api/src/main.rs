@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
-use timeless_logs_api::{run, Config, LogsQueryLimits, StorePolicy};
+use timeless_logs_api::{run, Config, LogsQueryLimits, OtelTracesConfig, StorePolicy};
 
 const USAGE: &str = "usage: timeless-logs-api <libtimeless_ext.so> <database> [listen-address]";
 
@@ -146,6 +146,13 @@ async fn main() -> ExitCode {
         command_queue_batches,
         flush_interval,
         optimize_interval,
+        otel_traces: match OtelTracesConfig::from_env(
+            "TIMELESS_LOGS_OTEL_TRACES",
+            &defaults.otel_traces,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
         queue_bytes,
         logs_query_limits,
         auth,

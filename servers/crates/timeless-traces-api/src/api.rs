@@ -123,7 +123,8 @@ async fn health(State(storage): State<Storage>) -> Response {
                     "in_flight_batches": stats.in_flight_requests,
                     "in_flight_spans": stats.in_flight_spans,
                     "oldest_queue_age_ms": stats.oldest_queued_ms
-                }
+                },
+                "otel_traces_state": stats.otel_traces.state
             })),
         )
             .into_response(),
@@ -283,6 +284,7 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 "Age of the oldest queued request in milliseconds.",
                 clamp(stats.oldest_queued_ms),
             );
+            timeless_api_common::otel::expose_health(&mut x, "traces", &stats.otel_traces);
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],

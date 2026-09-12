@@ -29,6 +29,16 @@ The exact public storage contract is in the
 - A low-volume timer sends the public `flush` command. A separate maintenance
   timer reads public actionable backlog and invokes bounded
   `optimize:<entries>`; it never builds or rewrites blocks itself.
+- Optional OpenTelemetry export covers only that optimize/retention sweep:
+  set `TIMELESS_LOGS_OTEL_TRACES_ENDPOINT` and each sweep becomes one
+  `timeless.logs.optimize` span carrying the backlog, the chosen budget, the
+  extension's block/entry/byte/elapsed deltas, and an event only when the
+  pass takes at least 50 ms. Nothing per request, entry, or block is traced.
+  `TIMELESS_LOGS_OTEL_TRACES_{HEADERS,HEADERS_FILE,CA_CERT,SAMPLE_RATIO,
+  QUEUE_SPANS,BATCH_SPANS,EXPORT_DELAY_MS,EXPORT_TIMEOUT_MS}` behave exactly
+  as the metrics server's settings; export is bounded, drop-on-full, cannot
+  fail the sweep or the server, and reports itself through
+  `StorageStats.otel_traces` and `timeless_logs_otel_traces_*`.
 - SIGINT/SIGTERM stops admission, drains accepted work, flushes, checkpoints
   WAL, closes workers, and releases the exclusive owner lease.
 

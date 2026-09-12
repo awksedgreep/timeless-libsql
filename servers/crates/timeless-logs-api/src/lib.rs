@@ -32,6 +32,10 @@ pub use storage::{
     FieldCompareOp, LogEntry, LogField, LogPredicate, MetadataExact, NumericOp, PatternMatchMode,
     PatternMatcher, QuerySpec, Storage, StorageStats, StorePolicy, TimestampUnit, ValueTypeKind,
 };
+pub use timeless_api_common::otel::{
+    MaintenanceTelemetry, OtelExportState, OtelHeaders, OtelTelemetry, OtelTracesConfig,
+    OtelTracesStats,
+};
 pub use timeless_api_common::BackupReport;
 
 /// Cadence of the writer's periodic `wal_checkpoint(TRUNCATE)`. It keeps the
@@ -89,6 +93,9 @@ pub struct Config {
     pub queue_bytes: usize,
     pub flush_interval: Duration,
     pub optimize_interval: Duration,
+    /// Optional one-span-per-optimize-sweep OpenTelemetry export. An unset
+    /// endpoint disables it entirely.
+    pub otel_traces: OtelTracesConfig,
     pub timestamp_unit: TimestampUnit,
     pub logs_query_limits: LogsQueryLimits,
     pub auth: AuthConfig,
@@ -111,6 +118,7 @@ impl Default for Config {
             // volume, just as it does for every direct SQLite user.
             flush_interval: Duration::from_secs(1),
             optimize_interval: Duration::from_secs(30),
+            otel_traces: OtelTracesConfig::default(),
             // The released Elixir product's canonical timestamp is epoch
             // microseconds. Direct SQL callers can still create the legacy
             // default millisecond table explicitly.
@@ -143,6 +151,7 @@ impl Config {
         if self.flush_interval.is_zero() || self.optimize_interval.is_zero() {
             return Err("maintenance intervals must be positive".into());
         }
+        self.otel_traces.validate()?;
         self.logs_query_limits.validate()?;
         self.auth.preflight()?;
         Ok(())
@@ -151,6 +160,22 @@ impl Config {
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
+    let telemetry = OtelTelemetry::initialize(&config.otel_traces, "logs")?;
+    if telemetry.is_some() {
+        // Endpoint and header names only: header values are secrets.
+        println!(
+            "timeless-logs-api OpenTelemetry optimize tracing enabled: endpoint {} \
+             sample_ratio {} queue {} spans, batch {} spans, delay {} ms, timeout {} ms, \
+             headers {:?}",
+            config.otel_traces.endpoint.as_deref().unwrap_or_default(),
+            config.otel_traces.sample_ratio,
+            config.otel_traces.queue_spans,
+            config.otel_traces.batch_spans,
+            config.otel_traces.export_delay.as_millis(),
+            config.otel_traces.export_timeout.as_millis(),
+            config.otel_traces.headers.names(),
+        );
+    }
 
     let storage = Storage::start_with_policy_full(
         config.database_path.clone(),
@@ -161,6 +186,9 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.queue_bytes,
         config.store_policy.clone(),
     )?;
+    if let Some(telemetry) = &telemetry {
+        storage.attach_otel_health(telemetry.health());
+    }
     let app = protect_router(
         router_with_limits(storage.clone(), config.logs_query_limits),
         config.auth.clone(),
@@ -175,10 +203,17 @@ pub async fn run(config: Config) -> Result<(), String> {
         storage.clone(),
         |storage| async move { storage.schedule_flush().await },
     );
+    let maintenance_telemetry = telemetry
+        .as_ref()
+        .map(|telemetry| telemetry.maintenance("logs"));
     let optimize_task = maintenance_task(
         config.optimize_interval,
-        storage.clone(),
-        |storage| async move { storage.schedule_optimize().await },
+        (storage.clone(), maintenance_telemetry),
+        |(storage, telemetry)| async move {
+            storage
+                .schedule_optimize_with_telemetry(telemetry.as_ref())
+                .await
+        },
     );
     let wal_checkpoint_task = maintenance_task(
         WAL_CHECKPOINT_INTERVAL,
@@ -207,6 +242,14 @@ pub async fn run(config: Config) -> Result<(), String> {
         drain,
     )
     .await;
+    if let Some(telemetry) = telemetry {
+        // The exporter flush blocks on HTTP; keep it off the async workers.
+        match tokio::task::spawn_blocking(move || telemetry.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("timeless-logs-api: {error}"),
+            Err(error) => eprintln!("timeless-logs-api: flush OpenTelemetry traces: {error}"),
+        }
+    }
     served.and(shutdown)
 }
 

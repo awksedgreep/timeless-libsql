@@ -98,7 +98,8 @@ async fn health(State(storage): State<Storage>) -> impl IntoResponse {
                 "queued_entries": stats.queued_entries,
                 "oldest_queued_ms": stats.oldest_queued_ms,
                 "admitted_entries": stats.admitted_entries,
-                "completed_entries": stats.completed_entries
+                "completed_entries": stats.completed_entries,
+                "otel_traces_state": stats.otel_traces.state
             })),
         )
             .into_response(),
@@ -267,6 +268,7 @@ async fn self_metrics(State(storage): State<Storage>) -> impl IntoResponse {
                 "Reusable free pages inside the database file.",
                 stats.freelist_bytes,
             );
+            timeless_api_common::otel::expose_health(&mut x, "logs", &stats.otel_traces);
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],

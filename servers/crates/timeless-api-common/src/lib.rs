@@ -8,6 +8,7 @@
 mod admission;
 mod auth;
 mod error;
+pub mod otel;
 mod prometheus;
 
 pub use admission::{BytesGate, GatePermit};

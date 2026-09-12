@@ -16,6 +16,20 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Added
 
+- **Logs and traces maintenance sweeps emit one bounded OpenTelemetry span
+  each (issue #53).** `TIMELESS_LOGS_OTEL_TRACES_ENDPOINT` and
+  `TIMELESS_TRACES_OTEL_TRACES_ENDPOINT` enable a `timeless.logs.optimize` /
+  `timeless.traces.optimize` span per scheduled optimize/retention sweep,
+  carrying the backlog the sweep saw, the budget it chose, the extension's
+  before/after block, entry, byte, and elapsed-time deltas, the result, and
+  an event only when the pass takes at least 50 ms. Nothing per request,
+  entry, span, block, or ingest is traced, so a traces server may export
+  into its own OTLP route without recursing (a real-extension test pins
+  this). The exporter, its `..._HEADERS`/`..._CA_CERT`/sampling/bounds
+  settings, `StorageStats.otel_traces`, `/health.otel_traces_state`, and the
+  `timeless_<signal>_otel_traces_*` self-metrics are shared with the metrics
+  server through `timeless-api-common`.
+
 - **The metrics OpenTelemetry exporter is observable and configurable
   (issue #55).** `StorageStats.otel_traces`, `/health`'s `otel_traces_state`,
   and new `timeless_metrics_otel_traces_*` self-metrics report the exporter

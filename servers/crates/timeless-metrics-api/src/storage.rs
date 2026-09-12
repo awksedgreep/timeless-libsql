@@ -21,7 +21,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
 use crate::scrape::{ScrapeController, ScrapeTargetSet, ScrapeTargetSetReport};
-use crate::telemetry::{CompactionTelemetry, CompactionWork, ExporterHealth, OtelTracesStats};
+use crate::telemetry::{CompactionTelemetry, CompactionWork};
+use timeless_api_common::otel::{ExporterHealth, OtelTracesStats};
 
 /// Maximum metrics series and rollup groups handled by one scheduled
 /// maintenance transaction. Production-scale compact/rollup sweeps are

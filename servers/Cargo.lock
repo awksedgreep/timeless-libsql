@@ -1873,11 +1873,19 @@ dependencies = [
 name = "timeless-api-common"
 version = "0.8.3"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "ed25519-dalek",
  "form_urlencoded",
  "fs2",
+ "futures-executor",
+ "http",
+ "opentelemetry",
+ "opentelemetry-http",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest",
  "rusqlite",
  "semver",
  "serde",
@@ -1922,6 +1930,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "timeless-api-common",
+ "timeless-traces-api",
  "tokio",
  "tower",
  "xxhash-rust",
@@ -1931,17 +1940,12 @@ dependencies = [
 name = "timeless-metrics-api"
 version = "0.8.3"
 dependencies = [
- "async-trait",
  "axum",
  "bytes",
  "chrono",
  "form_urlencoded",
  "fs2",
- "futures-executor",
- "http",
  "opentelemetry",
- "opentelemetry-http",
- "opentelemetry-otlp",
  "opentelemetry_sdk",
  "promql-parser",
  "regex",
