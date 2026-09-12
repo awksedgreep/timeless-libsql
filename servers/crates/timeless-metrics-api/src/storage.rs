@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::query::{self, QueryFeatures, ReadKind, ReadOutput, ReadRequest};
 use crate::scrape::{ScrapeController, ScrapeTargetSet, ScrapeTargetSetReport};
-use crate::telemetry::{CompactionTelemetry, CompactionWork};
+use crate::telemetry::{CompactionTelemetry, CompactionWork, ExporterHealth, OtelTracesStats};
 
 /// Maximum metrics series and rollup groups handled by one scheduled
 /// maintenance transaction. Production-scale compact/rollup sweeps are
@@ -161,6 +161,9 @@ pub struct StorageStats {
     pub backup_count: u64,
     pub backup_total_ns: u64,
     pub backup_errors: u64,
+    /// OpenTelemetry compaction-span exporter health (issue #55); `state`
+    /// is `disabled` when no endpoint is configured.
+    pub otel_traces: OtelTracesStats,
     pub extension_prometheus_ingest_batches: i64,
     pub extension_prometheus_ingest_points: i64,
     pub extension_prometheus_ingest_errors: i64,
@@ -372,6 +375,8 @@ struct StorageInner {
     gate: BytesGate,
     shutting_down: AtomicBool,
     scrape: ScrapeController,
+    /// Set once by the server after the exporter starts; stats read it.
+    otel_health: std::sync::OnceLock<Arc<ExporterHealth>>,
 }
 
 #[derive(Clone)]
@@ -380,6 +385,12 @@ pub struct Storage(Arc<StorageInner>);
 impl Storage {
     pub fn is_ready(&self) -> bool {
         !self.0.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Expose the OpenTelemetry exporter's health through `stats()`. Only
+    /// the first attachment takes effect.
+    pub(crate) fn attach_otel_health(&self, health: Arc<ExporterHealth>) {
+        let _ = self.0.otel_health.set(health);
     }
 
     pub async fn replace_scrape_targets(&self, set: ScrapeTargetSet) -> Result<(), String> {
@@ -552,6 +563,7 @@ impl Storage {
             shutting_down: AtomicBool::new(false),
             backup_guard: timeless_api_common::SingleFlight::new(),
             scrape: ScrapeController::default(),
+            otel_health: std::sync::OnceLock::new(),
         })))
     }
 
@@ -926,6 +938,12 @@ impl Storage {
             apply_profile(&mut stats, &profile);
         }
         stats.raw_retention_seconds = self.0.raw_retention.as_secs();
+        stats.otel_traces = self
+            .0
+            .otel_health
+            .get()
+            .map(|health| health.snapshot())
+            .unwrap_or_default();
         stats.writer_connections = 1;
         stats.reader_connections = self.0.readers.len();
         stats.command_queue_capacity_batches = self.0.queue_capacity;

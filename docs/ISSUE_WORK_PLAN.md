@@ -18,9 +18,34 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 | 3 | [#48](https://github.com/awksedgreep/timeless-libsql/issues/48) WriterGate pointer ABA | P1 | done | Writer/read ownership now uses a generation-stamped connection identity; the synthetic pointer-reuse regression proves the later connection cannot re-enter, read through, or release the leaked holder. |
 | 4 | [#46](https://github.com/awksedgreep/timeless-libsql/issues/46) remaining API consistency | P1 | externally pending | Repository work is complete: native JSON error contract v1 is implemented and tested without changing Prometheus/MetricsQL, Jaeger, OTLP, or Victoria-compatible ingest shapes. Post the reconciliation evidence to the issue and close it. |
 | 5 | [#52](https://github.com/awksedgreep/timeless-libsql/issues/52) metrics size-tiered compaction | P2 | externally pending | Repository work is complete: the planner, hard source-work budgets, phase counters, correctness fixtures, full gates, and production-shaped release curve are recorded. Post the evidence to the issue and close it. |
-| 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | pending | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested. |
+| 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | done | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested; post the evidence to the issue and close it. |
 | 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | pending | Add bounded maintenance summary spans and prove trace ingest/export cannot recurse. |
 | 8 | [#54](https://github.com/awksedgreep/timeless-libsql/issues/54) request and contention tracing | P3 | pending | Add sampled, redacted, cardinality-bounded request spans with measured disabled/enabled overhead and nonblocking export. |
+
+## Issue #55 completion (2026-09-12)
+
+- Replaced the SDK batch processor with `BoundedBatchProcessor`: a
+  fixed-capacity queue, one export worker thread, exact enqueue/drop/attempt/
+  success/failure/span counters in `ExporterHealth`, and a shutdown that
+  returns within the caller's budget even when the exporter hangs.
+- Replaced the exporter's bundled `reqwest` 0.13 (blocking, no TLS) with an
+  `HttpClient` over the crate's `reqwest` 0.12 client: TLS via the existing
+  rustls roots plus an optional CA file, headers, and connect/response
+  timeouts configured in one place. The workspace now builds one `reqwest`;
+  the release `timeless-metrics-api` binary went from 11,468,384 to
+  11,125,248 bytes (about 335 KiB smaller) on the same toolchain.
+- Added `TIMELESS_METRICS_OTEL_TRACES_{HEADERS,HEADERS_FILE,CA_CERT,
+  SAMPLE_RATIO,QUEUE_SPANS,BATCH_SPANS,EXPORT_DELAY_MS,EXPORT_TIMEOUT_MS}`;
+  `OtelTracesConfig::validate` runs from `Config::validate` and names the
+  failing setting without echoing header values.
+- Surfaced health as `StorageStats.otel_traces`, `/health.otel_traces_state`,
+  and `timeless_metrics_otel_traces_*` self-metrics.
+- Tests: header parsing/redaction, bound validation, queue overflow and
+  recovery, failure accounting and recovery, bounded shutdown with a hung
+  exporter, zero sampling, loopback transport with headers, refused
+  connection, stalled collector; plus two real-extension tests (span round
+  trip into `timeless-traces-api`, and an eight-sweep collector outage that
+  keeps maintenance under one second per sweep with the queue bounded).
 
 ## Issue #56 completion (2026-09-12)
 

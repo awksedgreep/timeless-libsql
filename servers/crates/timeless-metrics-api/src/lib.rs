@@ -29,6 +29,7 @@ pub use scrape::{
     ScrapeAuth, ScrapeTarget, ScrapeTargetReport, ScrapeTargetSet, ScrapeTargetSetReport,
 };
 pub use storage::{FlushReport, Storage, StorageStats};
+pub use telemetry::{OtelExportState, OtelHeaders, OtelTracesConfig, OtelTracesStats};
 pub use timeless_api_common::BackupReport;
 
 pub const DEFAULT_RAW_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -109,9 +110,9 @@ pub struct Config {
     /// unchanged and creates new databases without rollups; `Some("none")`
     /// disables an existing ladder, while another value replaces it.
     pub rollups: Option<String>,
-    /// Full OTLP/HTTP traces endpoint. Unset disables the deliberately narrow
-    /// metrics-compaction instrumentation slice.
-    pub otel_traces_endpoint: Option<String>,
+    /// Deliberately narrow metrics-compaction OpenTelemetry export. An unset
+    /// endpoint disables it entirely.
+    pub otel_traces: OtelTracesConfig,
     pub prom_query_limits: PromQueryLimits,
     pub auth: AuthConfig,
 }
@@ -133,7 +134,7 @@ impl Default for Config {
             retention_interval: Duration::from_secs(60 * 60),
             raw_retention: DEFAULT_RAW_RETENTION,
             rollups: None,
-            otel_traces_endpoint: None,
+            otel_traces: OtelTracesConfig::default(),
             prom_query_limits: PromQueryLimits::default(),
             auth: AuthConfig::disabled(),
         }
@@ -166,7 +167,7 @@ impl Config {
             return Err("maintenance and retention intervals must be positive".into());
         }
         self.prom_query_limits.validate()?;
-        telemetry::validate_endpoint(self.otel_traces_endpoint.as_deref())?;
+        self.otel_traces.validate()?;
         self.auth.preflight()?;
         Ok(())
     }
@@ -174,9 +175,21 @@ impl Config {
 
 pub async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
-    let telemetry = telemetry::Telemetry::initialize(config.otel_traces_endpoint.as_deref())?;
+    let telemetry = telemetry::Telemetry::initialize(&config.otel_traces)?;
     if telemetry.is_some() {
-        println!("timeless-metrics-api OpenTelemetry compaction tracing enabled");
+        // Endpoint and header names only: header values are secrets.
+        println!(
+            "timeless-metrics-api OpenTelemetry compaction tracing enabled: endpoint {} \
+             sample_ratio {} queue {} spans, batch {} spans, delay {} ms, timeout {} ms, \
+             headers {:?}",
+            config.otel_traces.endpoint.as_deref().unwrap_or_default(),
+            config.otel_traces.sample_ratio,
+            config.otel_traces.queue_spans,
+            config.otel_traces.batch_spans,
+            config.otel_traces.export_delay.as_millis(),
+            config.otel_traces.export_timeout.as_millis(),
+            config.otel_traces.headers.names(),
+        );
     }
     let storage = Storage::start_with_queue_bytes_and_rollups(
         config.database_path.clone(),
@@ -187,6 +200,9 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.queue_bytes,
         config.rollups.as_deref(),
     )?;
+    if let Some(telemetry) = &telemetry {
+        storage.attach_otel_health(telemetry.health());
+    }
     let app = protect_router(
         router_with_limits(storage.clone(), config.prom_query_limits),
         config.auth.clone(),
@@ -249,8 +265,12 @@ pub async fn run(config: Config) -> Result<(), String> {
     )
     .await;
     if let Some(telemetry) = telemetry {
-        if let Err(error) = telemetry.shutdown() {
-            eprintln!("timeless-metrics-api: {error}");
+        // The exporter flush blocks on HTTP; keep it off the async workers.
+        let flushed = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
+        match flushed {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("timeless-metrics-api: {error}"),
+            Err(error) => eprintln!("timeless-metrics-api: flush OpenTelemetry traces: {error}"),
         }
     }
     served.and(shutdown)

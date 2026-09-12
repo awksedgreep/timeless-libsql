@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
-use timeless_metrics_api::{run, Config, PromQueryLimits};
+use timeless_metrics_api::{run, Config, OtelHeaders, OtelTracesConfig, PromQueryLimits};
 const USAGE: &str = "usage: timeless-metrics-api <libtimeless_ext.so> <database> [listen-address]";
 
 #[tokio::main]
@@ -100,11 +100,10 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
-    let otel_traces_endpoint =
-        match optional_string_from_env("TIMELESS_METRICS_OTEL_TRACES_ENDPOINT") {
-            Ok(value) => value,
-            Err(error) => return usage_error(error),
-        };
+    let otel_traces = match otel_traces_from_env(&defaults.otel_traces) {
+        Ok(value) => value,
+        Err(error) => return usage_error(error),
+    };
     let prom_query_limits = PromQueryLimits {
         max_points_per_series: match positive_usize_from_env(
             "TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES",
@@ -161,7 +160,7 @@ async fn main() -> ExitCode {
         compact_interval,
         retention_interval,
         rollups,
-        otel_traces_endpoint,
+        otel_traces,
         prom_query_limits,
         auth,
         ..defaults
@@ -246,6 +245,68 @@ fn rollups_from_env(name: &str, default: Option<&str>) -> Result<Option<String>,
         ));
     }
     Ok(Some(value.to_owned()))
+}
+
+/// `TIMELESS_METRICS_OTEL_TRACES_*`: endpoint, headers (inline or from a
+/// file, never both), CA certificate, sample ratio, and the queue/batch/
+/// delay/timeout bounds. Range checks live in `OtelTracesConfig::validate`,
+/// which `Config::validate` runs before anything starts.
+fn otel_traces_from_env(defaults: &OtelTracesConfig) -> Result<OtelTracesConfig, String> {
+    let endpoint = optional_string_from_env("TIMELESS_METRICS_OTEL_TRACES_ENDPOINT")?;
+    let inline = optional_string_from_env("TIMELESS_METRICS_OTEL_TRACES_HEADERS")?;
+    let file = optional_string_from_env("TIMELESS_METRICS_OTEL_TRACES_HEADERS_FILE")?;
+    let headers = match (inline, file) {
+        (Some(_), Some(_)) => {
+            return Err("set only one of TIMELESS_METRICS_OTEL_TRACES_HEADERS and \
+                        TIMELESS_METRICS_OTEL_TRACES_HEADERS_FILE"
+                .into())
+        }
+        (Some(inline), None) => OtelHeaders::parse(&inline)
+            .map_err(|error| format!("TIMELESS_METRICS_OTEL_TRACES_HEADERS: {error}"))?,
+        (None, Some(path)) => {
+            let contents = std::fs::read_to_string(&path).map_err(|error| {
+                format!("read TIMELESS_METRICS_OTEL_TRACES_HEADERS_FILE {path:?}: {error}")
+            })?;
+            OtelHeaders::parse(&contents)
+                .map_err(|error| format!("TIMELESS_METRICS_OTEL_TRACES_HEADERS_FILE: {error}"))?
+        }
+        (None, None) => OtelHeaders::default(),
+    };
+    let ca_certificate =
+        optional_string_from_env("TIMELESS_METRICS_OTEL_TRACES_CA_CERT")?.map(PathBuf::from);
+    let sample_ratio = match std::env::var("TIMELESS_METRICS_OTEL_TRACES_SAMPLE_RATIO") {
+        Ok(value) => value.trim().parse::<f64>().map_err(|error| {
+            format!("invalid TIMELESS_METRICS_OTEL_TRACES_SAMPLE_RATIO={value:?}: {error}")
+        })?,
+        Err(std::env::VarError::NotPresent) => defaults.sample_ratio,
+        Err(error) => {
+            return Err(format!(
+                "TIMELESS_METRICS_OTEL_TRACES_SAMPLE_RATIO is not valid Unicode: {error}"
+            ))
+        }
+    };
+    Ok(OtelTracesConfig {
+        endpoint,
+        headers,
+        ca_certificate,
+        sample_ratio,
+        queue_spans: positive_usize_from_env(
+            "TIMELESS_METRICS_OTEL_TRACES_QUEUE_SPANS",
+            defaults.queue_spans,
+        )?,
+        batch_spans: positive_usize_from_env(
+            "TIMELESS_METRICS_OTEL_TRACES_BATCH_SPANS",
+            defaults.batch_spans,
+        )?,
+        export_delay: duration_millis_from_env(
+            "TIMELESS_METRICS_OTEL_TRACES_EXPORT_DELAY_MS",
+            defaults.export_delay,
+        )?,
+        export_timeout: duration_millis_from_env(
+            "TIMELESS_METRICS_OTEL_TRACES_EXPORT_TIMEOUT_MS",
+            defaults.export_timeout,
+        )?,
+    })
 }
 
 fn optional_string_from_env(name: &str) -> Result<Option<String>, String> {

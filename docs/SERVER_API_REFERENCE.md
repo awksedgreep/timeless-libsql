@@ -172,6 +172,29 @@ next flush. The paired
 exported alongside. The same values appear in the serialized `StorageStats`
 responses; each plane README documents its exact series list.
 
+### OpenTelemetry exporter health (metrics)
+
+The metrics `StorageStats` response carries an `otel_traces` object and
+`/health` carries `otel_traces_state`, so the optional compaction-span
+exporter is observable without exporting telemetry about itself. `state` is
+one of `disabled` (no endpoint), `starting` (enabled, nothing attempted or
+dropped yet), `healthy` (last export succeeded, nothing dropped since),
+`dropping` (exports succeed but the bounded queue overflowed since the last
+success), or `failing` (the last export failed or timed out). The object also
+reports the configured `sample_ratio`, `queue_capacity_spans`, `batch_spans`,
+`export_delay_ms`, and `export_timeout_ms`; the live `queued_spans` and
+`queue_high_water_spans`; cumulative `enqueued_spans`, `dropped_spans`,
+`dropped_since_last_success`, `export_attempts`, `export_successes`,
+`export_failures`, `exported_spans`, and `failed_spans`; and
+`last_success_unix_ms`, `last_failure_unix_ms`, and a bounded `last_error`
+text (retained after a later success so its timestamp dates it). The
+Prometheus exposition renders the state as
+`timeless_metrics_otel_traces_state{state="..."}` plus the
+`timeless_metrics_otel_traces_queued_spans`, `..._queue_capacity_spans`,
+`..._enqueued_spans_total`, `..._dropped_spans_total`,
+`..._export_successes_total`, `..._export_failures_total`, and
+`..._exported_spans_total` series.
+
 ## Metrics requests
 
 GET and POST query endpoints consume URL-encoded parameters. On POST, form
@@ -316,7 +339,15 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_QUEUE_BYTES` | metrics | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
 | `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |
 | `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` | metrics | `300` | Public compact/rollup sweep cadence. Each sweep uses resumable transactions capped at 64 metrics series, 262,144 source points, 4 MiB of encoded metrics input, and 64 rollup groups, with a reader-admission pause between commits. |
-| `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` | metrics | unset | Full OTLP/HTTP traces endpoint, for example `http://127.0.0.1:19449/insert/opentelemetry/v1/traces`. Unset disables export. The initial scope emits one scheduled compact/rollup sweep span with raw/merge step, point, byte, and elapsed-time totals plus events for steps taking at least 50 ms; it does not trace requests, samples, or other services. Endpoint credentials are rejected; use a trusted loopback receiver for this initial slice. |
+| `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` | metrics | unset | Full OTLP/HTTP traces endpoint, for example `http://127.0.0.1:19449/insert/opentelemetry/v1/traces` or an `https://` collector. Unset disables export and no exporter, queue, or span cost exists. The scope is one scheduled compact/rollup sweep span with raw/merge step, point, byte, and elapsed-time totals plus events for steps taking at least 50 ms; it does not trace requests, samples, or other services. Credentials in the URL are rejected; use `..._HEADERS` for authentication. |
+| `TIMELESS_METRICS_OTEL_TRACES_HEADERS` | metrics | unset | Extra OTLP request headers as comma-separated `name=value` entries (the `OTEL_EXPORTER_OTLP_HEADERS` convention; values may be percent-encoded). Values are secrets: they are never logged, and validation errors name only the header. `content-type`, `content-length`, `host`, and `transfer-encoding` are set by the exporter and rejected here. Requires the endpoint. |
+| `TIMELESS_METRICS_OTEL_TRACES_HEADERS_FILE` | metrics | unset | Path to a file with the same `name=value` entries, one per line or comma-separated, for deployments that mount secrets as files. Mutually exclusive with `..._HEADERS`. |
+| `TIMELESS_METRICS_OTEL_TRACES_CA_CERT` | metrics | unset | PEM file holding the CA certificate(s) that sign an `https://` collector's certificate; it is read and parsed at startup. Unset uses the built-in WebPKI roots. Rejected with an `http://` endpoint. |
+| `TIMELESS_METRICS_OTEL_TRACES_SAMPLE_RATIO` | metrics | `1.0` | Fraction of sweeps traced, `0.0`–`1.0`. Sampling is decided when the sweep starts, so an unsampled sweep records no attributes and touches no queue. |
+| `TIMELESS_METRICS_OTEL_TRACES_QUEUE_SPANS` | metrics | `256` | Capacity of the drop-on-full export queue, 1–65,536. A full queue drops the newest span and counts it; ending a span never blocks maintenance. |
+| `TIMELESS_METRICS_OTEL_TRACES_BATCH_SPANS` | metrics | `64` | Maximum spans per export request, 1–queue size. |
+| `TIMELESS_METRICS_OTEL_TRACES_EXPORT_DELAY_MS` | metrics | `1000` | Longest a queued span waits before an export attempt, 1–60,000 ms. |
+| `TIMELESS_METRICS_OTEL_TRACES_EXPORT_TIMEOUT_MS` | metrics | `2000` | Per-request HTTP connect and response timeout, 1–60,000 ms. Shutdown flushes the queue for at most twice this budget, then discards and counts what is left. |
 | `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` | metrics | `3600` | Seven-day raw-retention prune check cadence. |
 | `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows through the same 64-row transaction budget. The HTTP API does not require persisted rollups. |
 | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Evaluation-grid points per series; valid range 1–11,000. |

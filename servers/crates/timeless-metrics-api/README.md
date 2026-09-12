@@ -36,15 +36,23 @@ The exact public storage contract is in the
 - Optional first-party OpenTelemetry export is deliberately limited to those
   scheduled compact/rollup sweeps. Set
   `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` to a full OTLP/HTTP endpoint such as
-  `http://127.0.0.1:19449/insert/opentelemetry/v1/traces`; leaving it unset has
-  no exporter or span cost. One sweep produces one span, with events only for
-  committed steps taking at least 50 ms. Export runs through a 256-span
-  drop-on-full background queue in batches of at most 64 with a two-second
-  request/shutdown timeout. The endpoint must be trusted and must not contain
-  credentials. Export failure is best-effort and cannot fail data-plane work or
-  turn an otherwise clean shutdown into a server failure. HTTP request tracing,
-  per-chunk spans, other signals, and the logs/traces processes are not part of
-  this initial slice.
+  `http://127.0.0.1:19449/insert/opentelemetry/v1/traces` or an `https://`
+  collector; leaving it unset has no exporter or span cost. One sweep produces
+  one span, with events only for committed steps taking at least 50 ms.
+  Authentication goes in `TIMELESS_METRICS_OTEL_TRACES_HEADERS` (or
+  `..._HEADERS_FILE`), never in the URL, and header values are never logged;
+  `..._CA_CERT` pins a private CA for TLS. Export runs through a bounded
+  drop-on-full queue (`..._QUEUE_SPANS`, default 256) in batches
+  (`..._BATCH_SPANS`, default 64) after at most `..._EXPORT_DELAY_MS` (default
+  1000) with a per-request `..._EXPORT_TIMEOUT_MS` (default 2000);
+  `..._SAMPLE_RATIO` traces a fraction of sweeps. Export failure is best-effort
+  and cannot fail data-plane work or turn an otherwise clean shutdown into a
+  server failure, and it is observable: `StorageStats.otel_traces` and the
+  `timeless_metrics_otel_traces_*` self-metrics report `disabled`, `starting`,
+  `healthy`, `dropping`, or `failing` with exact queue, drop, attempt, success,
+  and failure counts plus the last error. HTTP request tracing, per-chunk
+  spans, other signals, and the logs/traces processes are not part of this
+  slice.
 - A successful ingest response follows the route-specific admission/completion
   contract. `POST /api/v1/flush` is the ordered durability barrier.
 - SIGINT/SIGTERM stops admission, drains accepted work, flushes, checkpoints

@@ -453,7 +453,8 @@ async fn health(State(storage): State<Storage>) -> Response {
                 "import_errors": stats.import_errors,
                 "database_file_bytes": stats.database_file_bytes,
                 "database_wal_bytes": stats.database_wal_bytes,
-                "freelist_bytes": stats.freelist_bytes
+                "freelist_bytes": stats.freelist_bytes,
+                "otel_traces_state": stats.otel_traces.state
             })),
         )
             .into_response(),
@@ -602,6 +603,48 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 "timeless_metrics_freelist_bytes",
                 "Reusable free pages inside the database file.",
                 stats.freelist_bytes,
+            );
+            let otel = &stats.otel_traces;
+            x.info(
+                "timeless_metrics_otel_traces_state",
+                "OpenTelemetry compaction-span export state: disabled, starting, \
+                 healthy, dropping, or failing.",
+                &[("state", otel.state.as_str())],
+            );
+            x.gauge(
+                "timeless_metrics_otel_traces_queued_spans",
+                "Spans waiting in the bounded OpenTelemetry export queue.",
+                clamp(otel.queued_spans),
+            );
+            x.gauge(
+                "timeless_metrics_otel_traces_queue_capacity_spans",
+                "Capacity of the OpenTelemetry export queue.",
+                clamp(otel.queue_capacity_spans),
+            );
+            x.counter(
+                "timeless_metrics_otel_traces_enqueued_spans_total",
+                "Spans accepted into the OpenTelemetry export queue.",
+                clamp(otel.enqueued_spans),
+            );
+            x.counter(
+                "timeless_metrics_otel_traces_dropped_spans_total",
+                "Spans discarded because the OpenTelemetry export queue was full.",
+                clamp(otel.dropped_spans),
+            );
+            x.counter(
+                "timeless_metrics_otel_traces_export_successes_total",
+                "OpenTelemetry export requests that succeeded.",
+                clamp(otel.export_successes),
+            );
+            x.counter(
+                "timeless_metrics_otel_traces_export_failures_total",
+                "OpenTelemetry export requests that failed or timed out.",
+                clamp(otel.export_failures),
+            );
+            x.counter(
+                "timeless_metrics_otel_traces_exported_spans_total",
+                "Spans delivered by successful OpenTelemetry exports.",
+                clamp(otel.exported_spans),
             );
             (
                 StatusCode::OK,

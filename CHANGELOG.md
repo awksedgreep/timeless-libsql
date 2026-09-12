@@ -14,6 +14,33 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- **The metrics OpenTelemetry exporter is observable and configurable
+  (issue #55).** `StorageStats.otel_traces`, `/health`'s `otel_traces_state`,
+  and new `timeless_metrics_otel_traces_*` self-metrics report the exporter
+  as `disabled`, `starting`, `healthy`, `dropping`, or `failing`, with exact
+  queued, enqueued, dropped, attempted, succeeded, failed, and exported span
+  counts, the last success/failure times, and a bounded last-error text. New
+  `TIMELESS_METRICS_OTEL_TRACES_HEADERS` / `..._HEADERS_FILE` carry
+  authentication headers without placing credentials in the URL or logs,
+  `..._CA_CERT` pins a private CA, `..._SAMPLE_RATIO` samples sweeps, and
+  `..._QUEUE_SPANS`, `..._BATCH_SPANS`, `..._EXPORT_DELAY_MS`, and
+  `..._EXPORT_TIMEOUT_MS` bound the transport. Out-of-range or unusable
+  settings fail startup with an error that names the setting and never a
+  header value.
+
+### Changed
+
+- **The metrics OTLP transport is the server's own `reqwest` client.** The
+  exporter previously pulled in a second `reqwest` major version with no TLS
+  support, so an `https://` endpoint passed validation but could never
+  connect. Export now runs on one bounded worker thread with an exact
+  drop-on-full queue; ending a span never blocks maintenance, a stalled
+  collector costs at most the export timeout per request, and shutdown
+  flushes for at most twice that timeout before counting the remainder as
+  dropped.
+
 ### Fixed
 
 - **The dbhealth-only extension no longer breaks `ALTER TABLE` on its host
