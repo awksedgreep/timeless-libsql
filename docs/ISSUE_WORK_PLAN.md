@@ -11,6 +11,7 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 
 | Order | Issue | Priority | Status | Exit condition |
 |---:|---|---|---|---|
+| -1 | [#56](https://github.com/awksedgreep/timeless-libsql/issues/56) dbhealth-only view over unregistered `timeless_series` | P0 | done | `register_dbhealth` registers the `timeless_series` TVF; the embedded unit test and the standalone dbhealth gate prove the companion views resolve and `RENAME COLUMN`/`DROP COLUMN`/`RENAME TO` succeed on fresh and reopened databases. Post the evidence to the issue and close it. |
 | 0 | [#50](https://github.com/awksedgreep/timeless-libsql/issues/50) metrics discovery writer-gate exhaustion | P0 | externally pending | Deploy a build containing `ef81a38` to the affected environment; observe at least one active scheduled sweep; record `compact_step_max_ns`, `api_read_errors`, discovery behavior, ingestion accounting, and container health; then close the issue. |
 | 1 | [#51](https://github.com/awksedgreep/timeless-libsql/issues/51) LogsQL opaque internal errors | P0 | externally pending | The repository fix and local real-extension verification are complete. Re-run the reported requests against the affected deployment, retain the server-side detail for any remaining `query_execution` fault, and close when production behavior is confirmed. |
 | 2 | [#49](https://github.com/awksedgreep/timeless-libsql/issues/49) LogsQL cancellation-counter flake | P1 | done | The `replace`/`replace_regexp` cancellation regression now reaches reader-owned work before asserting the counter; 20 consecutive focused runs and all 93 logs real-extension tests pass. |
@@ -20,6 +21,25 @@ Statuses: `pending`, `in progress`, `externally pending`, `done`, `deferred`.
 | 6 | [#55](https://github.com/awksedgreep/timeless-libsql/issues/55) OTel exporter health | P3 | pending | Exporter state, drops, failures, queue pressure, safe configuration, auth/TLS, and bounded outage behavior are observable and tested. |
 | 7 | [#53](https://github.com/awksedgreep/timeless-libsql/issues/53) logs/traces maintenance spans | P3 | pending | Add bounded maintenance summary spans and prove trace ingest/export cannot recurse. |
 | 8 | [#54](https://github.com/awksedgreep/timeless-libsql/issues/54) request and contention tracing | P3 | pending | Add sampled, redacted, cardinality-bounded request spans with measured disabled/enabled overhead and nonblocking export. |
+
+## Issue #56 completion (2026-09-12)
+
+- Reproduced on `main` with a fresh debug `libdbhealth_ext.so`: the
+  `timeless_dbhealth_series` view existed, `timeless_series('dbhealth')`
+  failed with `no such table`, and `RENAME COLUMN` on an unrelated user table
+  failed with `error in view timeless_dbhealth_series`.
+- Root cause: `schema::metric_objects` is shared by every metrics-shaped
+  table, but only `register_telemetry` registered the `timeless_series`
+  module. Chose the issue's option 1 — register the TVF from
+  `register_dbhealth` — because the view is a documented metrics companion,
+  the fix needs no migration of existing databases, and the alternative
+  (not installing the companions) would have required reaping stale views on
+  every open.
+- Not fixable here: a connection with no extension loaded still cannot ALTER
+  a dbhealth database, because `dbhealth_now`/`_report`/`_trends` and
+  `timeless_<t>_latest` reference the `dbhealth` virtual table itself and
+  fail view validation with `no such module`. Documented the
+  `legacy_alter_table` escape hatch in `docs/DBHEALTH.md`.
 
 ## Issue #51 execution checklist
 

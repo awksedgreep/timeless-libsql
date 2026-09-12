@@ -14,6 +14,21 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- **The dbhealth-only extension no longer breaks `ALTER TABLE` on its host
+  database (issue #56).** `CREATE VIRTUAL TABLE ... USING dbhealth` installs
+  the metric companion view `timeless_<table>_series`, which selects from the
+  `timeless_series` table-valued function, but `libdbhealth_ext` registered
+  only the health modules. The view was unresolvable, and because SQLite
+  validates every view on `RENAME COLUMN`, `DROP COLUMN`, and `RENAME TO`,
+  every such ALTER on any table in the database failed with
+  `no such table: main.timeless_series`. The dbhealth registration now also
+  registers `timeless_series`; existing databases need no migration because
+  the view definition is unchanged and resolves as soon as a fixed extension
+  is loaded. The standalone dbhealth gate now proves the companion views and
+  all three ALTER forms on fresh and reopened databases.
+
 ## [0.8.3] — 2026-09-10
 
 ### Added

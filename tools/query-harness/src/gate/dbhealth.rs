@@ -16,6 +16,64 @@ fn count(connection: &Connection, table: &str) -> Result<i64> {
     )
 }
 
+fn companion_views_resolve(connection: &Connection) -> Result<()> {
+    let direct: i64 = connection.query_row(
+        "SELECT count(*) FROM timeless_series('dbhealth')",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(direct > 0, "timeless_series('dbhealth') listed no series");
+    let via_view = count(connection, "timeless_dbhealth_series")?;
+    ensure!(
+        via_view == direct,
+        "timeless_dbhealth_series returned {via_view} rows, TVF {direct}"
+    );
+    // Tied newest timestamps are all returned, so count series, not rows.
+    let latest: i64 = connection.query_row(
+        "SELECT count(DISTINCT name || labels) FROM timeless_dbhealth_latest",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        latest == direct,
+        "timeless_dbhealth_latest covered {latest} series, TVF {direct}"
+    );
+    Ok(())
+}
+
+/// Rename a column, drop a column, and rename the table: every ALTER
+/// form that makes SQLite re-validate each view in the schema.
+fn alter_user_table(connection: &Connection, table: &str, renamed: &str) -> Result<()> {
+    connection.execute(
+        &format!("ALTER TABLE \"{table}\" RENAME COLUMN old_name TO renamed_{table}"),
+        [],
+    )?;
+    connection.execute(&format!("ALTER TABLE \"{table}\" DROP COLUMN spare"), [])?;
+    connection.execute(
+        &format!("ALTER TABLE \"{table}\" RENAME TO \"{renamed}\""),
+        [],
+    )?;
+    let columns = connection
+        .prepare(&format!(
+            "SELECT name FROM pragma_table_info('{renamed}') ORDER BY cid"
+        ))?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(
+        columns == vec!["id".to_string(), format!("renamed_{table}")],
+        "unexpected columns after ALTER: {columns:?}"
+    );
+    connection.execute(
+        &format!("ALTER TABLE \"{renamed}\" RENAME COLUMN renamed_{table} TO old_name"),
+        [],
+    )?;
+    connection.execute(
+        &format!("ALTER TABLE \"{renamed}\" ADD COLUMN spare TEXT"),
+        [],
+    )?;
+    Ok(())
+}
+
 pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     let connection = open(extension, database)?;
     connection.execute("CREATE VIRTUAL TABLE dbhealth USING dbhealth(every=1)", [])?;
@@ -48,6 +106,15 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
         error.to_string().contains("sample"),
         "unexpected error: {error}"
     );
+    // Issue #56: the metric companion views CREATE installs must resolve
+    // on a dbhealth-only connection, and schema ALTERs on unrelated user
+    // tables (which make SQLite validate every view) must keep working.
+    companion_views_resolve(&connection)?;
+    connection.execute(
+        "CREATE TABLE app(id INTEGER PRIMARY KEY, old_name TEXT, spare TEXT)",
+        [],
+    )?;
+    alter_user_table(&connection, "app", "app2")?;
     drop(connection);
 
     thread::sleep(Duration::from_secs(2));
@@ -59,6 +126,10 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
         after > before,
         "scheduler did not resume ({before} -> {after})"
     );
+    // The same guarantees hold for a pre-existing database on reopen: the
+    // view was created by an earlier connection and must still resolve.
+    companion_views_resolve(&connection)?;
+    alter_user_table(&connection, "app2", "app3")?;
 
     connection.execute("CREATE VIRTUAL TABLE manual USING dbhealth(every=0)", [])?;
     thread::sleep(Duration::from_millis(2600));

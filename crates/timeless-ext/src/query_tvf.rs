@@ -320,6 +320,20 @@ fn parse_window_op(module: &str, name: Option<&str>) -> Result<timeless_core::Wi
     })
 }
 
+/// Register only the metric series catalog TVF.
+///
+/// Every metrics table (and therefore every dbhealth table, which is a
+/// `timeless_metrics` table underneath) installs a companion
+/// `timeless_<table>_series` view over `timeless_series(...)`. SQLite
+/// re-parses every view on `ALTER TABLE ... RENAME/DROP COLUMN` and
+/// `RENAME TO`, so a connection that can create such a view must also
+/// carry this module or every later schema ALTER on the database fails
+/// (issue #56). The dbhealth-only extension registers exactly this.
+pub(crate) fn register_series(db: &Connection) -> Result<()> {
+    const SERIES: Module<SeriesTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_series", &SERIES, None::<()>)
+}
+
 /// Register the TVF modules on a freshly-loaded connection.
 pub(crate) fn register(db: &Connection, query_reports: Arc<LogQueryReportState>) -> Result<()> {
     const GRID: Module<GridTab> = Module::eponymous_only_module();
@@ -328,8 +342,7 @@ pub(crate) fn register(db: &Connection, query_reports: Arc<LogQueryReportState>)
     db.create_module(c"timeless_window", &WINDOW, None::<()>)?;
     const WINDOW_BATCHES: Module<WindowBatchTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_window_batches", &WINDOW_BATCHES, None::<()>)?;
-    const SERIES: Module<SeriesTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_series", &SERIES, None::<()>)?;
+    register_series(db)?;
     const STATS: Module<StatsTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_stats", &STATS, None::<()>)?;
     const ROLLUP: Module<RollupTab> = Module::eponymous_only_module();

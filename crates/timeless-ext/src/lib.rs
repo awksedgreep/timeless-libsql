@@ -102,9 +102,18 @@ use rusqlite::{Connection, Result};
 
 /// Register ONLY the dbhealth module family on a connection — the
 /// public API the separate `dbhealth-ext` cdylib builds its extension
-/// entry points from (its .so registers health and nothing else).
+/// entry points from.
+///
+/// "Family" includes the `timeless_series` catalog TVF: a dbhealth table
+/// is a `timeless_metrics` table underneath and ships the same
+/// `timeless_<table>_series` companion view, which selects from that
+/// TVF. Without the module the view is unresolvable, and because SQLite
+/// validates every view on `ALTER TABLE ... RENAME/DROP COLUMN` and
+/// `RENAME TO`, every schema ALTER on the whole database fails
+/// (issue #56). No other telemetry module is registered.
 pub fn register_dbhealth(db: &Connection) -> Result<()> {
-    health_vtab::register(db)
+    health_vtab::register(db)?;
+    query_tvf::register_series(db)
 }
 
 /// Register the telemetry virtual tables and query functions on an existing

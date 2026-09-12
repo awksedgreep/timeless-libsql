@@ -894,6 +894,91 @@ impl SavepointVTab for HealthTab {
     }
 }
 
+#[cfg(all(test, feature = "embedded"))]
+mod companion_view_tests {
+    use rusqlite::Connection;
+
+    /// Issue #56: the dbhealth-only registration must service the
+    /// `timeless_<table>_series` companion view its own CREATE installs.
+    /// SQLite re-parses every view on column/table renames and drops, so
+    /// an unresolvable view breaks ALTER TABLE for the whole database —
+    /// including user tables that have nothing to do with dbhealth.
+    #[test]
+    fn dbhealth_only_registration_keeps_series_view_and_alter_table_working() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_dbhealth(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE dbhealth USING dbhealth(every=0);
+             INSERT INTO dbhealth(dbhealth) VALUES ('sample');
+             CREATE TABLE app(id INTEGER PRIMARY KEY, old_name TEXT, spare TEXT);",
+        )
+        .unwrap();
+
+        let views: Vec<String> = db
+            .prepare("SELECT name FROM sqlite_master WHERE type='view' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            views.iter().any(|name| name == "timeless_dbhealth_series"),
+            "series companion view missing: {views:?}"
+        );
+
+        // The TVF the view depends on is registered, and the view resolves.
+        let direct: i64 = db
+            .query_row(
+                "SELECT count(*) FROM timeless_series('dbhealth')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let via_view: i64 = db
+            .query_row("SELECT count(*) FROM timeless_dbhealth_series", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(direct > 0, "one sample must register at least one series");
+        assert_eq!(direct, via_view);
+        let latest: i64 = db
+            .query_row(
+                "SELECT count(DISTINCT name || labels) FROM timeless_dbhealth_latest",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest, direct);
+
+        // Every ALTER form that makes SQLite validate views must succeed.
+        db.execute_batch(
+            "ALTER TABLE app RENAME COLUMN old_name TO new_name;
+             ALTER TABLE app DROP COLUMN spare;
+             ALTER TABLE app RENAME TO app2;",
+        )
+        .unwrap();
+        let columns: Vec<String> = db
+            .prepare("SELECT name FROM pragma_table_info('app2') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(columns, vec!["id".to_string(), "new_name".to_string()]);
+
+        // Dropping the table still reaps the companion views it owns.
+        db.execute_batch("DROP TABLE dbhealth").unwrap();
+        let left: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE '%dbhealth%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+}
+
 #[cfg(test)]
 mod scheduler_tests {
     use super::{

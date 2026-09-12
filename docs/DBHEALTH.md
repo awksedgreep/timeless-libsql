@@ -171,6 +171,22 @@ TABLE` removes them), so evaluating health requires no DBA knowledge:
 - **`<t>_now`** — latest value per series plus its age in seconds.
 - **`<t>_trends`** — per-series daily min/avg/max over the last 7 days.
 
+Because the table is a `timeless_metrics` table underneath, CREATE also
+installs the two metric companions from the
+[observability schema](OBSERVABILITY_SCHEMA.md): **`timeless_<t>_series`**
+(every retained series with span and point/chunk counts, a view over the
+`timeless_series` table-valued function) and **`timeless_<t>_latest`**
+(newest sample per series with a human-readable timestamp). The dbhealth
+extension registers `timeless_series` alongside its own modules so those
+views resolve on a dbhealth-only connection. That matters beyond
+convenience: SQLite re-validates every view in the schema on
+`ALTER TABLE ... RENAME COLUMN`, `DROP COLUMN`, and `RENAME TO`, so an
+unresolvable view would block schema changes to *every* table in the
+database. (Any connection without the extension loaded cannot resolve
+views over the `dbhealth` virtual table either — load the extension, or
+set `PRAGMA legacy_alter_table=ON` for that one statement, before
+altering schema from a plain `sqlite3` shell.)
+
 The vtabs are marked `SQLITE_VTAB_INNOCUOUS` (the FTS5 precedent) so the
 views work under the CLI's default `trusted_schema=off` — this applies to
 all four timeless modules, so users can build their own views over
