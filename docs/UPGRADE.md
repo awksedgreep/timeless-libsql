@@ -46,19 +46,19 @@ contracts with the older binary). Upgrade every binary that opens the same
 database file as one set before allowing optimize to run, exactly as the
 invariants above require.
 
-Unreleased log-schema maintenance records configuration freshness in the
+Log-schema maintenance in `0.8.4` records configuration freshness in the
 inventory. Reindexing refreshes the owned discovery companions transactionally;
 reopen and run the explicit `schema` command to repair stale companions from an
 older extension. Merely opening a database never repairs or replaces views.
 
-Unreleased logs binaries support `TIMELESS_LOGS_TIMESTAMP_UNIT=ms|us` (default
+Logs binaries from `0.8.4` support `TIMELESS_LOGS_TIMESTAMP_UNIT=ms|us` (default
 `us`). Select `ms` to serve a default SQL-created logs database without converting
 its data. Unit mismatches now stop startup before policy or ledger changes.
 The revised SQL quickstart explicitly declares microseconds for new tables.
 
 ## 1. Inventory the current installation
 
-Unreleased metrics servers enforce the configured `TIMELESS_METRICS_PROMQL_MAX_*`
+Metrics servers from `0.8.4` enforce the configured `TIMELESS_METRICS_PROMQL_MAX_*`
 budgets on native latest, range, export, and discovery routes, including
 Prometheus discovery aliases. Previously unbounded requests may now fail with
 an explicit budget error. Narrow the selection, increase the range step, split
@@ -115,7 +115,7 @@ such a binary starts open instead of failing. If you want token verification,
 set `TIMELESS_AUTH_MODE=required` with `TIMELESS_AUTH_POLICY_FILE` — one
 line, and the enforcement is exactly as before.
 
-## Metrics retention default change — unreleased
+## Metrics retention default change — 0.8.4
 
 The metrics server no longer applies an implicit seven-day wall-clock cutoff.
 By default it preserves the table's declared retention, which the extension
@@ -130,7 +130,7 @@ but cannot lengthen it. Startup logs and `/select/metrics/stats` expose both
 policies (`table_retention_seconds` and `raw_retention_seconds`). Existing
 table definitions are not rewritten.
 
-## Companion view upgrades — unreleased
+## Companion view upgrades — 0.8.4
 
 Opening or reading a signal table no longer refreshes companion views. On a
 writable connection, run `INSERT INTO metrics(metrics) VALUES ('schema')`

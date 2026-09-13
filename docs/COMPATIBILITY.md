@@ -15,8 +15,8 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.8.3` | Current extension/core/dbhealth source line. |
-| `server_workspace` | `0.8.3` | Current metrics/logs/traces server source line. |
+| `extension_workspace` | `0.8.4` | Current extension/core/dbhealth source line. |
+| `server_workspace` | `0.8.4` | Current metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
 | `extension_minimum_server` | `0.8.0` | Oldest server accepted by the current extension document. |
@@ -150,12 +150,9 @@ storage.
 ## Platform and SQLite/libSQL boundary
 
 The release-tool target inventory covers x86-64/AArch64 Linux GNU and
-x86-64/AArch64 macOS. For `v0.8.3`, all four native build, identity,
-install/remove, and upload jobs passed, followed by the complete outer
-checksum job, and the workflow published the archives plus `SHA256SUMS` as
-permanent `v0.8.3` GitHub Release assets (the tag→Release path first proven
-by `v0.4.2`). The [artifact guide](ARTIFACTS.md) is the canonical
-publication-status record.
+x86-64/AArch64 macOS. The [artifact guide](ARTIFACTS.md#current-publication-status)
+records the latest published version and verified archive matrix separately
+from the current source versions above.
 
 The extension uses SQLite's loadable-extension ABI and stores ordinary SQLite
 pages/WAL records. A host may use SQLite backup, libSQL replication, or sqld
