@@ -164,10 +164,24 @@ impl Server {
                 && selected["Os"] == "linux",
             "image platform mismatch: {selected}"
         );
-        let index: Value = serde_json::from_str(&command(
+        let index_output = super::oracle::command_output(
             &args.runtime,
             &strings(&["manifest", "inspect", image]),
-        )?)?;
+            Duration::from_secs(180),
+        )?;
+        let index: Value = if index_output.status.success() {
+            serde_json::from_slice(&index_output.stdout)?
+        } else {
+            // Podman 5.x rejects a single-platform manifest here; image
+            // inspection still resolves its digest and exact config identity.
+            ensure!(
+                String::from_utf8_lossy(&index_output.stderr)
+                    .contains("Treating single images as manifest lists is not implemented"),
+                "manifest inspection failed: {}",
+                String::from_utf8_lossy(&index_output.stderr)
+            );
+            Value::Null
+        };
         let platform_digest = if let Some(manifests) = index["manifests"].as_array() {
             manifests
                 .iter()
@@ -187,17 +201,10 @@ impl Server {
         );
         let platform_manifest: Value = serde_json::from_str(&command(
             &args.runtime,
-            &strings(&["manifest", "inspect", &platform_image]),
+            &strings(&["image", "inspect", &platform_image]),
         )?)?;
         ensure!(
-            platform_manifest["config"]["digest"]
-                .as_str()
-                .context("platform image config")?
-                .trim_start_matches("sha256:")
-                == selected["Id"]
-                    .as_str()
-                    .context("image ID")?
-                    .trim_start_matches("sha256:"),
+            platform_manifest[0]["Id"] == selected["Id"],
             "selected image differs from pinned platform manifest"
         );
         let name = format!(
