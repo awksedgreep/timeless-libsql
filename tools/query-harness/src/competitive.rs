@@ -690,6 +690,15 @@ fn canonical_logs(rows: &Value) -> Result<Value> {
     let mut rows = rows.clone();
     for row in rows.as_array_mut().context("log array")? {
         let object = row.as_object_mut().context("log object")?;
+        // The named aggregate count is numeric in Timeless and a decimal
+        // string in VictoriaLogs. Normalize this one declared output column,
+        // never arbitrary fields from the retained log rows.
+        if let Some(count) = object.get_mut("n") {
+            *count = json!(match count.as_str() {
+                Some(value) => value.parse::<u64>().context("decimal count")?,
+                None => count.as_u64().context("unsigned count")?,
+            });
+        }
         if let Some(time) = object.get_mut("_time") {
             *time = json!(chrono::DateTime::parse_from_rfc3339(
                 time.as_str().context("log timestamp string")?
@@ -1119,6 +1128,14 @@ mod tests {
             &json!(1_789_000_000_000_000_i64),
             &json!(1_789_000_000_000_001_i64)
         ));
+        assert_eq!(
+            canonical_logs(&json!([{"n":"42"}])).unwrap(),
+            canonical_logs(&json!([{"n":42}])).unwrap()
+        );
+        assert_ne!(
+            canonical_logs(&json!([{"host":"42"}])).unwrap(),
+            canonical_logs(&json!([{"host":42}])).unwrap()
+        );
     }
 
     #[test]

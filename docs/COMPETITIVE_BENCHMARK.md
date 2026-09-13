@@ -57,6 +57,9 @@ competitor response. Every response, including warmups, must match those
 expectations. Metric series order and numeric spelling may differ; labels,
 result types, timestamps, sample order, log order and projected fields must
 match. Only floating sample values have a relative/absolute `1e-9` tolerance.
+The declared aggregate count column `n` is normalized from a decimal string
+or an unsigned JSON number: VictoriaLogs and Timeless use different wire
+encodings for this numeric result. Retained log field types are not coerced.
 Missing rows, wrong timestamps, non-finite samples and query diagnostics fail.
 
 ## Timing and resource accounting
