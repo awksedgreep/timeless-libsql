@@ -604,7 +604,11 @@ fn log_queries(entries: usize, at: i64) -> Vec<Query> {
     };
     let query = |name, expression: String, expected| Query {
         name,
-        expression,
+        expression: format!(
+            "_time:[{},{}] {expression} | limit {entries}",
+            (at - 1) * 1_000_000,
+            (at + 1) * 1_000_000
+        ),
         range: false,
         expected,
     };
@@ -732,19 +736,13 @@ fn request(
         "/api/v1/query"
     };
     let mut params = vec![("query", query.expression.clone())];
-    if server.kind.logs() {
-        params.extend([
-            ("start", (at - 1).to_string()),
-            ("end", (at + 1).to_string()),
-            ("limit", "100000".into()),
-        ]);
-    } else if query.range {
+    if !server.kind.logs() && query.range {
         params.extend([
             ("start", (at - (points - 1) as i64 * 10).to_string()),
             ("end", at.to_string()),
             ("step", "10s".into()),
         ]);
-    } else {
+    } else if !server.kind.logs() {
         params.push(("time", at.to_string()));
     }
     let url = format!("{}{path}", server.base);
