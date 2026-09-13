@@ -1,0 +1,3 @@
+prometheus: prometheus, version 3.13.2 (branch: HEAD, revision: bb5dff00cf8fdfbf5c65e0531aa835fa238a43a2)
+victorialogs: victoria-logs-20260716-022232-tags-v1.52.0-0-g46a54c976f
+victoriametrics: victoria-metrics-20260717-112343-tags-v1.148.0-0-gd94a85a405

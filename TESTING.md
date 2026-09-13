@@ -293,6 +293,8 @@ For pinned, same-workload comparisons with Prometheus, VictoriaMetrics and
 VictoriaLogs, use the Rust [`competitive` benchmark](docs/COMPETITIVE_BENCHMARK.md).
 It verifies complete results before reporting timings and runs every engine
 on the same native Linux container platform.
+The [2026-09-13 review](docs/2026-09-13_competitive_review.md) retains four
+captures, live oracle results, and the resulting compatibility/performance gaps.
 
 Evidence capture requires a clean worktree and exact matching extension and
 server build identities:

@@ -5,6 +5,8 @@ immutable Prometheus, VictoriaMetrics and VictoriaLogs releases in
 [`tests/query_oracles/manifest.json`](../tests/query_oracles/manifest.json).
 This is a bounded public-HTTP read benchmark. Live semantic oracle verification
 remains a separate gate described in [QUERY_ORACLES.md](QUERY_ORACLES.md).
+The [2026-09-13 review](2026-09-13_competitive_review.md) contains the first
+repeated measurements and the unsupported query compositions they exposed.
 
 ## Reproduce
 

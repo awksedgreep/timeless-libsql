@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "captured_date": "2026-09-13",
+  "tested_source": "ee6c9dd2d7b5af45395ee06f5cbc44f9dfeb256e",
+  "timeless_version": "0.8.4",
+  "live_oracle_runtime": "Podman linux/amd64 on an arm64 Linux VM; correctness only, no timings compared",
+  "live_oracles": [
+    {
+      "suite": "prometheus-api",
+      "passed": 549,
+      "failed": 0,
+      "log_sha256": "fbcdcadf97ed50fb1787520463e44e8320eaf62ce63246623514a7e75c74e9ba",
+      "log": "2026-09-13_oracles/oracle-prometheus-api.txt"
+    },
+    {
+      "suite": "victoria-metrics-api",
+      "passed": 196,
+      "failed": 0,
+      "log_sha256": "c534f54f387f6e51fa09161a3b15d9654a37f32b996328f2a764db1f82adbb30",
+      "log": "2026-09-13_oracles/oracle-victoria-metrics-api.txt"
+    },
+    {
+      "suite": "victoria-logs-api",
+      "passed": 1498,
+      "failed": 0,
+      "log_sha256": "7dc283ccfa166fb83089cfb4ddcdb431302c4a9ba63b5f53c6a0ff0c62cd1805",
+      "log": "2026-09-13_oracles/oracle-victoria-logs-api.txt"
+    }
+  ],
+  "promtool_smoke": "passed",
+  "versions": [
+    "prometheus: prometheus, version 3.13.2 (branch: HEAD, revision: bb5dff00cf8fdfbf5c65e0531aa835fa238a43a2)",
+    "victorialogs: victoria-logs-20260716-022232-tags-v1.52.0-0-g46a54c976f",
+    "victoriametrics: victoria-metrics-20260717-112343-tags-v1.148.0-0-gd94a85a405"
+  ],
+  "timeless_real_extension_tests": {
+    "passed": 457,
+    "failed": 0,
+    "ignored": 0,
+    "command": "TIMELESS_EXT_PATH=<release dylib> TIMELESS_EXT_TEST_PATH=<release dylib> cargo test --manifest-path servers/Cargo.toml -p timeless-metrics-api -p timeless-logs-api --locked -- --include-ignored"
+  },
+  "fixture_sha256": {
+    "tests/query_oracles/victoriametrics/api_cases.json": "ea04b046f1abfe1d3307aa7335cb3fb255819af7061357dd5c710f246a40f4d9",
+    "tests/query_oracles/prometheus/api_cases.json": "35c9ed44c3164775eb2a906f77a16f02a54664ed6a7fb4f014abce8f4613a4b5",
+    "tests/query_oracles/victorialogs/api_cases.json": "7caf7beaf8a7002295ca4f6578b02d3eadf75feb6c48f7e69fa48eb5c8c61132"
+  },
+  "scope": "Live suites verify pinned upstream fixtures; Timeless tests independently cover the real extension. Totals are not a claim of all upstream features or identical wire encodings.",
+  "standalone_evidence_attempt": {
+    "status": "infrastructure failure",
+    "reason": "Legacy evidence reads Linux /proc/<pid>/status; native macOS capture failed. No complete legacy evidence artifact was produced. Competitive captures measure native Linux processes."
+  },
+  "competitive_captures": [
+    {
+      "file": "2026-09-13_competitive_small_a.json",
+      "sha256": "12b3b11824747ad0b9651f0fa66fe3ce4009433eeb73b4a2f49b95288183d67c"
+    },
+    {
+      "file": "2026-09-13_competitive_small_b.json",
+      "sha256": "ddce871ba95a01d901fd920864123965092af59cd57670f5149e32d904551c9b"
+    },
+    {
+      "file": "2026-09-13_competitive_larger_a.json",
+      "sha256": "e1dceb4e212a04c6f433807a94f2c09ed3080b3f30f3aa29a01e517372d39777"
+    },
+    {
+      "file": "2026-09-13_competitive_larger_b.json",
+      "sha256": "4c18f17b15bd6dc09dfb15919f1aa4780309694b1f28d2c254d27a3794cb77ab"
+    }
+  ],
+  "harness_tests": {
+    "passed": 64,
+    "failed": 0,
+    "clippy": "all targets, -D warnings: passed"
+  }
+}
