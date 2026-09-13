@@ -71,5 +71,20 @@
     "passed": 64,
     "failed": 0,
     "clippy": "all targets, -D warnings: passed"
+  },
+  "native_client_environment": {
+    "cpu": "Apple M5 Pro",
+    "model": "Mac17,9",
+    "physical_ram_bytes": 68719476736,
+    "os": "Darwin 25.5.0",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)"
+  },
+  "ci": {
+    "workflow": "Query documentation contracts",
+    "run_id": 34788711136,
+    "commit": "7f27d891349c2236e9f3b83320255a53f13cc4c1",
+    "conclusion": "success",
+    "completed_at": "2026-09-13T23:09:23Z",
+    "url": "https://github.com/awksedgreep/timeless-libsql/actions/runs/34788711136"
   }
 }

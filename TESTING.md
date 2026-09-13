@@ -268,7 +268,8 @@ repeats exact reads after reopen.
 
 Normal development validates checked-in fixtures without network access via
 `oracle validate`. Refreshing the actual upstream evidence is explicit,
-requires Docker and network access, and uses immutable image digests:
+requires Docker or Podman and network access, and uses immutable image digests.
+For a running Podman machine, append `--runtime podman` to each oracle command:
 
 ```sh
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \

@@ -17,6 +17,9 @@ speed advantage or complete upstream language compatibility.
 - Timeless metrics/logs suites: **457 passed, zero failed or ignored**, with the
   real release extension and the ignored integration tests explicitly included.
 - Benchmark harness: **64 tests passed**, strict Clippy passed for all targets.
+- [Query documentation CI](https://github.com/awksedgreep/timeless-libsql/actions/runs/34788711136)
+  **passed** on `7f27d891349c2236e9f3b83320255a53f13cc4c1`, including the harness,
+  matrix/oracle validators, and executable onboarding SQL on Linux.
 - Competitive captures: **four complete runs, 6,800 measured requests**. Every
   response matched independently generated fixture expectations. Every engine
   retained the full dataset across both required graceful restart checks.
@@ -50,8 +53,10 @@ the [manifest](../tests/query_oracles/manifest.json); no upstream version or
 semantic fixture was moved. This evaluates the pinned baseline, not the latest
 upstream release lines.
 
-All measured engines ran natively in the same ARM64 Linux Podman VM, configured
-with 12 CPUs and 32 GiB RAM. Each container had the same four-CPU/4-GiB ceiling
+The host was an Apple M5 Pro (Mac17,9), with 64 GiB physical RAM and Darwin
+25.5.0; the client used Rust 1.98.1. All measured engines ran natively in the
+same ARM64 Linux Podman VM, configured with 12 CPUs and 32 GiB RAM. Each
+container had the same four-CPU/4-GiB ceiling
 and its own disposable volume. The macOS client used the same loopback port
 forwarding path. One pre-existing idle PostgreSQL container was left running;
 this was a shared development host, not an isolated benchmark machine.
