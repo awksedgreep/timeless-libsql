@@ -143,6 +143,7 @@ impl Server {
         kind: Kind,
         image: &str,
         platform: &str,
+        platform_digest: Option<&str>,
         manifest: &Value,
         client: &Client,
     ) -> Result<Self> {
@@ -178,49 +179,20 @@ impl Server {
                 && selected["Os"] == "linux",
             "image platform mismatch: {selected}"
         );
-        let index_output = super::oracle::command_output(
-            &args.runtime,
-            &strings(&["manifest", "inspect", image]),
-            Duration::from_secs(180),
-        )?;
-        let index: Value = if index_output.status.success() {
-            serde_json::from_slice(&index_output.stdout)?
-        } else {
-            // Podman 5.x rejects a single-platform manifest here; image
-            // inspection still resolves its digest and exact config identity.
-            ensure!(
-                String::from_utf8_lossy(&index_output.stderr)
-                    .contains("Treating single images as manifest lists is not implemented"),
-                "manifest inspection failed: {}",
-                String::from_utf8_lossy(&index_output.stderr)
+        if let Some(platform_digest) = platform_digest {
+            let platform_image = format!(
+                "{}@{platform_digest}",
+                image.rsplit_once('@').context("image repository")?.0
             );
-            Value::Null
-        };
-        let platform_digest = if let Some(manifests) = index["manifests"].as_array() {
-            manifests
-                .iter()
-                .find(|entry| {
-                    entry["platform"]["architecture"] == selected["Architecture"]
-                        && entry["platform"]["os"] == "linux"
-                })
-                .and_then(|entry| entry["digest"].as_str())
-                .context("native platform manifest")?
-                .to_owned()
-        } else {
-            image.rsplit_once('@').context("image digest")?.1.to_owned()
-        };
-        let platform_image = format!(
-            "{}@{platform_digest}",
-            image.rsplit_once('@').context("image repository")?.0
-        );
-        let platform_manifest: Value = serde_json::from_str(&command(
-            &args.runtime,
-            &strings(&["image", "inspect", &platform_image]),
-        )?)?;
-        ensure!(
-            platform_manifest[0]["Id"] == selected["Id"],
-            "selected image differs from pinned platform manifest"
-        );
+            let platform_manifest: Value = serde_json::from_str(&command(
+                &args.runtime,
+                &strings(&["image", "inspect", &platform_image]),
+            )?)?;
+            ensure!(
+                platform_manifest[0]["Id"] == selected["Id"],
+                "selected image differs from pinned platform manifest"
+            );
+        }
         let name = format!(
             "timeless-competition-{}-{}-{}",
             std::process::id(),
@@ -717,7 +689,8 @@ fn canonical_logs(rows: &Value) -> Result<Value> {
             *time = json!(chrono::DateTime::parse_from_rfc3339(
                 time.as_str().context("log timestamp string")?
             )?
-            .timestamp_micros());
+            .timestamp_nanos_opt()
+            .context("log timestamp outside nanosecond range")?);
         }
     }
     let array = rows.as_array_mut().context("log array")?;
@@ -970,7 +943,28 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
                     .as_str()
                     .context("oracle image")?
             };
-            let mut server = Server::start(&args, kind, image, &platform, &manifest, &client)?;
+            let platform_digest = if kind.timeless() {
+                None
+            } else {
+                Some(
+                    oracle["oracles"][kind.name()][if arch == "arm64" {
+                        "linux_arm64_digest"
+                    } else {
+                        "linux_amd64_digest"
+                    }]
+                    .as_str()
+                    .context("native oracle platform pin")?,
+                )
+            };
+            let mut server = Server::start(
+                &args,
+                kind,
+                image,
+                &platform,
+                platform_digest,
+                &manifest,
+                &client,
+            )?;
             if !kind.timeless() {
                 let definition = &oracle["oracles"][kind.name()];
                 let mut probe = strings(&[

@@ -18,6 +18,18 @@ is an enterprise LTS patch line and has no matching community image. It is not
 the MetricsQL oracle. `v1.148.0` is the newest community release available at
 the baseline date.
 
+The 2026-09-13 competitive run additionally records native Linux ARM64 children
+of these same immutable image indexes. Versions, source commits, AMD64 pins,
+and semantic fixtures are unchanged. The container runtime's verified cache
+maps each index and child digest to the same native ARM64 image ID; benchmarks
+check that mapping without repeatedly fetching registry manifests.
+
+| oracle | Linux ARM64 image digest |
+|---|---|
+| Prometheus | `sha256:819dcd34085a183b908a439fc9379f1b504c0431a837b5e5b2d37a259b21c179` |
+| VictoriaMetrics | `sha256:d041b4be8b5f51a8055650ef35346ceae2ede246ecdb60b2e2c9617344aa16a6` |
+| VictoriaLogs | `sha256:dd437a2ab011dca91f1591f9d70bc741f74ac43f34c1587192f48af058bc7dfc` |
+
 Source tag objects are also recorded so a future audit can distinguish an
 annotated tag from its peeled commit:
 

@@ -55,6 +55,7 @@ struct OracleDefinition {
     source_commit: String,
     image: String,
     linux_amd64_digest: String,
+    linux_arm64_digest: String,
     version_entrypoint: String,
     version_args: Vec<String>,
     version_contains: String,
@@ -116,6 +117,11 @@ fn validate_manifest(root: &Path, manifest: &OracleManifest) -> Result<Vec<Strin
                 "{prefix}: linux_amd64_digest must be sha256:<64 hex>"
             ));
         }
+        if !sha.is_match(&oracle.linux_arm64_digest) {
+            errors.push(format!(
+                "{prefix}: linux_arm64_digest must be sha256:<64 hex>"
+            ));
+        }
         if oracle.version_contains.is_empty() {
             errors.push(format!("{prefix}: version_contains is required"));
         }
@@ -124,6 +130,7 @@ fn validate_manifest(root: &Path, manifest: &OracleManifest) -> Result<Vec<Strin
             &oracle.source_commit,
             &oracle.image,
             &oracle.linux_amd64_digest,
+            &oracle.linux_arm64_digest,
         ] {
             if !field.is_empty() && !docs.contains(field) {
                 errors.push(format!(

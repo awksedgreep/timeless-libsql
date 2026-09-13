@@ -90,6 +90,9 @@ PID 1 RSS and HWM come from Linux `/proc` after timing and exclude page cache;
 HWM starts at the ingestion restart, not at initial ingestion. Container image
 IDs, selected digests, reported versions, server arguments, runtime details
 and the published artifact manifest accompany the measurements.
+The base image records its supplied immutable reference and native image ID;
+the three oracle images additionally verify their selected platform digests
+from the manifest. Cached images of the matching architecture are reused.
 
 Admission times use different wire formats and are **not durable ingestion
 throughput**. Small-fixture allocated bytes are **not compression ratios**.
