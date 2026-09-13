@@ -270,8 +270,9 @@ JSON and preserves missing, null, empty, scalar, array, and nested-object
 distinctions. Writes are append-only. Commands are `flush`, `optimize`,
 `optimize:<positive max source entries>`, `prune:<timestamp>`,
 `reindex:<keys>` (rewrite every block's postings against a new `index_keys`
-allowlist and persist it — connections opened before the command keep their
-old allowlist until they reconnect), `retention:<n>[s|m|h|d]` (persist a
+allowlist, persist it, and reconcile owned fields/services companions atomically;
+flush pending writes first and reconnect existing sessions to load the new
+hidden-column layout), `retention:<n>[s|m|h|d]` (persist a
 new retention window and apply it to the live engine; enforcement happens at
 the next flush/optimize boundary), and `message_index:<none|trigram>`
 (persist the trigram opt-in or opt-out; `none` drops every `tg:` posting

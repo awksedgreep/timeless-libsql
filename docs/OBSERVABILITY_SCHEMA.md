@@ -50,7 +50,7 @@ agg --cols 120 --rows 32 schema-demo.cast schema-demo.gif   # optional GIF
   `schema` command on a writable connection. It checks every planned name
   before changing anything and commits the objects and inventory together.
   Unowned name collisions fail with an error; resolve those names explicitly
-  before retrying. Current objects are left in place, so repeating the command
+  before retrying. Current objects with unchanged source configuration are left in place, so repeating the command
   is idempotent.
 
 ```sql
@@ -66,6 +66,14 @@ These commands participate in the surrounding transaction; an explicit
 updated companion views on a read-only replica. They update only companion
 objects; private shadow-schema upgrades use `timeless_upgrade()` as described
 in the [SQL API reference](SQL_API_REFERENCE.md#legacy-shadow-schema-upgrades).
+
+Log companions also track the source inputs that affect their definitions.
+`reindex:<keys>` reconciles the fields and services views in the same transaction
+as the index change: it adds, updates, or removes owned companions as needed.
+Flush pending writes first and reconnect all old sessions after reindexing so
+their hidden-column layouts use the new keys. A name collision or installation
+failure rolls back the change. To repair a stale companion created by an older
+extension, run the explicit `schema` command after reopening the database.
 
 ## Removal and upgrade
 
@@ -126,6 +134,7 @@ the new catalog; deploy matching binaries before upgrading companions.
 | `object_name`, `object_kind` | what was installed (`view`, or `table` for the read-only series catalog) |
 | `schema_version` | definition version of that object |
 | `description` | human-readable reference for users |
+| `source_config` | opaque, alias-independent source inputs used to detect configuration changes; added to older inventories during explicit schema maintenance |
 | `installed_at` | unix epoch seconds |
 
 Querying this table is the capability/version query: it identifies

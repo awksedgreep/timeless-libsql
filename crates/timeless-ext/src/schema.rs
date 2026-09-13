@@ -14,7 +14,7 @@
 //! - every identifier passes through `sql_ident` quoting — the vtab and
 //!   schema names are attacker-controlled.
 
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 
 use crate::sql_ident;
 
@@ -41,6 +41,8 @@ pub(crate) struct SchemaObject {
     pub version: u32,
     pub ddl: String,
     pub description: &'static str,
+    /// Stable, alias-independent source inputs that affect this definition.
+    pub source_config: String,
 }
 
 /// The full trace companion set for one source table, in dependency
@@ -57,6 +59,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: spans.clone(),
             kind: "view",
             version: 1,
+            source_config: String::new(),
             ddl: trace_spans_view_ddl(database, table).1,
             description: trace_spans_description(),
         },
@@ -64,6 +67,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: summary.clone(),
             kind: "view",
             version: 1,
+            source_config: String::new(),
             ddl: trace_summary_view_ddl(database, &spans, &summary),
             description: "One row per retained trace: span and error counts, \
                 envelope timing (native plus human-readable), invalid-end \
@@ -75,6 +79,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: services.clone(),
             kind: "view",
             version: 1,
+            source_config: String::new(),
             ddl: trace_services_view_ddl(database, &spans, &services),
             description: "Distinct service names retained in this source, \
                 ordered. Backed by a spans-view scan, not the discovery TVF.",
@@ -83,6 +88,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: operations.clone(),
             kind: "view",
             version: 1,
+            source_config: String::new(),
             ddl: trace_operations_view_ddl(database, &spans, &operations),
             description: "Distinct service/operation pairs retained in this \
                 source, ordered. Backed by a spans-view scan.",
@@ -91,6 +97,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: errors.clone(),
             kind: "view",
             version: 1,
+            source_config: String::new(),
             ddl: trace_filtered_view_ddl(database, &spans, &errors, "status = 'error'"),
             description: "Retained spans whose status is exactly 'error', \
                 in spans-view shape.",
@@ -99,6 +106,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: roots.clone(),
             kind: "view",
             version: 1,
+            source_config: String::new(),
             ddl: trace_filtered_view_ddl(database, &spans, &roots, "parent_span_id IS NULL"),
             description: "Retained root spans (no parent), in spans-view shape.",
         },
@@ -159,6 +167,7 @@ pub(crate) fn inventory_ddl(database: &str) -> String {
            schema_version INTEGER NOT NULL, \
            description TEXT NOT NULL DEFAULT '', \
            installed_at INTEGER NOT NULL, \
+           source_config TEXT NOT NULL DEFAULT '', \
            PRIMARY KEY (source_database, source_table, object_name))"
     )
 }
@@ -334,8 +343,8 @@ fn install_object(
         &format!(
             "INSERT OR REPLACE INTO {} \
              (source_database, source_table, object_name, object_kind, \
-              schema_version, description, installed_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())",
+              schema_version, description, source_config, installed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch())",
             sql_ident::qualified(database, INVENTORY_TABLE)
         ),
         rusqlite::params![
@@ -344,7 +353,8 @@ fn install_object(
             object.name,
             object.kind,
             i64::from(object.version),
-            object.description
+            object.description,
+            object.source_config
         ],
     )?;
     Ok(())
@@ -413,6 +423,7 @@ pub(crate) fn log_objects(
         name: entries.clone(),
         kind: "view",
         version: 1,
+        source_config: per_second.to_string(),
         ddl: format!(
             "CREATE VIEW {} AS \
              SELECT ts, \
@@ -431,6 +442,7 @@ pub(crate) fn log_objects(
             name: name.clone(),
             kind: "view",
             version: 1,
+            source_config: "service".into(),
             ddl: format!(
                 "CREATE VIEW {} AS \
                  SELECT DISTINCT service FROM {source} ORDER BY service",
@@ -451,6 +463,7 @@ pub(crate) fn log_objects(
             name: name.clone(),
             kind: "view",
             version: 1,
+            source_config: serde_json::to_string(index_keys).expect("string list"),
             ddl: format!(
                 "CREATE VIEW {} AS SELECT column1 AS field FROM (VALUES {values})",
                 sql_ident::qualified(database, &name)
@@ -476,6 +489,7 @@ pub(crate) fn metric_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: series.clone(),
             kind: "table",
             version: 2,
+            source_config: String::new(),
             ddl: format!(
                 "CREATE VIRTUAL TABLE {} USING timeless_series_catalog(source={})",
                 sql_ident::qualified(database, &series),
@@ -489,6 +503,7 @@ pub(crate) fn metric_objects(database: &str, table: &str) -> Vec<SchemaObject> {
             name: latest.clone(),
             kind: "view",
             version: 1,
+            source_config: String::new(),
             // Exact arg-max join, not SQLite's bare-column min/max idiom:
             // duplicate (name, labels, ts) rows are all returned, never
             // silently deduplicated. Labels group by canonical text.
@@ -537,6 +552,17 @@ pub(crate) fn install_objects(
         }
     }
     host.execute_batch(&inventory_ddl(database))?;
+    let has_config: bool = host.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,?2) WHERE name='source_config')",
+        [INVENTORY_TABLE, database],
+        |row| row.get(0),
+    )?;
+    if !has_config {
+        host.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN source_config TEXT NOT NULL DEFAULT ''",
+            sql_ident::qualified(database, INVENTORY_TABLE)
+        ))?;
+    }
     for object in planned {
         if let Some((_, kind, version)) = owned.iter().find(|(name, _, _)| name == &object.name) {
             // Never downgrade definitions from a newer extension. A current
@@ -544,7 +570,11 @@ pub(crate) fn install_objects(
             // upgrade older versions only inside this explicit transaction.
             if *version > i64::from(object.version)
                 || (*version == i64::from(object.version)
-                    && object_exists(host, database, &object.name)?)
+                    && object_exists(host, database, &object.name)?
+                    && host.query_row(
+                        &format!("SELECT source_config FROM {} WHERE source_table=?1 AND object_name=?2 ORDER BY schema_version DESC LIMIT 1", sql_ident::qualified(database, INVENTORY_TABLE)),
+                        rusqlite::params![table, object.name], |row| row.get::<_, String>(0),
+                    ).optional()?.as_deref() == Some(object.source_config.as_str()))
             {
                 continue;
             }
@@ -570,12 +600,23 @@ pub(crate) fn install_log_views(
     index_keys: &[String],
     per_second: i64,
 ) -> Result<Vec<String>> {
-    install_objects(
-        host,
-        database,
-        table,
-        &log_objects(database, table, index_keys, per_second),
-    )
+    let planned = log_objects(database, table, index_keys, per_second);
+    let installed = install_objects(host, database, table, &planned)?;
+    // Configuration changes can remove companions. Reconcile only the
+    // known log objects owned by this source; preserve future definitions.
+    for (name, kind, version) in owned_objects(host, database, table)? {
+        if version <= 1
+            && [
+                format!("timeless_{table}_fields"),
+                format!("timeless_{table}_services"),
+            ]
+            .contains(&name)
+            && !planned.iter().any(|object| object.name == name)
+        {
+            drop_object(host, database, table, &name, &kind)?;
+        }
+    }
+    Ok(installed)
 }
 
 pub(crate) fn install_metric_views(

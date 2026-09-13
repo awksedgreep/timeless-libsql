@@ -1,4 +1,5 @@
 mod catalog;
+mod log_schema;
 mod r1;
 mod r2;
 mod r3;
@@ -24,7 +25,8 @@ pub(super) fn run(
         CorrectnessSection::R3 => {
             r3::run(extension, temporary)?;
             schema::run(extension, temporary)?;
-            catalog::run(extension, temporary)
+            catalog::run(extension, temporary)?;
+            log_schema::run(extension, temporary)
         }
         CorrectnessSection::R4 => r4::run(extension, temporary),
         CorrectnessSection::R8 => r8::run(extension, temporary),

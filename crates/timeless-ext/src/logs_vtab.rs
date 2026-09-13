@@ -689,11 +689,22 @@ impl LogsTab {
     fn run_command(&self, cmd: &str) -> Result<i64> {
         if cmd == "schema" {
             let host = unsafe { Connection::from_handle(self.db) }?;
+            // A reindex earlier in this session persists new keys, while
+            // xConnect's hidden columns keep their old layout until reopen.
+            let keys = shadow_meta::load_meta_text(
+                &host,
+                &self.database_name,
+                &self.table_name,
+                "index_keys",
+            )
+            .map_err(module_err)?
+            .unwrap_or_else(|| self.index_keys.join(","));
+            let keys = parse_index_keys_value(&self.table_name, &keys).map_err(module_err)?;
             schema::install_log_views(
                 &host,
                 &self.database_name,
                 &self.table_name,
-                &self.index_keys,
+                &keys,
                 self.native_per_second,
             )?;
         } else if cmd == "flush" {
@@ -728,6 +739,14 @@ impl LogsTab {
             let parsed = parse_index_keys_value(&self.table_name, keys.trim())
                 .map_err(|e| module_err(format!("reindex: {e}")))?;
 
+            let host = unsafe { Connection::from_handle(self.db) }?;
+            schema::install_log_views(
+                &host,
+                &self.database_name,
+                &self.table_name,
+                &parsed,
+                self.native_per_second,
+            )?;
             return self
                 .shared
                 .engine
