@@ -49,12 +49,14 @@ fn legacy_fixture(extension: &Path, path: &Path) -> Result<()> {
     )?;
     // Simulate the pre-companion database shape without depending on an
     // obsolete binary. Shadow schemas and the signal tables stay intact.
-    let views = connection
-        .prepare("SELECT object_name FROM timeless_schema_inventory")?
-        .query_map([], |row| row.get::<_, String>(0))?
+    let objects = connection
+        .prepare("SELECT object_name, object_kind FROM timeless_schema_inventory")?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for view in views {
-        connection.execute_batch(&format!("DROP VIEW \"{view}\""))?;
+    for (name, kind) in objects {
+        connection.execute_batch(&format!("DROP {kind} \"{name}\""))?;
     }
     connection.execute_batch("DROP TABLE timeless_schema_inventory")?;
     Ok(())

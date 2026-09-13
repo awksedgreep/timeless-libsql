@@ -160,6 +160,7 @@ fn document() -> &'static str {
                     "timeless_rollup",
                     "timeless_rollup_batches",
                     "timeless_series",
+                    "timeless_series_catalog",
                     "timeless_stats",
                     "timeless_trace_buckets",
                     "timeless_trace_operations",
@@ -310,7 +311,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            22
+            23
         );
     }
 }

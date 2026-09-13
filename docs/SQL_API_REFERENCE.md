@@ -103,6 +103,7 @@ The following table is machine-checked against the Rust registration source.
 | `timeless_pins` | scalar | telemetry | Count of engines pinned by this connection (P1 diagnostics; deterministic test observable). |
 | `timeless_upgrade` | scalar | telemetry | Explicitly apply additive legacy shadow-schema upgrades to `table` or `schema.table` on a writable connection. |
 | `timeless_metrics` | stored virtual-table module | telemetry | Compressed float metric series. |
+| `timeless_series_catalog` | read-only virtual-table module | telemetry | A series catalog bound to a source table in its own database; powers the metrics companion and survives attachment aliases. |
 | `timeless_logs` | stored virtual-table module | telemetry | Compressed rich logs with exact severity and typed metadata. |
 | `timeless_traces` | stored virtual-table module | telemetry | Compressed rich spans with trace and term indexes. |
 | `timeless_aggregate` | eponymous TVF | telemetry | One scalar aggregate row per non-empty metric series. |

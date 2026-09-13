@@ -5,7 +5,7 @@ spirit of MySQL Performance Schema: stable output shapes for ordinary
 SQL users, no expert recipes required. This document states the
 lifecycle and compatibility policy (#21). Per-signal objects and query
 examples grow here as phases land; the current MVP covers traces,
-metrics, and logs companion views (no evaluators).
+metrics, and logs companion objects (views and a read-only metrics catalog).
 
 ## Visual tour
 
@@ -25,11 +25,12 @@ agg --cols 120 --rows 32 schema-demo.cast schema-demo.gif   # optional GIF
 ## Version contract
 
 - The binary advertises `observability_schema` in `timeless_capabilities()`
-  (currently `1`). Clients compare it against installed rows before
+  (currently `2`). Clients compare it against installed rows before
   relying on new columns.
 - Every installed object carries its own `schema_version` in
   `timeless_schema_inventory`. Versions are per object, not per
-  database: a release that changes one view upgrades exactly that view.
+  database: a release that changes one object upgrades exactly that object.
+  The metrics series catalog is version 2; the other objects remain version 1.
 - Compatibility within a schema version is additive. A new binary never
   renames or narrows an installed shape at the same version; changes
   ship as a version bump plus migration.
@@ -47,7 +48,7 @@ agg --cols 120 --rows 32 schema-demo.cast schema-demo.gif   # optional GIF
   without companions remain readable through their source tables.
 - To install missing companions or upgrade older owned definitions, run the
   `schema` command on a writable connection. It checks every planned name
-  before changing anything and commits the views and inventory together.
+  before changing anything and commits the objects and inventory together.
   Unowned name collisions fail with an error; resolve those names explicitly
   before retrying. Current objects are left in place, so repeating the command
   is idempotent.
@@ -61,7 +62,7 @@ INSERT INTO archive.traces(traces) VALUES ('schema');
 ```
 
 These commands participate in the surrounding transaction; an explicit
-`ROLLBACK` removes every new view and inventory row. Apply them before opening
+`ROLLBACK` removes every new object and inventory row. Apply them before opening
 updated companion views on a read-only replica. They update only companion
 objects; private shadow-schema upgrades use `timeless_upgrade()` as described
 in the [SQL API reference](SQL_API_REFERENCE.md#legacy-shadow-schema-upgrades).
@@ -100,6 +101,21 @@ survive direct opens, backup copies, and `ATTACH` under any alias.
 file opens without that alias attached.) Only `CREATE`/`DROP` targets
 and installer bookkeeping queries carry schema qualifiers.
 
+The metrics series catalog is a read-only virtual table, registered as
+`timeless_series_catalog(source='<table>')`, with the same name and eight visible
+columns as the original companion view. SQLite binds this object to the schema
+where it lives on every connection, so it selects the correct source when
+same-named tables exist in `main`, an attached file, or a backup. Its source
+argument is a literal local table name; dots are part of the name. A stored
+view over `timeless_series('metrics')` cannot provide this behavior, because
+that TVF string always selects `main.metrics`.
+
+Upgrade existing version-1 metrics companions with the `schema` command above.
+It replaces only the old series view with the bound catalog; other companions
+retain their versions and installation records. The standalone dbhealth
+extension registers this catalog module too. Older extensions cannot query
+the new catalog; deploy matching binaries before upgrading companions.
+
 ## Inventory
 
 `timeless_schema_inventory`, one row per owned object:
@@ -107,7 +123,7 @@ and installer bookkeeping queries carry schema qualifiers.
 | column | meaning |
 |---|---|
 | `source_database`, `source_table` | installation-time schema alias and source table; ownership is local to this database file and survives reopening under another alias |
-| `object_name`, `object_kind` | what was installed (`view` today) |
+| `object_name`, `object_kind` | what was installed (`view`, or `table` for the read-only series catalog) |
 | `schema_version` | definition version of that object |
 | `description` | human-readable reference for users |
 | `installed_at` | unix epoch seconds |
@@ -125,7 +141,7 @@ UTC alongside: ISO-8601 with millis (`start_time`) and millisecond
 durations (`duration_ms`). One convention across all three signals;
 native columns are never replaced, only accompanied.
 
-## Current MVP surface (schema 1, traces)
+## Current companion surface
 
 | object | shape | source |
 |---|---|---|
@@ -138,7 +154,7 @@ native columns are never replaced, only accompanied.
 | `timeless_<source>_entries` | one row per log entry: native timestamp plus human-readable UTC, severity, message, verbatim typed metadata | `timeless_logs` base-table scan |
 | `timeless_<source>_services` | distinct service values, ordered (logs: only when `service` is a declared index key) | spans view / logs base table |
 | `timeless_<source>_fields` | declared logs index keys in declaration order | install-time configuration, no scan |
-| `timeless_<source>_series` | every retained series with counts and span | `timeless_series` TVF (catalog reads only) |
+| `timeless_<source>_series` | every retained series with counts and span | bound `timeless_series_catalog` virtual table (catalog reads only) |
 | `timeless_<source>_latest` | newest sample per series with human-readable UTC; tied timestamps all returned | metrics base-table arg-max self-join |
 
 All columns are verbatim public vtab outputs or exact formattings
@@ -164,7 +180,7 @@ source table owns the same shapes under its own derived names.
 | `timeless_traces_operations` | view | `traces` | `TSQ-05` | Distinct retained service/operation pairs, ordered. |
 | `timeless_traces_errors` | view | `traces` | `TSQ-04` | Retained spans whose status is exactly error, in spans shape. |
 | `timeless_traces_roots` | view | `traces` | `TSQ-04` | Retained spans with no parent, in spans shape. |
-| `timeless_metrics_series` | view | `metrics` | `SQL-PROM-001`, `PQL-S04` | Every retained series: metric name, canonical labels, id, span, and point/chunk/buffer counts. Catalog reads only. |
+| `timeless_metrics_series` | table | `metrics` | `SQL-PROM-001`, `PQL-S04` | Every retained series: metric name, canonical labels, id, span, and point/chunk/buffer counts. Read-only catalog bound to this database. |
 | `timeless_metrics_latest` | view | `metrics` | `SQL-PROM-001` | Newest sample per series with human-readable UTC. Duplicate timestamps return all tied rows; full scan with documented cost. |
 | `timeless_logs_entries` | view | `logs` | `SQL-LOG-001` | One row per log entry: native timestamp plus human-readable UTC, severity level, message, and verbatim typed metadata JSON. |
 | `timeless_logs_services` | view | `logs` | `SQL-LOG-004` | Distinct service values retained in this table, ordered. Only installed when service is a declared index key. |

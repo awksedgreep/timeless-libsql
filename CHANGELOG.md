@@ -71,6 +71,12 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Metrics companion catalogs read their owning database (issue #62).**
+  `timeless_<source>_series` is now a read-only catalog table with unchanged
+  visible columns. It remains bound to its local source across attachment
+  aliases, standalone reopens, and backup copies. The explicit `schema`
+  command upgrades only this companion from version 1 to version 2; other
+  objects remain at version 1. The dbhealth extension supports it too.
 - **Server ownership follows the resolved database path (issue #63).**
   File and directory symlink aliases use the same lease and SQLite WAL path.
   A shared lease rejects a second server across all signals, and legacy

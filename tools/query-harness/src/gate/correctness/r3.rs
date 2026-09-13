@@ -181,7 +181,7 @@ fn complete_lifecycle(extension: &Path, temporary: &Path) -> Result<()> {
         ("view".into(), "timeless_logs_fields".into()),
         ("view".into(), "timeless_logs_services".into()),
         ("view".into(), "timeless_metrics_latest".into()),
-        ("view".into(), "timeless_metrics_series".into()),
+        ("table".into(), "timeless_metrics_series".into()),
         ("view".into(), "timeless_traces_errors".into()),
         ("view".into(), "timeless_traces_operations".into()),
         ("view".into(), "timeless_traces_roots".into()),
@@ -268,7 +268,7 @@ fn quoted_names(extension: &Path, temporary: &Path) -> Result<()> {
     let aux = temporary.join("quoted-aux.db");
     let schema = "aux\"quoted";
     let tables = [
-        ("metrics", "metrics\"quoted"),
+        ("metrics", "metrics'\"quoted.name"),
         ("logs", "logs\"quoted"),
         ("traces", "traces\"quoted"),
     ];
@@ -317,6 +317,15 @@ fn quoted_names(extension: &Path, temporary: &Path) -> Result<()> {
         command(&connection, schema, table, "schema")?;
         command(&connection, schema, table, "flush")?;
     }
+    ensure!(
+        scalar(
+            &connection,
+            &format!(
+                "SELECT count(*) FROM {} WHERE name='quoted_metric'",
+                qualified(schema, &format!("timeless_{}_series", tables[0].1))
+            )
+        )? == 1
+    );
     for ((_, table), (column, value)) in tables.into_iter().zip([
         ("name", "quoted_metric"),
         ("message", "quoted_log"),

@@ -1150,7 +1150,7 @@ fn validate_observability_schema_catalog(root: &Path) -> Result<Vec<String>> {
         if !seen.insert(name.to_owned()) {
             errors.push(format!("{relative}: duplicate catalog object {name:?}"));
         }
-        if cells[1].trim_matches('`') != "view" {
+        if !matches!(cells[1].trim_matches('`'), "view" | "table") {
             errors.push(format!(
                 "{relative}: catalog object {name:?} has unknown kind {}",
                 cells[1]

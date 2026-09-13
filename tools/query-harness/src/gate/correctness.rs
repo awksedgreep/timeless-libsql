@@ -1,3 +1,4 @@
+mod catalog;
 mod r1;
 mod r2;
 mod r3;
@@ -22,7 +23,8 @@ pub(super) fn run(
         CorrectnessSection::R2 => r2::run(root, extension, temporary),
         CorrectnessSection::R3 => {
             r3::run(extension, temporary)?;
-            schema::run(extension, temporary)
+            schema::run(extension, temporary)?;
+            catalog::run(extension, temporary)
         }
         CorrectnessSection::R4 => r4::run(extension, temporary),
         CorrectnessSection::R8 => r8::run(extension, temporary),

@@ -21,7 +21,7 @@ use crate::sql_ident;
 /// Version of the installed schema shape. Bumped whenever the emitted
 /// DDL changes; explicit maintenance upgrades older definitions and
 /// leaves newer definitions alone.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// The inventory table itself (one per database schema that hosts an
 /// installed source table).
@@ -38,6 +38,7 @@ pub(crate) fn spans_view_name(source_table: &str) -> String {
 pub(crate) struct SchemaObject {
     pub name: String,
     pub kind: &'static str,
+    pub version: u32,
     pub ddl: String,
     pub description: &'static str,
 }
@@ -55,12 +56,14 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
         SchemaObject {
             name: spans.clone(),
             kind: "view",
+            version: 1,
             ddl: trace_spans_view_ddl(database, table).1,
             description: trace_spans_description(),
         },
         SchemaObject {
             name: summary.clone(),
             kind: "view",
+            version: 1,
             ddl: trace_summary_view_ddl(database, &spans, &summary),
             description: "One row per retained trace: span and error counts, \
                 envelope timing (native plus human-readable), invalid-end \
@@ -71,6 +74,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
         SchemaObject {
             name: services.clone(),
             kind: "view",
+            version: 1,
             ddl: trace_services_view_ddl(database, &spans, &services),
             description: "Distinct service names retained in this source, \
                 ordered. Backed by a spans-view scan, not the discovery TVF.",
@@ -78,6 +82,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
         SchemaObject {
             name: operations.clone(),
             kind: "view",
+            version: 1,
             ddl: trace_operations_view_ddl(database, &spans, &operations),
             description: "Distinct service/operation pairs retained in this \
                 source, ordered. Backed by a spans-view scan.",
@@ -85,6 +90,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
         SchemaObject {
             name: errors.clone(),
             kind: "view",
+            version: 1,
             ddl: trace_filtered_view_ddl(database, &spans, &errors, "status = 'error'"),
             description: "Retained spans whose status is exactly 'error', \
                 in spans-view shape.",
@@ -92,6 +98,7 @@ pub(crate) fn trace_objects(database: &str, table: &str) -> Vec<SchemaObject> {
         SchemaObject {
             name: roots.clone(),
             kind: "view",
+            version: 1,
             ddl: trace_filtered_view_ddl(database, &spans, &roots, "parent_span_id IS NULL"),
             description: "Retained root spans (no parent), in spans-view shape.",
         },
@@ -291,7 +298,11 @@ fn object_exists(host: &Connection, database: &str, name: &str) -> Result<bool> 
 
 /// Objects the inventory attributes to one source table, with their
 /// recorded per-object schema versions.
-fn owned_objects(host: &Connection, database: &str, table: &str) -> Result<Vec<(String, i64)>> {
+fn owned_objects(
+    host: &Connection,
+    database: &str,
+    table: &str,
+) -> Result<Vec<(String, String, i64)>> {
     if !object_exists(host, database, INVENTORY_TABLE)? {
         return Ok(Vec::new());
     }
@@ -299,12 +310,12 @@ fn owned_objects(host: &Connection, database: &str, table: &str) -> Result<Vec<(
     // ATTACH alias is descriptive, not an ownership boundary: the same
     // file must remain maintainable when reopened under another alias.
     let sql = format!(
-        "SELECT object_name, max(schema_version) FROM {} \
+        "SELECT object_name, object_kind, max(schema_version) FROM {} \
          WHERE source_table = ?1 GROUP BY object_name",
         sql_ident::qualified(database, INVENTORY_TABLE)
     );
     let mut stmt = host.prepare(&sql)?;
-    let names = stmt.query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let names = stmt.query_map([table], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
     names.collect()
 }
 
@@ -332,7 +343,7 @@ fn install_object(
             table,
             object.name,
             object.kind,
-            SCHEMA_VERSION as i64,
+            i64::from(object.version),
             object.description
         ],
     )?;
@@ -341,9 +352,24 @@ fn install_object(
 
 /// Remove one owned object and forget it. Unknown names are a no-op
 /// through `IF EXISTS`; the inventory row goes with the object.
-fn drop_object(host: &Connection, database: &str, table: &str, name: &str) -> Result<()> {
+fn drop_object(
+    host: &Connection,
+    database: &str,
+    table: &str,
+    name: &str,
+    kind: &str,
+) -> Result<()> {
+    let keyword = match kind {
+        "view" => "VIEW",
+        "table" => "TABLE",
+        _ => {
+            return Err(rusqlite::Error::ModuleError(format!(
+                "unsupported owned schema object kind {kind:?}"
+            )))
+        }
+    };
     host.execute_batch(&format!(
-        "DROP VIEW IF EXISTS {}",
+        "DROP {keyword} IF EXISTS {}",
         sql_ident::qualified(database, name)
     ))?;
     host.execute(
@@ -386,6 +412,7 @@ pub(crate) fn log_objects(
     objects.push(SchemaObject {
         name: entries.clone(),
         kind: "view",
+        version: 1,
         ddl: format!(
             "CREATE VIEW {} AS \
              SELECT ts, \
@@ -403,6 +430,7 @@ pub(crate) fn log_objects(
         objects.push(SchemaObject {
             name: name.clone(),
             kind: "view",
+            version: 1,
             ddl: format!(
                 "CREATE VIEW {} AS \
                  SELECT DISTINCT service FROM {source} ORDER BY service",
@@ -422,6 +450,7 @@ pub(crate) fn log_objects(
         objects.push(SchemaObject {
             name: name.clone(),
             kind: "view",
+            version: 1,
             ddl: format!(
                 "CREATE VIEW {} AS SELECT column1 AS field FROM (VALUES {values})",
                 sql_ident::qualified(database, &name)
@@ -434,24 +463,21 @@ pub(crate) fn log_objects(
     objects
 }
 
-/// Companion set for one metrics table (Phase 4): series catalog and
-/// latest values. Both compose existing public TVFs and base-table SQL
-/// with the source name baked in — no parameters, no new evaluators.
+/// Companion set for one metrics table: a bound, read-only series catalog
+/// and a latest-values view. Both use the public source without new evaluators.
 pub(crate) fn metric_objects(database: &str, table: &str) -> Vec<SchemaObject> {
-    // Unqualified bodies (see the spans view): portable across direct
-    // opens, copies, and foreign aliases. TVF arguments are string
-    // literals, which carry no schema at all.
+    // The catalog module binds its source to its current home schema at
+    // xConnect. View bodies likewise resolve local names in their home schema.
     let source = sql_ident::quote(table);
     let series = format!("timeless_{table}_series");
     let latest = format!("timeless_{table}_latest");
     vec![
         SchemaObject {
             name: series.clone(),
-            kind: "view",
+            kind: "table",
+            version: 2,
             ddl: format!(
-                "CREATE VIEW {} AS \
-                 SELECT name, labels, series_id, min_ts, max_ts, points, chunks, buffered \
-                 FROM timeless_series({})",
+                "CREATE VIRTUAL TABLE {} USING timeless_series_catalog(source={})",
                 sql_ident::qualified(database, &series),
                 sql_literal(table)
             ),
@@ -462,6 +488,7 @@ pub(crate) fn metric_objects(database: &str, table: &str) -> Vec<SchemaObject> {
         SchemaObject {
             name: latest.clone(),
             kind: "view",
+            version: 1,
             // Exact arg-max join, not SQLite's bare-column min/max idiom:
             // duplicate (name, labels, ts) rows are all returned, never
             // silently deduplicated. Labels group by canonical text.
@@ -499,7 +526,7 @@ pub(crate) fn install_objects(
     // first install into this schema.
     let owned = owned_objects(host, database, table)?;
     for object in planned {
-        if !owned.iter().any(|(o, _)| o == &object.name)
+        if !owned.iter().any(|(o, _, _)| o == &object.name)
             && object_exists(host, database, &object.name)?
         {
             return Err(rusqlite::Error::ModuleError(format!(
@@ -511,17 +538,17 @@ pub(crate) fn install_objects(
     }
     host.execute_batch(&inventory_ddl(database))?;
     for object in planned {
-        if let Some((_, version)) = owned.iter().find(|(name, _)| name == &object.name) {
+        if let Some((_, kind, version)) = owned.iter().find(|(name, _, _)| name == &object.name) {
             // Never downgrade definitions from a newer extension. A current
             // definition is idempotent; repair a missing current object and
             // upgrade older versions only inside this explicit transaction.
-            if *version > i64::from(SCHEMA_VERSION)
-                || (*version == i64::from(SCHEMA_VERSION)
+            if *version > i64::from(object.version)
+                || (*version == i64::from(object.version)
                     && object_exists(host, database, &object.name)?)
             {
                 continue;
             }
-            drop_object(host, database, table, &object.name)?;
+            drop_object(host, database, table, &object.name, kind)?;
         }
         install_object(host, database, table, object)?;
     }
@@ -564,8 +591,8 @@ pub(crate) fn install_metric_views(
 /// Signal-agnostic: every vtab's `xDestroy` funnels through here.
 pub(crate) fn drop_objects(host: &Connection, database: &str, table: &str) -> Result<()> {
     let owned = owned_objects(host, database, table)?;
-    for (name, _) in &owned {
-        drop_object(host, database, table, name)?;
+    for (name, kind, _) in &owned {
+        drop_object(host, database, table, name, kind)?;
     }
     Ok(())
 }

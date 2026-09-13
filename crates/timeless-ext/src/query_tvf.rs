@@ -164,8 +164,8 @@ use std::sync::Arc;
 use rusqlite::ffi;
 use rusqlite::types::Value;
 use rusqlite::vtab::{
-    Context, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig, VTabConnection,
-    VTabCursor,
+    Context, CreateVTab, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig,
+    VTabConnection, VTabCursor, VTabKind,
 };
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{AggFn, Engine, Labels, LogQuery};
@@ -320,18 +320,19 @@ fn parse_window_op(module: &str, name: Option<&str>) -> Result<timeless_core::Wi
     })
 }
 
-/// Register only the metric series catalog TVF.
+/// Register the metric catalog TVF and its schema-bound companion module.
 ///
 /// Every metrics table (and therefore every dbhealth table, which is a
 /// `timeless_metrics` table underneath) installs a companion
-/// `timeless_<table>_series` view over `timeless_series(...)`. SQLite
-/// re-parses every view on `ALTER TABLE ... RENAME/DROP COLUMN` and
-/// `RENAME TO`, so a connection that can create such a view must also
-/// carry this module or every later schema ALTER on the database fails
-/// (issue #56). The dbhealth-only extension registers exactly this.
+/// `timeless_<table>_series` catalog. Older companions were views over
+/// `timeless_series(...)`; both registrations are needed for new catalogs,
+/// legacy queries, and SQLite's view validation during ALTER TABLE (#56).
+/// The dbhealth-only extension also calls this registration.
 pub(crate) fn register_series(db: &Connection) -> Result<()> {
     const SERIES: Module<SeriesTab> = Module::eponymous_only_module();
-    db.create_module(c"timeless_series", &SERIES, None::<()>)
+    db.create_module(c"timeless_series", &SERIES, None::<()>)?;
+    const CATALOG: Module<SeriesTab> = Module::read_only_module();
+    db.create_module(c"timeless_series_catalog", &CATALOG, None::<()>)
 }
 
 /// Register the TVF modules on a freshly-loaded connection.
@@ -4180,6 +4181,7 @@ fn require_tbl(module: &str, idx_num: c_int, args: &Filters<'_>) -> Result<(Stri
 pub(crate) struct SeriesTab {
     base: ffi::sqlite3_vtab,
     db: *mut ffi::sqlite3,
+    source: Option<(String, String)>,
 }
 
 const SERIES_FIRST_ARG: c_int = 8;
@@ -4193,11 +4195,34 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
     fn connect(
         db: &mut VTabConnection,
         _aux: Option<&()>,
-        _module_name: &[u8],
-        _database_name: &[u8],
+        module_name: &[u8],
+        database_name: &[u8],
         _table_name: &[u8],
-        _args: &[&[u8]],
+        args: &[&[u8]],
     ) -> Result<(Cow<'static, CStr>, Self)> {
+        let source = if module_name == b"timeless_series_catalog" {
+            let [argument] = args else {
+                return Err(module_err(
+                    "timeless_series_catalog requires source='<table>'".into(),
+                ));
+            };
+            let argument = String::from_utf8_lossy(argument);
+            let value = argument
+                .trim()
+                .strip_prefix("source=")
+                .map(str::trim)
+                .and_then(|value| value.strip_prefix('\''))
+                .and_then(|value| value.strip_suffix('\''))
+                .ok_or_else(|| {
+                    module_err("timeless_series_catalog requires source='<table>'".into())
+                })?;
+            Some((
+                String::from_utf8_lossy(database_name).into_owned(),
+                value.replace("''", "'"),
+            ))
+        } else {
+            None
+        };
         let handle = unsafe { db.handle() };
         db.config(VTabConfig::Innocuous)?;
         Ok((
@@ -4210,6 +4235,7 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
             SeriesTab {
                 base: ffi::sqlite3_vtab::default(),
                 db: handle,
+                source,
             },
         ))
     }
@@ -4222,6 +4248,7 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
         Ok(SeriesCursor {
             base: ffi::sqlite3_vtab_cursor::default(),
             db: self.db,
+            source: self.source.clone(),
             rows: Vec::new(),
             pos: 0,
             phantom: PhantomData,
@@ -4233,6 +4260,7 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
 pub(crate) struct SeriesCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
     db: *mut ffi::sqlite3,
+    source: Option<(String, String)>,
     rows: Vec<timeless_core::SeriesOverview>,
     pos: usize,
     phantom: PhantomData<&'vtab SeriesTab>,
@@ -4241,12 +4269,27 @@ pub(crate) struct SeriesCursor<'vtab> {
 unsafe impl VTabCursor for SeriesCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         const M: &str = "timeless_series";
-        let slots = named_slots(M, SERIES_ARGS, SERIES_REQUIRED, idx_num)?;
+        let required = if self.source.is_some() {
+            0
+        } else {
+            SERIES_REQUIRED
+        };
+        let slots = named_slots(M, SERIES_ARGS, required, idx_num)?;
         let get = |slot: usize, what: &str| -> Result<String> {
             let value: Option<String> = args.get(slot)?;
             value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
-        let (database, table) = split_spec(&get(slots[0].unwrap(), "tbl")?);
+        let (database, table) = match &self.source {
+            Some(source) => {
+                if slots[0].is_some() {
+                    return Err(module_err(
+                        "a bound series catalog does not accept tbl overrides".into(),
+                    ));
+                }
+                source.clone()
+            }
+            None => split_spec(&get(slots[0].unwrap(), "tbl")?),
+        };
         let metric: Option<String> = match slots[1] {
             Some(slot) => args.get(slot)?,
             None => None,
@@ -4346,6 +4389,25 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
 
     fn rowid(&self) -> Result<i64> {
         Ok(self.pos as i64)
+    }
+}
+
+impl CreateVTab<'_> for SeriesTab {
+    const KIND: VTabKind = VTabKind::Default;
+
+    fn create(
+        db: &mut VTabConnection,
+        aux: Option<&Self::Aux>,
+        module_name: &[u8],
+        database_name: &[u8],
+        table_name: &[u8],
+        args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        Self::connect(db, aux, module_name, database_name, table_name, args)
+    }
+
+    fn destroy(&self) -> Result<()> {
+        Ok(())
     }
 }
 

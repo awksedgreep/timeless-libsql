@@ -125,6 +125,13 @@ deploying updated companion queries to read-only replicas. The full lifecycle
 and attached-database examples are in the
 [observability schema reference](OBSERVABILITY_SCHEMA.md#installation).
 
+Schema version 2 changes the metrics series companion to a read-only catalog
+table with the same visible columns. Run the `schema` command for each metrics
+source to replace its version-1 view; other companions remain at version 1.
+This fixes attached-database queries and preserves binding through standalone
+opens and backup copies. Load the updated extension wherever these catalogs
+are queried before upgrading them.
+
 ## 2. Drain and create the rollback point
 
 For a Rust signal server, stop producers, call its flush route

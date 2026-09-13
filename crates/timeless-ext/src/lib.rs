@@ -104,12 +104,10 @@ use rusqlite::{Connection, Result};
 /// public API the separate `dbhealth-ext` cdylib builds its extension
 /// entry points from.
 ///
-/// "Family" includes the `timeless_series` catalog TVF: a dbhealth table
-/// is a `timeless_metrics` table underneath and ships the same
-/// `timeless_<table>_series` companion view, which selects from that
-/// TVF. Without the module the view is unresolvable, and because SQLite
-/// validates every view on `ALTER TABLE ... RENAME/DROP COLUMN` and
-/// `RENAME TO`, every schema ALTER on the whole database fails
+/// "Family" includes the `timeless_series` TVF and schema-bound
+/// `timeless_series_catalog` module. A dbhealth table uses metrics storage
+/// underneath and installs the same series companion. Both modules remain
+/// available for new catalogs and legacy view validation during ALTER TABLE
 /// (issue #56). No other telemetry module is registered.
 pub fn register_dbhealth(db: &Connection) -> Result<()> {
     health_vtab::register(db)?;

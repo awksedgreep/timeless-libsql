@@ -899,7 +899,8 @@ mod companion_view_tests {
     use rusqlite::Connection;
 
     /// Issue #56: the dbhealth-only registration must service the
-    /// `timeless_<table>_series` companion view its own CREATE installs.
+    /// `timeless_<table>_series` companion its own CREATE installs, and
+    /// the old TVF-based view shape.
     /// SQLite re-parses every view on column/table renames and drops, so
     /// an unresolvable view breaks ALTER TABLE for the whole database —
     /// including user tables that have nothing to do with dbhealth.
@@ -910,20 +911,21 @@ mod companion_view_tests {
         db.execute_batch(
             "CREATE VIRTUAL TABLE dbhealth USING dbhealth(every=0);
              INSERT INTO dbhealth(dbhealth) VALUES ('sample');
-             CREATE TABLE app(id INTEGER PRIMARY KEY, old_name TEXT, spare TEXT);",
+             CREATE TABLE app(id INTEGER PRIMARY KEY, old_name TEXT, spare TEXT);
+             CREATE VIEW legacy_series AS SELECT * FROM timeless_series('dbhealth');",
         )
         .unwrap();
 
-        let views: Vec<String> = db
-            .prepare("SELECT name FROM sqlite_master WHERE type='view' ORDER BY name")
+        let tables: Vec<String> = db
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
         assert!(
-            views.iter().any(|name| name == "timeless_dbhealth_series"),
-            "series companion view missing: {views:?}"
+            tables.iter().any(|name| name == "timeless_dbhealth_series"),
+            "series companion catalog missing: {tables:?}"
         );
 
         // The TVF the view depends on is registered, and the view resolves.

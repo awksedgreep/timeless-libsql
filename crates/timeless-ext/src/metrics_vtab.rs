@@ -1646,7 +1646,11 @@ mod schema_tests {
             inventory_names(&db),
             vec![
                 ("timeless_metrics_latest".to_string(), "view".to_string(), 1),
-                ("timeless_metrics_series".to_string(), "view".to_string(), 1),
+                (
+                    "timeless_metrics_series".to_string(),
+                    "table".to_string(),
+                    2
+                ),
             ]
         );
         // Same series, labels in different key order across inserts:
