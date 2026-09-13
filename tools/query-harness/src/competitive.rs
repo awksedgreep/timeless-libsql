@@ -597,7 +597,7 @@ fn log_queries(entries: usize, at: i64) -> Vec<Query> {
     let query = |name, expression: String, expected| Query {
         name,
         expression: format!(
-            "_time:[{},{}] {expression} | limit {entries}",
+            "_time:[{},{}] {expression}",
             (at - 1) * 1_000_000,
             (at + 1) * 1_000_000
         ),
@@ -632,17 +632,17 @@ fn log_queries(entries: usize, at: i64) -> Vec<Query> {
         ),
         query(
             "exact_message",
-            format!("_msg:=\"competition event 00000042\"{fields}"),
+            format!("_msg:=\"competition event 00000042\"{fields} | limit {entries}"),
             rows(|i| i == 42),
         ),
         query(
             "indexed_rows",
-            format!("host:=h00 | sort by (_time){fields}"),
+            format!("host:=h00 | sort by (_time){fields} | limit {entries}"),
             rows(|i| i % 64 == 0),
         ),
         query(
             "wide_rows",
-            format!("* | sort by (_time){fields}"),
+            format!("* | sort by (_time){fields} | limit {entries}"),
             rows(|_| true),
         ),
     ]
@@ -693,7 +693,7 @@ fn canonical_logs(rows: &Value) -> Result<Value> {
     for row in rows.as_array_mut().context("log array")? {
         let object = row.as_object_mut().context("log object")?;
         // The named aggregate count is numeric in Timeless and a decimal
-        // string in VictoriaLogs. Normalize this one declared output column,
+        // string in VictoriaLogs. Normalize these declared output columns,
         // never arbitrary fields from the retained log rows.
         for field in ["n", "total"] {
             if let Some(count) = object.get_mut(field) {
@@ -713,7 +713,7 @@ fn canonical_logs(rows: &Value) -> Result<Value> {
     }
     let array = rows.as_array_mut().context("log array")?;
     // Grouped aggregates have no promised order without a sort operator.
-    // Raw log queries all contain an explicit timestamp sort and stay ordered.
+    // Multirow log queries contain an explicit timestamp sort and stay ordered.
     if array
         .iter()
         .all(|row| row.get("n").or_else(|| row.get("total")).is_some())
@@ -1101,46 +1101,64 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
                 .iter()
                 .find(|query| query.name == "grouped_count")
                 .context("grouped count")?;
-            let expression = grouped
-                .expression
-                .replace(" | limit", " | sort by (service) | limit");
-            let mut responses = serde_json::Map::new();
-            for server in &servers {
-                let response = client
-                    .post(format!("{}/select/logsql/query", server.base))
-                    .form(&[("query", &expression)])
-                    .send()?;
-                let status = response.status().as_u16();
-                let body = response.text()?;
-                ensure!(
-                    matches!(status, 200 | 422),
-                    "field sort probe returned HTTP {status}: {body}"
-                );
-                if status == 200 {
-                    let rows: Vec<Value> = body
-                        .lines()
-                        .filter(|line| !line.is_empty())
-                        .map(serde_json::from_str)
-                        .collect::<Result<_, _>>()?;
+            let counted = queries
+                .iter()
+                .find(|query| query.name == "count_as_total")
+                .context("native count")?;
+            for (probe_name, expression, expected, ordered) in [
+                (
+                    "field_sort",
+                    format!("{} | sort by (service)", grouped.expression),
+                    &grouped.expected,
+                    true,
+                ),
+                (
+                    "count_limit",
+                    format!("{} | limit 1", counted.expression),
+                    &counted.expected,
+                    false,
+                ),
+            ] {
+                let mut responses = serde_json::Map::new();
+                for server in &servers {
+                    let response = client
+                        .post(format!("{}/select/logsql/query", server.base))
+                        .form(&[("query", &expression)])
+                        .send()?;
+                    let status = response.status().as_u16();
+                    let body = response.text()?;
                     ensure!(
-                        rows.iter()
-                            .map(|row| row["service"].as_str())
-                            .collect::<Vec<_>>()
-                            == vec![Some("api"), Some("worker")]
-                            && equivalent(
-                                &canonical_logs(&json!(rows))?,
-                                &canonical_logs(&grouped.expected)?
-                            ),
-                        "field sort probe returned wrong groups or order: {body}"
+                        matches!(status, 200 | 422),
+                        "{probe_name} probe returned HTTP {status}: {body}"
+                    );
+                    if status == 200 {
+                        let rows: Vec<Value> = body
+                            .lines()
+                            .filter(|line| !line.is_empty())
+                            .map(serde_json::from_str)
+                            .collect::<Result<_, _>>()?;
+                        if ordered {
+                            ensure!(
+                                rows.iter()
+                                    .map(|row| row["service"].as_str())
+                                    .collect::<Vec<_>>()
+                                    == vec![Some("api"), Some("worker")],
+                                "{probe_name} returned wrong order: {body}"
+                            );
+                        }
+                        ensure!(
+                            equivalent(&canonical_logs(&json!(rows))?, &canonical_logs(expected)?),
+                            "{probe_name} returned wrong data: {body}"
+                        );
+                    }
+                    responses.insert(
+                        server.kind.name().into(),
+                        json!({"http_status":status,"body":body}),
                     );
                 }
-                responses.insert(
-                    server.kind.name().into(),
-                    json!({"http_status":status,"body":body}),
-                );
+                capability_probes[probe_name] =
+                    json!({"query":expression,"engines":responses,"timed":false});
             }
-            capability_probes["field_sort"] =
-                json!({"query":expression,"engines":responses,"timed":false});
         }
         for server in &servers {
             let value = details

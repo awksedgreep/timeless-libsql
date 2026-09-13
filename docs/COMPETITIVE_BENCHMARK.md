@@ -67,7 +67,9 @@ log rows preserve order. A separate untimed `sort by (service)` probe records
 the capability gap: Timeless supports timestamp sorting, while VictoriaLogs
 also sorts the grouped result by an ordinary field. Failed capability probes
 are retained alongside the timings rather than counted as successful queries.
-Missing rows, wrong timestamps, non-finite samples and query diagnostics fail.
+A second probe records whether native count accepts a following `limit 1`;
+the timed aggregate queries have no redundant terminal limit. Missing rows,
+wrong timestamps, non-finite samples and diagnostics fail timed workloads.
 
 ## Timing and resource accounting
 
