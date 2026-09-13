@@ -60,6 +60,11 @@ match. Only floating sample values have a relative/absolute `1e-9` tolerance.
 The declared aggregate count column `n` is normalized from a decimal string
 or an unsigned JSON number: VictoriaLogs and Timeless use different wire
 encodings for this numeric result. Retained log field types are not coerced.
+Unsorted aggregate groups compare by group identity; explicitly sorted retained
+log rows preserve order. A separate untimed `sort by (service)` probe records
+the capability gap: Timeless supports timestamp sorting, while VictoriaLogs
+also sorts the grouped result by an ordinary field. Failed capability probes
+are retained alongside the timings rather than counted as successful queries.
 Missing rows, wrong timestamps, non-finite samples and query diagnostics fail.
 
 ## Timing and resource accounting

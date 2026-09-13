@@ -625,7 +625,7 @@ fn log_queries(entries: usize, at: i64) -> Vec<Query> {
         ),
         query(
             "grouped_count",
-            "* | stats by (service) count() as n | sort by (service)".into(),
+            "* | stats by (service) count() as n".into(),
             json!([{"service":"api","n":entries.div_ceil(4).to_string()},{"service":"worker","n":(entries-entries.div_ceil(4)).to_string()}]),
         ),
         query(
@@ -705,6 +705,12 @@ fn canonical_logs(rows: &Value) -> Result<Value> {
             )?
             .timestamp_micros());
         }
+    }
+    let array = rows.as_array_mut().context("log array")?;
+    // Grouped aggregates have no promised order without a sort operator.
+    // Raw log queries all contain an explicit timestamp sort and stay ordered.
+    if array.iter().all(|row| row.get("n").is_some()) {
+        array.sort_by_cached_key(|row| row["service"].to_string());
     }
     Ok(rows)
 }
@@ -1060,6 +1066,53 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
             details.insert(server.kind.name(),json!({"identity":server.identity,"ingestion":{"wire_bytes":body.len(),"wire_sha256":digest(body),"admission_ns":admission,"graceful_restart_verified":true},"startup_storage":server.startup_storage}));
         }
         let measurements = measure(&client, &servers, &queries, at, &args)?;
+        let mut capability_probes = json!({});
+        if logs {
+            let grouped = queries
+                .iter()
+                .find(|query| query.name == "grouped_count")
+                .context("grouped count")?;
+            let expression = grouped
+                .expression
+                .replace(" | limit", " | sort by (service) | limit");
+            let mut responses = serde_json::Map::new();
+            for server in &servers {
+                let response = client
+                    .post(format!("{}/select/logsql/query", server.base))
+                    .form(&[("query", &expression)])
+                    .send()?;
+                let status = response.status().as_u16();
+                let body = response.text()?;
+                ensure!(
+                    matches!(status, 200 | 422),
+                    "field sort probe returned HTTP {status}: {body}"
+                );
+                if status == 200 {
+                    let rows: Vec<Value> = body
+                        .lines()
+                        .filter(|line| !line.is_empty())
+                        .map(serde_json::from_str)
+                        .collect::<Result<_, _>>()?;
+                    ensure!(
+                        rows.iter()
+                            .map(|row| row["service"].as_str())
+                            .collect::<Vec<_>>()
+                            == vec![Some("api"), Some("worker")]
+                            && equivalent(
+                                &canonical_logs(&json!(rows))?,
+                                &canonical_logs(&grouped.expected)?
+                            ),
+                        "field sort probe returned wrong groups or order: {body}"
+                    );
+                }
+                responses.insert(
+                    server.kind.name().into(),
+                    json!({"http_status":status,"body":body}),
+                );
+            }
+            capability_probes["field_sort"] =
+                json!({"query":expression,"engines":responses,"timed":false});
+        }
         for server in &servers {
             let value = details
                 .get_mut(server.kind.name())
@@ -1076,7 +1129,7 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
             )?;
             value["storage_after_final_restart"] = server.storage(&args.base_image, &platform)?;
         }
-        report["signals"][if logs { "logs" } else { "metrics" }] = json!({"fixture_sha256":digest(&logical),"logical_wire_bytes":logical.len(),"engines":details,"queries":measurements});
+        report["signals"][if logs { "logs" } else { "metrics" }] = json!({"fixture_sha256":digest(&logical),"logical_wire_bytes":logical.len(),"engines":details,"queries":measurements,"capability_probes":capability_probes});
         // Explicitly drop all engines for this signal before the next signal.
         drop(servers);
     }
