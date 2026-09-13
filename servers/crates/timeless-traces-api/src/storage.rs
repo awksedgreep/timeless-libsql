@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -7,7 +6,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -17,7 +15,7 @@ use timeless_api_common::otel::{
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
-    BackupReport, BytesGate, DataPlaneSpec,
+    BackupReport, BytesGate, DataPlaneSpec, DatabaseLease,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -397,7 +395,7 @@ struct StorageInner {
     profile: Arc<StdMutex<ApiProfile>>,
     admission: Mutex<()>,
     joins: Mutex<Vec<JoinHandle<Result<(), String>>>>,
-    lease: StdMutex<Option<File>>,
+    lease: StdMutex<Option<DatabaseLease>>,
     database_path: PathBuf,
     retention: Option<Duration>,
     queue_capacity: usize,
@@ -495,6 +493,7 @@ impl Storage {
         // This is deliberately acquired before SQLite is opened. A second
         // process cannot initialize or recover the same extension state.
         let lease = acquire_database_lease(&database_path, "traces")?;
+        let database_path = lease.database_path().to_path_buf();
         let profile = Arc::new(StdMutex::new(ApiProfile::default()));
         let (writer_tx, writer_rx) = mpsc::channel(queue_batches);
         let (ready_tx, ready_rx) = std_mpsc::channel();
@@ -1065,7 +1064,7 @@ impl Storage {
                 .map_err(|_| "SQLite traces API worker panicked".to_string())??;
         }
         if let Some(file) = profile_lock(&self.0.lease).take() {
-            FileExt::unlock(&file)
+            file.unlock()
                 .map_err(|error| format!("release database owner lease: {error}"))?;
         }
         writer_result
@@ -2109,7 +2108,7 @@ mod tests {
         let first = acquire_database_lease(&database, "traces").unwrap();
         let error = acquire_database_lease(&database, "traces").unwrap_err();
         assert!(error.contains("already owned"), "{error}");
-        FileExt::unlock(&first).unwrap();
+        first.unlock().unwrap();
         acquire_database_lease(&database, "traces").unwrap();
     }
 

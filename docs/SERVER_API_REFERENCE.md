@@ -553,7 +553,14 @@ mutated. A pre-ledger database receives the additive, idempotent
 `_timeless_schema_migrations` v1 row on the writer connection.
 
 Each server holds an advisory exclusive
-`<database>.timeless-<signal>-api.lock` lease. This fences another conforming
+`<canonical-database>.timeless-api.lock` lease, shared across signals, together
+with all three legacy `.timeless-<signal>-api.lock` files for compatibility.
+Existing file symlinks and directory aliases resolve before leasing and opening
+SQLite; a new database uses its canonical parent directory. Dangling file
+symlinks fail with instructions to create the target first. Linux and macOS
+reject hard-linked database files because they can create conflicting WAL paths.
+Do not rename or replace the database, add hard links, or remove lease files
+while a server owns it. This fences another conforming
 server owner. It cannot protect against an unrelated SQLite process that
 ignores the lease; an operator must not give another writer the database while
 the server owns it.

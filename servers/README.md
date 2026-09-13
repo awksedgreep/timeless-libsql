@@ -89,22 +89,27 @@ a server becomes network-reachable is the moment to consider
 ### Sharing a database with the extension
 
 The servers load the same `libtimeless_ext` and speak the same on-disk
-format as an application embedding the extension directly — but every
-database has exactly **one writing owner**, enforced by a lease that fails
-loudly on a second writer. The supported topologies:
+format as an application embedding the extension directly. Each database must
+have **one writing owner**. A shared lease rejects a second participating
+signal server, including one using a symlink or a different signal. Embedded
+applications do not acquire this lease and must be stopped before handing
+writing ownership to a server. The supported topologies:
 
 1. **The server owns the database.** Applications ingest and query over
    HTTP. The default topology, and the reason the binaries exist.
 2. **The application owns the database** through the embedded extension.
    There is no HTTP surface; start a server against that file only after
-   the application has stopped writing (the lease enforces this).
+   the application has stopped writing; this handoff is the operator's responsibility.
 3. **Split reads.** The server owns writes; other processes open the same
    file read-only and query through the extension directly. WAL gives them
    safe snapshot reads, minus the server's not-yet-flushed buffer
    (typically the last few seconds).
 
-What is not supported is two writers on one file — the lease refuses, by
-design, before either can corrupt the other.
+Two independent writing owners on one file are unsupported. The servers resolve
+symlinks before opening SQLite and reject hard-linked database files on Linux
+and macOS because those aliases can use different WAL paths. Keep database
+paths and lease files in place while a server is running. Upgrade every
+participating server to obtain the same alias protection.
 
 All three expose `/live`, `/ready`, `/health`, and signal-specific stats. A
 SIGINT or SIGTERM stops admission, drains accepted HTTP work, stops maintenance,

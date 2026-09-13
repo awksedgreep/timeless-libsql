@@ -1,6 +1,5 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -8,7 +7,6 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
@@ -19,7 +17,7 @@ use timeless_api_common::otel::{
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
-    require_query_surface, BackupReport, BytesGate, DataPlaneSpec,
+    require_query_surface, BackupReport, BytesGate, DataPlaneSpec, DatabaseLease,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -1061,7 +1059,7 @@ struct StorageInner {
     profile: Arc<StdMutex<QueueProfile>>,
     joins: Mutex<Vec<JoinHandle<Result<(), String>>>>,
     admission: Mutex<()>,
-    lease: StdMutex<Option<File>>,
+    lease: StdMutex<Option<DatabaseLease>>,
     shutting_down: AtomicBool,
     timestamp_unit: TimestampUnit,
     database_path: PathBuf,
@@ -1178,6 +1176,7 @@ impl Storage {
             })?;
         }
         let lease = acquire_database_lease(&database_path, "logs")?;
+        let database_path = lease.database_path().to_path_buf();
         apply_store_policy(&database_path, &extension_path, timestamp_unit, &policy)?;
         let (writer_tx, writer_rx) = mpsc::channel(queue_batches);
         let (ready_tx, ready_rx) = std_mpsc::channel();
@@ -1752,7 +1751,7 @@ impl Storage {
             .unwrap_or_else(|error| error.into_inner())
             .take()
         {
-            FileExt::unlock(&file)
+            file.unlock()
                 .map_err(|error| format!("release database owner lease: {error}"))?;
         }
         writer_result
@@ -4352,7 +4351,7 @@ mod tests {
         let first = acquire_database_lease(&database, "logs").unwrap();
         let error = acquire_database_lease(&database, "logs").unwrap_err();
         assert!(error.contains("already owned"), "{error}");
-        FileExt::unlock(&first).unwrap();
+        first.unlock().unwrap();
         acquire_database_lease(&database, "logs").unwrap();
     }
 

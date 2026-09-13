@@ -8,12 +8,14 @@
 mod admission;
 mod auth;
 mod error;
+mod lease;
 pub mod otel;
 mod prometheus;
 
 pub use admission::{BytesGate, GatePermit};
 pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims, RESULT_ROWS_HEADER};
 pub use error::{native_error, native_error_with_message, native_internal_error};
+pub use lease::{acquire_database_lease, DatabaseLease};
 pub use prometheus::{build_info, Exposition, PROMETHEUS_CONTENT_TYPE};
 
 use std::fs::{File, OpenOptions};
@@ -22,7 +24,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use fs2::FileExt;
 use rusqlite::backup::Backup;
 use rusqlite::{params, Connection, OptionalExtension};
 use semver::Version;
@@ -533,24 +534,6 @@ pub fn validate_loopback(address: SocketAddr) -> Result<(), String> {
             "non-loopback listen address {address} is disabled; use loopback or set TIMELESS_ALLOW_NON_LOOPBACK=1 for an explicitly secured deployment"
         ))
     }
-}
-
-pub fn acquire_database_lease(database_path: &Path, signal: &str) -> Result<File, String> {
-    let lock_path = suffix_path(database_path, &format!(".timeless-{signal}-api.lock"));
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| format!("open database owner lease {}: {error}", lock_path.display()))?;
-    file.try_lock_exclusive().map_err(|error| {
-        format!(
-            "database {} is already owned by another timeless-{signal}-api process: {error}",
-            database_path.display()
-        )
-    })?;
-    Ok(file)
 }
 
 pub fn suffix_path(path: &Path, suffix: &str) -> PathBuf {

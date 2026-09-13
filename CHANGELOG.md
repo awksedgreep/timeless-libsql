@@ -71,6 +71,12 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Server ownership follows the resolved database path (issue #63).**
+  File and directory symlink aliases use the same lease and SQLite WAL path.
+  A shared lease rejects a second server across all signals, and legacy
+  per-signal locks remain held for compatibility. Linux and macOS reject
+  hard-linked databases. Documentation now states that embedded applications
+  do not participate in server leases and require an explicit owner handoff.
 - **Reading a signal table preserves user views and schema (issue #59).**
   Companion installation and upgrades now run only during table creation or
   through the explicit `schema` maintenance command. Name collisions fail
