@@ -150,14 +150,28 @@ impl Server {
             image.contains("@sha256:"),
             "floating image is forbidden: {image}"
         );
-        command(
-            &args.runtime,
-            &strings(&["pull", "--platform", platform, image]),
-        )?;
-        let inspected: Value = serde_json::from_str(&command(
+        let cached = super::oracle::command_output(
             &args.runtime,
             &strings(&["image", "inspect", image]),
-        )?)?;
+            Duration::from_secs(30),
+        )?;
+        let mut inspected: Value = if cached.status.success() {
+            serde_json::from_slice(&cached.stdout)?
+        } else {
+            Value::Null
+        };
+        if inspected[0]["Architecture"] != platform.trim_start_matches("linux/")
+            || inspected[0]["Os"] != "linux"
+        {
+            command(
+                &args.runtime,
+                &strings(&["pull", "--platform", platform, image]),
+            )?;
+            inspected = serde_json::from_str(&command(
+                &args.runtime,
+                &strings(&["image", "inspect", image]),
+            )?)?;
+        }
         let selected = &inspected[0];
         ensure!(
             selected["Architecture"] == platform.trim_start_matches("linux/")
