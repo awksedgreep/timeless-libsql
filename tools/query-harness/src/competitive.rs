@@ -164,6 +164,42 @@ impl Server {
                 && selected["Os"] == "linux",
             "image platform mismatch: {selected}"
         );
+        let index: Value = serde_json::from_str(&command(
+            &args.runtime,
+            &strings(&["manifest", "inspect", image]),
+        )?)?;
+        let platform_digest = if let Some(manifests) = index["manifests"].as_array() {
+            manifests
+                .iter()
+                .find(|entry| {
+                    entry["platform"]["architecture"] == selected["Architecture"]
+                        && entry["platform"]["os"] == "linux"
+                })
+                .and_then(|entry| entry["digest"].as_str())
+                .context("native platform manifest")?
+                .to_owned()
+        } else {
+            image.rsplit_once('@').context("image digest")?.1.to_owned()
+        };
+        let platform_image = format!(
+            "{}@{platform_digest}",
+            image.rsplit_once('@').context("image repository")?.0
+        );
+        let platform_manifest: Value = serde_json::from_str(&command(
+            &args.runtime,
+            &strings(&["manifest", "inspect", &platform_image]),
+        )?)?;
+        ensure!(
+            platform_manifest["config"]["digest"]
+                .as_str()
+                .context("platform image config")?
+                .trim_start_matches("sha256:")
+                == selected["Id"]
+                    .as_str()
+                    .context("image ID")?
+                    .trim_start_matches("sha256:"),
+            "selected image differs from pinned platform manifest"
+        );
         let name = format!(
             "timeless-competition-{}-{}-{}",
             std::process::id(),
@@ -180,7 +216,7 @@ impl Server {
             volume,
             base: format!("http://127.0.0.1:{port}"),
             kind,
-            identity: json!({"image": image, "image_id": selected["Id"], "selected_digest": selected["Digest"], "architecture": selected["Architecture"]}),
+            identity: json!({"image": image, "image_id": selected["Id"], "selected_digest": platform_digest, "architecture": selected["Architecture"]}),
             startup_storage: Value::Null,
         };
         command(
@@ -212,6 +248,8 @@ impl Server {
                     &format!("{}:/opt/timeless:ro", args.bundle.display()),
                     "-e",
                     "TIMELESS_AUTH_MODE=disabled",
+                    "-e",
+                    "TIMELESS_ALLOW_NON_LOOPBACK=1",
                 ]));
                 let binary = if kind.logs() {
                     "timeless-logs-api"
