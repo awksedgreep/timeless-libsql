@@ -1885,6 +1885,7 @@ dependencies = [
  "opentelemetry-http",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "prost",
  "reqwest",
  "rusqlite",
  "semver",

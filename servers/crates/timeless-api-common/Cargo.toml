@@ -23,6 +23,7 @@ opentelemetry-http = { version = "0.32.0", default-features = false }
 # carry one HTTP stack instead of two.
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "trace"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace"] }
+prost = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rusqlite = { version = "0.40.1", features = ["backup"] }
 semver = "1"

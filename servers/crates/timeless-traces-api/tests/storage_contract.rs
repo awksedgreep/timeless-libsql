@@ -276,7 +276,12 @@ async fn session_two_owns_lifecycle_durability_and_cold_reopen() {
     assert_eq!(health.1["module"], "timeless_traces");
 
     // Invalid input and oversized bodies never reach storage admission.
-    let absent_otlp = post_body(&app, "/insert/opentelemetry/v1/traces", b"{}").await;
+    let absent_otlp = post_body(
+        &app,
+        "/insert/opentelemetry/v1/traces",
+        br#"{"resourceSpans":false}"#,
+    )
+    .await;
     assert_eq!(absent_otlp.0, StatusCode::BAD_REQUEST);
     let oversized = vec![0_u8; MAX_BODY_BYTES + 1];
     let rejected = post_body(&app, "/insert/opentelemetry/v1/traces", &oversized).await;

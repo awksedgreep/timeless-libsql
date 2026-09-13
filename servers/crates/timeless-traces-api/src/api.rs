@@ -18,6 +18,7 @@ use crate::otlp;
 use crate::query::{DashboardSearchParams, ReadRequest, SearchParams};
 use crate::tail::TailParams;
 use crate::{IngestTimings, Storage, TracesQueryLimits};
+use timeless_api_common::otlp_http::{self, Encoding};
 
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
@@ -57,6 +58,7 @@ pub fn router_with_limits(storage: Storage, limits: TracesQueryLimits) -> Router
         .fallback(unsupported)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(Extension(limits))
+        .layer(axum::middleware::from_fn(otlp_http::response_boundary))
         .with_state(storage)
 }
 
@@ -480,6 +482,7 @@ async fn ingest_otlp(
     headers: HeaderMap,
     request: Request<Body>,
 ) -> Response {
+    let encoding = Encoding::from_headers(&headers);
     let offered_bytes = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -488,21 +491,38 @@ async fn ingest_otlp(
         Ok(body) => body,
         Err(_) => {
             storage.record_ingest_rejection(0, offered_bytes.unwrap_or(MAX_BODY_BYTES + 1));
-            return compatibility_client_error(
+            return encoding.error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("request body exceeds {MAX_BODY_BYTES} bytes"),
             );
         }
     };
     let body_bytes = body.len();
-    let protobuf = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("application/x-protobuf"));
-    let gzip = headers
-        .get(header::CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        == Some("gzip");
+    let protobuf = matches!(encoding, Encoding::Protobuf);
+    let gzip = match headers.get(header::CONTENT_ENCODING) {
+        None => false,
+        Some(value)
+            if value
+                .to_str()
+                .is_ok_and(|v| v.trim().eq_ignore_ascii_case("identity")) =>
+        {
+            false
+        }
+        Some(value)
+            if value
+                .to_str()
+                .is_ok_and(|v| v.trim().eq_ignore_ascii_case("gzip")) =>
+        {
+            true
+        }
+        Some(_) => {
+            storage.record_ingest_rejection(0, body_bytes);
+            return encoding.error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported Content-Encoding; use identity or gzip",
+            );
+        }
+    };
 
     let wire_started = Instant::now();
     let decompressed_limit = claims
@@ -510,19 +530,26 @@ async fn ingest_otlp(
         .map(|Extension(claims)| claims.limits.max_decompressed_bytes)
         .unwrap_or(MAX_BODY_BYTES)
         .min(MAX_BODY_BYTES);
-    let decoded = if protobuf && gzip {
+    let decoded = if gzip {
         match otlp::gunzip_bounded(&body, decompressed_limit) {
             Ok(decoded) => decoded,
-            Err(error) if error.starts_with("decompressed protobuf exceeds") => {
+            Err(error) if error.starts_with("decompressed request exceeds") => {
                 storage.record_ingest_rejection(0, body_bytes);
-                return compatibility_client_error(StatusCode::PAYLOAD_TOO_LARGE, error);
+                return encoding.error(StatusCode::PAYLOAD_TOO_LARGE, error);
             }
             Err(error) => {
                 storage.record_ingest_rejection(0, body_bytes);
-                return compatibility_client_error(StatusCode::BAD_REQUEST, error);
+                return encoding.error(StatusCode::BAD_REQUEST, error);
             }
         }
     } else {
+        if body.len() > decompressed_limit {
+            storage.record_ingest_rejection(0, body_bytes);
+            return encoding.error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("request exceeds {decompressed_limit} bytes"),
+            );
+        }
         body.to_vec()
     };
     let wire_decode = wire_started.elapsed();
@@ -542,7 +569,7 @@ async fn ingest_otlp(
                 otlp::declared_json_spans(&decoded)
             };
             storage.record_ingest_rejection(rejected_spans, body_bytes);
-            return compatibility_client_error(StatusCode::BAD_REQUEST, error);
+            return encoding.error(StatusCode::BAD_REQUEST, error);
         }
     };
     let parse = parse_started.elapsed();
@@ -552,7 +579,8 @@ async fn ingest_otlp(
         Ok(batch) => batch,
         Err(error) => {
             storage.record_ingest_rejection(span_count, body_bytes);
-            return compatibility_server_error(StatusCode::INTERNAL_SERVER_ERROR, error);
+            eprintln!("timeless-traces-api: OTLP batch encoding failed: {error}");
+            return encoding.error(StatusCode::INTERNAL_SERVER_ERROR, "internal ingest error");
         }
     };
     let batch_encode = encode_started.elapsed();
@@ -571,14 +599,12 @@ async fn ingest_otlp(
             // subscriber never sees a span a search would not return. An idle
             // hub costs one atomic load.
             storage.tail_hub().publish(&spans);
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                Bytes::from_static(br#"{"partialSuccess":{}}"#),
-            )
-                .into_response()
+            encoding.success()
         }
-        Err(error) => compatibility_server_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+        Err(error) => {
+            eprintln!("timeless-traces-api: OTLP storage failed: {error}");
+            encoding.error(StatusCode::INTERNAL_SERVER_ERROR, "internal ingest error")
+        }
     }
 }
 
@@ -736,7 +762,7 @@ fn read_limit_error(protocol: ReadProtocol, limit: usize) -> Response {
     }
 }
 
-/// Jaeger and OTLP retain their established compatibility envelopes.
+/// Jaeger retains its established compatibility envelope.
 fn compatibility_server_error(status: StatusCode, error: String) -> Response {
     eprintln!("timeless-traces-api: compatibility endpoint internal error: {error}");
     (

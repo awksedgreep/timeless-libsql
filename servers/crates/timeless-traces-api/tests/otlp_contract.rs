@@ -20,29 +20,30 @@ async fn json_protobuf_and_gzip_preserve_the_exact_rich_fixture() {
     let app = router(storage.clone());
     let json = rich_json_fixture();
     let protobuf = rich_protobuf_fixture();
+    let gzip_json = gzip(&json);
     let gzip = gzip(&protobuf);
 
     for (body, content_type, encoding) in [
         (json.as_slice(), "application/json", None),
+        (gzip_json.as_slice(), "application/json", Some("gzip")),
         (protobuf.as_slice(), "application/x-protobuf", None),
         (gzip.as_slice(), "application/x-protobuf", Some("gzip")),
     ] {
         let response = post(&app, body, content_type, encoding).await;
         assert_eq!(response.0, StatusCode::OK);
-        assert_eq!(response.1, br#"{"partialSuccess":{}}"#);
     }
 
     let watermarks = storage.runtime_watermarks();
-    assert_eq!(watermarks.admitted_requests, 3);
-    assert_eq!(watermarks.completed_requests, 3);
-    assert_eq!(watermarks.admitted_spans, 6);
-    assert_eq!(watermarks.completed_spans, 6);
+    assert_eq!(watermarks.admitted_requests, 4);
+    assert_eq!(watermarks.completed_requests, 4);
+    assert_eq!(watermarks.admitted_spans, 8);
+    assert_eq!(watermarks.completed_spans, 8);
     assert_eq!(watermarks.failed_requests, 0);
     assert_eq!(watermarks.queued_requests, 0);
     assert_eq!(watermarks.in_flight_requests, 0);
     assert_eq!(
         watermarks.admitted_body_bytes,
-        (json.len() + protobuf.len() + gzip.len()) as u64
+        (json.len() + protobuf.len() + gzip.len() + gzip_json.len()) as u64
     );
     assert_eq!(
         watermarks.completed_body_bytes,
@@ -50,28 +51,28 @@ async fn json_protobuf_and_gzip_preserve_the_exact_rich_fixture() {
     );
 
     let report = storage.flush().await.unwrap();
-    assert_eq!(report.through_requests, 3);
-    assert_eq!(report.through_spans, 6);
+    assert_eq!(report.through_requests, 4);
+    assert_eq!(report.through_spans, 8);
     assert_eq!(report.through_body_bytes, watermarks.admitted_body_bytes);
-    assert_eq!(report.completed_requests, 3);
-    assert_eq!(report.completed_spans, 6);
+    assert_eq!(report.completed_requests, 4);
+    assert_eq!(report.completed_spans, 8);
 
     let stats = storage.stats().await.unwrap();
-    assert_eq!(stats.api_ingest_requests, 3);
+    assert_eq!(stats.api_ingest_requests, 4);
     assert_eq!(stats.api_rejected_requests, 0);
-    assert_eq!(stats.admitted_requests, 3);
-    assert_eq!(stats.completed_requests, 3);
+    assert_eq!(stats.admitted_requests, 4);
+    assert_eq!(stats.completed_requests, 4);
     assert!(stats.api_parse_ns > 0);
     assert!(stats.api_wire_decode_ns > 0);
     assert!(stats.api_batch_encode_ns > 0);
     assert_eq!(
         stats.api_decompressed_body_bytes,
-        (json.len() + protobuf.len() * 2) as u64
+        (json.len() * 2 + protobuf.len() * 2) as u64
     );
 
     storage.shutdown().await.unwrap();
     drop(storage);
-    assert_exact_rich_rows(&database, &extension, 6);
+    assert_exact_rich_rows(&database, &extension, 8);
 }
 
 #[tokio::test]
@@ -90,7 +91,7 @@ async fn malformed_partial_and_oversized_inputs_are_atomic_pre_admission_rejecti
             StatusCode::BAD_REQUEST,
         ),
         (
-            br#"{"data":"nope"}"#.as_slice(),
+            br#"{"resourceSpans":"nope"}"#.as_slice(),
             "application/json",
             None,
             StatusCode::BAD_REQUEST,
@@ -163,7 +164,7 @@ async fn malformed_partial_and_oversized_inputs_are_atomic_pre_admission_rejecti
     let empty = br#"{"resourceSpans":[]}"#;
     let accepted = post(&app, empty, "application/octet-stream", None).await;
     assert_eq!(accepted.0, StatusCode::OK);
-    assert_eq!(accepted.1, br#"{"partialSuccess":{}}"#);
+    assert_eq!(accepted.1, b"{}");
     let after = storage.stats().await.unwrap();
     assert_eq!(after.admitted_requests, 1);
     assert_eq!(after.completed_requests, 1);
@@ -172,6 +173,73 @@ async fn malformed_partial_and_oversized_inputs_are_atomic_pre_admission_rejecti
     assert_eq!(after.api_rejected_requests, 8);
     assert_eq!(after.api_rejected_spans, 4); // partial request's 3 + reversed 1
     assert!(after.api_rejected_body_bytes >= partial.len() as u64);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_exports_encoding_errors_and_auth_rejections_use_otlp_responses() {
+    use timeless_api_common::{protect_router, AuthConfig};
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("empty.db"),
+        required_extension(),
+        1,
+        4,
+        None,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    for content_type in ["application/json", "application/x-protobuf"] {
+        let empty = if content_type == "application/json" {
+            b"{}".as_slice()
+        } else {
+            b"".as_slice()
+        };
+        assert_eq!(
+            post(&app, empty, content_type, None).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(&app, &gzip(empty), content_type, Some("gzip")).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(&app, empty, content_type, Some("br")).await.0,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            post(&app, b"broken", content_type, Some("gzip")).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(
+                &app,
+                &gzip(&vec![b' '; MAX_BODY_BYTES + 1]),
+                content_type,
+                Some("gzip")
+            )
+            .await
+            .0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        // A missing bearer token is rejected before loading a policy or
+        // entering the handler, but still gets the requested OTLP encoding.
+        let protected = protect_router(
+            app.clone(),
+            AuthConfig::enforced(
+                "traces",
+                "local",
+                directory.path().join("unused-policy.json"),
+            ),
+        );
+        assert_eq!(
+            post(&protected, empty, content_type, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let counts = storage.runtime_watermarks();
+    assert_eq!(counts.admitted_requests, 4);
+    assert_eq!(counts.admitted_spans, 0);
     storage.shutdown().await.unwrap();
 }
 
@@ -325,7 +393,39 @@ async fn post(
         .await
         .unwrap();
     let status = response.status();
+    let protobuf = content_type == "application/x-protobuf";
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        if protobuf {
+            "application/x-protobuf"
+        } else {
+            "application/json"
+        }
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    if status.is_success() {
+        if protobuf {
+            let decoded = fixture_proto::ExportTraceServiceResponse::decode(body.as_ref()).unwrap();
+            assert!(decoded.partial_success.is_none());
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                serde_json::json!({})
+            );
+        }
+    } else if protobuf {
+        assert!(!fixture_proto::RpcStatus::decode(body.as_ref())
+            .unwrap()
+            .message
+            .is_empty());
+    } else {
+        let decoded: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            decoded["message"].as_str().is_some_and(|s| !s.is_empty()),
+            "{decoded}"
+        );
+        assert!(decoded.get("error").is_none());
+    }
     (status, body.to_vec())
 }
 
@@ -541,6 +641,24 @@ fn hex(value: &str) -> Vec<u8> {
 }
 
 mod fixture_proto {
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct ExportTraceServiceResponse {
+        #[prost(message, optional, tag = "1")]
+        pub partial_success: Option<PartialSuccess>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct PartialSuccess {
+        #[prost(int64, tag = "1")]
+        pub rejected_spans: i64,
+        #[prost(string, tag = "2")]
+        pub error_message: String,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct RpcStatus {
+        #[prost(string, tag = "2")]
+        pub message: String,
+    }
+
     #[derive(Clone, PartialEq, prost::Message)]
     pub struct ExportTraceServiceRequest {
         #[prost(message, repeated, tag = "1")]

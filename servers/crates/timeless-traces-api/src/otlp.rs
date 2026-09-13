@@ -49,9 +49,9 @@ struct ScopeContext {
 pub(crate) fn parse_json(body: &[u8]) -> Result<Vec<Span>, String> {
     let root: Value = serde_json::from_slice(body).map_err(|_| "invalid JSON".to_owned())?;
     let root = object(&root, "request")?;
-    let resource_spans = root
-        .get("resourceSpans")
-        .ok_or_else(|| "missing resourceSpans field".to_owned())?;
+    let Some(resource_spans) = root.get("resourceSpans").filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
     let resource_spans = array(resource_spans, "resourceSpans")?;
     let mut out = Vec::new();
     for (resource_index, resource_spans) in resource_spans.iter().enumerate() {
@@ -182,9 +182,9 @@ pub(crate) fn gunzip_bounded(body: &[u8], limit: usize) -> Result<Vec<u8>, Strin
     let mut decoded = Vec::with_capacity(body.len().min(limit));
     decoder
         .read_to_end(&mut decoded)
-        .map_err(|_| "invalid protobuf".to_owned())?;
+        .map_err(|_| "invalid gzip request".to_owned())?;
     if decoded.len() > limit {
-        return Err(format!("decompressed protobuf exceeds {limit} bytes"));
+        return Err(format!("decompressed request exceeds {limit} bytes"));
     }
     Ok(decoded)
 }

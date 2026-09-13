@@ -1,15 +1,15 @@
 //! Neutral release lifecycle shared by the three signal-specific servers.
 //!
-//! Signal routes, wire formats, query semantics, and storage commands do not
-//! belong here. This crate is limited to extension/schema negotiation, owner
-//! fencing, loopback policy, shutdown signals, and identical maintenance-task
-//! lifecycle.
+//! Query semantics and storage commands belong to the signal servers. Shared
+//! code owns extension/schema negotiation, leases, authentication (including
+//! protocol error responses), shutdown, and maintenance lifecycle.
 
 mod admission;
 mod auth;
 mod error;
 mod lease;
 pub mod otel;
+pub mod otlp_http;
 mod prometheus;
 
 pub use admission::{BytesGate, GatePermit};

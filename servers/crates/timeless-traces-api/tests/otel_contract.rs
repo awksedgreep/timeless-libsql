@@ -4,6 +4,10 @@
 //! them.
 
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use tempfile::TempDir;
 use timeless_traces_api::{router, OtelExportState, OtelTelemetry, OtelTracesConfig, Storage};
@@ -31,7 +35,36 @@ async fn self_export_stores_sweep_spans_without_recursing() {
         "http://{}/insert/opentelemetry/v1/traces",
         listener.local_addr().unwrap()
     );
-    let app = router(storage.clone());
+    // The upstream OpenTelemetry Rust SDK exporter uses a real HTTP listener.
+    // Inspect the response it receives as well as its delivery result, so
+    // a permissive exporter cannot hide an invalid success envelope.
+    let responses = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&responses);
+    let app = router(storage.clone()).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let observed = Arc::clone(&observed);
+            async move {
+                assert_eq!(
+                    request.headers()[axum::http::header::CONTENT_TYPE],
+                    "application/x-protobuf"
+                );
+                let response = next.run(request).await;
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                assert_eq!(
+                    response.headers()[axum::http::header::CONTENT_TYPE],
+                    "application/x-protobuf"
+                );
+                let (parts, body) = response.into_parts();
+                let body = axum::body::to_bytes(body, 4096).await.unwrap();
+                assert!(
+                    body.is_empty(),
+                    "full-success ExportTraceServiceResponse must have no partial_success"
+                );
+                observed.fetch_add(1, Ordering::Relaxed);
+                axum::response::Response::from_parts(parts, axum::body::Body::from(body))
+            }
+        },
+    ));
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
     let config = OtelTracesConfig {
@@ -68,6 +101,7 @@ async fn self_export_stores_sweep_spans_without_recursing() {
     assert_eq!(otel.state, OtelExportState::Healthy, "{otel:?}");
     assert_eq!(otel.enqueued_spans, 3, "{otel:?}");
     assert_eq!(otel.exported_spans, 3, "{otel:?}");
+    assert!(responses.load(Ordering::Relaxed) > 0);
     assert_eq!(otel.dropped_spans, 0, "{otel:?}");
 
     // Later untraced sweeps (which now optimize the stored sweep spans)

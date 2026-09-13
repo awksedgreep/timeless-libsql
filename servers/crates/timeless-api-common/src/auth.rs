@@ -380,7 +380,9 @@ pub fn protect_router(router: Router, config: AuthConfig) -> Router {
     if config.verifier.is_none() && config.admin_key.is_none() {
         router
     } else {
-        router.layer(middleware::from_fn_with_state(config, authorize))
+        router
+            .layer(middleware::from_fn_with_state(config, authorize))
+            .layer(middleware::from_fn(crate::otlp_http::response_boundary))
     }
 }
 

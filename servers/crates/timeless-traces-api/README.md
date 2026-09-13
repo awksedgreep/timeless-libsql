@@ -78,12 +78,15 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
 - `POST /api/v1/backup` flushes, drains actionable optimize backlog,
   checkpoints the WAL, and publishes a verified no-overwrite SQLite backup.
 - `POST /insert/opentelemetry/v1/traces` accepts OTLP JSON, protobuf, and
-  gzip-compressed protobuf. It validates the complete request, encodes one
+  gzip compression with either encoding. It validates the complete request,
+  encodes one
   public rich-span v2 batch without dropping links, trace state/flags,
   dropped-value counters, schema URLs, or resource/scope metadata, waits for
   its one SQLite statement, and returns
-  the established `{"partialSuccess":{}}` response. Raw and decompressed
-  bodies are independently capped at 10 MiB.
+  HTTP 200 with `{}` for JSON or an empty protobuf export response. The
+  response content type matches the request encoding. Errors use the OTLP
+  `google.rpc.Status` message, including authentication and size-limit failures.
+  Raw and decompressed bodies are independently capped at 10 MiB.
 - `GET /select/jaeger/api/services` and
   `GET /select/jaeger/api/services/:service/operations` provide sorted
   discovery.
