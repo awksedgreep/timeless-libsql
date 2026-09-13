@@ -96,6 +96,16 @@ async fn main() -> ExitCode {
         Ok(value) => value,
         Err(error) => return usage_error(error),
     };
+    let raw_retention = match std::env::var("TIMELESS_METRICS_RAW_RETENTION_SECS") {
+        Ok(value) => match parse_raw_retention(&value) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        Err(std::env::VarError::NotPresent) => defaults.raw_retention,
+        Err(error) => {
+            return usage_error(format!("read TIMELESS_METRICS_RAW_RETENTION_SECS: {error}"))
+        }
+    };
     let rollups = match rollups_from_env("TIMELESS_METRICS_ROLLUPS", defaults.rollups.as_deref()) {
         Ok(value) => value,
         Err(error) => return usage_error(error),
@@ -160,11 +170,11 @@ async fn main() -> ExitCode {
         flush_interval,
         compact_interval,
         retention_interval,
+        raw_retention,
         rollups,
         otel_traces,
         prom_query_limits,
         auth,
-        ..defaults
     };
 
     match run(config).await {
@@ -179,6 +189,16 @@ async fn main() -> ExitCode {
 fn usage_error(error: String) -> ExitCode {
     eprintln!("{error}");
     ExitCode::from(2)
+}
+
+fn parse_raw_retention(value: &str) -> Result<Duration, String> {
+    let seconds = value.parse::<u64>().map_err(|_| {
+        "TIMELESS_METRICS_RAW_RETENTION_SECS must be a non-negative integer (0 disables wall-clock expiry)".to_owned()
+    })?;
+    if seconds > i64::MAX as u64 {
+        return Err("TIMELESS_METRICS_RAW_RETENTION_SECS exceeds i64::MAX seconds".into());
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 fn positive_usize_from_env(name: &str, default: usize) -> Result<usize, String> {
@@ -250,6 +270,21 @@ fn rollups_from_env(name: &str, default: Option<&str>) -> Result<Option<String>,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raw_retention_is_explicit_and_can_be_disabled() {
+        assert_eq!(
+            super::parse_raw_retention("0").unwrap(),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            super::parse_raw_retention("604800").unwrap().as_secs(),
+            604800
+        );
+        for value in ["", "-1", "1.5", "7d", "18446744073709551615"] {
+            assert!(super::parse_raw_retention(value).is_err(), "{value}");
+        }
+    }
+
     #[test]
     fn environment_overrides_require_positive_values() {
         assert_eq!(positive_usize_from_env_value("READERS", "4").unwrap(), 4);

@@ -12,6 +12,125 @@ use tower::ServiceExt;
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn default_retention_preserves_declared_windows_and_historical_backfills() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for (case, arguments, window) in [
+        ("thirty_days", "retention='30d'", Some(30 * 86_400)),
+        ("unlimited", "", None),
+    ] {
+        let database = directory.path().join(format!("{case}.db"));
+        let connection = open_with_extension(&database, &extension);
+        let arguments = if arguments.is_empty() {
+            String::new()
+        } else {
+            format!("({arguments})")
+        };
+        connection
+            .execute_batch(&format!(
+                "CREATE VIRTUAL TABLE metrics USING timeless_metrics{arguments};
+             INSERT INTO metrics(name,ts,value) VALUES ('history',{},42);
+             INSERT INTO metrics(metrics) VALUES ('flush');",
+                now - 10 * 86_400,
+            ))
+            .unwrap();
+        drop(connection);
+
+        let storage = Storage::start(
+            database.clone(),
+            extension.clone(),
+            1,
+            8,
+            DEFAULT_RAW_RETENTION,
+        )
+        .unwrap();
+        storage.schedule_retention().await.unwrap();
+        storage.flush().await.unwrap();
+        storage.schedule_compact().await.unwrap();
+        let stats = storage.stats().await.unwrap();
+        assert_eq!(stats.table_retention_seconds, window);
+        assert_eq!(stats.raw_retention_seconds, 0);
+        assert_eq!(stats.total_points, 1, "{case}");
+        assert_eq!(stats.prune_count, 0);
+        storage.shutdown().await.unwrap();
+
+        // Explicitly opting into wall-clock expiry remains available and
+        // never silently rewrites the table's persisted data-time policy.
+        let storage = Storage::start(
+            database.clone(),
+            extension.clone(),
+            1,
+            8,
+            Duration::from_secs(7 * 86_400),
+        )
+        .unwrap();
+        storage.schedule_retention().await.unwrap();
+        let stats = storage.stats().await.unwrap();
+        assert_eq!(stats.total_points, 0, "{case}");
+        assert_eq!(stats.table_retention_seconds, window);
+        assert_eq!(stats.raw_retention_seconds, 7 * 86_400);
+        storage.shutdown().await.unwrap();
+        let connection = open_with_extension(&database, &extension);
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM metrics", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn default_retention_keeps_extension_data_time_expiry_active() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("data-time.db");
+    let connection = open_with_extension(&database, &extension);
+    connection
+        .execute_batch(
+            "CREATE VIRTUAL TABLE metrics USING timeless_metrics(retention='1d');
+         INSERT INTO metrics(name,ts,value) VALUES ('history',1000000,1);
+         INSERT INTO metrics(metrics) VALUES ('flush');",
+        )
+        .unwrap();
+    drop(connection);
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    storage
+        .submit_named_batch(
+            named_series_batch("history", &[(1_000_000 + 2 * 86_400, 2.0)]),
+            1,
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    storage.schedule_retention().await.unwrap();
+    assert_eq!(storage.stats().await.unwrap().total_points, 1);
+    storage.shutdown().await.unwrap();
+    let connection = open_with_extension(&database, &extension);
+    assert_eq!(
+        connection
+            .query_row("SELECT ts FROM metrics", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1_000_000 + 2 * 86_400
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_available() {
     let extension = extension_path();
     let directory = TempDir::new().unwrap();
@@ -529,7 +648,7 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     assert_eq!(flushed.0, StatusCode::OK);
     assert_eq!(flushed.1["disk_points"], 4_106);
     assert_eq!(flushed.1["buffered_points"], 0);
-    assert_eq!(flushed.1["raw_retention_seconds"], 604_800);
+    assert_eq!(flushed.1["raw_retention_seconds"], 0);
     assert_eq!(flushed.1["writer_connections"], 1);
     assert_eq!(flushed.1["reader_connections"], 2);
     assert_eq!(flushed.1["api_flush_count"], 1);

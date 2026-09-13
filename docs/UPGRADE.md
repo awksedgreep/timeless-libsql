@@ -98,6 +98,21 @@ such a binary starts open instead of failing. If you want token verification,
 set `TIMELESS_AUTH_MODE=required` with `TIMELESS_AUTH_POLICY_FILE` — one
 line, and the enforcement is exactly as before.
 
+## Metrics retention default change — unreleased
+
+The metrics server no longer applies an implicit seven-day wall-clock cutoff.
+By default it preserves the table's declared retention, which the extension
+measures from the newest queryable data timestamp. This keeps historical
+imports replayable and honors windows such as `retention='30d'`.
+
+Deployments that want the previous additional seven-day wall-clock expiry
+must set `TIMELESS_METRICS_RAW_RETENTION_SECS=604800`. Unset or `0` disables
+that additional policy; a table without declared retention then keeps data
+until explicitly pruned. A positive override can shorten the table's window,
+but cannot lengthen it. Startup logs and `/select/metrics/stats` expose both
+policies (`table_retention_seconds` and `raw_retention_seconds`). Existing
+table definitions are not rewritten.
+
 ## 2. Drain and create the rollback point
 
 For a Rust signal server, stop producers, call its flush route

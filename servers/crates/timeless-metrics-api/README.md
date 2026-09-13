@@ -22,6 +22,12 @@ The exact public storage contract is in the
   compatible existing public metrics tables remain readable.
 - The extension owns durable series identity, its 4,096-point per-series
   threshold, compression, chunks, rollups, retention, and transactions.
+- Retention follows the table's declared data-time window by default, so
+  historical imports keep their original timestamps. Optional additional
+  wall-clock expiry requires `TIMELESS_METRICS_RAW_RETENTION_SECS` (default
+  `0`, disabled). Startup and JSON stats report both policies through
+  `table_retention_seconds` (`null` means unlimited) and
+  `raw_retention_seconds` (`0` means disabled).
 - Native VictoriaMetrics JSON-line and Prometheus exposition imports are
   encoded through the extension's public ingestion contracts.
 - The process-owned Prometheus scrape loop parses targets in Rust and feeds

@@ -35,7 +35,9 @@ pub use timeless_api_common::otel::{
 };
 pub use timeless_api_common::BackupReport;
 
-pub const DEFAULT_RAW_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// No additional wall-clock expiry by default. The extension enforces the
+/// table's persisted data-time retention at flush/maintenance boundaries.
+pub const DEFAULT_RAW_RETENTION: Duration = Duration::ZERO;
 
 /// Cadence of the writer's periodic `wal_checkpoint(TRUNCATE)`. It keeps the
 /// WAL file near its configured bound instead of its high-water size; a busy
@@ -108,6 +110,9 @@ pub struct Config {
     pub flush_interval: Duration,
     pub compact_interval: Duration,
     pub retention_interval: Duration,
+    /// Additional wall-clock raw expiry. Zero disables it; positive values
+    /// explicitly prune raw samples older than now minus this window. This
+    /// never replaces or lengthens the table's data-time retention.
     pub raw_retention: Duration,
     /// Optional persisted-rollup override. None leaves existing databases
     /// unchanged and creates new databases without rollups; `Some("none")`
@@ -165,7 +170,6 @@ impl Config {
         if self.flush_interval.is_zero()
             || self.compact_interval.is_zero()
             || self.retention_interval.is_zero()
-            || self.raw_retention.is_zero()
         {
             return Err("maintenance and retention intervals must be positive".into());
         }
@@ -203,6 +207,16 @@ pub async fn run(config: Config) -> Result<(), String> {
         config.queue_bytes,
         config.rollups.as_deref(),
     )?;
+    let retention = storage.stats().await?;
+    let table_window = retention
+        .table_retention_seconds
+        .map(|seconds| format!("{seconds} seconds"))
+        .unwrap_or_else(|| "unlimited".into());
+    println!(
+        "timeless-metrics-api retention: table data-time window {table_window}; \
+         additional wall-clock raw expiry {} seconds (0 = disabled)",
+        retention.raw_retention_seconds,
+    );
     if let Some(telemetry) = &telemetry {
         storage.attach_otel_health(telemetry.health());
     }

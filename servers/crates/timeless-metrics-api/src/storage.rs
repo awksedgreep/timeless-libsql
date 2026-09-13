@@ -59,6 +59,7 @@ impl MetricsTable {
 pub struct StorageStats {
     pub module: String,
     pub raw_retention_seconds: u64,
+    pub table_retention_seconds: Option<i64>,
     pub rollup_tiers: Option<String>,
     pub series: i64,
     pub chunks: i64,
@@ -462,9 +463,6 @@ impl Storage {
         }
         if queue_bytes == 0 {
             return Err("queue_bytes must be positive".into());
-        }
-        if raw_retention.is_zero() {
-            return Err("raw_retention must be positive".into());
         }
         if let Some(parent) = database_path
             .parent()
@@ -870,6 +868,12 @@ impl Storage {
     }
 
     pub async fn schedule_retention(&self) -> Result<(), String> {
+        // Data-time retention belongs to the extension. A server timer must
+        // not impose wall-clock expiry on SQL databases or old backfills
+        // unless the operator explicitly requests this additional policy.
+        if self.0.raw_retention.is_zero() {
+            return Ok(());
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("system time precedes Unix epoch: {error}"))?;
@@ -1727,6 +1731,10 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
     let total_points = disk_points.saturating_add(buffered_points);
     Ok(StorageStats {
         module: text("module").unwrap_or_else(|| "metrics".into()),
+        table_retention_seconds: match values.get("retention") {
+            Some(SqlValue::Integer(value)) if *value > 0 => Some(*value),
+            _ => None,
+        },
         rollup_tiers: text("rollup_tiers"),
         series: integer("series"),
         chunks: raw_tier_chunks.saturating_add(rollup_entries),

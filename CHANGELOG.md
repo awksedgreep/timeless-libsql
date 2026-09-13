@@ -71,6 +71,17 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Metrics retention preserves declared windows and historical imports
+  (issue #58).** The server's implicit seven-day wall-clock prune is disabled
+  by default. The extension continues to apply the table's data-time policy;
+  optional additional expiry requires `TIMELESS_METRICS_RAW_RETENTION_SECS`.
+  Startup logs and JSON stats report both policies. See the upgrade guide
+  before upgrading a deployment that relies on the previous cutoff.
+- **Ingest byte budgets remain bounded under contention (issue #60).** Queued
+  requests reserve their full rounded size against the configured capacity,
+  including when another request holds some or all permits. Oversized requests
+  reserve the whole gate; cancelled waiters return their partial reservations.
+
 - **The dbhealth-only extension no longer breaks `ALTER TABLE` on its host
   database (issue #56).** `CREATE VIRTUAL TABLE ... USING dbhealth` installs
   the metric companion view `timeless_<table>_series`, which selects from the
