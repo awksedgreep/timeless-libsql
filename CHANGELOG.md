@@ -71,6 +71,14 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **All metrics read routes enforce configured budgets (issue #61).** Native
+  latest, export, range, and discovery requests, including Prometheus
+  discovery aliases, now enforce result, work, response-byte, and deadline
+  limits. Catalogs stop before unbounded metadata copying, latest queries
+  check work before payload reads, and response serialization stays bounded.
+  Rejected requests release their reader for subsequent queries. The metrics
+  server requires the matching extension's bounded query capabilities at
+  startup; range-grid limits do not restrict raw export lengths.
 - **Metrics companion catalogs read their owning database (issue #62).**
   `timeless_<source>_series` is now a read-only catalog table with unchanged
   visible columns. It remains bound to its local source across attachment

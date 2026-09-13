@@ -298,3 +298,53 @@ fn aggregate_and_latest_batches_propagate_store_contract_failures() {
     engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
+    let dir = temp_dir("latest_budget");
+    let mode = Arc::new(AtomicU8::new(0));
+    let store = FaultyBatchStore {
+        inner: FsStore::new(dir.clone()).unwrap(),
+        mode: Arc::clone(&mode),
+    };
+    let engine = Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap();
+    let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
+    for timestamp in 0..10 {
+        engine.write_point(sid, timestamp, timestamp as f64);
+    }
+    engine.flush_all().unwrap();
+
+    mode.store(1, Ordering::SeqCst);
+    let error = engine
+        .query_latest_batch_by_id_limited(&[sid], 0, 8, 9)
+        .unwrap_err();
+    assert!(
+        error.contains("work point limit 9 exceeded"),
+        "payload read occurred before admission: {error}"
+    );
+    assert!(engine
+        .query_latest_batch_by_id_limited(&[sid], 0, 8, 10)
+        .unwrap_err()
+        .contains("injected batch read failure"));
+
+    mode.store(0, Ordering::SeqCst);
+    assert_eq!(
+        engine
+            .query_latest_batch_by_id_limited(&[sid], 0, 9, 1)
+            .unwrap(),
+        vec![(sid, Some((9, 9.0)))]
+    );
+    engine.write_point(sid, 10, 10.0);
+    assert!(engine
+        .query_latest_batch_by_id_limited(&[sid], 0, 10, 1)
+        .unwrap_err()
+        .contains("work point limit"));
+    assert_eq!(
+        engine
+            .query_latest_batch_by_id_limited(&[sid], 0, 10, 2)
+            .unwrap(),
+        vec![(sid, Some((10, 10.0)))]
+    );
+    engine.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

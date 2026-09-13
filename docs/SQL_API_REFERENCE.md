@@ -510,14 +510,14 @@ constraint on row-oriented per-series modules where listed.
 | `timeless_raw_frame` | `frame` | `tbl` R, `metric` R, `filter` O, `start` R, `stop` R, `max_work_points` O. |
 | `timeless_aggregate` | `series_id, labels, value` | `tbl` R, `metric` R, `filter` O, `start` R, `stop` R, `agg` R; `series_id` O constraint. |
 | `timeless_aggregate_frame` | `frame` | Same inputs as `timeless_aggregate`. |
-| `timeless_latest` | `series_id, labels, ts, value` | `tbl` R, `metric` R, `filter` O, `start` R, `stop` R; `series_id` O constraint. |
+| `timeless_latest` | `series_id, labels, ts, value` | `tbl` R, `metric` R, `filter` O, `start` R, `stop` R, `max_work_points` O; `series_id` O constraint. |
 | `timeless_latest_frame` | `frame` | Same hidden inputs as `timeless_latest`. |
 | `timeless_grid` | `labels, ts, value`; hidden `series_id` | `tbl` R, `metric` R, `filter` O, `start` R, `stop` R, `step` R, `lookback` R, `fill` O. |
 | `timeless_window` | `labels, ts, value`; hidden `series_id` | `tbl` R, `metric` R, `filter` O, `start` R, `stop` R, `step` R, `window` R, `agg` R, `fill` O. |
 | `timeless_window_batches` | `series_id, labels, buckets` | Window inputs plus `max_work_points` O. |
 | `timeless_rollup` | `labels, ts, value`; hidden `series_id` | `tbl` R, `metric` R, `filter` O, `resolution` R, `start` R, `stop` R, `agg` R. |
 | `timeless_rollup_batches` | `series_id, labels, buckets` | `tbl` R, `metric` R, `filter` O, `resolution` R, `start` R, `stop` R. |
-| `timeless_series` | `name, labels, series_id, min_ts, max_ts, points, chunks, buffered` | `tbl` R, `metric` O, `filter` O. |
+| `timeless_series` | `name, labels, series_id, min_ts, max_ts, points, chunks, buffered` | `tbl` R, `metric` O, `filter` O, `max_work_points` O, `max_catalog_bytes` O. |
 | `timeless_label_values` | `value` | `tbl` R, `metric` R, `key` R, `filter` O. |
 | `timeless_stats` | `key, value` | `tbl` R. |
 
@@ -532,6 +532,16 @@ Grid/window `fill` is `none` (default sparse) or `null` (dense grid points for
 series present on the grid). `max_work_points` must be a positive integer and
 is an inclusive conservative pre-decode limit; failure returns no partial
 frame.
+
+Latest queries count a metadata-only chunk candidate as one work point;
+candidates requiring payload decoding count their stored points, and buffered
+points also count. The check runs before payload reads. Catalog queries count
+examined series, including those rejected by label filters. An exact metric
+name narrows the catalog before this accounting. `max_catalog_bytes` bounds
+the total matching metric-name, label-key, and label-value UTF-8 bytes before
+copying catalog metadata. These optional limits must be positive integers;
+omitting them preserves the existing SQL call behavior. Their availability is
+advertised in `timeless_capabilities().query_surfaces`.
 
 ## Logs and traces query modules
 

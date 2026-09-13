@@ -16057,3 +16057,259 @@ async fn native_export_honors_limits_and_deadline() {
     assert!(body.get("status").is_none());
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("native-limits.db"),
+        extension_path(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let base = 1_700_000_000_i64;
+    let mut input = String::new();
+    for host in ["a", "b"] {
+        input.push_str(&format!(r#"{{"metric":{{"__name__":"m","host":"{host}"}},"timestamps":[{},{},{}],"values":[1,2,3]}}
+"#, base * 1000, (base + 1) * 1000, (base + 2) * 1000));
+    }
+    assert_no_content(post_body(&app, "/api/v1/import", input.as_bytes()).await);
+    storage
+        .submit_named_batch(named_series_batch("tiny", &[(base, 42.0)]), 1)
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    let routes = [
+        "/api/v1/query?metric=m",
+        "/api/v1/export?metric=m&start=1700000000&end=1700000002",
+        "/api/v1/query_range?metric=m&start=1700000000&end=1700000002&step=1",
+        "/api/v1/query_range?metric=m&start=1700000000&end=1700000002&step=2&aggregate=last",
+        "/api/v1/labels",
+        "/api/v1/label/host/values?metric=m",
+        "/api/v1/series?metric=m",
+    ];
+    for limits in [
+        PromQueryLimits {
+            max_points_per_series: 1,
+            max_result_points: 1,
+            max_work_points: 1,
+            max_response_bytes: 64,
+            ..PromQueryLimits::default()
+        },
+        PromQueryLimits {
+            max_result_points: 1,
+            ..PromQueryLimits::default()
+        },
+    ] {
+        let limited = router_with_limits(storage.clone(), limits);
+        for route in routes {
+            let (status, body) = get_json(&limited, route).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{route}: {body}");
+            assert_eq!(body["error"], "invalid_query", "{body}");
+            assert!(
+                body["message"].as_str().unwrap().contains("limit")
+                    || body["message"].as_str().unwrap().contains("maximum"),
+                "{body}"
+            );
+            assert_eq!(
+                get_json(&limited, "/api/v1/query?metric=tiny").await.0,
+                StatusCode::OK,
+                "reader was not reusable after {route}"
+            );
+        }
+        assert_eq!(
+            get_json(
+                &limited,
+                "/prometheus/api/v1/query_range?query=m&start=1700000000&end=1700000002&step=1"
+            )
+            .await
+            .0,
+            if limits.max_points_per_series == 1 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+        );
+    }
+    // Output limits do not prevent reading several input points to produce
+    // one aggregate or selecting one point from a larger persisted chunk.
+    let limited = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_result_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    assert_eq!(
+        get_json(
+            &limited,
+            "/api/v1/export?metric=m&host=a&start=1700000000&end=1700000000"
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(get_json(&limited, "/api/v1/query_range?metric=m&host=a&start=1700000000&end=1700000002&step=3&aggregate=avg").await.0, StatusCode::OK);
+    // A one-point work budget permits the persisted newest-value fast path,
+    // but must reject decoding a three-point chunk or scanning extra buffers.
+    let work = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 1,
+            ..PromQueryLimits::default()
+        },
+    );
+    assert_eq!(
+        get_json(&work, "/api/v1/query?metric=m&host=a").await.0,
+        StatusCode::BAD_REQUEST
+    ); // two candidates are inspected before filtering
+    let selector_work = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 3,
+            ..PromQueryLimits::default()
+        },
+    );
+    for route in [
+        "/api/v1/series?match%5B%5D=absent&match%5B%5D=also_absent",
+        "/prometheus/api/v1/series?match%5B%5D=absent&match%5B%5D=also_absent",
+    ] {
+        let (status, body) = get_json(&selector_work, route).await;
+        assert_eq!(
+            status,
+            if route.starts_with("/prometheus") {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            "{body}"
+        );
+        assert!(body.to_string().contains("selector-work limit"), "{body}");
+        assert_eq!(
+            get_json(&selector_work, "/api/v1/query?metric=tiny")
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    storage
+        .submit_named_batch(
+            named_series_batch("history", &[(base, 1.0), (base + 1, 2.0), (base + 2, 3.0)]),
+            3,
+        )
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+    assert_eq!(
+        get_json(&work, "/api/v1/query?metric=history").await.0,
+        StatusCode::OK
+    );
+    for route in [
+        "/api/v1/export?metric=history&start=1700000000&end=1700000002",
+        "/api/v1/query_range?metric=history&start=1700000000&end=1700000002&step=3",
+        "/api/v1/query_range?metric=history&start=1700000000&end=1700000002&step=2&aggregate=last",
+    ] {
+        assert_eq!(
+            get_json(&work, route).await.0,
+            StatusCode::BAD_REQUEST,
+            "{route}"
+        );
+        assert_eq!(
+            get_json(&work, "/api/v1/query?metric=tiny").await.0,
+            StatusCode::OK
+        );
+    }
+    storage
+        .submit_named_batch(named_series_batch("history", &[(base + 3, 4.0)]), 1)
+        .await
+        .unwrap();
+    storage.barrier().await.unwrap();
+    let rejected = get_json(&work, "/api/v1/query?metric=history").await;
+    assert_eq!(rejected.0, StatusCode::BAD_REQUEST, "{}", rejected.1);
+    assert!(rejected.1["message"]
+        .as_str()
+        .unwrap()
+        .contains("latest batch work point limit"));
+    assert_eq!(
+        get_json(&work, "/api/v1/query?metric=tiny").await.0,
+        StatusCode::OK
+    );
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn native_response_byte_limits_apply_to_every_route_and_prometheus_discovery() {
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("native-bytes.db"),
+        extension_path(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    assert_no_content(post_body(&app, "/api/v1/import", br#"{"metric":{"__name__":"m","host":"a"},"timestamps":[1700000000000,1700000001000,1700000002000],"values":[1,2,3]}"#).await);
+    storage.flush().await.unwrap();
+    for route in [
+        "/api/v1/query?metric=m",
+        "/api/v1/export?metric=m&start=1700000000&end=1700000002",
+        "/api/v1/query_range?metric=m&start=1700000000&end=1700000002&step=1",
+        "/api/v1/query_range?metric=m&start=1700000000&end=1700000002&step=2&aggregate=last",
+        "/api/v1/labels",
+        "/api/v1/label/host/values",
+        "/api/v1/series?metric=m",
+        "/prometheus/api/v1/labels",
+        "/prometheus/api/v1/label/host/values",
+        "/prometheus/api/v1/series?match%5B%5D=m",
+    ] {
+        let (status, expected) = get_body(&app, route).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{route}: {}",
+            String::from_utf8_lossy(&expected)
+        );
+        let exact = router_with_limits(
+            storage.clone(),
+            PromQueryLimits {
+                max_response_bytes: expected.len(),
+                ..PromQueryLimits::default()
+            },
+        );
+        assert_eq!(
+            get_body(&exact, route).await,
+            (StatusCode::OK, expected.clone()),
+            "{route}: exact byte budget"
+        );
+        let short = router_with_limits(
+            storage.clone(),
+            PromQueryLimits {
+                max_response_bytes: expected.len() - 1,
+                ..PromQueryLimits::default()
+            },
+        );
+        let (status, error) = get_json(&short, route).await;
+        assert_eq!(
+            status,
+            if route.starts_with("/prometheus") {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            "{route}: {error}"
+        );
+        assert!(error.to_string().contains("response-size limit"), "{error}");
+        assert_eq!(
+            get_json(&short, "/api/v1/query?metric=absent").await.0,
+            StatusCode::OK,
+            "reader was not reusable after {route}"
+        );
+    }
+    storage.shutdown().await.unwrap();
+}

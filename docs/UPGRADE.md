@@ -50,6 +50,15 @@ invariants above require.
 
 ## 1. Inventory the current installation
 
+Unreleased metrics servers enforce the configured `TIMELESS_METRICS_PROMQL_MAX_*`
+budgets on native latest, range, export, and discovery routes, including
+Prometheus discovery aliases. Previously unbounded requests may now fail with
+an explicit budget error. Narrow the selection, increase the range step, split
+exports by time, or configure a larger deployment budget as needed. The server
+requires bounded catalog and latest/raw-frame capabilities at startup; upgrade
+the extension and server together. See the
+[metrics query limits](../servers/crates/timeless-metrics-api/README.md#query-limits).
+
 Record the current artifact identities and complete database paths. For a
 current server binary:
 

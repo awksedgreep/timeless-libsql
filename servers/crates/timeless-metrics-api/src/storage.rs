@@ -13,7 +13,7 @@ use serde::Serialize;
 use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
-    BackupReport, BytesGate, DataPlaneSpec, DatabaseLease,
+    require_query_surface, BackupReport, BytesGate, DataPlaneSpec, DatabaseLease,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -1411,6 +1411,14 @@ fn open_connection(
         required_batch: "named-v0",
     };
     let capabilities = preflight_extension(&conn, spec)?;
+    for (surface, capability) in [
+        ("timeless_series", "max_work_points"),
+        ("timeless_series", "max_catalog_bytes"),
+        ("timeless_latest_frame", "max_work_points"),
+        ("timeless_raw_frame", "max_work_points"),
+    ] {
+        require_query_surface(&capabilities, surface, capability)?;
+    }
     preflight_database(&conn, spec.signal)?;
     let discovered = discover_metrics_table(&conn)?;
     if let (Some(expected), Some(actual)) = (expected_table, discovered) {

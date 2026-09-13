@@ -393,12 +393,12 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` | metrics | `3600` | Cadence of the optional additional wall-clock raw-retention prune. Inert when `TIMELESS_METRICS_RAW_RETENTION_SECS=0`. |
 | `TIMELESS_METRICS_RAW_RETENTION_SECS` | metrics | `0` | Additional wall-clock expiry for raw metrics, in seconds (`0` disables it; maximum `i64::MAX`). Positive values explicitly prune raw chunks older than now minus this window. Unset/zero preserves the table's declared data-time retention without adding wall-clock expiry; a fresh table without retention keeps its data. This setting cannot lengthen or replace a shorter table policy and never changes rollup tiers. |
 | `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows through the same 64-row transaction budget. The HTTP API does not require persisted rollups. |
-| `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Evaluation-grid points per series; valid range 1–11,000. |
-| `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` | metrics | `100000` | Final serialized result points. |
-| `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Cumulative storage and intermediate evaluation points. |
-| `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` | metrics | `16777216` | Serialized response bytes. |
+| `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Native and PromQL range evaluation-grid points per series; valid range 1–11,000. Raw export uses the total result-point limit. |
+| `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` | metrics | `100000` | Final native and PromQL result points; discovery counts returned names, values, or series. |
+| `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Cumulative PromQL storage/intermediate points. Native reads bound storage work, examined catalog series, and discovery selector evaluations separately by this value. |
+| `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` | metrics | `16777216` | Serialized native and PromQL response bytes. Also bounds native/discovery catalog metadata before response rendering. |
 | `TIMELESS_METRICS_PROMQL_DEFAULT_SUBQUERY_STEP_MS` | metrics | `15000` | Omitted PromQL subquery resolution in milliseconds. |
-| `TIMELESS_METRICS_PROMQL_DEADLINE_MS` | metrics | `30000` | Hard PromQL/MetricsQL execution deadline. |
+| `TIMELESS_METRICS_PROMQL_DEADLINE_MS` | metrics | `30000` | Hard execution deadline for native metrics, PromQL/MetricsQL, and discovery reads. |
 | `TIMELESS_LOGS_READER_CONNECTIONS` | logs | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_LOGS_COMMAND_QUEUE_BATCHES` | logs | `256` | Writer-command queue capacity in admitted request batches. |
 | `TIMELESS_LOGS_QUEUE_BYTES` | logs | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
@@ -632,7 +632,8 @@ contract and a compatibility-line change.
 | Invalid administration JSON | 400 | `{"error":"invalid_request","reason":"invalid_json_body"}` |
 | Invalid scrape-target set | 400 | `{"error":"invalid_request","reason":"scrape_target_validation","message":"..."}` |
 | LogsQL execution conflict | 422 | `{"error":"query_execution","reason":"field_conflict","message":"..."}` |
-| Native query limit | 422 | `{"error":"query_limit",...}` with reason `max_result_rows`, `max_work_rows`, or `max_response_bytes` and numeric `limit`. |
+| Native metrics query limit | 400 | `{"error":"invalid_query","reason":"query_validation","message":"..."}` naming the exceeded budget. |
+| Native logs query limit | 422 | `{"error":"query_limit",...}` with reason `max_result_rows`, `max_work_rows`, or `max_response_bytes` and numeric `limit`. |
 | Native query timeout | 504 | `{"error":"timeout","reason":"query_deadline","deadline_ms":N}` |
 | Retryable native storage contention | 503 | `{"error":"temporarily_unavailable","reason":"storage_busy"}` plus `Retry-After`. |
 | Overlapping backup | 409 | `{"error":"conflict","reason":"backup_in_progress"}` |

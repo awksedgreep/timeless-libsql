@@ -119,7 +119,15 @@ fn document() -> &'static str {
                     "format": "TAF1"
                 },
                 "timeless_latest_frame": {
-                    "format": "TLF1"
+                    "format": "TLF1",
+                    "max_work_points": true
+                },
+                "timeless_latest": {
+                    "max_work_points": true
+                },
+                "timeless_series": {
+                    "max_work_points": true,
+                    "max_catalog_bytes": true
                 },
                 "timeless_logs": {
                     "max_work_entries": true

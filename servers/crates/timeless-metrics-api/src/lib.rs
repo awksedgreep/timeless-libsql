@@ -44,9 +44,11 @@ pub const DEFAULT_RAW_RETENTION: Duration = Duration::ZERO;
 /// pass is only reported and the next interval tries again.
 const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Hard PromQL execution limits that apply even when API authentication is
-/// disabled. Authentication claims may impose tighter request-specific
-/// limits, but can never raise these storage-owner bounds.
+/// Hard metrics read limits for native and Prometheus-compatible routes,
+/// including discovery, even when API authentication is disabled. The public
+/// type and environment settings retain their original PromQL names.
+/// Authentication claims may impose tighter request-specific limits, but can
+/// never raise these storage-owner bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PromQueryLimits {
     pub max_points_per_series: usize,
@@ -86,6 +88,9 @@ impl PromQueryLimits {
         }
         if self.max_response_bytes == 0 {
             return Err("max_response_bytes must be positive".into());
+        }
+        if self.max_work_points > i64::MAX as usize || self.max_response_bytes > i64::MAX as usize {
+            return Err("query work and response limits must fit SQLite INTEGER".into());
         }
         if self.default_subquery_step.is_zero()
             || self.default_subquery_step.as_millis() > i64::MAX as u128

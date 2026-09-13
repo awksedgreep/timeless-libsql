@@ -290,11 +290,7 @@ async fn read_route(
     limits: PromQueryLimits,
     request: Result<ReadRequest, String>,
 ) -> Response {
-    // Native routes used to bypass PromQueryLimits entirely (no grid
-    // enforcement, no deadline): apply both, exactly like the
-    // Prometheus routes. `with_prometheus_limits` is a no-op for native
-    // request shapes beyond validating the limits themselves.
-    let request = match request.and_then(|request| request.with_prometheus_limits(limits)) {
+    let request = match request.and_then(|request| request.with_limits(limits)) {
         Ok(request) => request,
         Err(error) => return client_error(error),
     };
@@ -318,7 +314,7 @@ async fn prometheus_read_route(
     limits: PromQueryLimits,
     request: Result<ReadRequest, String>,
 ) -> Response {
-    let request = match request.and_then(|request| request.with_prometheus_limits(limits)) {
+    let request = match request.and_then(|request| request.with_limits(limits)) {
         Ok(request) => request,
         Err(error) => return prometheus_error(StatusCode::BAD_REQUEST, "bad_data", error),
     };
@@ -672,6 +668,12 @@ fn compatibility_server_error(error: String) -> Response {
 }
 
 fn read_error(error: String) -> Response {
+    if error.starts_with("query exceeded the maximum")
+        || error.contains("work point limit")
+        || error.contains("catalog byte limit")
+    {
+        return client_error(error);
+    }
     if !crate::storage::is_retryable_read(&error) {
         return server_error("query_execution", error);
     }

@@ -1901,7 +1901,14 @@ unsafe impl VTabCursor for AggregateFrameCursor<'_> {
 // timeless_latest — one newest point per matched series
 // ---------------------------------------------------------------------------
 
-const LATEST_ARGS: &[&str] = &["tbl", "metric", "filter", "start", "stop"];
+const LATEST_ARGS: &[&str] = &[
+    "tbl",
+    "metric",
+    "filter",
+    "start",
+    "stop",
+    "max_work_points",
+];
 const LATEST_REQUIRED: c_int = 0b1_1011; // all except filter
 const LATEST_FIRST_ARG: c_int = 4;
 
@@ -1928,7 +1935,7 @@ unsafe impl<'vtab> VTab<'vtab> for LatestTab {
         Ok((
             Cow::Borrowed(
                 c"CREATE TABLE x(series_id INTEGER, labels TEXT, ts INTEGER, value REAL, \
-                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, stop HIDDEN)",
+                            tbl HIDDEN, metric HIDDEN, filter HIDDEN, start HIDDEN, stop HIDDEN, max_work_points HIDDEN)",
             ),
             LatestTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -2001,10 +2008,18 @@ unsafe impl VTabCursor for LatestCursor<'_> {
             .map_err(module_err)?;
         let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
         let series_ids: Vec<i64> = candidates.iter().map(|(series_id, _)| *series_id).collect();
-        let batch = shared
-            .engine
-            .query_latest_batch_by_id(&series_ids, start, stop)
-            .map_err(module_err)?;
+        let batch = match slots[5] {
+            Some(slot) => shared.engine.query_latest_batch_by_id_limited(
+                &series_ids,
+                start,
+                stop,
+                positive_work_limit(M, args, slot)?,
+            ),
+            None => shared
+                .engine
+                .query_latest_batch_by_id(&series_ids, start, stop),
+        }
+        .map_err(module_err)?;
         validate_batch_series(&table, M, &candidates, &batch)?;
         let mut rows = Vec::new();
         for ((sid, labels), (_, point)) in candidates.into_iter().zip(batch) {
@@ -2074,7 +2089,7 @@ unsafe impl<'vtab> VTab<'vtab> for LatestFrameTab {
         Ok((
             Cow::Borrowed(
                 c"CREATE TABLE x(frame BLOB, tbl HIDDEN, metric HIDDEN, filter HIDDEN, \
-                            start HIDDEN, stop HIDDEN)",
+                            start HIDDEN, stop HIDDEN, max_work_points HIDDEN)",
             ),
             LatestFrameTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -2144,10 +2159,18 @@ unsafe impl VTabCursor for LatestFrameCursor<'_> {
             .refresh_authoritative_state()
             .map_err(module_err)?;
         let series_ids = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers);
-        let batch = shared
-            .engine
-            .query_latest_batch_by_id(&series_ids, start, stop)
-            .map_err(module_err)?;
+        let batch = match slots[5] {
+            Some(slot) => shared.engine.query_latest_batch_by_id_limited(
+                &series_ids,
+                start,
+                stop,
+                positive_work_limit(M, args, slot)?,
+            ),
+            None => shared
+                .engine
+                .query_latest_batch_by_id(&series_ids, start, stop),
+        }
+        .map_err(module_err)?;
         let frame = encode_latest_frame(&batch).map_err(module_err)?;
         self.rows = if frame.is_empty() {
             Vec::new()
@@ -4185,7 +4208,13 @@ pub(crate) struct SeriesTab {
 }
 
 const SERIES_FIRST_ARG: c_int = 8;
-const SERIES_ARGS: &[&str] = &["tbl", "metric", "filter"];
+const SERIES_ARGS: &[&str] = &[
+    "tbl",
+    "metric",
+    "filter",
+    "max_work_points",
+    "max_catalog_bytes",
+];
 const SERIES_REQUIRED: c_int = 0b001;
 
 unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
@@ -4230,7 +4259,7 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
                 c"CREATE TABLE x(name TEXT, labels TEXT, series_id INTEGER, \
                             min_ts INTEGER, max_ts INTEGER, points INTEGER, \
                             chunks INTEGER, buffered INTEGER, tbl HIDDEN, \
-                            metric HIDDEN, filter HIDDEN)",
+                            metric HIDDEN, filter HIDDEN, max_work_points HIDDEN, max_catalog_bytes HIDDEN)",
             ),
             SeriesTab {
                 base: ffi::sqlite3_vtab::default(),
@@ -4323,6 +4352,68 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
+        let max_work = slots[3]
+            .map(|slot| positive_work_limit(M, args, slot))
+            .transpose()?;
+        let max_bytes = slots[4]
+            .map(|slot| positive_work_limit(M, args, slot))
+            .transpose()?;
+        if max_work.is_some() || max_bytes.is_some() {
+            let ids = {
+                let registry = shared.engine.series_read();
+                let candidates: Box<dyn Iterator<Item = _> + '_> = match selection {
+                    SeriesSelection::Empty => Box::new(std::iter::empty()),
+                    SeriesSelection::Id(id) => Box::new(
+                        registry
+                            .info_for(id)
+                            .into_iter()
+                            .map(move |info| (id, info)),
+                    ),
+                    SeriesSelection::All => registry.iter_series(metric.as_deref()),
+                };
+                let mut ids = Vec::new();
+                let mut work = 0_u64;
+                let mut bytes = 0_u64;
+                for (id, info) in candidates {
+                    work = work.saturating_add(1);
+                    if max_work.is_some_and(|limit| work > limit) {
+                        return Err(module_err(format!(
+                            "catalog work point limit {} exceeded",
+                            max_work.unwrap()
+                        )));
+                    }
+                    if metric
+                        .as_deref()
+                        .is_some_and(|metric| metric != info.metric_name)
+                        || !eq
+                            .iter()
+                            .all(|(key, value)| info.labels.get(key) == Some(value))
+                        || !matchers_pass(&info.labels, &matchers)
+                    {
+                        continue;
+                    }
+                    bytes = info.labels.iter().fold(
+                        bytes.saturating_add(info.metric_name.len() as u64),
+                        |total, (key, value)| {
+                            total
+                                .saturating_add(key.len() as u64)
+                                .saturating_add(value.len() as u64)
+                        },
+                    );
+                    if max_bytes.is_some_and(|limit| bytes > limit) {
+                        return Err(module_err(format!(
+                            "catalog byte limit {} exceeded",
+                            max_bytes.unwrap()
+                        )));
+                    }
+                    ids.push(id);
+                }
+                ids
+            };
+            self.rows = shared.engine.series_overview_by_ids(&ids);
+            self.pos = 0;
+            return Ok(());
+        }
         self.rows = match (metric, selection) {
             (_, SeriesSelection::Empty) => Vec::new(),
             (metric, SeriesSelection::Id(series_id)) => {

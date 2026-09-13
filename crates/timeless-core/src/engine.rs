@@ -540,6 +540,24 @@ impl SeriesRegistry {
         self.series_info.get(&id)
     }
 
+    /// Borrow catalog entries without cloning names, labels, or postings.
+    /// Callers can stop before exceeding their catalog work/byte budget.
+    pub fn iter_series(
+        &self,
+        metric: Option<&str>,
+    ) -> Box<dyn Iterator<Item = (i64, &SeriesInfo)> + '_> {
+        match metric {
+            Some(metric) => Box::new(
+                self.metric_index
+                    .get(metric)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| self.series_info.get(id).map(|info| (*id, info))),
+            ),
+            None => Box::new(self.series_info.iter().map(|(id, info)| (*id, info))),
+        }
+    }
+
     /// Find all series_ids matching a metric name and optional label filters.
     pub fn find_series(&self, metric_name: &str, label_filter: &Labels) -> Vec<i64> {
         let metric_ids = match self.metric_index.get(metric_name) {
@@ -3323,6 +3341,30 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<LatestSeriesBatch> {
+        self.query_latest_batch_by_id_inner(series_ids, t_start, t_end, None)
+    }
+
+    /// Bound latest lookup before reading payloads: metadata costs one point
+    /// per candidate chunk, decoded chunks cost their point count, and buffered
+    /// samples cost one each. Historical payloads with newest-value metadata
+    /// keep their fast path.
+    pub fn query_latest_batch_by_id_limited(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+        max_work_points: u64,
+    ) -> EngineResult<LatestSeriesBatch> {
+        self.query_latest_batch_by_id_inner(series_ids, t_start, t_end, Some(max_work_points))
+    }
+
+    fn query_latest_batch_by_id_inner(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+        max_work_points: Option<u64>,
+    ) -> EngineResult<LatestSeriesBatch> {
         if t_start > t_end {
             return Ok(series_ids.iter().map(|&sid| (sid, None)).collect());
         }
@@ -3374,6 +3416,30 @@ impl Engine {
                     .collect()
             })
             .collect();
+        if let Some(limit) = max_work_points {
+            let chunk_work = work
+                .iter()
+                .flatten()
+                .fold(0_u64, |total, (_, meta, decode)| {
+                    total.saturating_add(if decode.is_some() {
+                        u64::from(meta.point_count)
+                    } else {
+                        1
+                    })
+                });
+            let work_points = series_ids.iter().fold(chunk_work, |total, series_id| {
+                total.saturating_add(
+                    self.partitions
+                        .get(&PartitionKey {
+                            series_id: *series_id,
+                        })
+                        .map_or(0, |buffer| buffer.timestamps.len() as u64),
+                )
+            });
+            if work_points > limit {
+                return Err(format!("latest batch work point limit {limit} exceeded (candidate work: {work_points})"));
+            }
+        }
         let payloads = self.store.read_chunks(&locs)?;
         if payloads.len() != locs.len() {
             return Err(format!(

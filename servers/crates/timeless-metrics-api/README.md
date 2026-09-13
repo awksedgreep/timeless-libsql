@@ -69,6 +69,27 @@ The exact public storage contract is in the
 - SIGINT/SIGTERM stops admission, drains accepted work, flushes, checkpoints
   WAL, closes workers, and releases the exclusive owner lease.
 
+## Query limits
+
+The `TIMELESS_METRICS_PROMQL_MAX_*` settings and
+`TIMELESS_METRICS_PROMQL_DEADLINE_MS` apply to native latest, export, range,
+and discovery reads as well as PromQL and the Prometheus discovery aliases.
+They remain active when authentication is disabled. Range queries default to
+11,000 grid points per series; reads default to 100,000 result points,
+100,000 work points, 16 MiB of response bytes, and a 30-second deadline.
+Raw export uses the total result-point limit rather than the range-grid limit.
+
+Native reads check storage work before payload decoding, bound catalog scans
+and selector evaluations, and enforce response bytes while serializing.
+Catalog metadata also uses the response-byte allowance, so discovery can hit
+its catalog budget even when the final list is small. Limits reject the whole
+query; they do not silently truncate results. Narrow the metric/time selection,
+increase the range step, split a raw export into time intervals, or adjust the
+deployment limits. Native limit errors return HTTP 400 with the exceeded
+budget; Prometheus discovery uses its HTTP 422 execution-error envelope.
+Deploy this server with the matching extension: startup requires the bounded
+catalog, latest-frame, and raw-frame capabilities before changing the database.
+
 ## Storage observability
 
 `GET /metrics` (Prometheus exposition) and `GET /select/metrics/stats` (JSON)

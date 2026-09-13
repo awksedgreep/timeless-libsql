@@ -14,6 +14,8 @@ use crate::promql;
 use crate::storage::MetricsTable;
 
 mod metricsql;
+mod native;
+use native::NativeRequest;
 
 const RESERVED_PARAMS: &[&str] = &[
     "metric",
@@ -365,36 +367,9 @@ fn system_time_millis(timestamp: SystemTime) -> Result<i64, String> {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ReadRequest {
-    Latest {
-        metric: String,
-        filter: FilterPlan,
-        stop: i64,
-    },
-    Export {
-        metric: String,
-        filter: FilterPlan,
-        start: i64,
-        stop: i64,
-    },
-    Range {
-        metric: String,
-        filter: FilterPlan,
-        start: i64,
-        stop: i64,
-        step: i64,
-        aggregate: Aggregate,
-    },
-    Labels {
-        selectors: Vec<Selector>,
-    },
-    LabelValues {
-        name: String,
-        metric: Option<String>,
-        selectors: Vec<Selector>,
-    },
-    Series {
-        metric: Option<String>,
-        selectors: Vec<Selector>,
+    Native {
+        request: NativeRequest,
+        limits: PromQueryLimits,
     },
     Prometheus {
         query: String,
@@ -1483,22 +1458,21 @@ pub(crate) enum ReadKind {
 }
 
 impl ReadRequest {
+    fn native(request: NativeRequest) -> Self {
+        Self::Native {
+            request,
+            limits: PromQueryLimits::default(),
+        }
+    }
+
     pub(crate) fn kind(&self) -> ReadKind {
         match self {
-            Self::Latest { .. } => ReadKind::Latest,
-            Self::Export { .. } => ReadKind::Export,
-            Self::Range { .. } => ReadKind::Range,
-            Self::Labels { .. } | Self::LabelValues { .. } | Self::Series { .. } => {
-                ReadKind::Discovery
-            }
+            Self::Native { request, .. } => request.kind(),
             Self::Prometheus { .. } => ReadKind::Promql,
         }
     }
 
-    pub(crate) fn with_prometheus_limits(
-        mut self,
-        limits: PromQueryLimits,
-    ) -> Result<Self, String> {
+    pub(crate) fn with_limits(mut self, limits: PromQueryLimits) -> Result<Self, String> {
         limits.validate()?;
         if let Self::Prometheus {
             start,
@@ -1514,17 +1488,25 @@ impl ReadRequest {
             }
             *request_limits = limits;
         }
+        if let Self::Native {
+            request,
+            limits: request_limits,
+        } = &mut self
+        {
+            request.validate(limits)?;
+            *request_limits = limits;
+        }
         Ok(self)
     }
 }
 
 pub(crate) fn latest_request(params: &Params) -> Result<ReadRequest, String> {
     let metric = required_metric(params)?;
-    Ok(ReadRequest::Latest {
+    Ok(ReadRequest::native(NativeRequest::Latest {
         metric,
         filter: FilterPlan::new(params.label_matchers(false)?),
         stop: now_seconds(),
-    })
+    }))
 }
 
 pub(crate) fn export_request(params: &Params) -> Result<ReadRequest, String> {
@@ -1535,12 +1517,12 @@ pub(crate) fn export_request(params: &Params) -> Result<ReadRequest, String> {
         parse_time(params.get("from"), now.saturating_sub(3_600)),
     );
     let stop = parse_time(params.get("end"), parse_time(params.get("to"), now));
-    Ok(ReadRequest::Export {
+    Ok(ReadRequest::native(NativeRequest::Export {
         metric,
         filter: FilterPlan::new(params.label_matchers(false)?),
         start,
         stop,
-    })
+    }))
 }
 
 pub(crate) fn range_request(params: &Params) -> Result<ReadRequest, String> {
@@ -1570,14 +1552,14 @@ pub(crate) fn range_request(params: &Params) -> Result<ReadRequest, String> {
     if step <= 0 {
         return Err("step must be positive".into());
     }
-    Ok(ReadRequest::Range {
+    Ok(ReadRequest::native(NativeRequest::Range {
         metric,
         filter: FilterPlan::new(params.label_matchers(true)?),
         start,
         stop,
         step,
         aggregate: Aggregate::parse(params.get("aggregate"))?,
-    })
+    }))
 }
 
 pub(crate) fn prometheus_instant_request(params: &Params) -> Result<ReadRequest, String> {
@@ -3309,18 +3291,18 @@ fn promql_expression_name(expression: &promql::Expr) -> &'static str {
 
 pub(crate) fn labels_request(params: &Params) -> Result<ReadRequest, String> {
     params.ensure_only(&["match[]", "match"])?;
-    Ok(ReadRequest::Labels {
+    Ok(ReadRequest::native(NativeRequest::Labels {
         selectors: parse_selectors(params)?,
-    })
+    }))
 }
 
 pub(crate) fn label_values_request(params: &Params, name: String) -> Result<ReadRequest, String> {
     params.ensure_only(&["metric", "match[]", "match"])?;
-    Ok(ReadRequest::LabelValues {
+    Ok(ReadRequest::native(NativeRequest::LabelValues {
         name,
         metric: params.get("metric").map(ToOwned::to_owned),
         selectors: parse_selectors(params)?,
-    })
+    }))
 }
 
 pub(crate) fn series_request(
@@ -3336,7 +3318,10 @@ pub(crate) fn series_request(
     if !prometheus_alias && selectors.is_empty() && metric.is_none() {
         return Err("missing required parameter: metric or match[]".into());
     }
-    Ok(ReadRequest::Series { metric, selectors })
+    Ok(ReadRequest::native(NativeRequest::Series {
+        metric,
+        selectors,
+    }))
 }
 
 fn required_metric(params: &Params) -> Result<String, String> {
@@ -3702,6 +3687,8 @@ pub(crate) struct QueryFeatures {
     window_batches: bool,
     raw_frame_work_limit: bool,
     window_batch_work_limit: bool,
+    latest_frame_work_limit: bool,
+    catalog_work_limit: bool,
 }
 
 impl QueryFeatures {
@@ -3732,6 +3719,9 @@ impl QueryFeatures {
             window_batches: modules.contains("timeless_window_batches"),
             raw_frame_work_limit: has_work_limit("timeless_raw_frame"),
             window_batch_work_limit: has_work_limit("timeless_window_batches"),
+            latest_frame_work_limit: has_work_limit("timeless_latest_frame"),
+            catalog_work_limit: has_work_limit("timeless_series")
+                && capabilities["query_surfaces"]["timeless_series"]["max_catalog_bytes"] == true,
         })
     }
 }
@@ -3755,44 +3745,8 @@ pub(crate) fn execute(
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
     match request {
-        ReadRequest::Latest {
-            metric,
-            filter,
-            stop,
-        } => execute_latest(conn, features, &metric, &filter, stop),
-        ReadRequest::Export {
-            metric,
-            filter,
-            start,
-            stop,
-        } => execute_export(conn, features, &metric, &filter, start, stop),
-        ReadRequest::Range {
-            metric,
-            filter,
-            start,
-            stop,
-            step,
-            aggregate,
-        } => execute_range(
-            conn,
-            features,
-            RangeQuery {
-                metric: &metric,
-                filter: &filter,
-                start,
-                stop,
-                step,
-                aggregate,
-            },
-        ),
-        ReadRequest::Labels { selectors } => execute_labels(conn, features.table, &selectors),
-        ReadRequest::LabelValues {
-            name,
-            metric,
-            selectors,
-        } => execute_label_values(conn, features.table, &name, metric.as_deref(), &selectors),
-        ReadRequest::Series { metric, selectors } => {
-            execute_series(conn, features.table, metric.as_deref(), &selectors)
+        ReadRequest::Native { request, limits } => {
+            native::execute(conn, features, request, limits, cancelled)
         }
         ReadRequest::Prometheus {
             query,
@@ -3906,53 +3860,6 @@ fn catalog(
     Ok(output)
 }
 
-fn catalog_all(conn: &Connection, table: MetricsTable) -> Result<Vec<SeriesMeta>, String> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT series_id, name, labels
-               FROM timeless_series('{}')
-              ORDER BY name, labels, series_id",
-            table.name()
-        ))
-        .map_err(|error| format!("prepare complete series catalog: {error}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(|error| format!("query complete series catalog: {error}"))?;
-    let mut output = Vec::new();
-    for row in rows {
-        let (id, metric, labels_json) =
-            row.map_err(|error| format!("read complete series catalog: {error}"))?;
-        output.push(SeriesMeta {
-            id,
-            metric,
-            labels: decode_labels(&labels_json)?,
-            labels_json,
-        });
-    }
-    Ok(output)
-}
-
-fn all_metrics(conn: &Connection, table: MetricsTable) -> Result<Vec<String>, String> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT DISTINCT name FROM timeless_series('{}') ORDER BY name",
-            table.name()
-        ))
-        .map_err(|error| format!("prepare metric discovery: {error}"))?;
-    let metrics = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|error| format!("query metric discovery: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("collect metric discovery: {error}"))?;
-    Ok(metrics)
-}
-
 fn prometheus_catalogs(
     conn: &Connection,
     table: MetricsTable,
@@ -4057,168 +3964,11 @@ fn decode_labels(value: &str) -> Result<BTreeMap<String, String>, String> {
     serde_json::from_str(value).map_err(|error| format!("decode canonical labels: {error}"))
 }
 
-fn execute_latest(
-    conn: &Connection,
-    features: QueryFeatures,
-    metric: &str,
-    filter: &FilterPlan,
-    stop: i64,
-) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, features.table, metric, filter)?;
-    let by_id: HashMap<_, _> = catalog.iter().map(|meta| (meta.id, meta)).collect();
-    let (mut rows, frame_bytes) = if features.latest_frame {
-        let frame: Option<Vec<u8>> = conn
-            .query_row(
-                &format!(
-                    "SELECT frame FROM timeless_latest_frame('{}', ?1, ?2, 0, ?3)",
-                    features.table.name()
-                ),
-                params![metric, filter.pushdown_json, stop],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| format!("query latest frame: {error}"))?;
-        match frame {
-            Some(frame) => {
-                let frame_bytes = frame.len();
-                (decode_latest_frame(&frame)?, frame_bytes)
-            }
-            None => (Vec::new(), 0),
-        }
-    } else {
-        (latest_rows(conn, features.table, metric, filter, stop)?, 0)
-    };
-    rows.retain(|row| by_id.contains_key(&row.id));
-    rows.sort_by(|left, right| {
-        by_id[&left.id]
-            .labels_json
-            .cmp(&by_id[&right.id].labels_json)
-            .then(left.id.cmp(&right.id))
-    });
-    let mut body = Vec::new();
-    if rows.len() == 1 {
-        write_latest_object(&mut body, by_id[&rows[0].id], &rows[0])?;
-    } else {
-        body.extend_from_slice(br#"{"data":["#);
-        for (index, row) in rows.iter().enumerate() {
-            comma(&mut body, index);
-            write_latest_object(&mut body, by_id[&row.id], row)?;
-        }
-        body.extend_from_slice(b"]}");
-    }
-    Ok(ReadOutput {
-        body,
-        frame_bytes,
-        series: rows.len() as u64,
-        points: rows.len() as u64,
-        intermediate_points: 0,
-        rows: rows.len() as u64,
-    })
-}
-
 #[derive(Clone, Copy, Debug)]
 struct LatestRow {
     id: i64,
     timestamp: i64,
     value: Option<f64>,
-}
-
-fn latest_rows(
-    conn: &Connection,
-    table: MetricsTable,
-    metric: &str,
-    filter: &FilterPlan,
-    stop: i64,
-) -> Result<Vec<LatestRow>, String> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT series_id, ts, value
-               FROM timeless_latest('{}', ?1, ?2, 0, ?3)",
-            table.name()
-        ))
-        .map_err(|error| format!("prepare latest rows: {error}"))?;
-    let rows = stmt
-        .query_map(params![metric, filter.pushdown_json, stop], |row| {
-            Ok(LatestRow {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                value: row.get(2)?,
-            })
-        })
-        .map_err(|error| format!("query latest rows: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("collect latest rows: {error}"))?;
-    Ok(rows)
-}
-
-fn write_latest_object(
-    output: &mut Vec<u8>,
-    meta: &SeriesMeta,
-    row: &LatestRow,
-) -> Result<(), String> {
-    output.extend_from_slice(b"{\"labels\":");
-    output.extend_from_slice(meta.labels_json.as_bytes());
-    output.extend_from_slice(b",\"timestamp\":");
-    write_json(output, &row.timestamp)?;
-    output.extend_from_slice(b",\"value\":");
-    write_optional_float(output, row.value)?;
-    output.push(b'}');
-    Ok(())
-}
-
-fn execute_export(
-    conn: &Connection,
-    features: QueryFeatures,
-    metric: &str,
-    filter: &FilterPlan,
-    start: i64,
-    stop: i64,
-) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, features.table, metric, filter)?;
-    let raw = raw_query(conn, features, metric, filter, start, stop, None)?;
-    let by_id: HashMap<_, _> = raw
-        .series
-        .iter()
-        .map(|series| (series.id, series))
-        .collect();
-    let mut body = Vec::new();
-    let mut emitted = 0_u64;
-    let mut points = 0_u64;
-    for meta in &catalog {
-        let Some(series) = by_id.get(&meta.id) else {
-            continue;
-        };
-        if emitted > 0 {
-            body.push(b'\n');
-        }
-        body.extend_from_slice(b"{\"metric\":");
-        let mut labels = meta.labels.clone();
-        labels.insert("__name__".into(), metric.into());
-        write_json(&mut body, &labels)?;
-        body.extend_from_slice(b",\"timestamps\":[");
-        for index in 0..series.len() {
-            comma(&mut body, index);
-            let millis =
-                i128::from(series.timestamp(raw.frame.as_deref(), index)?).saturating_mul(1_000);
-            body.extend_from_slice(millis.to_string().as_bytes());
-        }
-        body.extend_from_slice(b"],\"values\":[");
-        for index in 0..series.len() {
-            comma(&mut body, index);
-            write_float(&mut body, series.value(raw.frame.as_deref(), index)?)?;
-        }
-        body.extend_from_slice(b"]}");
-        emitted += 1;
-        points = points.saturating_add(series.len() as u64);
-    }
-    Ok(ReadOutput {
-        body,
-        frame_bytes: raw.frame_bytes,
-        series: emitted,
-        points,
-        intermediate_points: 0,
-        rows: points,
-    })
 }
 
 struct RawQuery {
@@ -4399,197 +4149,6 @@ fn raw_query(
         frame: None,
         frame_bytes: 0,
     })
-}
-
-#[derive(Clone, Copy)]
-struct RangeQuery<'a> {
-    metric: &'a str,
-    filter: &'a FilterPlan,
-    start: i64,
-    stop: i64,
-    step: i64,
-    aggregate: Aggregate,
-}
-
-fn execute_range(
-    conn: &Connection,
-    features: QueryFeatures,
-    query: RangeQuery<'_>,
-) -> Result<ReadOutput, String> {
-    let span = query.stop.saturating_sub(query.start).saturating_add(1);
-    let native = features.window_batches
-        && query.aggregate.native_name().is_some()
-        && span > 0
-        && span % query.step == 0
-        && span / query.step <= 1_000_000;
-    if native {
-        return execute_native_range(conn, features.table, query);
-    }
-    execute_raw_range(conn, features, query)
-}
-
-fn execute_native_range(
-    conn: &Connection,
-    table: MetricsTable,
-    query: RangeQuery<'_>,
-) -> Result<ReadOutput, String> {
-    let window_start = query
-        .start
-        .checked_add(query.step - 1)
-        .ok_or_else(|| "range window start overflow".to_string())?;
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT series_id, labels, buckets
-               FROM timeless_window_batches('{}', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-              ORDER BY labels, series_id",
-            table.name()
-        ))
-        .map_err(|error| format!("prepare window batches: {error}"))?;
-    let rows = stmt
-        .query_map(
-            params![
-                query.metric,
-                query.filter.pushdown_json,
-                window_start,
-                query.stop,
-                query.step,
-                query.step,
-                query
-                    .aggregate
-                    .native_name()
-                    .expect("native aggregate checked")
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )
-        .map_err(|error| format!("query window batches: {error}"))?;
-    let mut body = Vec::new();
-    write_range_prefix(&mut body, query.metric)?;
-    let mut emitted = 0_usize;
-    let mut points = 0_u64;
-    let mut frame_bytes = 0_usize;
-    for row in rows {
-        let (_id, labels_json, buckets) =
-            row.map_err(|error| format!("read window batch: {error}"))?;
-        let labels = decode_labels(&labels_json)?;
-        if !query.filter.matches(&labels) {
-            continue;
-        }
-        let decoded = decode_window_batch(&buckets)?;
-        comma(&mut body, emitted);
-        body.extend_from_slice(b"{\"labels\":");
-        body.extend_from_slice(labels_json.as_bytes());
-        body.extend_from_slice(b",\"data\":[");
-        for index in 0..decoded.len() {
-            comma(&mut body, index);
-            body.push(b'[');
-            write_json(
-                &mut body,
-                &decoded.timestamp(index).saturating_sub(query.step - 1),
-            )?;
-            body.push(b',');
-            let value = decoded.value(index);
-            if query.aggregate == Aggregate::Count {
-                match value {
-                    Some(value) => body.extend_from_slice((value as i64).to_string().as_bytes()),
-                    None => body.extend_from_slice(b"null"),
-                }
-            } else {
-                write_optional_float(&mut body, value)?;
-            }
-            body.push(b']');
-        }
-        body.extend_from_slice(b"]}");
-        emitted += 1;
-        points = points.saturating_add(decoded.len() as u64);
-        frame_bytes = frame_bytes.saturating_add(buckets.len());
-    }
-    body.extend_from_slice(b"]}");
-    Ok(ReadOutput {
-        body,
-        frame_bytes,
-        series: emitted as u64,
-        points,
-        intermediate_points: 0,
-        rows: points,
-    })
-}
-
-fn execute_raw_range(
-    conn: &Connection,
-    features: QueryFeatures,
-    query: RangeQuery<'_>,
-) -> Result<ReadOutput, String> {
-    let catalog = catalog(conn, features.table, query.metric, query.filter)?;
-    let raw = raw_query(
-        conn,
-        features,
-        query.metric,
-        query.filter,
-        query.start,
-        query.stop,
-        None,
-    )?;
-    let by_id: HashMap<_, _> = raw
-        .series
-        .iter()
-        .map(|series| (series.id, series))
-        .collect();
-    let mut body = Vec::new();
-    write_range_prefix(&mut body, query.metric)?;
-    let mut emitted = 0_usize;
-    let mut point_count = 0_u64;
-    for meta in &catalog {
-        let Some(series) = by_id.get(&meta.id) else {
-            continue;
-        };
-        let buckets = aggregate_raw(
-            series,
-            raw.frame.as_deref(),
-            query.start,
-            query.step,
-            query.aggregate,
-        )?;
-        comma(&mut body, emitted);
-        body.extend_from_slice(b"{\"labels\":");
-        body.extend_from_slice(meta.labels_json.as_bytes());
-        body.extend_from_slice(b",\"data\":[");
-        for (index, (timestamp, value)) in buckets.iter().enumerate() {
-            comma(&mut body, index);
-            body.push(b'[');
-            write_json(&mut body, timestamp)?;
-            body.push(b',');
-            match value {
-                BucketValue::Integer(value) => write_json(&mut body, value)?,
-                BucketValue::Real(value) => write_float(&mut body, *value)?,
-            }
-            body.push(b']');
-        }
-        body.extend_from_slice(b"]}");
-        emitted += 1;
-        point_count = point_count.saturating_add(buckets.len() as u64);
-    }
-    body.extend_from_slice(b"]}");
-    Ok(ReadOutput {
-        body,
-        frame_bytes: raw.frame_bytes,
-        series: emitted as u64,
-        points: point_count,
-        intermediate_points: 0,
-        rows: point_count,
-    })
-}
-
-fn write_range_prefix(output: &mut Vec<u8>, metric: &str) -> Result<(), String> {
-    output.extend_from_slice(b"{\"metric\":");
-    write_json(output, &metric)?;
-    output.extend_from_slice(b",\"series\":[");
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9674,179 +9233,6 @@ fn aggregate_rate(points: &[(i64, f64)], start: i64, step: i64) -> Vec<(i64, Buc
     output
 }
 
-fn execute_labels(
-    conn: &Connection,
-    table: MetricsTable,
-    selectors: &[Selector],
-) -> Result<ReadOutput, String> {
-    let series = selected_series(conn, table, selectors)?;
-    let mut names = BTreeSet::new();
-    names.insert("__name__".to_string());
-    for meta in &series {
-        names.extend(meta.labels.keys().cloned());
-    }
-    success_array(names, 0, series.len() as u64)
-}
-
-fn execute_label_values(
-    conn: &Connection,
-    table: MetricsTable,
-    name: &str,
-    metric: Option<&str>,
-    selectors: &[Selector],
-) -> Result<ReadOutput, String> {
-    let values = if !selectors.is_empty() {
-        let series = selected_series(conn, table, selectors)?;
-        let values = series
-            .iter()
-            .filter_map(|meta| {
-                if name == "__name__" {
-                    Some(meta.metric.clone())
-                } else {
-                    meta.labels.get(name).cloned()
-                }
-            })
-            .collect::<BTreeSet<_>>();
-        return success_array(values, 0, series.len() as u64);
-    } else if name == "__name__" && metric.is_none() {
-        all_metrics(conn, table)?.into_iter().collect()
-    } else if let Some(metric) = metric {
-        direct_label_values(conn, table, metric, name)?
-    } else {
-        let mut values = BTreeSet::new();
-        for metric in all_metrics(conn, table)? {
-            values.extend(direct_label_values(conn, table, &metric, name)?);
-        }
-        values
-    };
-    success_array(values, 0, 0)
-}
-
-fn direct_label_values(
-    conn: &Connection,
-    table: MetricsTable,
-    metric: &str,
-    name: &str,
-) -> Result<BTreeSet<String>, String> {
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT value FROM timeless_label_values('{}', ?1, ?2) ORDER BY value",
-            table.name()
-        ))
-        .map_err(|error| format!("prepare label values: {error}"))?;
-    let values = stmt
-        .query_map(params![metric, name], |row| row.get(0))
-        .map_err(|error| format!("query label values: {error}"))?
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|error| format!("collect label values: {error}"))?;
-    Ok(values)
-}
-
-fn execute_series(
-    conn: &Connection,
-    table: MetricsTable,
-    metric: Option<&str>,
-    selectors: &[Selector],
-) -> Result<ReadOutput, String> {
-    let mut series = if selectors.is_empty() {
-        catalog(
-            conn,
-            table,
-            metric.expect("native series requires metric"),
-            &FilterPlan::new(Vec::new()),
-        )?
-    } else {
-        selected_series(conn, table, selectors)?
-    };
-    series.sort_by(|left, right| {
-        left.metric
-            .cmp(&right.metric)
-            .then(left.labels_json.cmp(&right.labels_json))
-            .then(left.id.cmp(&right.id))
-    });
-    let mut body = Vec::new();
-    body.extend_from_slice(br#"{"status":"success","data":["#);
-    for (index, meta) in series.iter().enumerate() {
-        comma(&mut body, index);
-        if selectors.is_empty() {
-            body.extend_from_slice(b"{\"labels\":");
-            body.extend_from_slice(meta.labels_json.as_bytes());
-            body.push(b'}');
-        } else {
-            let mut labels = meta.labels.clone();
-            labels.insert("__name__".into(), meta.metric.clone());
-            write_json(&mut body, &labels)?;
-        }
-    }
-    body.extend_from_slice(b"]}");
-    Ok(ReadOutput {
-        body,
-        frame_bytes: 0,
-        series: series.len() as u64,
-        points: 0,
-        intermediate_points: 0,
-        rows: series.len() as u64,
-    })
-}
-
-fn selected_series(
-    conn: &Connection,
-    table: MetricsTable,
-    selectors: &[Selector],
-) -> Result<Vec<SeriesMeta>, String> {
-    if selectors.is_empty() {
-        return catalog_all(conn, table);
-    }
-    let mut all_metric_names = None;
-    let mut unique = BTreeMap::<(String, String), SeriesMeta>::new();
-    for selector in selectors {
-        if let MetricSelection::Exact(metric) = &selector.metric {
-            for meta in catalog(conn, table, metric, &selector.filter)? {
-                unique.insert((meta.metric.clone(), meta.labels_json.clone()), meta);
-            }
-            continue;
-        }
-        let metrics = match &all_metric_names {
-            Some(metrics) => metrics,
-            None => all_metric_names.insert(all_metrics(conn, table)?),
-        };
-        for metric in metrics {
-            let selected = match &selector.metric {
-                MetricSelection::Regex(regex) => regex.is_match(metric),
-                MetricSelection::Matchers(matchers) => {
-                    matchers.iter().all(|matcher| matcher.matches_value(metric))
-                }
-                MetricSelection::All => true,
-                MetricSelection::Exact(_) => unreachable!("handled above"),
-            };
-            if selected {
-                for meta in catalog(conn, table, metric, &selector.filter)? {
-                    unique.insert((meta.metric.clone(), meta.labels_json.clone()), meta);
-                }
-            }
-        }
-    }
-    Ok(unique.into_values().collect())
-}
-
-fn success_array<T: Serialize + Ord>(
-    values: BTreeSet<T>,
-    frame_bytes: usize,
-    series: u64,
-) -> Result<ReadOutput, String> {
-    let rows = values.len() as u64;
-    let body = serde_json::to_vec(&json!({"status": "success", "data": values}))
-        .map_err(|error| format!("encode discovery response: {error}"))?;
-    Ok(ReadOutput {
-        body,
-        frame_bytes,
-        series,
-        points: 0,
-        intermediate_points: 0,
-        rows,
-    })
-}
-
 fn decode_latest_frame(bytes: &[u8]) -> Result<Vec<LatestRow>, String> {
     if bytes.len() < 8 || &bytes[..4] != b"TLF1" {
         return Err("timeless_latest_frame returned an unknown or truncated frame".into());
@@ -10097,25 +9483,6 @@ fn write_json_bounded<T: ?Sized + Serialize>(
         ));
     }
     result.map_err(|error| format!("encode query response: {error}"))
-}
-
-fn write_optional_float(output: &mut Vec<u8>, value: Option<f64>) -> Result<(), String> {
-    match value {
-        Some(value) => write_float(output, value),
-        None => {
-            output.extend_from_slice(b"null");
-            Ok(())
-        }
-    }
-}
-
-fn write_float(output: &mut Vec<u8>, value: f64) -> Result<(), String> {
-    if value.is_finite() {
-        write_json(output, &value)
-    } else {
-        output.extend_from_slice(b"null");
-        Ok(())
-    }
 }
 
 fn comma(output: &mut Vec<u8>, index: usize) {
