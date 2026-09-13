@@ -20,9 +20,16 @@ complete outer `SHA256SUMS`; and the workflow published the
 [`v0.8.3` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.3)
 with the four archives plus `SHA256SUMS` as permanent release assets. This is
 the current download channel. Complete published releases also exist for
-`v0.8.2`, `v0.8.1`, `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back
+`v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back
 through `v0.7.1`, `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and
 `v0.4.2`.
+
+Documentation on `main` also covers changes in the
+[Unreleased changelog](../CHANGELOG.md#unreleased). Those changes require a
+source build and are not yet part of the published bundle. For instructions
+matching a downloaded version exactly, use the documentation at that release's
+tag. The [compatibility contract](COMPATIBILITY.md) records current source
+versions and pairing floors separately from publication status.
 
 For history: some tags record source only, because their artifact runs failed
 and the fix became the next patch — `v0.7.0` (authctl missed the `--version`
@@ -131,16 +138,55 @@ identity. Before distribution, compare:
 
 ## Installing
 
-Download the archive matching the host plus the outer `SHA256SUMS` from the
-current GitHub Release, verify the outer checksum, extract, then run the
-bundled installer:
+The following Bash commands require `curl`, `tar`, and either `sha256sum`
+(Linux) or `shasum` (macOS). No GitHub account is needed. They select the host's
+native archive, download it and the outer `SHA256SUMS` from the same release,
+verify before extraction, and install under a writable prefix. Run in a new
+download directory. Set `TIMELESS_INSTALL_PREFIX` first to choose a different
+destination; the default here is `$HOME/.local/timeless`.
+
+<!-- executable-doc:install:start -->
 
 ```sh
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf timeless-telemetry-data-plane-0.7.6-x86_64-unknown-linux-gnu.tar.gz
-cd timeless-telemetry-data-plane-0.7.6-x86_64-unknown-linux-gnu
-sudo ./install.sh --prefix /opt/timeless
+set -euo pipefail
+timeless_repo=awksedgreep/timeless-libsql
+timeless_releases="https://github.com/$timeless_repo/releases"
+timeless_release_url="$(curl --fail --silent --show-error --location --head \
+  --output /dev/null --write-out '%{url_effective}' "$timeless_releases/latest")"
+timeless_tag="${timeless_release_url##*/}"
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) timeless_target=x86_64-unknown-linux-gnu ;;
+  Linux:aarch64|Linux:arm64) timeless_target=aarch64-unknown-linux-gnu ;;
+  Darwin:x86_64) timeless_target=x86_64-apple-darwin ;;
+  Darwin:arm64) timeless_target=aarch64-apple-darwin ;;
+  *) echo 'No published archive for this host; build from source.' >&2; exit 1 ;;
+esac
+timeless_bundle="timeless-telemetry-data-plane-${timeless_tag#v}-$timeless_target"
+timeless_archive="$timeless_bundle.tar.gz"
+curl --fail --show-error --location --output "$timeless_archive" \
+  "$timeless_releases/download/$timeless_tag/$timeless_archive"
+curl --fail --show-error --location --output SHA256SUMS \
+  "$timeless_releases/download/$timeless_tag/SHA256SUMS"
+awk -v archive="$timeless_archive" \
+  '$2 == archive { print; found=1 } END { exit !found }' \
+  SHA256SUMS > selected.SHA256SUMS
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum --check selected.SHA256SUMS
+else
+  shasum -a 256 --check selected.SHA256SUMS
+fi
+tar -xzf "$timeless_archive"
+cd "$timeless_bundle"
+./install.sh --prefix "${TIMELESS_INSTALL_PREFIX:-$HOME/.local/timeless}"
 ```
+
+<!-- executable-doc:install:end -->
+
+Use the installed binaries under `<prefix>/bin` and load
+`<prefix>/lib/libtimeless_ext` (SQLite supplies the platform suffix).
+For example, `$HOME/.local/timeless/bin/timeless-traces-api --version` prints
+the installed binary's identity. Database paths are chosen separately when
+starting a server; see the [launch contract](SERVER_API_REFERENCE.md#binaries-and-launch-contract).
 
 The installer re-verifies every inner checksum, parses the manifest identity,
 rejects a target/host mismatch, executes all three binary identity probes, and
@@ -183,8 +229,9 @@ Run the `uninstall.sh` inside the immutable release directory so it can verify
 the exact manifest-owned targets:
 
 ```sh
-release_dir=$(sed -n '1p' /opt/timeless/telemetry-data-plane/CURRENT)
-sudo "$release_dir/uninstall.sh" --prefix /opt/timeless --keep-artifact
+timeless_prefix="${TIMELESS_INSTALL_PREFIX:-$HOME/.local/timeless}"
+release_dir=$(sed -n '1p' "$timeless_prefix/telemetry-data-plane/CURRENT")
+"$release_dir/uninstall.sh" --prefix "$timeless_prefix" --keep-artifact
 ```
 
 `--keep-artifact` removes only symlinks and `CURRENT`; omit it to remove that

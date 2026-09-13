@@ -306,7 +306,10 @@ async fn release_backup_is_ordered_verified_no_clobber_and_cold_reopenable() {
 
     let report = storage.backup(backup.clone()).await.unwrap();
     assert_eq!(report.signal, "metrics");
-    assert_eq!(report.destination, backup.to_string_lossy());
+    assert_eq!(
+        report.destination,
+        backup.canonicalize().unwrap().to_string_lossy()
+    );
     assert_eq!(report.schema_version, 1);
     assert!(report.bytes > 0);
     assert!(report.pages > 0);

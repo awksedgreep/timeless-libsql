@@ -1,4 +1,5 @@
 mod contracts;
+mod docs;
 mod evidence;
 mod gate;
 mod oracle;
@@ -27,6 +28,8 @@ struct Cli {
 enum Command {
     /// Validate matrices, documentation links, test references, and server markers.
     Contracts,
+    /// Execute the SQL onboarding examples from the README and user's guide.
+    Docs,
     /// Validate or run immutable upstream query oracles.
     Oracle(oracle::OracleArgs),
     /// Capture public-API query performance and resource evidence.
@@ -57,6 +60,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Contracts => contracts::run(&root),
+        Command::Docs => docs::run(&root),
         Command::Oracle(args) => oracle::run(&root, args),
         Command::Evidence(args) => evidence::run(&root, args),
         Command::Gate(args) => gate::run(&root, args),

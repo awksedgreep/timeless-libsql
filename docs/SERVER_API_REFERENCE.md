@@ -25,13 +25,20 @@ not implemented.
 All three use the same positional command line:
 
 ```text
-timeless-<signal>-api <libtimeless_ext.so> <database> [listen-address]
+timeless-<signal>-api <extension-path> <database> [listen-address]
 ```
 
 The extension and database paths are required. The listener is the optional
 third positional argument. An extra or malformed argument exits with status
 2. `--version`, supplied by itself, prints a JSON object containing the binary
 name, Cargo version, source commit, target triple, and build profile.
+
+Use `libtimeless_ext.so` on Linux or `libtimeless_ext.dylib` on macOS. The
+launch path may omit the suffix: SQLite resolves `libtimeless_ext` on either
+platform. Source-build examples are in the
+[metrics](../servers/crates/timeless-metrics-api/README.md#run-locally),
+[logs](../servers/crates/timeless-logs-api/README.md#run-locally), and
+[traces](../servers/crates/timeless-traces-api/README.md#run) READMEs.
 
 TCP is the implemented transport. Loopback is the safe default. An operator
 who has separately secured a container or host network may set

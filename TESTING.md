@@ -41,7 +41,20 @@ scratch path.
 
 On macOS, `/usr/bin/sqlite3` disables extension loading. Install SQLite with
 Homebrew and put its `bin` directory first in `PATH` before running the shell
-suites.
+suites:
+
+```sh
+# macOS only:
+export PATH="$(brew --prefix sqlite)/bin:$PATH"
+```
+
+The shell suites detect `.so` on Linux and `.dylib` on macOS. Run the commands
+below in the same shell session, starting with this shared path setup:
+
+```sh
+source tests/platform.sh
+timeless_ext="$(timeless_library_path "$PWD/target/release/libtimeless_ext")"
+```
 
 ## Tooling migration status
 
@@ -151,8 +164,8 @@ TIMELESS_BUILD_COMMIT="$build_commit" \
 
 cargo fmt --manifest-path servers/Cargo.toml --all -- --check
 
-TIMELESS_EXT_PATH="$PWD/target/release/libtimeless_ext.so" \
-TIMELESS_EXT_TEST_PATH="$PWD/target/release/libtimeless_ext.so" \
+TIMELESS_EXT_PATH="$timeless_ext" \
+TIMELESS_EXT_TEST_PATH="$timeless_ext" \
   cargo test --workspace --manifest-path servers/Cargo.toml \
     --locked -- --include-ignored
 
@@ -164,8 +177,7 @@ RUSTDOCFLAGS='-D warnings' \
     --no-deps --locked
 ```
 
-Use `libtimeless_ext.dylib` instead of `.so` on macOS. The
-`--include-ignored` run is intentional: it enables the metrics and logs
+The `--include-ignored` run is intentional: it enables the metrics and logs
 contracts that require the real release extension. It also covers trace,
 OTLP, Jaeger, rich-field fidelity, shutdown, backup, queue, cancellation, and
 8,192-span batching behavior.
@@ -183,7 +195,7 @@ cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
   --locked -- oracle validate
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml \
   --locked -- sql \
-  --extension "$PWD/target/release/libtimeless_ext.so"
+  --extension "$timeless_ext"
 ```
 
 These commands validate matrix IDs and states, shipped-row test references,
@@ -196,19 +208,31 @@ recipes and 173 statements through the real extension.
 ```sh
 tests/cli.sh
 tests/dbhealth.sh
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- docs
 
 for section in r1 r2 r3 r4 r8 logs-rich; do
-  TIMELESS_EXT="$PWD/target/release/libtimeless_ext.so" \
+  TIMELESS_EXT="$timeless_ext" \
     tests/correctness.sh "$section" || exit
 done
 ```
 
-`tests/cli.sh` is the comprehensive 45-section direct-SQL gate. It includes
+`tests/cli.sh` is the comprehensive 47-section direct-SQL gate. It includes
 150,000 randomized operations, five random-timing `SIGKILL` recoveries,
 transaction/savepoint rollback, cold reopen, storage/index consistency, all
 three signals, public stats and query surfaces, and the SQL cookbook. Run
-`tests/crash.sh target/release/libtimeless_ext.so` only when you want the
-five-round crash subset independently.
+`tests/crash.sh` only when you want the
+five-round crash subset independently. Set `TIMELESS_EXT=/path/to/extension`
+to reuse an already built library in CLI, correctness, or crash tests;
+`tests/crash.sh /path/to/extension` also accepts an explicit argument.
+`TIMELESS_DBHEALTH_EXT` provides the equivalent override for the health suite.
+Relative overrides are resolved before running detached tools, and missing
+files fail before the suite starts.
+
+The `docs` command executes the marked README overview and quickstart, metrics tour,
+dbhealth walkthrough, and cheat-sheet setup directly from their Markdown
+sources. It checks the first results and cold reopen in isolated databases.
+Build both release extensions separately first: the examples load the exact
+documented `target/release` paths, with SQLite resolving the platform suffix.
 
 #### The crash suite
 
@@ -232,7 +256,7 @@ cargo run --locked -p timeless-ext \
   --no-default-features --features embedded --example embedded
 
 cargo run --manifest-path tools/libsql-check/Cargo.toml --locked -- \
-  target/release/libtimeless_ext.so
+  "$timeless_ext"
 ```
 
 The first command statically registers the production telemetry modules in a
@@ -334,15 +358,15 @@ Rust `tools/bench` crate:
 
 ```sh
 cargo run --release --manifest-path tools/bench/Cargo.toml \
-  --bin bench -- target/release/libtimeless_ext.so
+  --bin bench -- "$timeless_ext"
 cargo run --release --manifest-path tools/bench/Cargo.toml \
-  --bin bench-logs -- target/release/libtimeless_ext.so
+  --bin bench-logs -- "$timeless_ext"
 cargo run --release --manifest-path tools/bench/Cargo.toml \
-  --bin bench-traces -- target/release/libtimeless_ext.so
+  --bin bench-traces -- "$timeless_ext"
 cargo run --release --manifest-path tools/bench/Cargo.toml \
   --bin bench-codec
 cargo run --release --manifest-path tools/bench/Cargo.toml \
-  --bin query-read -- target/release/libtimeless_ext.so
+  --bin query-read -- "$timeless_ext"
 ```
 
 ### Trace duration-pruning evidence
@@ -352,10 +376,10 @@ and after public optimize backfill. It deliberately mutates the supplied copy;
 never point it at the only copy of a database:
 
 ```sh
-cp --reflink=auto /path/to/legacy-traces.db /path/to/scratch-traces.db
+cp /path/to/legacy-traces.db /path/to/scratch-traces.db
 cargo run --release --manifest-path tools/query-harness/Cargo.toml --locked -- \
   gate trace-duration-evidence \
-  --extension target/release/libtimeless_ext.so \
+  --extension "$timeless_ext" \
   --database /path/to/scratch-traces.db \
   --table traces --service payments \
   --minimum-duration-ns 9000000000000000000 \

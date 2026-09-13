@@ -6,14 +6,12 @@ not turn the server binaries into readers for an unrelated Rust block-store
 directory; that conversion belongs to the higher-order product that owns the
 legacy format and must write through the public Timeless batch/SQL contracts.
 
-The current tagged source line is `0.7.x` (`v0.7.6`). Its four native package
-jobs and complete outer-checksum gate passed, and the archives plus
-`SHA256SUMS` are published as permanent `v0.7.6` GitHub Release assets — see
-the [artifact guide](ARTIFACTS.md) for the exact channel; never mix archives
-from different versions. The `0.7.x` handshake floors pair extension and
-servers at `0.7.0` in both directions, so earlier `0.6.x` and older binaries
-are not valid peers for the current line (and the `v0.3.0` tag predates the
-capability handshake entirely).
+Use the [publication status](ARTIFACTS.md#current-publication-status) to select
+a published bundle and the [compatibility contract](COMPATIBILITY.md) for the
+current source versions and pairing floors. Never mix archives from different
+versions. Changes marked unreleased below require builds from `main`; they
+are not claims about the latest downloadable binaries. Historical versions in
+this guide describe migration boundaries, not installation recommendations.
 
 ## Invariants
 
@@ -192,10 +190,11 @@ SELECT name, sql
 SQL
 ```
 
-Require extension version `0.7.x`, `data_abi=1`,
-`sql_surface_version=1`, `minimum_server_version>=0.7.0`, the expected signal
-batch generations, and every query work guard required by the intended
-server. The canonical field inventory is in the
+Require the extension identity to match the selected artifact manifest and
+both binaries to satisfy the pairing floors in the
+[compatibility contract](COMPATIBILITY.md). Check `data_abi`,
+`sql_surface_version`, the expected signal batch generations, and every query
+work guard required by the intended server. The canonical field inventory is in the
 [SQL API reference](SQL_API_REFERENCE.md#capability-and-version-handshake).
 
 Run representative public queries on the copy for every signal and compare
@@ -276,7 +275,7 @@ contracts. Restore the matching backup.
 | Detected source | Action |
 |---|---|
 | Fresh database | Create the public signal vtab with the desired timestamp/index/retention options; record schema ledger v1 through the writer. |
-| Current SQLite/libSQL database and matching `0.7.x` extension | Start normally after backup; full handshake and schema preflight remain mandatory. |
+| Current SQLite/libSQL database and compatible extension/server bundle | Start normally after backup; full handshake and schema preflight remain mandatory. |
 | Pre-ledger SQLite telemetry database | Back up, preflight with the new extension on a copy, then allow the new writer to add ledger v1 idempotently. |
 | Database created by tagged `v0.3.0` | Replace the extension with the current line before starting a release server; validate all signals on a copy because the old tag has no capability document. |
 | Future ledger or different data ABI | Stop. Use a compatible newer binary or an explicit versioned migration; do not mutate/downgrade. |

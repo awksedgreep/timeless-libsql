@@ -71,6 +71,21 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Installation and onboarding instructions agree (issue #67).** Published
+  release status has one canonical source, separate from unreleased features
+  and compatibility floors. The install commands select and checksum the
+  native archive on Linux/macOS. Server examples describe opt-in auth and
+  POST-only flush; dbhealth examples build and load its separate extension.
+  A documentation gate executes the SQL examples and checks cold reopen.
+- **Environment contracts expand shared OpenTelemetry settings (issue #68).**
+  The scanner reads the actual constructor prefixes and suffixes, including
+  shared production helpers and grouped documentation rows. Undocumented
+  settings and unused documentation entries still fail validation.
+- **Shell verification runs directly on Linux and macOS (issue #69).** CLI,
+  correctness, crash, and dbhealth suites select the native library suffix
+  and support explicit existing-library overrides. Backup assertions compare
+  canonical paths, and legacy fixtures follow the owned catalog table.
+
 - **SQL-created logs can be served with their stored timestamp unit (issue
   #66).** `TIMELESS_LOGS_TIMESTAMP_UNIT=ms|us` selects the unit, defaulting to
   `us`. Mismatches fail before policy, writer-PRAGMA, or ledger changes and

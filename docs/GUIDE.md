@@ -30,21 +30,26 @@ contracts.
 Build once:
 
 ```sh
-cargo build --release -p timeless-ext
+cargo build --release -p timeless-ext --locked
 # produces: target/release/libtimeless_ext.so   (.dylib on macOS)
 ```
 
-`v0.7.6` passed the complete four-platform archive and outer-checksum matrix
-and published the archives plus `SHA256SUMS` as permanent GitHub Release
-assets. Build from source or follow the exact current download status in the
-[artifact guide](ARTIFACTS.md).
+For prebuilt binaries, follow the [publication status and installation
+guide](ARTIFACTS.md#current-publication-status). This guide follows `main`;
+features listed as [Unreleased](../CHANGELOG.md#unreleased) require a source
+build until the next published release.
 
 Load it like any SQLite extension:
 
 ```sh
 # sqlite3 CLI
 sqlite3 mydata.db
-sqlite> .load ./target/release/libtimeless_ext
+```
+
+At the SQLite prompt:
+
+```sql
+.load ./target/release/libtimeless_ext
 ```
 
 ```sql
@@ -65,6 +70,10 @@ whole-database backups, and the host's supported SQLite/libSQL replication.
 There is nothing else to run for the SQL-only path.
 
 ## 2. Five-minute tour
+
+Run this in a fresh database from the repository root:
+
+<!-- executable-doc:metrics-tour:start -->
 
 ```sql
 .load ./target/release/libtimeless_ext
@@ -89,6 +98,8 @@ SELECT name, ts, value FROM metrics
 SELECT min(value), avg(value), max(value)
   FROM metrics WHERE name = 'cpu_usage';
 ```
+
+<!-- executable-doc:metrics-tour:end -->
 
 What you get for that: on hostile real-world data, **~6x less disk** than a
 plain table (up to ~200x on regular, well-behaved data), and time-range /
@@ -732,11 +743,21 @@ Two behaviors that surprise people but are intentional:
 
 ## 10. Monitor the database itself: dbhealth
 
-The extension can also store SQLite's *own* health history — cache hit
-rates, bloat, WAL growth, memory — compressed, inside the same file:
+The optional standalone health extension can store SQLite's *own* health
+history — cache hit rates, bloat, WAL growth, memory — inside the same file.
+It is built separately and is not included in the telemetry release bundle:
+
+```sh
+cargo build --release -p dbhealth-ext --locked
+```
+
+From the repository root, open a database with an extension-enabled SQLite CLI
+and run:
+
+<!-- executable-doc:dbhealth:start -->
 
 ```sql
--- with libdbhealth_ext.so loaded (the standalone health extension):
+.load ./target/release/libdbhealth_ext
 CREATE VIRTUAL TABLE dbhealth USING dbhealth;
 -- collection has begun: a background sampler records db-level gauges
 -- every 60s (every=N to tune, every=0 for manual-only), and resumes
@@ -757,6 +778,8 @@ SELECT ts, value FROM dbhealth
 SELECT max(value) FROM dbhealth
  WHERE name = 'bloat_ratio' AND ts > unixepoch() - 7*86400;
 ```
+
+<!-- executable-doc:dbhealth:end -->
 
 And you don't have to know what any of the numbers *mean* — creating the
 table also creates three views, and **`dbhealth_report`** is the one to
@@ -801,14 +824,28 @@ inventory: [DBHEALTH.md](DBHEALTH.md).
 
 ## 11. Cheat sheet
 
+Build both extensions separately as above. This setup block runs in a fresh
+SQLite database from the repository root:
+
+<!-- executable-doc:cheat-sheet-setup:start -->
+
 ```sql
-.load ./libtimeless_ext
+.load ./target/release/libtimeless_ext
+.load ./target/release/libdbhealth_ext
 
 -- CREATE
 CREATE VIRTUAL TABLE metrics  USING timeless_metrics;
 CREATE VIRTUAL TABLE logs     USING timeless_logs(index_keys='service,host,status');
 CREATE VIRTUAL TABLE traces   USING timeless_traces;
-CREATE VIRTUAL TABLE dbhealth USING timeless_health;   -- the db monitors itself
+CREATE VIRTUAL TABLE dbhealth USING dbhealth;   -- the db monitors itself
+```
+
+<!-- executable-doc:cheat-sheet-setup:end -->
+
+The remaining entries are SQL templates: bind the named parameters and replace
+`...` with your columns or query before executing them.
+
+```sql
 
 -- INSERT                         units:
 INSERT INTO metrics(name, ts, value, labels) VALUES (:n, :s,  :v, :json);      -- ts: seconds

@@ -7,12 +7,18 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "== building dbhealth-ext (release) =="
-cargo build -p dbhealth-ext --release --manifest-path "$ROOT/Cargo.toml"
+source "$ROOT/tests/platform.sh"
+if [[ -n "${TIMELESS_DBHEALTH_EXT:-}" ]]; then
+  EXT="$(timeless_existing_library "$TIMELESS_DBHEALTH_EXT")"
+else
+  EXT="$(timeless_library_path "$ROOT/target/release/libdbhealth_ext")"
+  echo "== building dbhealth-ext (release) =="
+  cargo build -p dbhealth-ext --release --locked --manifest-path "$ROOT/Cargo.toml"
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
-  gate dbhealth --extension "$ROOT/target/release/libdbhealth_ext" \
+  gate dbhealth --extension "$EXT" \
   --database "$TMP/auto.db"

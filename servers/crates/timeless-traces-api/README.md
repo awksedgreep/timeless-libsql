@@ -9,8 +9,9 @@ The canonical binary, route, configuration, authentication, lifecycle,
 backup, and error contract is the
 [Rust signal server API reference](../../../docs/SERVER_API_REFERENCE.md).
 
-The release binary requires policy authentication by default. An external
-control plane may own cluster, user, session, and token administration.
+Authentication is off by default on the loopback listener. An external control
+plane may own cluster, user, session, and token administration when policy
+authentication is enabled; see the configuration below.
 
 The current binary provides OTLP ingest, the pinned Jaeger read surface, a
 reusable bounded/streaming extension read path, and a narrow lossless
@@ -19,11 +20,13 @@ historical-query surface for TimelessTracesDashboard.
 ## Run
 
 ```sh
-cargo build -p timeless-ext
+cargo build --release -p timeless-ext --locked
+cargo build --release --manifest-path servers/Cargo.toml \
+  -p timeless-traces-api --locked
 timeless_traces_dir="$(mktemp -d)"
 trap 'rm -rf -- "$timeless_traces_dir"' EXIT
-cargo run --manifest-path servers/Cargo.toml -p timeless-traces-api -- \
-  target/debug/libtimeless_ext.so "$timeless_traces_dir/traces.db"
+servers/target/release/timeless-traces-api \
+  target/release/libtimeless_ext "$timeless_traces_dir/traces.db"
 ```
 
 Authentication is off by default. To harden a deployment, opt in with
@@ -73,7 +76,7 @@ The default listener is loopback-only at `127.0.0.1:19449`. Configuration:
   whole-file sizes are separate series and never part of the ratio.
   Exact per-index allocation is intentionally unavailable on routine paths,
   so the `sqlite_index_bytes` compatibility field and gauge are `0`.
-- `GET|POST /api/v1/flush` is an ordered completion and durability barrier. Its
+- `POST /api/v1/flush` is an ordered completion and durability barrier. Its
   response identifies the admitted request watermark covered by the flush.
 - `POST /api/v1/backup` flushes, drains actionable optimize backlog,
   checkpoints the WAL, and publishes a verified no-overwrite SQLite backup.

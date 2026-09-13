@@ -31,11 +31,13 @@ than the exact tree being tagged verifies nothing.
 5. **CLI suite**: `./tests/cli.sh` — all sections.
 6. **Correctness suites**: `./tests/correctness.sh` for each section
    (`r1 r2 r3 r4 r8 logs-rich`), plus `./tests/dbhealth.sh` and
-   `./tests/crash.sh target/release/libtimeless_ext.so`.
+   `./tests/crash.sh`.
 7. **Query contracts + oracles** (the `query-contracts` gate, runnable
    locally):
    `cargo test --manifest-path tools/query-harness/Cargo.toml --locked`,
-   then `-- contracts` and `-- oracle validate`.
+   then `-- contracts`, `-- oracle validate`, and `-- docs` (after both
+   release extensions have been built separately). The docs gate executes
+   the onboarding SQL and verifies its results after cold reopen.
 8. **Everything above runs locally, in one pass, without pausing between
    steps.** The dispatchable CI workflows re-run the same binaries on
    slower shared runners and have produced false failures from timing

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use regex::Regex;
 
 const MATRICES: [&str; 2] = [
@@ -630,35 +630,68 @@ fn validate_public_server_routes(root: &Path) -> Result<Vec<String>> {
     Ok(errors)
 }
 
-fn source_runtime_environment(root: &Path) -> Result<BTreeSet<String>> {
+struct RuntimeEnvironment {
+    names: BTreeSet<String>,
+    /// Prefix arguments at actual calls to the shared config constructor.
+    prefixes: BTreeSet<String>,
+}
+
+fn source_runtime_environment(root: &Path) -> Result<RuntimeEnvironment> {
     let variable = Regex::new(r#"\"(TIMELESS_[A-Z0-9_]+)\""#)?;
-    let sources = [
-        "servers/crates/timeless-api-common/src/auth.rs",
-        "servers/crates/timeless-api-common/src/lib.rs",
-        "servers/crates/timeless-metrics-api/src/main.rs",
-        "servers/crates/timeless-logs-api/src/main.rs",
-        "servers/crates/timeless-traces-api/src/main.rs",
-    ];
-    let mut variables = BTreeSet::new();
-    for relative in sources {
-        let path = root.join(relative);
-        if !path.is_file() {
-            continue;
-        }
+    let constructor = Regex::new(r#"OtelTracesConfig::from_env\s*\(\s*\"(TIMELESS_[A-Z0-9_]+)\""#)?;
+    let mut sources = Vec::new();
+    for name in ["api-common", "metrics-api", "logs-api", "traces-api"] {
+        rust_source_files(
+            &root.join(format!("servers/crates/timeless-{name}/src")),
+            &mut sources,
+        )?;
+    }
+    let mut names = BTreeSet::new();
+    let mut prefixes = BTreeSet::new();
+    for path in sources {
         let source = production_source(&path)?;
-        variables.extend(
+        names.extend(
             variable
                 .captures_iter(&source)
                 .map(|captures| captures[1].to_owned())
                 .filter(|name| !name.starts_with("TIMELESS_BUILD_")),
         );
+        prefixes.extend(
+            constructor
+                .captures_iter(&source)
+                .map(|captures| captures[1].to_owned()),
+        );
     }
-    Ok(variables)
+    if !prefixes.is_empty() {
+        let relative = "servers/crates/timeless-api-common/src/otel.rs";
+        let shared = production_source(&root.join(relative)).with_context(|| {
+            format!("cannot expand OpenTelemetry environment names without {relative}")
+        })?;
+        // The shared constructor builds name("SUFFIX") as prefix + '_' +
+        // suffix. Read its actual call sites, including settings added later;
+        // a hand-maintained whitelist would hide undocumented runtime knobs.
+        ensure!(shared.contains(r#"format!("{prefix}_{suffix}")"#),
+            "{relative}: OpenTelemetry environment-name construction changed; update the contract scanner");
+        let suffix = Regex::new(r#"\bname\s*\(\s*\"([A-Z][A-Z0-9_]*)\"\s*\)"#)?;
+        let suffixes: BTreeSet<_> = suffix
+            .captures_iter(&shared)
+            .map(|captures| captures[1].to_owned())
+            .collect();
+        ensure!(
+            !suffixes.is_empty(),
+            "{relative}: no OpenTelemetry environment suffixes found"
+        );
+        for prefix in &prefixes {
+            names.remove(prefix);
+            names.extend(suffixes.iter().map(|suffix| format!("{prefix}_{suffix}")));
+        }
+    }
+    Ok(RuntimeEnvironment { names, prefixes })
 }
 
 fn validate_public_server_environment(root: &Path) -> Result<Vec<String>> {
-    let registered = source_runtime_environment(root)?;
-    if registered.is_empty() {
+    let runtime = source_runtime_environment(root)?;
+    if runtime.names.is_empty() {
         return Ok(Vec::new());
     }
     let relative = "docs/SERVER_API_REFERENCE.md";
@@ -670,17 +703,35 @@ fn validate_public_server_environment(root: &Path) -> Result<Vec<String>> {
     }
     let content = fs::read_to_string(path)?;
     let (region, mut errors) = marked_region(&content, relative, "public-server-environment")?;
-    let row = Regex::new(r#"(?m)^\|\s*`(TIMELESS_[A-Z0-9_]+)`\s*\|"#)?;
-    let documented: BTreeSet<String> = row
-        .captures_iter(region)
-        .map(|captures| captures[1].to_owned())
-        .collect();
-    for name in registered.difference(&documented) {
+    let token = Regex::new(r"`([^`]+)`")?;
+    let mut documented = BTreeSet::new();
+    for line in region.lines().filter(|line| line.starts_with('|')) {
+        let values = cells(line);
+        let Some(cell) = values.first() else { continue };
+        let mut prefix = None;
+        for capture in token.captures_iter(cell) {
+            let name = &capture[1];
+            if name.starts_with("TIMELESS_") {
+                prefix = runtime
+                    .prefixes
+                    .iter()
+                    .filter(|prefix| name.starts_with(&format!("{prefix}_")))
+                    .max_by_key(|prefix| prefix.len());
+                documented.insert(name.to_owned());
+            } else if let Some(suffix) = name.strip_prefix("..._") {
+                match prefix {
+                    Some(prefix) => { documented.insert(format!("{prefix}_{suffix}")); }
+                    None => errors.push(format!("{relative}: cannot resolve environment shorthand {name:?}; use a full variable name")),
+                }
+            }
+        }
+    }
+    for name in runtime.names.difference(&documented) {
         errors.push(format!(
             "{relative}: runtime environment variable {name} has no inventory row"
         ));
     }
-    for name in documented.difference(&registered) {
+    for name in documented.difference(&runtime.names) {
         errors.push(format!(
             "{relative}: environment row {name} is not read by production server source"
         ));
@@ -2613,6 +2664,72 @@ mod tests {
         assert!(!errors
             .iter()
             .any(|error| error.contains("TIMELESS_TEST_ONLY")));
+    }
+
+    #[test]
+    fn constructed_environment_names_and_grouped_docs_remain_strict() {
+        let fixture = fixture();
+        let main = fixture
+            .path()
+            .join("servers/crates/timeless-metrics-api/src");
+        let common = fixture
+            .path()
+            .join("servers/crates/timeless-api-common/src");
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(&common).unwrap();
+        fs::write(main.join("main.rs"), r#"let config = OtelTracesConfig::from_env("TIMELESS_METRICS_OTEL_TRACES", &defaults);"#).unwrap();
+        let shared = r#"
+impl OtelTracesConfig {
+    pub fn from_env(prefix: &str, defaults: &Self) {
+        let name = |suffix: &str| format!("{prefix}_{suffix}");
+        let endpoint = optional_env(&name("ENDPOINT"));
+        let headers = optional_env(&name("HEADERS"));
+        let file = optional_env(&name("HEADERS_FILE"));
+    }
+}
+#[cfg(test)]
+fn tests() { let _ = name("TEST_ONLY"); let _ = "TIMELESS_TEST_ONLY"; }
+"#;
+        fs::write(common.join("otel.rs"), shared).unwrap();
+        let documentation = "<!-- public-server-environment:start -->\n\
+            | Variable | Meaning |\n|---|---|\n\
+            | `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` | endpoint |\n\
+            | `TIMELESS_METRICS_OTEL_TRACES_HEADERS`, `..._HEADERS_FILE` | authentication |\n\
+            <!-- public-server-environment:end -->\n";
+        let reference = fixture.path().join("docs/SERVER_API_REFERENCE.md");
+        fs::write(&reference, documentation).unwrap();
+        assert!(validate_public_server_environment(fixture.path())
+            .unwrap()
+            .is_empty());
+
+        fs::write(
+            common.join("otel.rs"),
+            shared.replace(
+                "let endpoint =",
+                "let hidden = optional_env(&name(\"UNDOCUMENTED\")); let endpoint =",
+            ),
+        )
+        .unwrap();
+        // A literal read moved into a shared production helper is covered too.
+        fs::write(
+            common.join("settings.rs"),
+            "fn setting() { std::env::var(\"TIMELESS_SHARED_UNDOCUMENTED\"); }",
+        )
+        .unwrap();
+        let errors = validate_public_server_environment(fixture.path()).unwrap();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().any(|error| error
+            .contains("TIMELESS_METRICS_OTEL_TRACES_UNDOCUMENTED has no inventory row")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("TIMELESS_SHARED_UNDOCUMENTED has no inventory row")));
+
+        fs::write(&reference, documentation.replace("<!-- public-server-environment:end -->", "| `TIMELESS_METRICS_OTEL_TRACES_UNUSED` | obsolete |\n<!-- public-server-environment:end -->")).unwrap();
+        let errors = validate_public_server_environment(fixture.path()).unwrap();
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("TIMELESS_METRICS_OTEL_TRACES_UNUSED is not read")));
+        assert!(!errors.iter().any(|error| error.contains("TEST_ONLY")));
     }
 
     #[test]

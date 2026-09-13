@@ -10,7 +10,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXT="${TIMELESS_EXT:-$ROOT/target/release/libtimeless_ext.so}"
+source "$ROOT/tests/platform.sh"
 SECTION="${1:-r1}"
 
 case "$SECTION" in
@@ -21,8 +21,11 @@ case "$SECTION" in
     ;;
 esac
 
-if [[ -z "${TIMELESS_EXT:-}" ]]; then
-  cargo build -p timeless-ext --release --manifest-path "$ROOT/Cargo.toml"
+if [[ -n "${TIMELESS_EXT:-}" ]]; then
+  EXT="$(timeless_existing_library "$TIMELESS_EXT")"
+else
+  EXT="$(timeless_library_path "$ROOT/target/release/libtimeless_ext")"
+  cargo build -p timeless-ext --release --locked --manifest-path "$ROOT/Cargo.toml"
 fi
 
 TMP="$(mktemp -d)"

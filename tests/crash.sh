@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kill -9 crash test (hardening session, Job 3). Invoked from cli.sh
-# section 20, or standalone:  tests/crash.sh <path-to-libtimeless_ext.so>
+# section 20, or standalone: tests/crash.sh [extension-path]
 #
 # WHAT DURABILITY IS PROMISED (the contract these assertions pin down):
 #   - FLUSHED = DURABLE. A 'flush' command writes chunk/block rows
@@ -36,7 +36,14 @@
 
 set -euo pipefail
 
-EXT="${1:?usage: crash.sh <path-to-libtimeless_ext.so>}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/tests/platform.sh"
+if [[ -n "${1:-${TIMELESS_EXT:-}}" ]]; then
+  EXT="$(timeless_existing_library "${1:-$TIMELESS_EXT}")"
+else
+  EXT="$(timeless_library_path "$ROOT/target/release/libtimeless_ext")"
+  cargo build -p timeless-ext --release --locked --manifest-path "$ROOT/Cargo.toml"
+fi
 ITERATIONS=5
 # 3000 rounds ≈ several seconds of wall time on tmpfs — the kill at
 # 0.1–0.8s reliably lands MID-FLIGHT (a 200-round script finished in

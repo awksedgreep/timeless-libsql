@@ -89,10 +89,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-EXT="$ROOT/target/release/libtimeless_ext.so"
-
-echo "== building extension (release) =="
-cargo build -p timeless-ext --release --manifest-path "$ROOT/Cargo.toml"
+source "$ROOT/tests/platform.sh"
+if [[ -n "${TIMELESS_EXT:-}" ]]; then
+  EXT="$(timeless_existing_library "$TIMELESS_EXT")"
+else
+  EXT="$(timeless_library_path "$ROOT/target/release/libtimeless_ext")"
+  echo "== building extension (release) =="
+  cargo build -p timeless-ext --release --locked --manifest-path "$ROOT/Cargo.toml"
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -167,7 +171,7 @@ metric_sample_types|["float64"]
 native_histograms|0
 sql_surface_version|1
 storage_modules|["timeless_metrics","timeless_logs","timeless_traces"]
-query_module_count|22
+query_module_count|23
 sql_module_inventory|0|0
 raw_batches_versioned|0
 packed_formats|TRF1|TWB1|TRB1|TAF1|TLF1'
@@ -2678,7 +2682,7 @@ reopen|{"env":"prod","host":"a"}|40|6.0'
 # none, and SQLite rewrites dependent view definitions during ALTER TABLE
 # DROP COLUMN, which cannot resolve TVF-backed views without the extension
 # (and must not run against a half-migrated schema with it).
-sqlite3 "$E36DB" "DROP VIEW timeless_latest_series; DROP VIEW timeless_latest_latest; DELETE FROM timeless_schema_inventory;"
+sqlite3 "$E36DB" ".load $EXT" "DROP TABLE timeless_latest_series; DROP VIEW timeless_latest_latest; DELETE FROM timeless_schema_inventory;"
 sqlite3 "$E36DB" "ALTER TABLE latest_chunks DROP COLUMN max_ts_val;"
 set +e
 legacy_err=$(sqlite3 "$E36DB" ".load $EXT" \

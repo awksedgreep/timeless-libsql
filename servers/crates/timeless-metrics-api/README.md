@@ -162,12 +162,13 @@ timeless_metrics_dir="$(mktemp -d)"
 trap 'rm -rf -- "$timeless_metrics_dir"' EXIT
 \
   servers/target/release/timeless-metrics-api \
-  target/release/libtimeless_ext.so \
+  target/release/libtimeless_ext \
   "$timeless_metrics_dir/metrics.db" \
   127.0.0.1:19439
 ```
 
-Use `.dylib` on macOS. Authentication is off by default. To harden a deployment, opt in with
+SQLite supplies the platform suffix for the extension path above.
+Authentication is off by default. To harden a deployment, opt in with
 `TIMELESS_AUTH_MODE=required`, `TIMELESS_AUTH_POLICY_FILE`, and
 `TIMELESS_TENANT`; non-loopback binding additionally requires
 `TIMELESS_ALLOW_NON_LOOPBACK=1` in a separately secured deployment.

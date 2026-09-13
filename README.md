@@ -8,13 +8,16 @@ blocks, indexes, rollups, and maintenance metadata in that database, so the
 host retains SQLite transactions, WAL, backup, and libSQL deployment choices.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Release line: 0.7.x](https://img.shields.io/badge/release%20line-0.7.x-orange.svg)
+[![Latest release](https://img.shields.io/github/v/release/awksedgreep/timeless-libsql)](docs/ARTIFACTS.md#current-publication-status)
 
 Think of it as **FTS5 for telemetry**: load one extension, create the table
-types you need, and query them with SQL.
+types you need, and query them with SQL. After the source build in the
+[quick start](#quick-start), run this from the repository root:
+
+<!-- executable-doc:overview:start -->
 
 ```sql
-.load ./libtimeless_ext
+.load ./target/release/libtimeless_ext
 
 CREATE VIRTUAL TABLE metrics USING timeless_metrics;
 CREATE VIRTUAL TABLE logs USING timeless_logs(
@@ -25,6 +28,8 @@ CREATE VIRTUAL TABLE traces USING timeless_traces(
   attribute_indexes='[{"scope":"span","path":"/http.method"}]'
 );
 ```
+
+<!-- executable-doc:overview:end -->
 
 ## The two-minute tour
 
@@ -60,20 +65,17 @@ generator is a second loadable extension, so the whole thing is SQL in one
 
 ## Current status
 
-The project is on the pre-1.0 `0.7.x` compatibility line. Extension and Rust
-signal-server versions move together and negotiate capabilities at startup;
-matching version strings alone are not sufficient.
+The project is pre-1.0. Extension and Rust signal-server versions move together
+and negotiate capabilities at startup; matching version strings alone are not
+sufficient. The [compatibility contract](docs/COMPATIBILITY.md) records the
+current source versions and pairing floors.
 
-`v0.7.8` is the current release, and it is what makes the compression numbers
-above honest: every signal now exports data-block payload, index, and WAL
-bytes as separate series, with a raw comparator, so a ratio is raw versus
-storage and never quietly folds in index or file overhead. Its tag-triggered
-artifact run built, identity-checked, and install/remove-drilled all four
-native Linux/macOS archives, verified the complete outer checksum set, and
-published the
-[`v0.7.8` GitHub Release](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.7.8)
-with the archives plus `SHA256SUMS` as permanent assets. Download and
-verification steps are in [the artifact guide](docs/ARTIFACTS.md).
+The [publication status](docs/ARTIFACTS.md#current-publication-status) is the
+single source for the latest published release and verified native archives.
+Follow the [installation steps](docs/ARTIFACTS.md#installing) for binaries.
+This checkout's guides describe `main`; changes in the
+[Unreleased changelog](CHANGELOG.md#unreleased) require a source build until
+they appear in a published release.
 
 The storage, SQL, and Rust API contracts are implemented and extensively
 tested. Query-language coverage is explicit rather than implied:
@@ -131,7 +133,12 @@ cargo build --release -p timeless-ext --locked
 # macOS: target/release/libtimeless_ext.dylib
 ```
 
-Load it and exercise all three signals:
+Apple's `/usr/bin/sqlite3` disables extension loading. On macOS, first run
+`brew install sqlite` and `export PATH="$(brew --prefix sqlite)/bin:$PATH"`.
+
+Load it and exercise all three signals in a new `telemetry.db`:
+
+<!-- executable-doc:quickstart:start -->
 
 ```sh
 sqlite3 telemetry.db <<'SQL'
@@ -165,9 +172,7 @@ SELECT lower(hex(trace_id)), name, duration_ns
 SQL
 ```
 
-Apple's `/usr/bin/sqlite3` disables extension loading. On macOS, install
-SQLite with Homebrew and use `$(brew --prefix sqlite)/bin/sqlite3`, or embed
-the extension in a Rust host.
+<!-- executable-doc:quickstart:end -->
 
 The logs example explicitly uses microseconds, matching the standalone server's
 default. After closing the SQLite session, you can serve those same rows:

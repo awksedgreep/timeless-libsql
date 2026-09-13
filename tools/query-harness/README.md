@@ -28,9 +28,27 @@ Execute every fenced recipe in `docs/QUERY_SQL_EQUIVALENTS.md` against the
 real public extension:
 
 ```bash
+source tests/platform.sh
+timeless_ext="$(timeless_library_path "$PWD/target/release/libtimeless_ext")"
 cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- \
-  sql --extension target/release/libtimeless_ext.so
+  sql --extension "$timeless_ext"
 ```
+
+Execute the marked SQL onboarding examples directly from the README and
+user's guide, checking both the first results and a cold reopen:
+
+```bash
+cargo build --release -p timeless-ext --locked
+cargo build --release -p dbhealth-ext --locked
+cargo run --quiet --manifest-path tools/query-harness/Cargo.toml --locked -- docs
+```
+
+This command uses an extension-enabled `sqlite3` CLI and the examples' actual
+release-library paths. See the macOS PATH setup in `TESTING.md`. It includes
+the separate dbhealth extension so a wrong module or missing load fails.
+Published-artifact installation is a separate network check: run the marked
+installation block in `docs/ARTIFACTS.md` in a fresh download directory with
+`TIMELESS_INSTALL_PREFIX` pointing to an isolated writable prefix.
 
 Run the two-minute production fault gate against release builds:
 
@@ -56,6 +74,7 @@ The modules have narrow responsibilities:
 
 - `contracts` parses matrices and documentation, validates legal states and
   ownership, checks local links, and proves shipped-row test references;
+- `docs` executes marked onboarding SQL and checks durable results;
 - `oracle` validates immutable pins, owns temporary containers, writes the
   deterministic raw-Snappy Remote Write fixture, and compares exact API cases;
 - `sql_equivalents` extracts and executes public SQL recipes and checks their
