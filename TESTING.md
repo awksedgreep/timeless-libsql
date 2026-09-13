@@ -289,6 +289,11 @@ refresh checked fixture files, so review `git diff` afterward. See
 
 ## Query performance evidence
 
+For pinned, same-workload comparisons with Prometheus, VictoriaMetrics and
+VictoriaLogs, use the Rust [`competitive` benchmark](docs/COMPETITIVE_BENCHMARK.md).
+It verifies complete results before reporting timings and runs every engine
+on the same native Linux container platform.
+
 Evidence capture requires a clean worktree and exact matching extension and
 server build identities:
 

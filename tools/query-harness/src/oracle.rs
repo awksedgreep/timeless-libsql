@@ -140,7 +140,7 @@ fn validate_manifest(root: &Path, manifest: &OracleManifest) -> Result<Vec<Strin
     Ok(errors)
 }
 
-fn command_output(program: &str, args: &[String], timeout: Duration) -> Result<Output> {
+pub(super) fn command_output(program: &str, args: &[String], timeout: Duration) -> Result<Output> {
     let mut child = Command::new(program)
         .args(args)
         .stdout(Stdio::piped())

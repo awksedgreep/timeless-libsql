@@ -1,3 +1,4 @@
+mod competitive;
 mod contracts;
 mod docs;
 mod evidence;
@@ -34,6 +35,8 @@ enum Command {
     Oracle(oracle::OracleArgs),
     /// Capture public-API query performance and resource evidence.
     Evidence(evidence::EvidenceArgs),
+    /// Compare verified identical workloads on native Linux containers.
+    Competitive(competitive::CompetitiveArgs),
     /// Run Rust-native extension fixtures and release-gate regressions.
     Gate(gate::GateArgs),
     /// Run the completion-aware production fault and soak gate.
@@ -63,6 +66,7 @@ fn main() -> Result<()> {
         Command::Docs => docs::run(&root),
         Command::Oracle(args) => oracle::run(&root, args),
         Command::Evidence(args) => evidence::run(&root, args),
+        Command::Competitive(args) => competitive::run(&root, args),
         Command::Gate(args) => gate::run(&root, args),
         Command::Production(args) => production::run(&root, args),
         Command::Sql(args) => sql_equivalents::run(&root, args),
