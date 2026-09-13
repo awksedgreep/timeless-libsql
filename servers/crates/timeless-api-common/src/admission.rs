@@ -59,7 +59,10 @@ impl BytesGate {
         let requested = u64::try_from(bytes)
             .unwrap_or(u64::MAX)
             .div_ceil(UNIT_BYTES);
-        let total = self.semaphore.available_permits() as u64;
+        // A waiter must keep its entire reservation while queued. Clamping
+        // against the permits currently available undercounts contended
+        // requests (a full gate would turn every waiter into one unit).
+        let total = self.max_bytes / UNIT_BYTES;
         let units = u32::try_from(requested.min(total))
             .unwrap_or(u32::MAX)
             .max(1);
@@ -82,8 +85,67 @@ impl BytesGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::{poll_fn, Future};
     use std::sync::Arc as StdArc;
+    use std::task::Poll;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn partially_full_gate_waits_for_the_entire_batch() {
+        for requested_units in [2, 160] {
+            let gate = BytesGate::new(3 * UNIT_BYTES);
+            let held = gate.acquire(2 * UNIT_BYTES as usize).await;
+            let mut waiting = Box::pin(gate.acquire(requested_units * UNIT_BYTES as usize));
+            assert!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+                .await
+                .is_pending());
+            drop(held);
+            let reservation = waiting.await;
+            let expected_free = 3 - requested_units.min(3);
+            assert_eq!(gate.semaphore.available_permits(), expected_free);
+            drop(reservation);
+            assert_eq!(gate.semaphore.available_permits(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn full_gate_waiters_keep_their_requested_sizes() {
+        let gate = BytesGate::new(3 * UNIT_BYTES);
+        let held = gate.acquire(3 * UNIT_BYTES as usize).await;
+        let mut first = Box::pin(gate.acquire(3 * UNIT_BYTES as usize));
+        let mut second = Box::pin(gate.acquire(2 * UNIT_BYTES as usize));
+        assert!(poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+            .await
+            .is_pending());
+        assert!(poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+            .await
+            .is_pending());
+        drop(held);
+        let first = first.await;
+        assert!(poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+            .await
+            .is_pending());
+        drop(first);
+        let second = second.await;
+        assert_eq!(gate.semaphore.available_permits(), 1);
+        drop(second);
+        assert_eq!(gate.semaphore.available_permits(), 3);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_large_waiter_returns_partial_reservations() {
+        let gate = BytesGate::new(3 * UNIT_BYTES);
+        let held = gate.acquire(2 * UNIT_BYTES as usize).await;
+        let mut waiting = Box::pin(gate.acquire(3 * UNIT_BYTES as usize));
+        assert!(poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+            .await
+            .is_pending());
+        drop(waiting);
+        let remaining = gate.acquire(UNIT_BYTES as usize).await;
+        drop(held);
+        drop(remaining);
+        assert_eq!(gate.semaphore.available_permits(), 3);
+    }
 
     #[tokio::test]
     async fn oversized_batch_clamps_to_full_capacity_and_still_admits() {
