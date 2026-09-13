@@ -37,7 +37,13 @@ pub(crate) struct CompetitiveArgs {
 }
 
 fn command(runtime: &str, args: &[String]) -> Result<String> {
-    let output = super::oracle::command_output(runtime, args, Duration::from_secs(180))?;
+    let mut args = args.to_vec();
+    if args.first().is_some_and(|arg| arg == "run") {
+        // Images are pulled and verified explicitly before container creation.
+        // Do not inherit a host-level "always" pull policy during measurement.
+        args.insert(1, "--pull=never".into());
+    }
+    let output = super::oracle::command_output(runtime, &args, Duration::from_secs(180))?;
     ensure!(
         output.status.success(),
         "{runtime} {args:?}: {}",
