@@ -50,14 +50,16 @@ do not satisfy this check. Timeless also executes its explicit flush endpoint.
 After timing, the runner repeats the restart and complete-data check.
 
 The six metric queries cover an exact selector, wide selector, sum, grouped
-sum, rate and wide range. The six log queries cover count, filtered count,
+sum, rate and wide range. The eight log queries cover count, filtered count,
 grouped count, exact message, indexed rows and ordered full rows. Expected
+count results use both `as total` (Timeless's native count path) and `as n`
+(its general pipeline) to expose alias-sensitive execution costs. Expected
 results are generated independently from the fixture, not copied from a
 competitor response. Every response, including warmups, must match those
 expectations. Metric series order and numeric spelling may differ; labels,
 result types, timestamps, sample order, log order and projected fields must
 match. Only floating sample values have a relative/absolute `1e-9` tolerance.
-The declared aggregate count column `n` is normalized from a decimal string
+The declared aggregate count columns `n` and `total` are normalized from a decimal string
 or an unsigned JSON number: VictoriaLogs and Timeless use different wire
 encodings for this numeric result. Retained log field types are not coerced.
 Unsorted aggregate groups compare by group identity; explicitly sorted retained

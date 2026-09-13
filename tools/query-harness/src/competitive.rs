@@ -606,14 +606,24 @@ fn log_queries(entries: usize, at: i64) -> Vec<Query> {
     };
     vec![
         query(
-            "count",
+            "count_as_n",
             "* | stats count() as n".into(),
             json!([{"n":entries.to_string()}]),
         ),
         query(
-            "filtered_count",
+            "filtered_count_as_n",
             "service:=api | stats count() as n".into(),
             json!([{"n":entries.div_ceil(4).to_string()}]),
+        ),
+        query(
+            "count_as_total",
+            "* | stats count() as total".into(),
+            json!([{"total":entries.to_string()}]),
+        ),
+        query(
+            "filtered_count_as_total",
+            "service:=api | stats count() as total".into(),
+            json!([{"total":entries.div_ceil(4).to_string()}]),
         ),
         query(
             "grouped_count",
@@ -685,11 +695,13 @@ fn canonical_logs(rows: &Value) -> Result<Value> {
         // The named aggregate count is numeric in Timeless and a decimal
         // string in VictoriaLogs. Normalize this one declared output column,
         // never arbitrary fields from the retained log rows.
-        if let Some(count) = object.get_mut("n") {
-            *count = json!(match count.as_str() {
-                Some(value) => value.parse::<u64>().context("decimal count")?,
-                None => count.as_u64().context("unsigned count")?,
-            });
+        for field in ["n", "total"] {
+            if let Some(count) = object.get_mut(field) {
+                *count = json!(match count.as_str() {
+                    Some(value) => value.parse::<u64>().context("decimal count")?,
+                    None => count.as_u64().context("unsigned count")?,
+                });
+            }
         }
         if let Some(time) = object.get_mut("_time") {
             *time = json!(chrono::DateTime::parse_from_rfc3339(
@@ -702,7 +714,10 @@ fn canonical_logs(rows: &Value) -> Result<Value> {
     let array = rows.as_array_mut().context("log array")?;
     // Grouped aggregates have no promised order without a sort operator.
     // Raw log queries all contain an explicit timestamp sort and stay ordered.
-    if array.iter().all(|row| row.get("n").is_some()) {
+    if array
+        .iter()
+        .all(|row| row.get("n").or_else(|| row.get("total")).is_some())
+    {
         array.sort_by_cached_key(|row| row["service"].to_string());
     }
     Ok(rows)
@@ -1184,7 +1199,14 @@ mod tests {
         let expected = canonical_metrics(&data).unwrap();
         data["result"].as_array_mut().unwrap().reverse();
         assert_eq!(canonical_metrics(&data).unwrap(), expected);
-        let expected = canonical_logs(&log_queries(64, 1000)[5].expected).unwrap();
+        let expected = canonical_logs(
+            &log_queries(64, 1000)
+                .iter()
+                .find(|query| query.name == "wide_rows")
+                .unwrap()
+                .expected,
+        )
+        .unwrap();
         let mut reversed = expected.clone();
         reversed.as_array_mut().unwrap().reverse();
         assert!(!equivalent(&reversed, &expected));
@@ -1202,6 +1224,10 @@ mod tests {
         assert_ne!(
             canonical_logs(&json!([{"host":"42"}])).unwrap(),
             canonical_logs(&json!([{"host":42}])).unwrap()
+        );
+        assert_ne!(
+            canonical_logs(&json!([{"_time":"2026-09-13T00:00:00.000000000Z"}])).unwrap(),
+            canonical_logs(&json!([{"_time":"2026-09-13T00:00:00.000000001Z"}])).unwrap()
         );
     }
 
