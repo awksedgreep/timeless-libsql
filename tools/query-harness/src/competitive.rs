@@ -211,7 +211,7 @@ impl Server {
                     "-v",
                     &format!("{}:/opt/timeless:ro", args.bundle.display()),
                     "-e",
-                    "TIMELESS_AUTH_MODE=open",
+                    "TIMELESS_AUTH_MODE=disabled",
                 ]));
                 let binary = if kind.logs() {
                     "timeless-logs-api"
@@ -291,13 +291,22 @@ impl Server {
             {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
-                let logs = command(
+            let running = command(
+                &self.runtime,
+                &strings(&["inspect", "--format", "{{.State.Running}}", &self.name]),
+            )?;
+            if running != "true" || Instant::now() >= deadline {
+                let logs = super::oracle::command_output(
                     &self.runtime,
                     &strings(&["logs", "--tail", "30", &self.name]),
-                )
-                .unwrap_or_default();
-                bail!("{} did not become ready: {logs}", self.kind.name());
+                    Duration::from_secs(10),
+                )?;
+                bail!(
+                    "{} did not become ready: {}{}",
+                    self.kind.name(),
+                    String::from_utf8_lossy(&logs.stdout),
+                    String::from_utf8_lossy(&logs.stderr)
+                );
             }
             std::thread::sleep(Duration::from_millis(100));
         }
