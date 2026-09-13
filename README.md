@@ -143,9 +143,9 @@ VALUES ('cpu_usage', 1753000000, 42.5, '{"host":"web1"}');
 INSERT INTO metrics(metrics) VALUES ('flush');
 SELECT name, ts, value, labels FROM metrics WHERE name = 'cpu_usage';
 
-CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');
+CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service', timestamp_unit='us');
 INSERT INTO logs(ts, level, message, metadata)
-VALUES (1753000000123, 'error', 'payment declined',
+VALUES (1753000000123000, 'error', 'payment declined',
         '{"service":"payments","retryable":false}');
 INSERT INTO logs(logs) VALUES ('flush');
 SELECT ts, level, message FROM logs WHERE service = 'payments';
@@ -168,6 +168,25 @@ SQL
 Apple's `/usr/bin/sqlite3` disables extension loading. On macOS, install
 SQLite with Homebrew and use `$(brew --prefix sqlite)/bin/sqlite3`, or embed
 the extension in a Rust host.
+
+The logs example explicitly uses microseconds, matching the standalone server's
+default. After closing the SQLite session, you can serve those same rows:
+
+```sh
+cargo build --release --manifest-path servers/Cargo.toml -p timeless-logs-api --locked
+servers/target/release/timeless-logs-api target/release/libtimeless_ext telemetry.db 127.0.0.1:19429
+```
+
+In another terminal, query the imported event:
+
+```sh
+curl 'http://127.0.0.1:19429/select/logsql/query?service=payments&limit=10'
+```
+
+For a database created with the original default millisecond logs table, prefix
+the server command with `TIMELESS_LOGS_TIMESTAMP_UNIT=ms`. This selects the
+existing unit without rewriting timestamps. Keep other database owners stopped
+while the server is running; stop it before returning to direct SQL writes.
 
 For a guided walkthrough, continue with the [user guide](docs/GUIDE.md).
 The [SQL API reference](docs/SQL_API_REFERENCE.md) is canonical when a schema,

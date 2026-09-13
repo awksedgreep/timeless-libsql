@@ -48,6 +48,16 @@ contracts with the older binary). Upgrade every binary that opens the same
 database file as one set before allowing optimize to run, exactly as the
 invariants above require.
 
+Unreleased log-schema maintenance records configuration freshness in the
+inventory. Reindexing refreshes the owned discovery companions transactionally;
+reopen and run the explicit `schema` command to repair stale companions from an
+older extension. Merely opening a database never repairs or replaces views.
+
+Unreleased logs binaries support `TIMELESS_LOGS_TIMESTAMP_UNIT=ms|us` (default
+`us`). Select `ms` to serve a default SQL-created logs database without converting
+its data. Unit mismatches now stop startup before policy or ledger changes.
+The revised SQL quickstart explicitly declares microseconds for new tables.
+
 ## 1. Inventory the current installation
 
 Unreleased metrics servers enforce the configured `TIMELESS_METRICS_PROMQL_MAX_*`

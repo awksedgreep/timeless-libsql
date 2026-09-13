@@ -71,6 +71,24 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **SQL-created logs can be served with their stored timestamp unit (issue
+  #66).** `TIMELESS_LOGS_TIMESTAMP_UNIT=ms|us` selects the unit, defaulting to
+  `us`. Mismatches fail before policy, writer-PRAGMA, or ledger changes and
+  name the required setting. The quickstart declares microseconds and shows
+  serving the same database over HTTP; existing millisecond tables need no
+  data conversion.
+- **Log discovery follows index-key changes (issue #65).** Reindexing
+  transactionally refreshes the owned fields/services companions, including
+  adding and removing them. Configuration freshness is recorded in the
+  inventory; explicit schema maintenance repairs older stale definitions.
+  User objects, newer definitions, and unchanged companions are preserved.
+
+- **OTLP trace ingestion follows request encoding (issue #64).** JSON and
+  protobuf both accept bounded gzip requests. Full success leaves partial
+  success unset and returns the matching export-response encoding; empty
+  exports succeed. Errors, including authentication and size-limit failures,
+  use OTLP Status messages. Unsupported content encodings return HTTP 415.
+
 - **All metrics read routes enforce configured budgets (issue #61).** Native
   latest, export, range, and discovery requests, including Prometheus
   discovery aliases, now enforce result, work, response-byte, and deadline

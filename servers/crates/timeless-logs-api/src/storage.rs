@@ -18,6 +18,7 @@ use timeless_api_common::{
     acquire_database_lease, apply_schema_ledger, checkpoint_wal, create_verified_backup,
     periodic_wal_checkpoint, preflight_database, preflight_extension, require_current_schema,
     require_query_surface, BackupReport, BytesGate, DataPlaneSpec, DatabaseLease,
+    ExtensionCapabilities,
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -2195,11 +2196,9 @@ fn apply_store_policy(
             ));
         }
     }
-    let conn = open_connection(path, extension, None).or_else(|_| {
-        // A brand-new database has no schema ledger yet; fall back to a
-        // bare extension-loaded connection for creation.
-        open_bare_connection(path, extension)
-    })?;
+    let conn = open_bare_connection(path, extension)?;
+    preflight_logs(&conn)?;
+    validate_stored_timestamp_unit(&conn, timestamp_unit)?;
     let exists: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE name = 'logs'",
@@ -2292,32 +2291,59 @@ fn open_bare_connection(path: &Path, extension: &Path) -> Result<Connection, Str
     Ok(conn)
 }
 
-fn open_connection(
-    path: &Path,
-    extension: &Path,
-    initialize: Option<TimestampUnit>,
-) -> Result<Connection, String> {
-    let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    unsafe {
-        conn.load_extension_enable()
-            .map_err(|e| format!("enable extension loading: {e}"))?;
-        conn.load_extension(extension, None::<&str>)
-            .map_err(|e| format!("load {}: {e}", extension.display()))?;
-    }
-    conn.load_extension_disable()
-        .map_err(|e| format!("disable extension loading: {e}"))?;
+fn preflight_logs(conn: &Connection) -> Result<ExtensionCapabilities, String> {
     let spec = DataPlaneSpec {
         signal: "logs",
         required_batch: "rich-v1",
     };
-    let capabilities = preflight_extension(&conn, spec)?;
+    let capabilities = preflight_extension(conn, spec)?;
     for surface in ["timeless_logs", "timeless_log_count", "timeless_log_values"] {
         require_query_surface(&capabilities, surface, "max_work_entries")?;
     }
     for capability in ["request_local", "same_connection", "single_use"] {
         require_query_surface(&capabilities, "timeless_log_query_stats", capability)?;
     }
-    preflight_database(&conn, spec.signal)?;
+    preflight_database(conn, spec.signal)?;
+    Ok(capabilities)
+}
+
+/// Validate a persisted unit before PRAGMAs, policy changes, or ledger writes.
+fn validate_stored_timestamp_unit(
+    conn: &Connection,
+    requested: TimestampUnit,
+) -> Result<(), String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='logs')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("probe logs table: {error}"))?;
+    if !exists {
+        return Ok(());
+    }
+    let stored = stat_text(conn, "timestamp_unit")?;
+    if stored.as_deref() != Some(requested.sql_name()) {
+        let unit = stored.as_deref().unwrap_or("<missing>");
+        return Err(format!("logs timestamp capability mismatch: binary requested {}, database stores {unit}; set TIMELESS_LOGS_TIMESTAMP_UNIT={unit} to serve this database without converting stored timestamps", requested.sql_name()));
+    }
+    Ok(())
+}
+
+fn open_connection(
+    path: &Path,
+    extension: &Path,
+    initialize: Option<TimestampUnit>,
+) -> Result<Connection, String> {
+    let conn = open_bare_connection(path, extension)?;
+    let capabilities = preflight_logs(&conn)?;
+    let spec = DataPlaneSpec {
+        signal: "logs",
+        required_batch: "rich-v1",
+    };
+    if let Some(timestamp_unit) = initialize {
+        validate_stored_timestamp_unit(&conn, timestamp_unit)?;
+    }
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| format!("set busy timeout: {e}"))?;
     if let Some(timestamp_unit) = initialize {
@@ -2355,14 +2381,6 @@ fn open_connection(
         conn.execute("INSERT INTO logs(logs) VALUES ('auto_optimize:off')", [])
             .map_err(|e| format!("disable flush-path auto-optimize: {e}"))?;
         apply_schema_ledger(&conn, spec, &capabilities)?;
-        let stored = stat_text(&conn, "timestamp_unit")?;
-        if stored.as_deref() != Some(timestamp_unit.sql_name()) {
-            return Err(format!(
-                "logs timestamp capability mismatch: binary requested {}, database stores {}",
-                timestamp_unit.sql_name(),
-                stored.as_deref().unwrap_or("<missing>")
-            ));
-        }
     } else {
         require_current_schema(&conn, spec.signal)?;
     }

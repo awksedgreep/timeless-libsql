@@ -113,7 +113,7 @@ overlapping `POST /api/v1/backup` is answered `409 Conflict` with
 queued, so repeating the call costs the writer nothing. Retry after the
 in-flight backup completes.
 
-| `traces` | `POST` | `/insert/opentelemetry/v1/traces` | `traces:write` | OTLP JSON, protobuf, or gzip-compressed protobuf ingestion. |
+| `traces` | `POST` | `/insert/opentelemetry/v1/traces` | `traces:write` | OTLP JSON or protobuf ingestion, optionally gzip-compressed. |
 
 <!-- public-server-routes:end -->
 
@@ -304,7 +304,10 @@ not overwrite labels already present in a sample.
 
 `POST /insert/jsonline` accepts one JSON object per line. `_msg_field` and
 `_time_field` query parameters select alternate source keys (defaults `_msg`
-and `_time`). The release table uses epoch microseconds. Every other retained
+and `_time`). New server tables use epoch microseconds by default;
+`TIMELESS_LOGS_TIMESTAMP_UNIT=ms` supports existing millisecond SQL tables.
+The setting must match the persisted unit and never converts stored timestamps.
+Every other retained
 field remains typed/nested metadata, and all eight severities remain exact.
 A fully valid request returns 204; a partially valid request returns 200 with
 accepted/error counts. That response means admission to the bounded writer
@@ -338,10 +341,14 @@ are in the [LogsQL matrix](LOGSQL_FEATURE_MATRIX.md) and
 ## Trace requests
 
 `POST /insert/opentelemetry/v1/traces` accepts OTLP JSON by default and OTLP
-protobuf when `Content-Type` contains `application/x-protobuf`. Protobuf may
-also use `Content-Encoding: gzip`. The handler validates the complete request,
+protobuf for `Content-Type: application/x-protobuf`. Both encodings support
+`Content-Encoding: gzip` (or uncompressed `identity`); other content encodings
+return HTTP 415. The handler validates the complete request,
 encodes one public rich-span-v2 batch, and waits for its SQLite insertion
-statement before returning `{"partialSuccess":{}}`. That statement may leave
+statement before returning a full-success export response: `{}` for JSON or
+an empty protobuf message, with the matching response content type. Empty
+exports succeed. Errors use `google.rpc.Status` in the same encoding, including
+pre-handler authentication and body-limit failures. That statement may leave
 spans in the extension's authoritative 8,192-span buffer; call flush when a
 durability barrier is required. There is no server-owned span buffer.
 
@@ -410,6 +417,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_LOGS_LOGSQL_MAX_WORK_ROWS` | logs | `100000` | Cumulative decoded/examined rows and bounded state items. |
 | `TIMELESS_LOGS_LOGSQL_MAX_RESPONSE_BYTES` | logs | `16777216` | Response and bounded pipeline-state bytes. |
 | `TIMELESS_LOGS_LOGSQL_DEADLINE_MS` | logs | `30000` | Hard LogsQL/native-query deadline in milliseconds. |
+| `TIMELESS_LOGS_TIMESTAMP_UNIT` | logs | `us` | Stored log timestamp unit, `ms` or `us`. Must match an existing table; choose `ms` for the default direct-SQL table. Validated before policy changes, writer PRAGMAs, or schema-ledger writes. No timestamp conversion is performed. |
 | `TIMELESS_LOGS_INDEX_KEYS` | logs | absent/inherit | Comma-separated indexed-metadata allowlist. New stores are created with it; an existing store whose persisted allowlist differs is reindexed once at startup (postings rewritten for every block). Absent preserves the store's current allowlist. |
 | `TIMELESS_LOGS_RETENTION` | logs | absent/inherit | Retention window as `<n>` plus a required unit suffix `s`, `m`, `h`, or `d`. Applied to new and existing stores at startup; enforcement remains at flush/optimize boundaries. Absent preserves the store's current window. |
 | `TIMELESS_TRACES_READER_CONNECTIONS` | traces | `2` | Independent bounded SQLite readers. |
@@ -488,7 +496,7 @@ Token claims are `iss`, `aud`, `sub`, `jti`, `tenant`, `signal`, `scopes`,
 | Claim limit | Enforcement |
 |---|---|
 | `max_request_bytes` | Auth middleware buffers and caps the request before route execution. The hard server body cap remains 10 MiB. |
-| `max_decompressed_bytes` | Caps gzip OTLP protobuf after decompression; other current request formats are not compressed. |
+| `max_decompressed_bytes` | Caps OTLP JSON and protobuf after decompression, and uncompressed OTLP bodies. |
 | `max_response_bytes` | Auth middleware caps the final body; signal query limits may be tighter. |
 | `max_query_rows` | Prechecks `limit`, `max_rows`, `max_points`, and the LogsQL `limit` pipeline stage; then verifies the handler's internal exact result-row header. |
 | `max_request_ms` | Deadline for read and stats routes. Writes are not response-cancelled because queued durability would make timeout ambiguous. |
@@ -646,7 +654,7 @@ silently migrated to native contract v1:
 |---|---|
 | Prometheus and MetricsQL query/discovery routes | `{"status":"error","errorType":"...","error":"..."}`; parse is 400/`bad_data`, execution or limit is 422/`execution`, timeout is 504/`timeout`, and retryable storage contention is 503/`unavailable` plus `Retry-After`. |
 | Jaeger query/discovery routes | Existing Jaeger handler bodies, including bare client diagnostics and `{"status":"error","error":"internal"}` for internal faults. |
-| OTLP trace ingest | Existing collector response/error contract, including `{"partialSuccess":{}}` on success. |
+| OTLP trace ingest | OTLP export response on success (JSON `{}` or empty protobuf), matching request encoding; failures use `google.rpc.Status`. |
 | VictoriaMetrics/VictoriaLogs-compatible ingest and Prometheus text `/metrics` | Existing ingestion error bodies and text exposition behavior. |
 | Liveness/readiness/health probe state | Existing probe `status` bodies; internal health-stat collection faults use native `stats_execution`. |
 

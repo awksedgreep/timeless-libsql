@@ -16,15 +16,30 @@ and shutdown contract is the
 The exact public storage contract is in the
 [SQLite extension API reference](../../../docs/SQL_API_REFERENCE.md).
 
+## Serve an existing SQL logs database
+
+Stop the SQL writer before starting the server. Check the stored unit with
+`SELECT value FROM timeless_stats('logs') WHERE key='timestamp_unit'` on an
+extension-loaded connection, then close that connection. The binary defaults to
+`us`; set `TIMELESS_LOGS_TIMESTAMP_UNIT=ms` for a default direct-SQL logs table.
+The server reads and writes in that unit without converting existing timestamps.
+A mismatch fails before changing index keys, retention, auto-optimize settings,
+or the schema ledger, and the error names the setting needed to reopen it.
+
+For new SQL tables intended for the default server, declare
+`timestamp_unit='us'` and insert epoch microseconds. The
+[root quickstart](../../../README.md#quick-start) includes a SQL-to-HTTP example.
+Use ISO 8601 timestamps in HTTP ingestion when specifying subsecond precision.
+
 ## Storage and lifecycle
 
 - NDJSON requests are parsed into the public rich-log batch format.
-- Epoch-microsecond timestamps, all eight severities, and canonical typed and
-  nested JSON metadata survive flush, optimize, backup, and reopen.
+- Epoch-microsecond or epoch-millisecond timestamps, all eight severities, and
+  canonical typed and nested JSON metadata survive flush, optimize, backup, and reopen.
 - The extension owns the authoritative 8,192-entry buffer. The API does not
   flush or reshape storage at an HTTP-request boundary.
 - `204` means the parsed request was admitted to the bounded SQLite writer;
-  it is not a durability claim. `GET /api/v1/flush` is the ordered durability
+  it is not a durability claim. `POST /api/v1/flush` is the ordered durability
   barrier.
 - A low-volume timer sends the public `flush` command. A separate maintenance
   timer reads public actionable backlog and invokes bounded
@@ -57,7 +72,7 @@ The server provides:
 - `POST /insert/jsonline` for rich NDJSON ingestion;
 - `GET|POST /select/logsql/query` for native parameters and strict LogsQL;
 - `GET /select/logsql/field_values` and `/select/logsql/stats`;
-- `GET /api/v1/flush`; and
+- `POST /api/v1/flush`; and
 - `POST /api/v1/backup` for a verified no-overwrite SQLite backup.
 
 See the [server API reference](../../../docs/SERVER_API_REFERENCE.md#complete-route-inventory)

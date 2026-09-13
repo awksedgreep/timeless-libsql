@@ -4,7 +4,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use timeless_api_common::{server_build_identity, AuthConfig};
-use timeless_logs_api::{run, Config, LogsQueryLimits, OtelTracesConfig, StorePolicy};
+use timeless_logs_api::{
+    run, Config, LogsQueryLimits, OtelTracesConfig, StorePolicy, TimestampUnit,
+};
 
 const USAGE: &str = "usage: timeless-logs-api <libtimeless_ext.so> <database> [listen-address]";
 
@@ -60,6 +62,14 @@ async fn main() -> ExitCode {
     }
 
     let defaults = Config::default();
+    let timestamp_unit = match std::env::var("TIMELESS_LOGS_TIMESTAMP_UNIT") {
+        Ok(value) => match parse_timestamp_unit(&value) {
+            Ok(unit) => unit,
+            Err(error) => return usage_error(error),
+        },
+        Err(std::env::VarError::NotPresent) => defaults.timestamp_unit,
+        Err(error) => return usage_error(format!("read TIMELESS_LOGS_TIMESTAMP_UNIT: {error}")),
+    };
     let flush_interval = match interval_from_env(
         "TIMELESS_LOGS_FLUSH_INTERVAL_SECS",
         defaults.flush_interval.as_secs(),
@@ -154,13 +164,13 @@ async fn main() -> ExitCode {
             Err(error) => return usage_error(error),
         },
         queue_bytes,
+        timestamp_unit,
         logs_query_limits,
         auth,
         store_policy: StorePolicy {
             index_keys: optional_env("TIMELESS_LOGS_INDEX_KEYS"),
             retention: optional_env("TIMELESS_LOGS_RETENTION"),
         },
-        ..defaults
     };
     match run(config).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -174,6 +184,17 @@ async fn main() -> ExitCode {
 fn usage_error(error: String) -> ExitCode {
     eprintln!("{error}");
     ExitCode::from(2)
+}
+
+fn parse_timestamp_unit(value: &str) -> Result<TimestampUnit, String> {
+    match value.trim() {
+        "ms" => Ok(TimestampUnit::Milliseconds),
+        "us" => Ok(TimestampUnit::Microseconds),
+        _ => Err(
+            "TIMELESS_LOGS_TIMESTAMP_UNIT must be ms or us; select the database's persisted unit"
+                .into(),
+        ),
+    }
 }
 
 fn optional_env(name: &str) -> Option<String> {
@@ -238,6 +259,22 @@ fn duration_millis_from_env(name: &str, default: Duration) -> Result<Duration, S
 mod tests {
     use super::{interval_from_env, parse_positive_usize};
     use std::time::Duration;
+
+    #[test]
+    fn timestamp_unit_override_is_explicit_and_validated() {
+        use timeless_logs_api::TimestampUnit;
+        assert_eq!(
+            super::parse_timestamp_unit("ms").unwrap(),
+            TimestampUnit::Milliseconds
+        );
+        assert_eq!(
+            super::parse_timestamp_unit("us").unwrap(),
+            TimestampUnit::Microseconds
+        );
+        for invalid in ["", "s", "ns", "auto"] {
+            assert!(super::parse_timestamp_unit(invalid).is_err());
+        }
+    }
 
     #[test]
     fn reader_override_requires_a_positive_integer() {

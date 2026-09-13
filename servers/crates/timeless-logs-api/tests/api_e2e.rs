@@ -22,6 +22,122 @@ async fn pipeline_rows(app: &axum::Router, query: &str) -> Vec<serde_json::Value
     ndjson_values(&body)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn sql_logs_serve_in_either_unit_and_mismatches_preserve_the_database() {
+    use timeless_logs_api::StorePolicy;
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    for (name, unit, other, timestamp, instant) in [
+        (
+            "ms",
+            TimestampUnit::Milliseconds,
+            TimestampUnit::Microseconds,
+            1_700_000_000_123_i64,
+            "2023-11-14T22:13:20.123Z",
+        ),
+        (
+            "us",
+            TimestampUnit::Microseconds,
+            TimestampUnit::Milliseconds,
+            1_700_000_000_123_456_i64,
+            "2023-11-14T22:13:20.123456Z",
+        ),
+    ] {
+        let database = directory.path().join(format!("sql-{name}.db"));
+        let open = || {
+            let connection = Connection::open(&database).unwrap();
+            unsafe {
+                let _guard = rusqlite::LoadExtensionGuard::new(&connection).unwrap();
+                connection.load_extension(&extension, None::<&str>).unwrap();
+            }
+            connection
+        };
+        let connection = open();
+        // ms deliberately uses the original SQL-tour default.
+        let option = if name == "us" {
+            ",timestamp_unit='us'"
+        } else {
+            ""
+        };
+        connection.execute_batch(&format!("CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service'{option});
+            INSERT INTO logs(ts,level,message,metadata) VALUES({timestamp},'info','from SQL','{{\"service\":\"sql\",\"host\":\"edge\"}}');
+            INSERT INTO logs(logs) VALUES('flush');
+            CREATE VIEW user_logs AS SELECT message FROM logs;" )).unwrap();
+        drop(connection);
+        let before = std::fs::read(&database).unwrap();
+        for policy in [
+            StorePolicy::default(),
+            StorePolicy {
+                index_keys: Some("host".into()),
+                retention: Some("1d".into()),
+            },
+        ] {
+            let error = match Storage::start_with_policy(
+                database.clone(),
+                extension.clone().into(),
+                1,
+                4,
+                other,
+                policy,
+            ) {
+                Ok(storage) => {
+                    storage.shutdown().await.unwrap();
+                    panic!("mismatched unit was accepted")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(&format!("TIMELESS_LOGS_TIMESTAMP_UNIT={name}")),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(&database).unwrap(),
+                before,
+                "failed startup changed {name} database"
+            );
+        }
+        let storage = Storage::start_with_timestamp_unit(
+            database.clone(),
+            extension.clone().into(),
+            1,
+            4,
+            unit,
+        )
+        .unwrap();
+        let app = router(storage.clone());
+        let rows = pipeline_rows(&app, "service:sql").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["_msg"], "from SQL");
+        assert_eq!(rows[0]["_time"], instant);
+        let response = app
+            .clone()
+            .oneshot(ingest_request(format!(
+                "{{\"_time\":\"{instant}\",\"_msg\":\"from HTTP\",\"service\":\"http\"}}\n"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        storage.flush().await.unwrap();
+        storage.shutdown().await.unwrap();
+        drop(app);
+        drop(storage);
+        let connection = open();
+        let stored = connection
+            .prepare("SELECT ts FROM logs ORDER BY message")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(stored, vec![timestamp, timestamp]);
+        let messages: i64 = connection
+            .query_row("SELECT count(*) FROM user_logs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(messages, 2);
+    }
+}
+
 fn numeric_pipeline_entries() -> Vec<LogEntry> {
     [
         ("numeric-missing", "a", None),
