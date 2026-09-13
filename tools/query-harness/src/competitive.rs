@@ -488,7 +488,7 @@ fn snappy(value: &[u8]) -> Vec<u8> {
 fn labels(index: usize, name: bool) -> Value {
     let mut labels = json!({"host": format!("h{index:05}"), "service": if index.is_multiple_of(2) { "api" } else { "worker" }});
     if name {
-        labels["__name__"] = json!("competition_counter");
+        labels["__name__"] = json!("competition_counter_total");
     }
     labels
 }
@@ -555,37 +555,37 @@ fn metric_queries(series: usize, points: usize, at: i64) -> Vec<Query> {
     vec![
         Query {
             name: "exact",
-            expression: "competition_counter{host=\"h00000\"}".into(),
+            expression: "competition_counter_total{host=\"h00000\"}".into(),
             range: false,
             expected: vector(vec![(labels(0, true), last(0))]),
         },
         Query {
             name: "wide",
-            expression: "competition_counter".into(),
+            expression: "competition_counter_total".into(),
             range: false,
             expected: vector(wide),
         },
         Query {
             name: "sum",
-            expression: "sum(competition_counter)".into(),
+            expression: "sum(competition_counter_total)".into(),
             range: false,
             expected: vector(vec![(json!({}), (0..series).map(last).sum())]),
         },
         Query {
             name: "grouped_sum",
-            expression: "sum by (service) (competition_counter)".into(),
+            expression: "sum by (service) (competition_counter_total)".into(),
             range: false,
             expected: vector(by_service),
         },
         Query {
             name: "rate",
-            expression: "rate(competition_counter[60s])".into(),
+            expression: "rate(competition_counter_total[60s])".into(),
             range: false,
             expected: vector((0..series).map(|i| (labels(i, false), 0.1)).collect()),
         },
         Query {
             name: "range",
-            expression: "competition_counter".into(),
+            expression: "competition_counter_total".into(),
             range: true,
             expected: json!({"resultType":"matrix","result":(0..series).map(|i|json!({"metric":labels(i,true),"values":(0..points).map(|p|json!([at-(points-1-p) as i64*10,(i%7+p).to_string()])).collect::<Vec<_>>()})).collect::<Vec<_>>()}),
         },
@@ -779,7 +779,12 @@ fn request(
             envelope["status"] == "success"
                 && envelope.get("warnings").is_none()
                 && envelope.get("infos").is_none(),
-            "unexpected query diagnostics: {envelope}"
+            "{} {} query diagnostics: status={} warnings={} infos={}",
+            server.kind.name(),
+            query.name,
+            envelope["status"],
+            envelope["warnings"],
+            envelope["infos"]
         );
         canonical_metrics(&envelope["data"])?
     };
