@@ -3,6 +3,7 @@ mod r2;
 mod r3;
 mod r4;
 mod r8;
+mod schema;
 
 use std::path::Path;
 
@@ -19,7 +20,10 @@ pub(super) fn run(
     match section {
         CorrectnessSection::R1 => r1::run(extension, temporary),
         CorrectnessSection::R2 => r2::run(root, extension, temporary),
-        CorrectnessSection::R3 => r3::run(extension, temporary),
+        CorrectnessSection::R3 => {
+            r3::run(extension, temporary)?;
+            schema::run(extension, temporary)
+        }
         CorrectnessSection::R4 => r4::run(extension, temporary),
         CorrectnessSection::R8 => r8::run(extension, temporary),
         CorrectnessSection::LogsRich => {

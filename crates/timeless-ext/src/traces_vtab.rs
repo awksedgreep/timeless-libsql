@@ -364,13 +364,6 @@ impl TracesTab {
             shadow_meta::require_instance_id(&host, &database, &table)
         }
         .map_err(module_err)?;
-        if !is_create {
-            // Best-effort refresh on open (dbhealth pattern): a writable
-            // open upgrades stale companion definitions; read-only opens
-            // keep working with whatever is installed. Never fails the
-            // connect itself.
-            schema::refresh_trace_views(&host, &database, &table);
-        }
 
         // Retention and attribute index configuration are data properties:
         // xCreate validates and persists them, xConnect loads metadata and
@@ -740,7 +733,10 @@ impl TracesTab {
     /// Hidden-column command insert ('flush' | 'optimize' |
     /// 'optimize:<max_spans>' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
-        if cmd == "flush" {
+        if cmd == "schema" {
+            let host = unsafe { Connection::from_handle(self.db) }?;
+            schema::install_trace_views(&host, &self.database_name, &self.table_name)?;
+        } else if cmd == "flush" {
             self.shared.engine.flush().map_err(module_err)?;
         } else if cmd == "optimize" {
             self.shared.engine.optimize().map_err(module_err)?;
@@ -773,7 +769,7 @@ impl TracesTab {
             self.shared.engine.prune(ts).map_err(module_err)?;
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'optimize', \
+                "unknown command {cmd:?}; supported: 'schema', 'flush', 'optimize', \
                  'optimize:<max_spans>', 'prune:<ts>', 'auto_optimize:<off|n>'"
             )));
         }
@@ -1905,8 +1901,8 @@ mod schema_spike_tests {
 
     #[test]
     fn reopen_keeps_views_queryable_without_duplicates() {
-        // xConnect refresh is idempotent: reopening neither duplicates
-        // inventory rows nor loses the installed surface.
+        // Reopening neither mutates inventory rows nor loses the
+        // installed surface.
         let path = std::env::temp_dir().join(format!(
             "timeless_schema_spike_reopen_{}",
             std::process::id()
@@ -1935,11 +1931,9 @@ mod schema_spike_tests {
     }
 
     #[test]
-    fn stale_version_upgrades_on_reopen() {
-        // Release-level migration (user feedback): an inventory row
-        // predating the binary's schema version is dropped and
-        // reinstalled at today's definition when a writable open
-        // refreshes — per object, by version comparison.
+    fn stale_version_waits_for_explicit_schema_command() {
+        // Opening the source preserves older definitions; only an explicit
+        // maintenance command can replace owned objects and their versions.
         let path = std::env::temp_dir().join(format!(
             "timeless_schema_spike_upgrade_{}",
             std::process::id()
@@ -1952,11 +1946,7 @@ mod schema_spike_tests {
                 .unwrap();
             // Simulate a previous release's definition: same name, stale
             // shape that still reads the base table, stale version. The
-            // refresh must replace the shape, not just the version
-            // number. Note the upgrade lands for the statement AFTER
-            // first touch (SQLite expands the view before xConnect
-            // fires); dashboards self-heal on the next refresh, and the
-            // inventory row says exactly what is installed.
+            // command must replace the shape, not just the version number.
             db.execute_batch(
                 "DROP VIEW timeless_traces_spans; \
                  CREATE VIEW timeless_traces_spans AS SELECT trace_id FROM traces; \
@@ -1966,27 +1956,28 @@ mod schema_spike_tests {
         }
         let db = Connection::open(&path).unwrap();
         register(&db).unwrap();
-        // First touch goes through the VIEW itself (the dashboard
-        // case): this is what triggers xConnect and therefore the
-        // refresh. If the self-replacement races the outer prepare,
-        // SQLite reports it loudly; a retry then sees the new shape.
-        // That behavior is asserted below, not hidden.
-        let first_touch = db.query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
-            row.get::<_, i64>(0)
-        });
-        let count = match first_touch {
-            Ok(count) => count,
-            Err(first_error) => {
-                let count: i64 = db
-                    .query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
-                        row.get(0)
-                    })
-                    .expect("retry after upgrade must succeed");
-                eprintln!("first touch after upgrade reported (retry succeeded): {first_error}");
-                count
-            }
-        };
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM timeless_traces_spans;", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(count, 0);
+        let old_sql: String = db
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'timeless_traces_spans';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !old_sql.contains("start_time"),
+            "a read upgraded the view: {old_sql}"
+        );
+        assert!(inventory_rows(&db, "traces")
+            .iter()
+            .all(|(_, _, version)| *version == 0));
+        db.execute("INSERT INTO traces(traces) VALUES ('schema')", [])
+            .unwrap();
         // The stale shape is gone: the current definition (with the
         // friendly timestamp columns) is installed and versioned.
         let sql: String = db

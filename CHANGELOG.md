@@ -71,6 +71,12 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Reading a signal table preserves user views and schema (issue #59).**
+  Companion installation and upgrades now run only during table creation or
+  through the explicit `schema` maintenance command. Name collisions fail
+  before mutation, DDL and inventory roll back together on failure, current
+  definitions are idempotent, and newer definitions are never downgraded.
+  Inventory ownership follows the database file across attached aliases.
 - **Metrics retention preserves declared windows and historical imports
   (issue #58).** The server's implicit seven-day wall-clock prune is disabled
   by default. The extension continues to apply the table's data-time policy;

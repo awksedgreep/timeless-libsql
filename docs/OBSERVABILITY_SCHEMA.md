@@ -42,17 +42,29 @@ agg --cols 120 --rows 32 schema-demo.cast schema-demo.gif   # optional GIF
   installation does not own fails the statement without touching it.
 - Object names derive deterministically: `timeless_<source>_<kind>`
   (e.g. source `traces` owns `timeless_traces_spans`).
-- Opening a database refreshs stale definitions best-effort: a writable
-  open drops and recreates objects whose recorded version differs;
-  read-only opens keep working with whatever is installed. Refresh never
-  fails the open itself.
-- Two consequences of lazy (first-touch) refresh, by design:
-  - the statement that triggers an upgrade may still serve the previous
-    shape; the next statement sees the new one (dashboards self-heal on
-    their next refresh; the inventory row says exactly what is
-    installed);
-  - a stale definition fails loudly at query time (SQLite errors on
-    unknown columns) rather than returning wrong rows.
+- Opening or reading a database never creates, replaces, or removes companion
+  objects, on writable and read-only connections alike. Legacy databases
+  without companions remain readable through their source tables.
+- To install missing companions or upgrade older owned definitions, run the
+  `schema` command on a writable connection. It checks every planned name
+  before changing anything and commits the views and inventory together.
+  Unowned name collisions fail with an error; resolve those names explicitly
+  before retrying. Current objects are left in place, so repeating the command
+  is idempotent.
+
+```sql
+INSERT INTO metrics(metrics) VALUES ('schema');
+INSERT INTO logs(logs) VALUES ('schema');
+INSERT INTO traces(traces) VALUES ('schema');
+-- For an attached source:
+INSERT INTO archive.traces(traces) VALUES ('schema');
+```
+
+These commands participate in the surrounding transaction; an explicit
+`ROLLBACK` removes every new view and inventory row. Apply them before opening
+updated companion views on a read-only replica. They update only companion
+objects; private shadow-schema upgrades use `timeless_upgrade()` as described
+in the [SQL API reference](SQL_API_REFERENCE.md#legacy-shadow-schema-upgrades).
 
 ## Removal and upgrade
 
@@ -64,9 +76,9 @@ agg --cols 120 --rows 32 schema-demo.cast schema-demo.gif   # optional GIF
   installs (deleted rows, dropped table, orphaned views). Reinstalling
   into the schema reuses it; nothing redundant accumulates.
 - Upgrades are per-object `DROP` + `CREATE` at the recorded version
-  boundary — migrations in the web-framework sense, executed
-  automatically on a writable open. There is no separate upgrade
-  command to forget.
+  boundary, executed through the explicit `schema` command. An installation
+  error restores the previous definitions and inventory; it is never silently
+  ignored. Objects retired from the planned set remain owned until removal.
 - Downgrade direction: an older binary leaves newer-versioned objects
   alone and keeps serving the base tables. Newer shapes may error when
   queried (unknown columns), which is loud, not wrong.
@@ -94,7 +106,7 @@ and installer bookkeeping queries carry schema qualifiers.
 
 | column | meaning |
 |---|---|
-| `source_database`, `source_table` | the signal table this object belongs to |
+| `source_database`, `source_table` | installation-time schema alias and source table; ownership is local to this database file and survives reopening under another alias |
 | `object_name`, `object_kind` | what was installed (`view` today) |
 | `schema_version` | definition version of that object |
 | `description` | human-readable reference for users |

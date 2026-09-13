@@ -113,6 +113,18 @@ but cannot lengthen it. Startup logs and `/select/metrics/stats` expose both
 policies (`table_retention_seconds` and `raw_retention_seconds`). Existing
 table definitions are not rewritten.
 
+## Companion view upgrades — unreleased
+
+Opening or reading a signal table no longer refreshes companion views. On a
+writable connection, run `INSERT INTO metrics(metrics) VALUES ('schema')`
+for each source that needs its companions installed or upgraded (substitute
+the actual table name). Fresh `CREATE VIRTUAL TABLE` statements still install
+companions automatically. The command preserves user objects, fails on unowned
+name collisions, and rolls back both DDL and inventory on error. Run it before
+deploying updated companion queries to read-only replicas. The full lifecycle
+and attached-database examples are in the
+[observability schema reference](OBSERVABILITY_SCHEMA.md#installation).
+
 ## 2. Drain and create the rollback point
 
 For a Rust signal server, stop producers, call its flush route

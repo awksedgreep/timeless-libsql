@@ -1,11 +1,10 @@
-//! Observability schema installer — Phase 0 spike for #20/#21/#27.
+//! Transactional observability schema installer.
 //!
 //! The friendly query surface (`timeless_<source>_<kind>` views plus a
 //! machine-readable inventory) installs as a side effect of
-//! `CREATE VIRTUAL TABLE`, refreshes best-effort on open, and uninstalls
-//! on `DROP TABLE` — the same shape as the dbhealth companion views,
-//! evaluated here against the #21 contract before the full surface is
-//! built:
+//! `CREATE VIRTUAL TABLE`, upgrades through an explicit `schema` command,
+//! and uninstalls on `DROP TABLE`. Opening or reading a source never
+//! changes companion objects:
 //!
 //! - explicit source table names, deterministic derived object names;
 //! - all collision checks run BEFORE anything is created, so a failed
@@ -14,17 +13,14 @@
 //! - inventory is a real owned table, the source of truth for removal;
 //! - every identifier passes through `sql_ident` quoting — the vtab and
 //!   schema names are attacker-controlled.
-//!
-//! Spike scope: traces only, one span view. Logs/metrics surfaces arrive
-//! in later phases behind this same installer.
 
 use rusqlite::{Connection, Result};
 
 use crate::sql_ident;
 
 /// Version of the installed schema shape. Bumped whenever the emitted
-/// DDL changes; connect refreshes older databases, removal drops only
-/// rows at known versions... (v1: everything this module owns).
+/// DDL changes; explicit maintenance upgrades older definitions and
+/// leaves newer definitions alone.
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// The inventory table itself (one per database schema that hosts an
@@ -296,19 +292,25 @@ fn object_exists(host: &Connection, database: &str, name: &str) -> Result<bool> 
 /// Objects the inventory attributes to one source table, with their
 /// recorded per-object schema versions.
 fn owned_objects(host: &Connection, database: &str, table: &str) -> Result<Vec<(String, i64)>> {
+    if !object_exists(host, database, INVENTORY_TABLE)? {
+        return Ok(Vec::new());
+    }
+    // The inventory lives in the source's own database. Its historical
+    // ATTACH alias is descriptive, not an ownership boundary: the same
+    // file must remain maintainable when reopened under another alias.
     let sql = format!(
-        "SELECT object_name, schema_version FROM {} \
-         WHERE source_database = ?1 AND source_table = ?2",
+        "SELECT object_name, max(schema_version) FROM {} \
+         WHERE source_table = ?1 GROUP BY object_name",
         sql_ident::qualified(database, INVENTORY_TABLE)
     );
     let mut stmt = host.prepare(&sql)?;
-    let names = stmt.query_map([database, table], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let names = stmt.query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))?;
     names.collect()
 }
 
 /// Install one companion object and record it. The caller sweeps
 /// collisions first; this runs inside the caller's transaction where
-/// one exists (xCreate), so a later failure still rolls everything
+/// one exists (xCreate or a command INSERT), so a later failure rolls everything
 /// back.
 fn install_object(
     host: &Connection,
@@ -346,11 +348,10 @@ fn drop_object(host: &Connection, database: &str, table: &str, name: &str) -> Re
     ))?;
     host.execute(
         &format!(
-            "DELETE FROM {} WHERE source_database = ?1 AND source_table = ?2 \
-             AND object_name = ?3",
+            "DELETE FROM {} WHERE source_table = ?1 AND object_name = ?2",
             sql_ident::qualified(database, INVENTORY_TABLE)
         ),
-        [database, table, name],
+        [table, name],
     )?;
     Ok(())
 }
@@ -496,7 +497,7 @@ pub(crate) fn install_objects(
     // owned by this exact source. Nothing is created before this passes.
     // No inventory table yet is not a collision — it just means a
     // first install into this schema.
-    let owned = owned_objects(host, database, table).unwrap_or_default();
+    let owned = owned_objects(host, database, table)?;
     for object in planned {
         if !owned.iter().any(|(o, _)| o == &object.name)
             && object_exists(host, database, &object.name)?
@@ -510,6 +511,18 @@ pub(crate) fn install_objects(
     }
     host.execute_batch(&inventory_ddl(database))?;
     for object in planned {
+        if let Some((_, version)) = owned.iter().find(|(name, _)| name == &object.name) {
+            // Never downgrade definitions from a newer extension. A current
+            // definition is idempotent; repair a missing current object and
+            // upgrade older versions only inside this explicit transaction.
+            if *version > i64::from(SCHEMA_VERSION)
+                || (*version == i64::from(SCHEMA_VERSION)
+                    && object_exists(host, database, &object.name)?)
+            {
+                continue;
+            }
+            drop_object(host, database, table, &object.name)?;
+        }
         install_object(host, database, table, object)?;
     }
     Ok(planned.iter().map(|object| object.name.clone()).collect())
@@ -546,75 +559,11 @@ pub(crate) fn install_metric_views(
     install_objects(host, database, table, &metric_objects(database, table))
 }
 
-/// Best-effort refresh on open, per owned object: anything whose
-/// recorded version differs from [`SCHEMA_VERSION`] is dropped and
-/// reinstalled at today's definition — per-release migration without a
-/// separate step, and a failed object never blocks its siblings.
-/// Missing inventory simply means nothing to drop. Failures are
-/// swallowed — open must succeed on read-only connections, and stale
-/// views fail loudly at query time (SQLite errors on unknown columns)
-/// rather than returning wrong rows.
-pub(crate) fn refresh_trace_views(host: &Connection, database: &str, table: &str) {
-    refresh_objects(host, database, table, &trace_objects(database, table));
-}
-
-pub(crate) fn refresh_log_views(
-    host: &Connection,
-    database: &str,
-    table: &str,
-    index_keys: &[String],
-    per_second: i64,
-) {
-    refresh_objects(
-        host,
-        database,
-        table,
-        &log_objects(database, table, index_keys, per_second),
-    );
-}
-
-pub(crate) fn refresh_metric_views(host: &Connection, database: &str, table: &str) {
-    refresh_objects(host, database, table, &metric_objects(database, table));
-}
-
-/// Best-effort refresh on open, per owned object: anything whose
-/// recorded version differs from [`SCHEMA_VERSION`] is dropped and
-/// reinstalled at today's definition — per-release migration without a
-/// separate step, and a failed object never blocks its siblings.
-/// Missing inventory simply means nothing to drop. Failures are
-/// swallowed — open must succeed on read-only connections, and stale
-/// views fail loudly at query time (SQLite errors on unknown columns)
-/// rather than returning wrong rows.
-///
-/// NOTE: refresh rebuilds the planned set from CURRENT table config
-/// (index keys, timestamp unit). A set that shrinks across versions —
-/// e.g. a view retired upstream — leaves its owned row installed but
-/// stale-versioned; removal of retired companions belongs to an
-/// explicit uninstall, never to a best-effort open.
-pub(crate) fn refresh_objects(
-    host: &Connection,
-    database: &str,
-    table: &str,
-    planned: &[SchemaObject],
-) {
-    let owned = owned_objects(host, database, table).unwrap_or_default();
-    for object in planned {
-        let fresh = owned
-            .iter()
-            .any(|(name, version)| name == &object.name && *version == SCHEMA_VERSION as i64);
-        if fresh {
-            continue;
-        }
-        let _ = drop_object(host, database, table, &object.name);
-        let _ = install_object(host, database, table, object);
-    }
-}
-
 /// Remove exactly the objects the inventory attributes to one source
 /// table, then forget them. Unknown (user) objects are never touched.
 /// Signal-agnostic: every vtab's `xDestroy` funnels through here.
 pub(crate) fn drop_objects(host: &Connection, database: &str, table: &str) -> Result<()> {
-    let owned = owned_objects(host, database, table).unwrap_or_default();
+    let owned = owned_objects(host, database, table)?;
     for (name, _) in &owned {
         drop_object(host, database, table, name)?;
     }

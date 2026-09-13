@@ -496,15 +496,6 @@ impl LogsTab {
                 timestamp_unit.per_second,
             )
             .map_err(|error| module_err(format!("install observability schema: {error}")))?;
-        } else {
-            // Best-effort refresh on open; never fails the connect.
-            schema::refresh_log_views(
-                &host,
-                &database,
-                &table,
-                &index_keys,
-                timestamp_unit.per_second,
-            );
         }
 
         // R4: one engine per (db file, schema alias, table, instance). First
@@ -693,10 +684,19 @@ impl LogsTab {
         Ok(count as i64)
     }
 
-    /// Hidden-column command insert ('flush' | 'optimize' |
+    /// Hidden-column command insert ('schema' | 'flush' | 'optimize' |
     /// 'optimize:<max_entries>' | 'prune:<ts>').
     fn run_command(&self, cmd: &str) -> Result<i64> {
-        if cmd == "flush" {
+        if cmd == "schema" {
+            let host = unsafe { Connection::from_handle(self.db) }?;
+            schema::install_log_views(
+                &host,
+                &self.database_name,
+                &self.table_name,
+                &self.index_keys,
+                self.native_per_second,
+            )?;
+        } else if cmd == "flush" {
             // Drain the buffer into one RAW block (+ terms). Durable as
             // soon as the enclosing SQLite transaction commits.
             self.shared.engine.flush().map_err(module_err)?;
@@ -799,7 +799,7 @@ impl LogsTab {
                 .map_err(module_err)?;
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'optimize', \
+                "unknown command {cmd:?}; supported: 'schema', 'flush', 'optimize', \
                  'optimize:<max_entries>', 'prune:<ts>', 'reindex:<keys>', \
                  'retention:<n[s|m|h|d]>', 'message_index:<none|trigram>', \
                  'auto_optimize:<off|n>'"

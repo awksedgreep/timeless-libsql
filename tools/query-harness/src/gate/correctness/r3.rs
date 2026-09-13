@@ -309,7 +309,12 @@ fn quoted_names(extension: &Path, temporary: &Path) -> Result<()> {
         [],
     )?;
     connection.execute(&format!("INSERT INTO {}(trace_id,span_id,name,service,start_ts) VALUES(zeroblob(16),zeroblob(8),'quoted_trace','quoted',1)", qualified(schema, tables[2].1)), [])?;
+    connection.execute_batch(&format!(
+        "UPDATE {} SET schema_version=0",
+        qualified(schema, "timeless_schema_inventory")
+    ))?;
     for (_, table) in tables {
+        command(&connection, schema, table, "schema")?;
         command(&connection, schema, table, "flush")?;
     }
     for ((_, table), (column, value)) in tables.into_iter().zip([

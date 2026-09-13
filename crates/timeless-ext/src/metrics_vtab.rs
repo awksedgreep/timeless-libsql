@@ -249,13 +249,12 @@ impl MetricsTab {
             host.execute_batch(&shadow_store::ddl(&database, &table))?;
             shadow_store::ensure_max_ts_val_column(&host, &database, &table)?;
             // Observability schema companions (#20/#21), same contract
-            // as traces/logs: same-transaction install, best-effort
-            // refresh on open, owned-only removal on drop.
+            // as traces/logs: same-transaction install, explicit upgrades,
+            // owned-only removal on drop.
             schema::install_metric_views(&host, &database, &table)
                 .map_err(|error| module_err(format!("install observability schema: {error}")))?;
         } else {
             shadow_store::require_read_schema(&host, &database, &table)?;
-            schema::refresh_metric_views(&host, &database, &table);
         }
         let instance_id = if is_create {
             shadow_meta::ensure_instance_id(&host, &database, &table)
@@ -448,7 +447,10 @@ impl MetricsTab {
     /// Handle a hidden-column command insert. Returns the (synthetic,
     /// meaningless) rowid 0 — commands do not create rows.
     pub(crate) fn run_command(&self, cmd: &str) -> Result<i64> {
-        if cmd == "flush" {
+        if cmd == "schema" {
+            let host = unsafe { Connection::from_handle(self.db) }?;
+            schema::install_metric_views(&host, &self.database_name, &self.table_name)?;
+        } else if cmd == "flush" {
             // Drain every partition buffer into pco chunks in _chunks and
             // persist the series registry into _meta. After this the data
             // is exactly as durable as the enclosing SQLite transaction.
@@ -597,7 +599,7 @@ impl MetricsTab {
             }
         } else {
             return Err(module_err(format!(
-                "unknown command {cmd:?}; supported: 'flush', 'compact', \
+                "unknown command {cmd:?}; supported: 'schema', 'flush', 'compact', \
                  'compact-step:<series>[:<points>:<bytes>]', 'rollup', \
                  'rollups:none|<ladder>', \
                  'clear-rollups', 'clear-rollups-step:<chunks>', 'prune:<unix_ts>'"

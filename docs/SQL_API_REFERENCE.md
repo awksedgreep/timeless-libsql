@@ -151,6 +151,14 @@ read-only replica; unknown tables and non-additive corruption still fail.
 
 ## Shared SQL conventions
 
+All three stored signal modules support the `schema` maintenance command:
+`INSERT INTO metrics(metrics) VALUES ('schema')` (substitute the actual table
+name, and qualify its schema when attached). It explicitly installs missing
+companion views or upgrades older owned definitions, atomically with their
+inventory records. Current definitions are idempotent, newer ones are preserved,
+and unowned name collisions fail without changing any objects. Reads never
+install or upgrade companions. See the [observability schema lifecycle](OBSERVABILITY_SCHEMA.md#installation).
+
 Eponymous TVFs may be called positionally, as in
 `timeless_raw('metrics', 'cpu', NULL, :start, :stop)`, or through equality
 constraints on their hidden inputs. A required hidden input must be bound
