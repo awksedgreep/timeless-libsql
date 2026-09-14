@@ -1158,6 +1158,7 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
             ] {
                 let mut responses = serde_json::Map::new();
                 for server in &servers {
+                    let stats_before = timeless_stats(&client, server)?;
                     let response = client
                         .post(format!("{}/select/logsql/query", server.base))
                         .form(&[("query", &expression)])
@@ -1197,10 +1198,18 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
                             "{probe_name} returned wrong data: {body}"
                         );
                     }
-                    responses.insert(
-                        server.kind.name().into(),
-                        json!({"http_status":status,"body":body}),
-                    );
+                    let mut result = json!({"http_status":status,"body":body});
+                    if let Some(before) = stats_before {
+                        let after = timeless_stats(&client, server)?
+                            .context("Timeless stats after capability probe")?;
+                        result["storage_work"] = json!({
+                            "requests": 1,
+                            "numeric_delta": super::evidence::numeric_delta(&before, &after),
+                            "before": before,
+                            "after": after,
+                        });
+                    }
+                    responses.insert(server.kind.name().into(), result);
                 }
                 capability_probes[probe_name] = json!({"query":expression,"engines":responses,"timed":false,
                         "required_for_timeless":(probe_name == "field_sort" && args.require_field_sort)
