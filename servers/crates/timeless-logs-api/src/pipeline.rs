@@ -26,11 +26,11 @@ use crate::logsql::{
     CoalesceSpec, CollapseNumsSpec, CopySpec, ExtractRegexpSpec, ExtractSpec, FacetsSpec,
     FirstSpec, FormatSpec, FormatStep, JoinSpec, JsonArrayConcatSpec, MathBinaryOperator,
     MathExpression, MathFunction, MathSpec, PackJsonSpec, PackLogfmtSpec, PipelineField,
-    PipelineOp, QueryRowsSource, RegexpReplacementStep, RenameSpec, ReplaceRegexpSpec, ReplaceSpec,
-    RunningStatsExpression, RunningStatsKind, RunningStatsMode, RunningStatsSpec,
-    SetStreamFieldsSpec, SplitSpec, StatsExpression, StatsKind, StatsSpec, TimeAddSpec, TopSpec,
-    UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec, UnpackSyslogSpec,
-    UnpackWordsSpec, UnrollSpec,
+    PipelineOp, PipelineSortField, QueryRowsSource, RegexpReplacementStep, RenameSpec,
+    ReplaceRegexpSpec, ReplaceSpec, RunningStatsExpression, RunningStatsKind, RunningStatsMode,
+    RunningStatsSpec, SetStreamFieldsSpec, SplitSpec, StatsExpression, StatsKind, StatsSpec,
+    TimeAddSpec, TopSpec, UnaryFieldSpec, UnionSpec, UniqSpec, UnpackJsonSpec, UnpackLogfmtSpec,
+    UnpackSyslogSpec, UnpackWordsSpec, UnrollSpec,
 };
 use crate::storage::{day_range_matches, week_range_matches, LogQueryExecutionReport, QueryRow};
 use crate::syslog;
@@ -435,42 +435,26 @@ pub(crate) fn execute(
     for operation in execution.operations {
         ensure_active(execution.cancelled)?;
         rows = match operation {
-            PipelineOp::SortTime { descending } => {
-                rows.sort_by(|left, right| {
-                    let ordering = left
-                        .get("_time")
-                        .and_then(Value::as_str)
-                        .cmp(&right.get("_time").and_then(Value::as_str));
-                    if *descending {
-                        ordering.reverse()
-                    } else {
-                        ordering
-                    }
-                });
-                rows
-            }
-            PipelineOp::SortFields { fields, descending } => {
-                let spec = FirstSpec {
-                    limit: rows.len(),
-                    by_fields: fields.clone(),
-                    partition_by: Vec::new(),
-                    rank_field: None,
-                };
-                // Sorting retains an intermediate rowset; only the complete
-                // pipeline applies max_result_rows after offset/limit. The
-                // existing sorter still enforces state, work and cancellation.
-                first_last(
-                    rows,
-                    &spec,
-                    PipelineLimits {
-                        max_result_rows: execution.limits.max_state_items,
-                        ..execution.limits
+            PipelineOp::SortTime { descending } => sort_fields(
+                rows,
+                &[PipelineSortField {
+                    field: PipelineField::Exact {
+                        name: "_time".into(),
+                        path: vec!["_time".into()],
                     },
-                    execution.cancelled,
-                    *descending,
-                    "sort",
-                )?
-            }
+                    descending: false,
+                }],
+                *descending,
+                execution.limits,
+                execution.cancelled,
+            )?,
+            PipelineOp::SortFields { fields, descending } => sort_fields(
+                rows,
+                fields,
+                *descending,
+                execution.limits,
+                execution.cancelled,
+            )?,
             PipelineOp::Offset(offset) => {
                 if *offset >= rows.len() {
                     Vec::new()
@@ -2784,6 +2768,36 @@ fn query_stats(report: LogQueryExecutionReport, query_duration_ns: u64) -> Map<S
 enum FirstSortKeys<'a> {
     Explicit(Vec<Vec<Cow<'a, str>>>),
     AllFields(Vec<String>),
+}
+
+fn sort_fields(
+    rows: Vec<Value>,
+    fields: &[PipelineSortField],
+    descending: bool,
+    limits: PipelineLimits,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Value>, String> {
+    let spec = FirstSpec {
+        limit: rows.len(),
+        by_fields: fields.to_vec(),
+        partition_by: Vec::new(),
+        rank_field: None,
+    };
+    // Sorting retains an intermediate rowset; only the complete pipeline
+    // applies max_result_rows after offset/limit. State, work and cancellation
+    // remain bounded. The comparator also handles variable-precision shifted
+    // timestamps, which cannot be sorted by their formatted bytes.
+    first_last(
+        rows,
+        &spec,
+        PipelineLimits {
+            max_result_rows: limits.max_state_items,
+            ..limits
+        },
+        cancelled,
+        descending,
+        "sort",
+    )
 }
 
 fn first(

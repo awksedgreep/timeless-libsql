@@ -20515,6 +20515,21 @@ async fn ordinary_field_sort_matches_pinned_oracle_and_preserves_bounds() {
             tested += 1;
         }
         assert_eq!(tested, 12);
+        // Fraction-free RFC3339 sorts lexically after fractional values in
+        // the same second. Time ordering after projection must be temporal.
+        let temporal = pipeline_rows(&app,
+            "options(time_offset=1s) numeric_group:=numeric | fields case,_time | sort by (_time) | fields case").await;
+        assert_eq!(
+            temporal,
+            numeric_pipeline_entries()
+                .into_iter()
+                .map(|row| {
+                    let metadata: serde_json::Value =
+                        serde_json::from_str(&row.metadata_json).unwrap();
+                    serde_json::json!({"case":metadata["case"]})
+                })
+                .collect::<Vec<_>>()
+        );
         let rows = pipeline_rows(&app, "numeric_group:=numeric | sort by (n,case)").await;
         assert!(rows[0].get("n").is_none());
         assert!(rows[1]["n"].is_null());
