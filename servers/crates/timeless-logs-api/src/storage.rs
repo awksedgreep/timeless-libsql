@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::logsql::{
     logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, LogsqlPlan, PipelineField,
-    PipelineOp, StatsKind,
+    PipelineOp, StatsKind, StatsSpec,
 };
 use crate::pipeline::{self, PipelineLimits};
 
@@ -2113,6 +2113,29 @@ fn reader_main(
                         )?;
                         return Ok((rows, report));
                     }
+                    if let Some((prefix_len, stats)) = metadata_count_prefix(&operations)
+                        .filter(|_| !capture_query_report && metadata_only_postfilters(&spec))
+                    {
+                        let mut groups = pipeline::MetadataCountGroups::new(stats, limits);
+                        fold_metadata_rows(&conn, &spec, cancelled.as_ref(), |metadata| {
+                            groups.add(&metadata)
+                        })?;
+                        let report = LogQueryExecutionReport::default();
+                        let rows = pipeline::execute(
+                            groups.finish(cancelled.as_ref())?,
+                            pipeline::PipelineExecution {
+                                report,
+                                operations: &operations[prefix_len..],
+                                implicit_result_limit,
+                                rate_window_seconds,
+                                timestamp_unit,
+                                limits,
+                                cancelled: cancelled.as_ref(),
+                                query_started: started,
+                            },
+                        )?;
+                        return Ok((rows, report));
+                    }
                     let (rows, report) = query_pipeline_rows(
                         &conn,
                         &spec,
@@ -2820,6 +2843,90 @@ fn native_count_prefix(operations: &[PipelineOp]) -> Option<(usize, &str)> {
     .then_some((index + 1, expression.alias.as_str()))
 }
 
+/// Reduce metadata groups directly from the public cursor. Other input
+/// transforms, built-in presentation fields and diagnostic reports retain
+/// their row semantics. A time presentation offset cannot change metadata.
+fn metadata_count_prefix(operations: &[PipelineOp]) -> Option<(usize, &StatsSpec)> {
+    let index = operations
+        .iter()
+        .take_while(|operation| {
+            matches!(
+                operation,
+                PipelineOp::SortTime { .. } | PipelineOp::QueryTimeOffset(_)
+            )
+        })
+        .count();
+    let PipelineOp::Stats(stats) = operations.get(index)? else {
+        return None;
+    };
+    let [expression] = stats.expressions.as_slice() else {
+        return None;
+    };
+    (!stats.group_by.is_empty()
+        && stats.group_by.iter().all(|field| {
+            matches!(field,
+            PipelineField::Exact { path, .. } if path.first().is_some_and(|name|
+                !matches!(name.as_str(), "_time" | "_msg" | "level")))
+        })
+        && expression.kind == StatsKind::Count
+        && matches!(expression.fields.as_slice(), [PipelineField::All])
+        && expression.limit.is_none())
+    .then_some((index + 1, stats))
+}
+
+fn metadata_only_postfilters(spec: &QuerySpec) -> bool {
+    spec.message_phrase.is_none() && spec.predicate.is_none()
+}
+
+/// Read only metadata across the API/SQLite boundary and retain one decoded
+/// JSON value at a time. The extension still owns candidate selection and its
+/// bounded scan; typed exact checks must run even after a posting-list filter.
+fn fold_metadata_rows(
+    conn: &Connection,
+    spec: &QuerySpec,
+    cancelled: &AtomicBool,
+    mut visit: impl FnMut(JsonValue) -> Result<(), String>,
+) -> Result<(), String> {
+    let (where_sql, mut values) = query_parts(spec)?;
+    let sql = format!("SELECT metadata FROM logs{where_sql} LIMIT ?");
+    values.push(SqlValue::Integer(
+        i64::try_from(spec.max_work_rows.saturating_add(1)).unwrap_or(i64::MAX),
+    ));
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("prepare LogsQL metadata reduction: {error}"))?;
+    let mut rows = statement
+        .query(params_from_iter(values))
+        .map_err(|error| format!("query LogsQL metadata reduction: {error}"))?;
+    let mut considered = 0usize;
+    loop {
+        ensure_query_active(cancelled)?;
+        let Some(row) = rows
+            .next()
+            .map_err(|error| format!("read LogsQL metadata reduction: {error}"))?
+        else {
+            break;
+        };
+        considered = considered.saturating_add(1);
+        if considered > spec.max_work_rows {
+            return Err(format!(
+                "LogsQL metadata reduction exceeded max_work_rows={}",
+                spec.max_work_rows
+            ));
+        }
+        let raw = row
+            .get_ref(0)
+            .and_then(|value| value.as_str().map_err(Into::into))
+            .map_err(|error| format!("read reduction metadata: {error}"))?;
+        let metadata = serde_json::from_str(raw)
+            .map_err(|error| format!("decode stored typed log metadata: {error}"))?;
+        if metadata_exact_matches(Some(&metadata), &spec.metadata_exact) {
+            visit(metadata)?;
+        }
+    }
+    Ok(())
+}
+
 fn query_pipeline_rows(
     conn: &Connection,
     spec: &QuerySpec,
@@ -2966,6 +3073,14 @@ fn query_count_with_postfilters(
     cancelled: &AtomicBool,
     timestamp_unit: TimestampUnit,
 ) -> Result<i64, String> {
+    if metadata_only_postfilters(spec) {
+        let mut total = 0i64;
+        fold_metadata_rows(conn, spec, cancelled, |_| {
+            total = total.saturating_add(1);
+            Ok(())
+        })?;
+        return Ok(total);
+    }
     let (where_sql, mut values) = query_parts(spec)?;
     let sql =
         format!("SELECT ts, level, message, metadata FROM logs{where_sql} ORDER BY ts ASC LIMIT ?");

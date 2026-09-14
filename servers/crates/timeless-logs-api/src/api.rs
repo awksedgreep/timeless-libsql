@@ -1361,6 +1361,9 @@ fn query_execution_error(error: String) -> Response<Body> {
     if let Some(limit) = error
         .split("max_response_bytes=")
         .nth(1)
+        // Pipeline state uses the same configured byte ceiling as the
+        // response. Reaching it is a bounded-query failure, not a fault.
+        .or_else(|| error.split("max_state_bytes=").nth(1))
         .and_then(|value| {
             value
                 .split(|character: char| !character.is_ascii_digit())

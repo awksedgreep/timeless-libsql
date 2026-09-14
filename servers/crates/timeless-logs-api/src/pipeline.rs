@@ -9487,6 +9487,94 @@ fn filter(
     Ok(output)
 }
 
+/// Streaming count state for the storage adapter's metadata-only reduction.
+/// Group identities and alias precedence match `grouped_stats`; no input row
+/// is retained. Only exact metadata paths are admitted by the caller.
+pub(crate) struct MetadataCountGroups<'a> {
+    spec: &'a StatsSpec,
+    limits: PipelineLimits,
+    groups: BTreeMap<Vec<String>, u64>,
+    state_bytes: usize,
+}
+
+impl<'a> MetadataCountGroups<'a> {
+    pub(crate) fn new(spec: &'a StatsSpec, limits: PipelineLimits) -> Self {
+        Self {
+            spec,
+            limits,
+            groups: BTreeMap::new(),
+            state_bytes: size_of::<Self>(),
+        }
+    }
+
+    pub(crate) fn add(&mut self, metadata: &Value) -> Result<(), String> {
+        let key = self
+            .spec
+            .group_by
+            .iter()
+            .map(|field| {
+                let PipelineField::Exact { path, .. } = field else {
+                    unreachable!("validated count group")
+                };
+                projected_text(field_value(metadata, path)).into_owned()
+            })
+            .collect::<Vec<_>>();
+        let group_count = self.groups.len();
+        match self.groups.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                *entry.get_mut() += 1;
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                if group_count >= self.limits.max_state_items {
+                    return Err(format!(
+                        "LogsQL stats group cardinality exceeds max_work_rows={}",
+                        self.limits.max_state_items
+                    ));
+                }
+                let mut bytes = self.state_bytes;
+                for value in entry.key() {
+                    bytes = bytes
+                        .checked_add(value.len())
+                        .and_then(|bytes| bytes.checked_add(size_of::<String>()))
+                        .ok_or("LogsQL stats group state size overflow")?;
+                }
+                // Include the tuple, counter, and a conservative B-tree slot
+                // allowance, independently of the number of matching logs.
+                bytes = bytes
+                    .checked_add(size_of::<(Vec<String>, u64)>() + size_of::<[usize; 8]>())
+                    .ok_or("LogsQL stats group state size overflow")?;
+                if bytes > self.limits.max_state_bytes {
+                    return Err(format!(
+                        "LogsQL stats group state exceeds max_state_bytes={}",
+                        self.limits.max_state_bytes
+                    ));
+                }
+                self.state_bytes = bytes;
+                entry.insert(1);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self, cancelled: &AtomicBool) -> Result<Vec<Value>, String> {
+        self.groups
+            .into_iter()
+            .map(|(key, count)| {
+                ensure_active(cancelled)?;
+                let mut object = Map::new();
+                for (field, value) in self.spec.group_by.iter().zip(key) {
+                    let PipelineField::Exact { name, .. } = field else {
+                        unreachable!("validated count group")
+                    };
+                    object.insert(name.clone(), Value::String(value));
+                }
+                object.insert(self.spec.expressions[0].alias.clone(), Value::from(count));
+                Ok(Value::Object(object))
+            })
+            .collect()
+    }
+}
+
 /// `stats by (fields...) ...`: partition rows by their group-value
 /// tuple and run the ordinary [`stats`] kernel once per partition, so
 /// every stats function behaves identically grouped and ungrouped.
@@ -11683,6 +11771,62 @@ fn json_array_primitive_in(values: &[String], value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_count_groups_bound_cardinality_bytes_and_cancellation() {
+        let plan = crate::logsql::parse_at(
+            "* | stats by (key) count() as n",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        let spec = plan
+            .pipeline
+            .iter()
+            .find_map(|operation| match operation {
+                PipelineOp::Stats(spec) => Some(spec),
+                _ => None,
+            })
+            .unwrap();
+        let limits = PipelineLimits {
+            max_result_rows: 1,
+            max_state_items: 1024,
+            max_state_bytes: 256_000,
+        };
+        let mut groups = MetadataCountGroups::new(spec, limits);
+        for key in 0..1024 {
+            for _ in 0..3 {
+                groups
+                    .add(&serde_json::json!({"key":format!("k{key:04}")}))
+                    .unwrap();
+            }
+        }
+        assert!(groups
+            .add(&serde_json::json!({"key":"overflow"}))
+            .unwrap_err()
+            .contains("max_work_rows"));
+        let rows = groups.finish(&AtomicBool::new(false)).unwrap();
+        assert_eq!(rows.len(), 1024);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(*row, serde_json::json!({"key":format!("k{i:04}"),"n":3}));
+        }
+        let mut groups = MetadataCountGroups::new(
+            spec,
+            PipelineLimits {
+                max_state_bytes: 128,
+                ..limits
+            },
+        );
+        assert!(groups
+            .add(&serde_json::json!({"key":"a".repeat(1024)}))
+            .unwrap_err()
+            .contains("max_state_bytes"));
+        let mut groups = MetadataCountGroups::new(spec, limits);
+        groups.add(&serde_json::json!({"key":1})).unwrap();
+        assert!(groups
+            .finish(&AtomicBool::new(true))
+            .unwrap_err()
+            .contains("cancelled"));
+    }
     use super::*;
     use serde_json::json;
 

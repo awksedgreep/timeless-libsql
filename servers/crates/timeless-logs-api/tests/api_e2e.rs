@@ -20797,3 +20797,198 @@ async fn native_count_pagination_preserves_scalar_work_and_input_order() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn metadata_reductions_preserve_types_groups_and_complete_scan_bounds() {
+    use serde_json::json;
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("metadata-reductions.db");
+    let mut storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let metadata = [
+        json!({"service":"api","key":2,"nested":{"n":"x"}}),
+        json!({"service":"api","key":"2","nested":{"n":"x"}}),
+        json!({"service":"worker","key":null}),
+        json!({"service":"worker"}),
+        json!({"service":"api","key":[1,2]}),
+        json!({"service":"api","key":{"a":1}}),
+        json!({"service":2,"key":"typed"}),
+        json!({"service":"2","key":"typed"}),
+    ];
+    storage
+        .ingest(
+            metadata
+                .iter()
+                .enumerate()
+                .map(|(i, metadata)| LogEntry {
+                    ts: 1_800_000_000_000_000 + i as i64,
+                    level: 1,
+                    severity: "info".into(),
+                    message: format!("reduction {i}"),
+                    metadata_json: metadata.to_string(),
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    for phase in 0..3 {
+        let app = router(storage.clone());
+        let before = storage.stats().await.unwrap();
+        assert_eq!(
+            pipeline_rows(&app, "* | stats by (service) count() as n").await,
+            vec![
+                json!({"service":"2","n":2}),
+                json!({"service":"api","n":4}),
+                json!({"service":"worker","n":2})
+            ]
+        );
+        let after = storage.stats().await.unwrap();
+        assert_eq!(after.query_count - before.query_count, 1);
+        assert_eq!(
+            after.query_returned_entries - before.query_returned_entries,
+            8
+        );
+        assert_eq!(
+            after.api_query_result_rows - before.api_query_result_rows,
+            3
+        );
+        assert_eq!(after.native_count_count, before.native_count_count);
+        for (query, expected) in [
+            (
+                "service:=api | stats count() as total",
+                vec![json!({"total":4})],
+            ),
+            ("service:=api | stats count() as n", vec![json!({"n":4})]),
+            ("service:=\"2\" | stats count() as n", vec![json!({"n":1})]),
+            ("service:=2 | stats count() as n", vec![json!({"n":1})]),
+            ("service:=absent | stats count() as n", vec![json!({"n":0})]),
+            ("service:=absent | stats by (key) count() as n", vec![]),
+            (
+                "service:=api | stats by (key) count() as n",
+                vec![
+                    json!({"key":"2","n":2}),
+                    json!({"key":"[1,2]","n":1}),
+                    json!({"key":"{\"a\":1}","n":1}),
+                ],
+            ),
+            (
+                "* | stats by (nested.n) count() as n",
+                vec![json!({"nested.n":"","n":6}), json!({"nested.n":"x","n":2})],
+            ),
+            (
+                "* | limit 2 | stats by (service) count() as n",
+                vec![json!({"service":"api","n":2})],
+            ),
+        ] {
+            assert_eq!(
+                pipeline_rows(&app, query).await,
+                expected,
+                "phase={phase}, {query}"
+            );
+        }
+        // A preceding identity projection forces the general row pipeline.
+        // Rich grouping, multiple keys and presentation-field fallbacks must
+        // agree with that path, including composed aggregate output.
+        for field in ["key", "service,key", "nested.n", "level", "_msg", "_time"] {
+            for prefix in ["", "options(time_offset=1s) "] {
+                assert_eq!(
+                    pipeline_rows(
+                        &app,
+                        &format!("{prefix}* | stats by ({field}) count() as n")
+                    )
+                    .await,
+                    pipeline_rows(
+                        &app,
+                        &format!("{prefix}* | fields * | stats by ({field}) count() as n")
+                    )
+                    .await,
+                );
+            }
+        }
+        let bounded = router_with_limits(
+            storage.clone(),
+            LogsQueryLimits {
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+        );
+        assert_eq!(
+            pipeline_rows(
+                &bounded,
+                "* | stats by (service) count() as n | sort by (n desc, service) | limit 1"
+            )
+            .await,
+            vec![json!({"service":"api","n":4})]
+        );
+        for (limits, query, reason) in [
+            (
+                LogsQueryLimits {
+                    max_work_rows: 4,
+                    ..LogsQueryLimits::default()
+                },
+                "* | stats by (service) count() as n | limit 1",
+                "max_work_rows",
+            ),
+            (
+                LogsQueryLimits {
+                    max_work_rows: 4,
+                    ..LogsQueryLimits::default()
+                },
+                "service:=api | stats count() as total",
+                "max_work_rows",
+            ),
+            (
+                LogsQueryLimits {
+                    max_result_rows: 1,
+                    ..LogsQueryLimits::default()
+                },
+                "* | stats by (key) count() as n",
+                "max_result_rows",
+            ),
+            (
+                LogsQueryLimits {
+                    max_response_bytes: 64,
+                    ..LogsQueryLimits::default()
+                },
+                "* | stats by (key) count() as n",
+                "max_response_bytes",
+            ),
+        ] {
+            let response = router_with_limits(storage.clone(), limits)
+                .oneshot(logsql_request(query))
+                .await
+                .unwrap();
+            let status = response.status();
+            let value: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}: {value}");
+            assert_eq!(value["reason"], reason, "{query}: {value}");
+        }
+        if phase == 0 {
+            storage.flush().await.unwrap();
+        }
+        if phase == 1 {
+            storage.schedule_optimize().await.unwrap();
+            storage.barrier().await.unwrap();
+            storage.shutdown().await.unwrap();
+            storage = Storage::start_with_timestamp_unit(
+                database.clone(),
+                extension.clone().into(),
+                1,
+                8,
+                TimestampUnit::Microseconds,
+            )
+            .unwrap();
+        }
+    }
+    storage.shutdown().await.unwrap();
+}
