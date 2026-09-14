@@ -250,3 +250,89 @@ was tagged.
 | [Small B](evidence/2026-09-13_issue74_small_b.json) | `e2ada11c78352097f8a26b83eb6f9873191d8261a154653bec76881ebcb5fb4d` |
 | [Larger A](evidence/2026-09-13_issue74_larger_a.json) | `6d1d1af58ea22c4d24a514a98296e3a683fe35b96288b5ebbd0f0ab25ced814a` |
 | [Larger B](evidence/2026-09-13_issue74_larger_b.json) | `a77a9641eceb9f80136097d85680e49f3904f4123efd8f052e920eb5cfb00674` |
+
+
+## #75: exact-message candidate pruning
+
+[Issue #75](https://github.com/awksedgreep/timeless-libsql/issues/75) is implemented
+in `2509f034e11e8be566ce5a7a03b7f0c83e78d2f0`. A nonempty exact message predicate
+now supplies a `message_contains` candidate constraint through the existing
+public cursor. Final equality remains case-sensitive in the API. Plain,
+textual, and typed-string exact forms qualify; empty literals, metadata fields,
+OR and NOT do not gain an unsound constraint. This extends the existing #2
+pruning path, with no new index or change to the default trigram policy.
+
+The preceding #74 candidate returned all 8,192/16,384 fixture rows from two
+blocks to find one exact match. Its small p50 was 6.02–6.16 ms and larger p50
+12.24–12.45 ms. Capture A API/storage materialization time was 5.75/3.47 ms
+small and 12.57/7.78 ms larger. Source inspection confirmed that the existing
+containment helper admitted words/phrases/prefixes/substrings but omitted exact
+predicates; these measurements identify the cost of that missing constraint.
+
+Candidate exact-message HTTP latency, **p50 / p95 milliseconds**:
+
+| Capture | Timeless | VictoriaLogs |
+|---|---:|---:|
+| Small A | 3.569 / 4.089 | 0.442 / 0.557 |
+| Small B | 3.506 / 3.714 | 0.489 / 0.935 |
+| Larger A | 7.648 / 8.915 | 0.623 / 1.310 |
+| Larger B | 7.639 / 8.514 | 0.702 / 1.114 |
+
+Small p50 improves approximately 41–43%, and larger p50 approximately 38–39%.
+A gap to VictoriaLogs remains. Each candidate request still selects two blocks,
+reads 666,700/1,333,324 payload bytes, and decodes 7,168/14,336 entries. It now
+prunes **one block**, and returns **one matching cursor row** instead of the
+entire fixture. `query_clp_skipped_rows` is zero for this benchmark's existing
+raw-block layout. Absence in the error block is proven by the message-column
+gate; the matching info block still takes the codec's full-decode fallback.
+The work counters therefore do not claim one decoded entry or zero payload
+reads. Core CLP prune/skip counters are now exposed in public logs stats.
+
+Mean public-counter time per request (55 requests per shape):
+
+| Capture | API query ms | Storage materialization ms |
+|---|---:|---:|
+| Small A | 3.354 | 3.217 |
+| Small B | 3.172 | 3.023 |
+| Larger A | 7.357 | 7.145 |
+| Larger B | 6.918 | 6.738 |
+
+Whole-server RSS after the complete workload and apparent data volume size:
+
+| Capture | Timeless logs RSS MiB | Apparent bytes |
+|---|---:|---:|
+| Small A | 31.00 | 757,840 |
+| Small B | 32.15 | 757,840 |
+| Larger A | 53.70 | 1,417,296 |
+| Larger B | 50.71 | 1,417,296 |
+
+Data size is identical to the preceding candidate. RSS includes other workload
+shapes and is not an isolated exact-query peak. No ingestion path, index,
+codec, compaction policy, or data format changed; ingestion timings remain in
+the raw captures, without a throughput claim.
+
+All **281 logs-package tests** passed with the real extension and ignored
+integrations enabled. The new HTTP regression exercises buffered, raw,
+compressed and reopened data; exact and textual syntax; duplicate, absent,
+empty, Unicode, case-variant, longer substring, and template/variable-boundary
+messages; retained nested/array/numeric field types; conjunctions, OR/NOT,
+work limits and optimize/restart. It proves that five containment candidates
+produce only two exact results, and that persisted exact absence decodes zero
+rows under a one-row work ceiling. The request-local diagnostic regression now
+expects zero processed rows for proven absence, matching actual physical work.
+All **83 selected core block/codec tests** passed, including pruning equivalence
+fuzzing, no-false-negative corpora, legacy codecs and corruption checks. Strict
+logs Clippy and query contracts passed; pinned oracle fixtures are unchanged.
+
+The clean unpublished native Linux 0.8.4 bundle and harness use `2509f03`;
+bundle SHA-256 `ae4b1e09a854c6aa85450061e2d5991eaa440ec0cda1111bf51a1a00d23b1d11`.
+The same native ARM64 packager checks, image pins, quotas and protocol apply.
+All **6,800 timed responses**, complete-data restart checks and both required
+capability probes passed in four captures. No release was tagged.
+
+| Capture | SHA-256 |
+|---|---|
+| [Small A](evidence/2026-09-13_issue75_small_a.json) | `d611432d2aaa1a7ad9a56ba5e7a094492e129c5103815af9d4f072065ddd53fb` |
+| [Small B](evidence/2026-09-13_issue75_small_b.json) | `c4a10db8ef433d9383824535c4007c3b52d98d43fb30226f8e622aee7ea49a93` |
+| [Larger A](evidence/2026-09-13_issue75_larger_a.json) | `09e0771ec44a4e2e0372810f6db999e3bf08a5f7d80002093ab8bf0138ee393e` |
+| [Larger B](evidence/2026-09-13_issue75_larger_b.json) | `b18ad6c8f839e9aad661698c10474400a1538cfe02f1a1f1e800a38dbbc664e5` |
