@@ -296,7 +296,7 @@ fn number_delta(before: &Number, after: &Number) -> Option<Number> {
     (delta != 0.0).then(|| Number::from_f64(delta).expect("finite stats delta"))
 }
 
-fn numeric_delta(before: &Value, after: &Value) -> Value {
+pub(super) fn numeric_delta(before: &Value, after: &Value) -> Value {
     let Some(before) = before.as_object() else {
         return json!({});
     };

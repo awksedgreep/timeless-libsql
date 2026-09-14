@@ -20317,3 +20317,155 @@ async fn tail_published_entries_are_immediately_searchable() {
     );
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn native_count_aliases_preserve_work_and_pipeline_semantics() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("count-aliases.db");
+    let mut storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let body = (0..128)
+        .map(|i| {
+            let service = if i % 4 == 0 { "api" } else { "worker" };
+            serde_json::json!({"_time": 1800000000000000_i64 + i, "_msg": format!("event {i}"),
+            "level": "info", "service": service})
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        router(storage.clone())
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    for phase in 0..3 {
+        let app = router(storage.clone());
+        for (filter, expected) in [("*", 128), ("service:=api", 32), ("service:=absent", 0)] {
+            let mut baseline = None;
+            for (expression, alias) in [
+                ("count()", "total"),
+                ("count() as total", "total"),
+                ("count() as n", "n"),
+                ("count(*) as hits", "hits"),
+                (r#"count() as "request count""#, "request count"),
+                (r#"count() as "a.b""#, "a.b"),
+            ] {
+                let query = format!("{filter} | stats {expression}");
+                let before = storage.stats().await.unwrap();
+                assert_eq!(
+                    pipeline_rows(&app, &query).await,
+                    vec![serde_json::json!({(alias): expected})],
+                    "phase={phase}, {query}"
+                );
+                let after = storage.stats().await.unwrap();
+                let work = (
+                    after.query_count - before.query_count,
+                    after.query_payload_bytes_read - before.query_payload_bytes_read,
+                    after.query_decoded_entries - before.query_decoded_entries,
+                    after.query_returned_entries - before.query_returned_entries,
+                    after.native_count_count - before.native_count_count,
+                    after.native_count_payload_bytes_read - before.native_count_payload_bytes_read,
+                    after.native_count_decoded_entries - before.native_count_decoded_entries,
+                );
+                if let Some(baseline) = baseline {
+                    assert_eq!(work, baseline, "phase={phase}, {query}");
+                } else {
+                    baseline = Some(work);
+                }
+                if filter == "*" {
+                    assert_eq!(work.0, 0);
+                    assert_eq!(work.4, 1);
+                }
+            }
+        }
+        for (query, expected) in [
+            (
+                "* | stats count() as n | filter n:>0 | fields n",
+                serde_json::json!({"n":128}),
+            ),
+            (
+                "* | stats count() as total | fields total",
+                serde_json::json!({"total":128}),
+            ),
+            (
+                "* | sort by (_time) desc | stats count() as n",
+                serde_json::json!({"n":128}),
+            ),
+            (
+                "* | limit 2 | stats count() as n",
+                serde_json::json!({"n":2}),
+            ),
+            (
+                "* | filter service:=api | stats count() as n",
+                serde_json::json!({"n":32}),
+            ),
+            (
+                "* | fields service | stats count(_msg) as n",
+                serde_json::json!({"n":0}),
+            ),
+            (
+                "* | stats count() as n, count() as m",
+                serde_json::json!({"n":128,"m":128}),
+            ),
+        ] {
+            assert_eq!(
+                pipeline_rows(&app, query).await,
+                vec![expected],
+                "phase={phase}, {query}"
+            );
+        }
+        assert!(
+            pipeline_rows(&app, "* | stats count() as n | filter n:>128")
+                .await
+                .is_empty()
+        );
+        let app = router_with_limits(
+            storage.clone(),
+            LogsQueryLimits {
+                max_response_bytes: 8,
+                ..LogsQueryLimits::default()
+            },
+        );
+        for alias in ["total", "n"] {
+            let response = app
+                .clone()
+                .oneshot(logsql_request(&format!("* | stats count() as {alias}")))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let value: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(value["reason"], "max_response_bytes");
+        }
+        if phase == 0 {
+            storage.flush().await.unwrap();
+            storage.schedule_optimize().await.unwrap();
+            storage.barrier().await.unwrap();
+        } else if phase == 1 {
+            storage.shutdown().await.unwrap();
+            storage = Storage::start_with_timestamp_unit(
+                database.clone(),
+                extension.clone().into(),
+                1,
+                8,
+                TimestampUnit::Microseconds,
+            )
+            .unwrap();
+        }
+    }
+    storage.shutdown().await.unwrap();
+}

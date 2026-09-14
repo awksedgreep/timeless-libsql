@@ -55,7 +55,7 @@ The six metric queries cover an exact selector, wide selector, sum, grouped
 sum, rate and wide range. The eight log queries cover count, filtered count,
 grouped count, exact message, indexed rows and ordered full rows. Expected
 count results use both `as total` (Timeless's native count path) and `as n`
-(its general pipeline) to expose alias-sensitive execution costs. Expected
+(its general pipeline in 0.8.4) to expose alias-sensitive execution costs. Expected
 results are generated independently from the fixture, not copied from a
 competitor response. Every response, including warmups, must match those
 expectations. Metric series order and numeric spelling may differ; labels,
@@ -80,6 +80,12 @@ are serial and rotate which engine runs first each round. Recorded latency
 covers request execution through the complete HTTP body. Request construction,
 JSON decoding and correctness checking are outside the timer. Raw nanosecond
 samples, nearest-rank p50/p95/p99, minima/maxima and response sizes are retained.
+Timeless also records public storage-stat snapshots and numeric deltas for each
+query shape, outside the request timers. `storage_work.requests` includes both
+warmups and measured requests. Unchanged numeric values are omitted from the
+delta; the full before/after snapshots distinguish zero work from absent counters.
+These are process-wide counters on the dedicated fixture engine, not profiles
+of competitor internals. Background maintenance may affect unrelated counters.
 Fifty samples give only a coarse tail estimate; use `--iterations` for longer
 runs. The client crosses the same VM port-forwarding path for every engine.
 

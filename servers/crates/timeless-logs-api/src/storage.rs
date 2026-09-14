@@ -23,7 +23,8 @@ use timeless_api_common::{
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::logsql::{
-    logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, LogsqlPlan, PipelineOp,
+    logsql_field_comparison, parse_ipv4_address, parse_ipv6_address, LogsqlPlan, PipelineField,
+    PipelineOp, StatsKind,
 };
 use crate::pipeline::{self, PipelineLimits};
 
@@ -2087,6 +2088,31 @@ fn reader_main(
                         )?;
                         return Ok((rows, report));
                     }
+                    // A scalar count owns its input cardinality. Carry its
+                    // alias into one aggregate row, then replay only the
+                    // suffix; naming the result must not force a row scan.
+                    // Diagnostic/nested reads still require a cursor report:
+                    // the native count TVF does not publish that contract.
+                    if let Some((prefix_len, alias)) =
+                        native_count_prefix(&operations).filter(|_| !capture_query_report)
+                    {
+                        let total = query_count(&conn, &spec, cancelled.as_ref(), timestamp_unit)?;
+                        let report = LogQueryExecutionReport::default();
+                        let rows = pipeline::execute(
+                            vec![serde_json::json!({(alias): total})],
+                            pipeline::PipelineExecution {
+                                report,
+                                operations: &operations[prefix_len..],
+                                implicit_result_limit,
+                                rate_window_seconds,
+                                timestamp_unit,
+                                limits,
+                                cancelled: cancelled.as_ref(),
+                                query_started: started,
+                            },
+                        )?;
+                        return Ok((rows, report));
+                    }
                     let (rows, report) = query_pipeline_rows(
                         &conn,
                         &spec,
@@ -2767,6 +2793,31 @@ fn query_rows_with_postfilters(
         }
     }
     Ok(output)
+}
+
+/// Ordering and query-time presentation cannot change count(*). Every other
+/// preceding operation can change its input and must remain on the row path.
+fn native_count_prefix(operations: &[PipelineOp]) -> Option<(usize, &str)> {
+    let index = operations
+        .iter()
+        .take_while(|operation| {
+            matches!(
+                operation,
+                PipelineOp::SortTime { .. } | PipelineOp::QueryTimeOffset(_)
+            )
+        })
+        .count();
+    let PipelineOp::Stats(stats) = operations.get(index)? else {
+        return None;
+    };
+    let [expression] = stats.expressions.as_slice() else {
+        return None;
+    };
+    (stats.group_by.is_empty()
+        && expression.kind == StatsKind::Count
+        && matches!(expression.fields.as_slice(), [PipelineField::All])
+        && expression.limit.is_none())
+    .then_some((index + 1, expression.alias.as_str()))
 }
 
 fn query_pipeline_rows(

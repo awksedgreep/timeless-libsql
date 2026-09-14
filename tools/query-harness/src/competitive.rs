@@ -840,6 +840,21 @@ fn percentile(sorted: &[u64], percent: usize) -> u64 {
     sorted[(sorted.len() * percent).div_ceil(100).saturating_sub(1)]
 }
 
+fn timeless_stats(client: &Client, server: &Server) -> Result<Option<Value>> {
+    let path = match server.kind {
+        Kind::TimelessLogs => "/select/logsql/stats",
+        Kind::TimelessMetrics => "/select/metrics/stats",
+        _ => return Ok(None),
+    };
+    let stats: Value = client
+        .get(format!("{}{path}", server.base))
+        .send()?
+        .error_for_status()?
+        .json()?;
+    ensure!(stats.is_object(), "public storage stats must be an object");
+    Ok(Some(stats))
+}
+
 fn measure(
     client: &Client,
     servers: &[Server],
@@ -849,6 +864,12 @@ fn measure(
 ) -> Result<Value> {
     let mut results = serde_json::Map::new();
     for query in queries {
+        // These snapshots are outside all request timers. They bracket the
+        // warmups as well as measured requests, on an otherwise idle engine.
+        let stats_before = servers
+            .iter()
+            .map(|server| timeless_stats(client, server))
+            .collect::<Result<Vec<_>>>()?;
         let mut samples = vec![Vec::new(); servers.len()];
         let mut sizes = vec![Vec::new(); servers.len()];
         for round in 0..args.warmup + args.iterations {
@@ -868,6 +889,16 @@ fn measure(
             let mut sorted = samples[i].clone();
             sorted.sort_unstable();
             engines.insert(server.kind.name().into(),json!({"latency_ns":{"p50":percentile(&sorted,50),"p95":percentile(&sorted,95),"p99":percentile(&sorted,99),"min":sorted[0],"max":sorted[sorted.len()-1]},"samples_ns":samples[i],"response_bytes":{"min":sizes[i].iter().min(),"max":sizes[i].iter().max()}}));
+            if let Some(before) = &stats_before[i] {
+                let after =
+                    timeless_stats(client, server)?.context("Timeless stats after query")?;
+                engines[server.kind.name()]["storage_work"] = json!({
+                    "requests": args.warmup + args.iterations,
+                    "before": before,
+                    "after": after,
+                    "numeric_delta": super::evidence::numeric_delta(before, &after),
+                });
+            }
         }
         results.insert(query.name.into(),json!({"query":query.expression,"range":query.range,"expected_result_sha256":digest(serde_json::to_string(&query.expected)?.as_bytes()),"engines":engines}));
         println!(
