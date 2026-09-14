@@ -700,7 +700,9 @@ async fn session_seventeen_query_stats_is_request_local_durable_and_direct_sql_v
             r#"="absent" | query_stats | keep RowsFound,RowsProcessed"#,
         )
         .await,
-        [serde_json::json!({"RowsFound":"0","RowsProcessed":"4"})]
+        // Exact absence is now proven by the existing message-column gate.
+        // The request-local report must reflect zero decoded rows.
+        [serde_json::json!({"RowsFound":"0","RowsProcessed":"0"})]
     );
     // Timeless eagerly executes the bounded API rowset today. The report is
     // actual work rather than a VictoriaLogs-style hypothetical early stop.
@@ -20979,6 +20981,168 @@ async fn metadata_reductions_preserve_types_groups_and_complete_scan_bounds() {
         if phase == 1 {
             storage.schedule_optimize().await.unwrap();
             storage.barrier().await.unwrap();
+            storage.shutdown().await.unwrap();
+            storage = Storage::start_with_timestamp_unit(
+                database.clone(),
+                extension.clone().into(),
+                1,
+                8,
+                TimestampUnit::Microseconds,
+            )
+            .unwrap();
+        }
+    }
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn exact_message_search_pushes_candidates_without_weakening_equality() {
+    use serde_json::json;
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("exact-message.db");
+    let mut storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let mut messages = (0..3000)
+        .map(|i| format!("competition event {i:08}"))
+        .collect::<Vec<_>>();
+    messages.extend(
+        [
+            "competition event 00000042",
+            "Competition event 00000042",
+            "prefix competition event 00000042",
+            "competition event 00000042 suffix",
+            "request user42 completed",
+            "request user420 completed",
+            "",
+            "λ Event 42",
+        ]
+        .map(str::to_owned),
+    );
+    storage
+        .ingest(
+            messages
+                .iter()
+                .enumerate()
+                .map(|(i, message)| LogEntry {
+                    ts: 1_800_000_000_000_000 + i as i64,
+                    level: 1,
+                    severity: "info".into(),
+                    message: message.clone(),
+                    metadata_json: json!({"id":i,"nested":{"flag":true},"array":[1,"2"]})
+                        .to_string(),
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    for phase in 0..4 {
+        let app = router(storage.clone());
+        for needle in [
+            "competition event 00000042",
+            "Competition event 00000042",
+            "request user42 completed",
+            "absent-message-zzz",
+            "",
+            "λ Event 42",
+        ] {
+            let literal = serde_json::to_string(needle).unwrap();
+            let expected = messages.iter().enumerate().filter(|(_,message)| message.as_str()==needle)
+                .map(|(i,message)|json!({"id":i,"_msg":message,"nested":{"flag":true},"array":[1,"2"]})).collect::<Vec<_>>();
+            for filter in [
+                format!("_msg:={literal}"),
+                format!("_msg:exact({literal})"),
+                format!("_msg:={literal} AND id:>=0"),
+            ] {
+                let query=format!("_time:[1799999999000000,1800000001000000] {filter} | fields id, _msg, nested, array | limit 4000");
+                assert_eq!(
+                    pipeline_rows(&app, &query).await,
+                    expected,
+                    "phase={phase}, {query}"
+                );
+                assert_eq!(
+                    pipeline_rows(&app, &format!("{filter} | stats count() as n")).await,
+                    vec![json!({"n":expected.len()})]
+                );
+            }
+        }
+        let before = storage.stats().await.unwrap();
+        let rows = pipeline_rows(
+            &app,
+            "_msg:=\"competition event 00000042\" | fields id | limit 4000",
+        )
+        .await;
+        assert_eq!(rows, vec![json!({"id":42}), json!({"id":3000})]);
+        let after = storage.stats().await.unwrap();
+        assert_eq!(after.query_count - before.query_count, 1);
+        // Containment is only a superset: mixed-case and longer messages
+        // may cross the cursor, but never the complete 3,008-row fixture.
+        assert_eq!(
+            after.query_returned_entries - before.query_returned_entries,
+            5
+        );
+        assert_eq!(
+            after.api_query_result_rows - before.api_query_result_rows,
+            2
+        );
+        let before = storage.stats().await.unwrap();
+        let bounded = router_with_limits(
+            storage.clone(),
+            LogsQueryLimits {
+                max_work_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+        );
+        if phase > 0 {
+            assert!(
+                pipeline_rows(&bounded, "_msg:=\"absent-message-zzz\" | fields id")
+                    .await
+                    .is_empty()
+            );
+            let after = storage.stats().await.unwrap();
+            assert_eq!(after.query_decoded_entries, before.query_decoded_entries);
+            assert!(after.query_clp_pruned_blocks > before.query_clp_pruned_blocks);
+        }
+        let response = bounded
+            .oneshot(logsql_request(
+                "_msg:=\"competition event 00000042\" | stats count() as n",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        // An OR/NOT expression must not inherit one branch's containment.
+        assert_eq!(
+            pipeline_rows(
+                &app,
+                "(_msg:=\"competition event 00000042\" OR id:=2999) | stats count() as n"
+            )
+            .await,
+            vec![json!({"n":3})]
+        );
+        assert_eq!(
+            pipeline_rows(
+                &app,
+                "NOT _msg:=\"competition event 00000042\" | stats count() as n"
+            )
+            .await,
+            vec![json!({"n":3006})]
+        );
+        if phase == 0 {
+            storage.flush().await.unwrap();
+        }
+        if phase == 1 {
+            storage.schedule_optimize().await.unwrap();
+            storage.barrier().await.unwrap();
+            assert_eq!(storage.stats().await.unwrap().raw_blocks, 0);
+        }
+        if phase == 2 {
             storage.shutdown().await.unwrap();
             storage = Storage::start_with_timestamp_unit(
                 database.clone(),

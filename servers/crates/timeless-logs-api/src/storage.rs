@@ -904,6 +904,8 @@ pub struct StorageStats {
     pub query_decoded_entries: i64,
     pub query_matched_entries: i64,
     pub query_returned_entries: i64,
+    pub query_clp_pruned_blocks: i64,
+    pub query_clp_skipped_rows: i64,
     pub query_bounded_count: i64,
     pub query_bounded_requested_entries: i64,
     pub query_bounded_max_entries: i64,
@@ -3143,7 +3145,7 @@ fn has_api_postfilter(spec: &QuerySpec) -> bool {
 
 /// The longest message literal every match must CONTAIN, derived from
 /// the predicate's top-level conjunctive structure. Word, Phrase,
-/// Prefix, and Substring nodes on the message field all imply substring
+/// Prefix, Substring, and exact-equality nodes on the message field imply substring
 /// containment of their literal (case-insensitive containment is a
 /// superset of every variant's semantics, case-sensitive or not);
 /// Or/Not/other nodes contribute nothing — conservative by design.
@@ -3155,10 +3157,12 @@ fn predicate_containment_needle(predicate: &LogPredicate) -> Option<&str> {
             | LogPredicate::Phrase { field, value, .. }
             | LogPredicate::Prefix { field, value, .. }
             | LogPredicate::Substring { field, value, .. }
-                if matches!(field, LogField::Message) && !value.is_empty() =>
-            {
-                Some(value.as_str())
-            }
+            | LogPredicate::Exact { field, value }
+            | LogPredicate::TextualExact { field, value }
+            | LogPredicate::TypedExact {
+                field,
+                value: JsonValue::String(value),
+            } if matches!(field, LogField::Message) && !value.is_empty() => Some(value.as_str()),
             _ => None,
         }
     }
@@ -4375,6 +4379,8 @@ fn storage_stats(conn: &Connection) -> Result<StorageStats, String> {
         query_decoded_entries: stat("query_decoded_entries"),
         query_matched_entries: stat("query_matched_entries"),
         query_returned_entries: stat("query_returned_entries"),
+        query_clp_pruned_blocks: stat("query_clp_pruned_blocks"),
+        query_clp_skipped_rows: stat("query_clp_skipped_rows"),
         query_bounded_count: stat("query_bounded_count"),
         query_bounded_requested_entries: stat("query_bounded_requested_entries"),
         query_bounded_max_entries: stat("query_bounded_max_entries"),
@@ -4527,6 +4533,52 @@ fn stat_text(conn: &Connection, key: &str) -> Result<Option<String>, String> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn exact_message_pushdown_requires_a_nonempty_positive_message_conjunct() {
+        let exact = LogPredicate::Exact {
+            field: LogField::Message,
+            value: "event 42".into(),
+        };
+        assert_eq!(predicate_containment_needle(&exact), Some("event 42"));
+        assert_eq!(
+            predicate_containment_needle(&LogPredicate::And(vec![
+                LogPredicate::True,
+                exact.clone()
+            ])),
+            Some("event 42")
+        );
+        for predicate in [
+            LogPredicate::Or(vec![exact.clone(), LogPredicate::True]),
+            LogPredicate::Not(Box::new(exact)),
+            LogPredicate::Exact {
+                field: LogField::Message,
+                value: String::new(),
+            },
+            LogPredicate::Exact {
+                field: LogField::Metadata(vec!["service".into()]),
+                value: "api".into(),
+            },
+            LogPredicate::TypedExact {
+                field: LogField::Message,
+                value: JsonValue::from(42),
+            },
+        ] {
+            assert_eq!(predicate_containment_needle(&predicate), None);
+        }
+        for predicate in [
+            LogPredicate::TextualExact {
+                field: LogField::Message,
+                value: "event 42".into(),
+            },
+            LogPredicate::TypedExact {
+                field: LogField::Message,
+                value: JsonValue::from("event 42"),
+            },
+        ] {
+            assert_eq!(predicate_containment_needle(&predicate), Some("event 42"));
+        }
+    }
 
     #[test]
     fn owner_lease_is_exclusive_and_recoverable() {

@@ -1453,3 +1453,8 @@ avoidable storage/decode cost.
 Direct SQLite/libSQL equivalents for current filtering, ordering, pagination,
 substring, count, field discovery, metadata, and bucket operations live in
 the [SQL equivalents cookbook](QUERY_SQL_EQUIVALENTS.md).
+
+Exact message predicates also carry their nonempty literal through the existing
+`message_contains` pruning superset. The final exact, case-sensitive predicate
+remains in the API. Public logs stats expose `query_clp_pruned_blocks` and
+`query_clp_skipped_rows` alongside decoded/returned entry counters.
