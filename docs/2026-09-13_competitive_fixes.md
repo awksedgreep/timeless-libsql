@@ -336,3 +336,118 @@ capability probes passed in four captures. No release was tagged.
 | [Small B](evidence/2026-09-13_issue75_small_b.json) | `c4a10db8ef433d9383824535c4007c3b52d98d43fb30226f8e622aee7ea49a93` |
 | [Larger A](evidence/2026-09-13_issue75_larger_a.json) | `09e0771ec44a4e2e0372810f6db999e3bf08a5f7d80002093ab8bf0138ee393e` |
 | [Larger B](evidence/2026-09-13_issue75_larger_b.json) | `b18ad6c8f839e9aad661698c10474400a1538cfe02f1a1f1e800a38dbbc664e5` |
+
+
+## #76: direct instant-selector sums
+
+[Issue #76](https://github.com/awksedgreep/timeless-libsql/issues/76) is implemented
+in `dcf65cf3dcded0a0fe1e9240878f5a23325083e9`. Instant sums over an exact-metric
+selector now feed selected typed values directly into the existing compensated
+group state. They avoid retaining the entire child vector as JSON and then
+parsing it back into label maps and samples. One reusable item buffer charges
+the same exact child-vector byte budget, including tentative prefixes for rows
+that lookback later excludes. Sample ordering, grouping, result/intermediate
+point limits, raw-work limits, cancellation, and final response bounds remain.
+Range queries, metric-name regexes and other child expressions retain the
+general evaluator. The same catalog and bounded raw-frame reader are reused.
+
+Before this change, each sum/grouped sum decoded 16,384/65,536 points in
+512/2,048 chunks, returned 15,872/63,488 points, and transferred
+260,112/1,040,400 raw-frame bytes per request to select 512/2,048 values.
+In #75 capture A, sum/grouped sum API time was 1.39/1.45 ms small and
+4.93/4.87 ms larger; the public extension raw-query portion was 0.34/0.33 ms
+small and 1.46/1.43 ms larger. The remaining API work includes catalog labels,
+selection, child serialization/parsing, grouping, and final output. The
+existing native latest frame cannot replace this selector without a contract
+change: its duplicate-timestamp rule selects the first stable value, whereas
+the current PromQL selector selects the last. The optimization preserves that
+difference and does not change the public native latest contract.
+
+Candidate public HTTP latency, **p50 / p95 milliseconds**:
+
+| Capture | Shape | Timeless | Prometheus | VictoriaMetrics |
+|---|---|---:|---:|---:|
+| Small A | `sum` | 1.414 / 2.022 | 0.765 / 1.134 | 1.111 / 1.898 |
+| Small A | `grouped_sum` | 1.379 / 1.652 | 0.759 / 1.310 | 1.025 / 1.718 |
+| Small B | `sum` | 1.368 / 1.643 | 0.749 / 0.932 | 1.027 / 1.464 |
+| Small B | `grouped_sum` | 1.331 / 1.448 | 0.702 / 0.849 | 0.782 / 1.256 |
+| Larger A | `sum` | 4.621 / 4.845 | 2.168 / 3.037 | 2.217 / 2.796 |
+| Larger A | `grouped_sum` | 4.847 / 5.359 | 2.205 / 3.160 | 2.396 / 2.965 |
+| Larger B | `sum` | 4.476 / 5.231 | 2.055 / 2.899 | 2.167 / 3.078 |
+| Larger B | `grouped_sum` | 4.578 / 5.123 | 2.125 / 2.893 | 2.143 / 2.630 |
+
+The preceding #75 p50 ranges were 1.62–1.86 ms for small sum and 1.71–1.77 ms
+for small grouped sum; 5.19–5.41 and 5.27–5.56 ms for the larger fixture. The
+averages of the two per-capture p50 values improve approximately **13–22%**
+across these four shape/size combinations. Tail latency does not improve
+uniformly in every capture. A latency gap to the competitors remains; these
+warmed serial measurements are not a general performance ranking.
+
+New successful top-level direct-sum counters attribute mean request time in
+milliseconds (55 requests per shape). Raw time includes the public SQL/frame
+transfer and frame decoding in the API; the extension-only raw time remains
+separately available in each capture. Grouping includes group-label construction
+and compensated addition. Budget time is the single-item serialization needed
+to preserve the existing child-byte ceiling. These phases do not include HTTP
+parsing, reader queueing, transport or all loop overhead.
+
+| Capture | Shape | Catalog | Raw frame | Selection | Grouping | Byte budget | Final encoding |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Small A | `sum` | 0.380 | 0.453 | 0.018 | 0.020 | 0.095 | 0.001 |
+| Small A | `grouped_sum` | 0.358 | 0.439 | 0.018 | 0.049 | 0.096 | 0.001 |
+| Small B | `sum` | 0.374 | 0.470 | 0.019 | 0.023 | 0.104 | 0.002 |
+| Small B | `grouped_sum` | 0.336 | 0.424 | 0.018 | 0.051 | 0.096 | 0.004 |
+| Larger A | `sum` | 1.318 | 1.904 | 0.081 | 0.081 | 0.386 | 0.002 |
+| Larger A | `grouped_sum` | 1.348 | 1.956 | 0.084 | 0.204 | 0.389 | 0.002 |
+| Larger B | `sum` | 1.328 | 1.940 | 0.083 | 0.076 | 0.383 | 0.001 |
+| Larger B | `grouped_sum` | 1.271 | 1.846 | 0.078 | 0.193 | 0.376 | 0.002 |
+
+Catalog and raw-frame work dominate the remaining query time. The physical
+sample/chunk/frame counts above are unchanged. Each request now reports one
+direct sum, 512/2,048 selected input points, and one/two output groups.
+`api_promql_sum_input_json_bytes` exactly matches the complete selector's
+response size, but is an accounting total, not a retained full JSON vector.
+The input point count still contributes to the intermediate-work budget.
+The profile counters cover successful top-level fused sums, not every nested
+sum in an arbitrary expression.
+
+Whole-server RSS after all benchmark shapes, in MiB:
+
+| Capture | Timeless metrics | Prometheus | VictoriaMetrics | Timeless apparent bytes |
+|---|---:|---:|---:|---:|
+| Small A | 16.42 | 85.77 | 51.70 | 610,304 |
+| Small B | 16.94 | 83.68 | 51.67 | 610,304 |
+| Larger A | 32.82 | 94.09 | 62.94 | 1,757,184 |
+| Larger B | 33.11 | 93.23 | 64.62 | 1,757,184 |
+
+Timeless retains its measured metrics RSS advantage. Its preceding values were
+16.36–16.41 MiB small and 32.66–33.06 MiB larger; these snapshots do not establish
+a memory reduction or isolate one query's peak. Apparent disk bytes remain
+exactly 610,304/1,757,184. There is no storage-format, index or ingestion change.
+
+All **187 metrics-package tests** passed with the real extension and ignored
+integrations enabled. New executor-equivalence regressions compare the original
+and direct path across duplicate timestamps, IEEE values, missing/empty grouping
+labels, escaped labels, offsets, explicit evaluation times, open-left lookback,
+fractional times, empty input, cancellation, and exact byte/point-limit boundaries.
+Public HTTP regressions independently verify both competitive cardinalities,
+all host groups, frame and input-work counters, rejection without partial sums,
+reader reuse, flush, maintenance and reopen. Existing PromQL numeric and temporal
+regressions remain green. Strict metrics Clippy and query contracts passed.
+All **549 pinned Prometheus API cases** and **196 pinned VictoriaMetrics API
+cases** passed ([Prometheus output](evidence/2026-09-13_issue76_prometheus_oracle.txt),
+[VictoriaMetrics output](evidence/2026-09-13_issue76_victoriametrics_oracle.txt)).
+
+The clean unpublished native Linux 0.8.4 candidate and harness use `dcf65cf`;
+bundle SHA-256 `4ea5d11518b3e6b8127b77162ce06d9b7bd4a1fc5a4a7c887b97fe734cf74766`.
+The same native ARM64 packager checks, immutable competitor pins, quotas and
+protocol apply. All **6,800 timed responses**, complete-data restart checks and
+both required LogsQL capability probes passed across the final four captures.
+No release was tagged.
+
+| Capture | SHA-256 |
+|---|---|
+| [Small A](evidence/2026-09-13_issue76_small_a.json) | `ce844c5b0184691282e435ecf34499116f83e519f2e5f2e1998bab10f4d97a94` |
+| [Small B](evidence/2026-09-13_issue76_small_b.json) | `3504b44c3cb02601191bf2e4839973adf815c27953fc8fd731b025997ea16472` |
+| [Larger A](evidence/2026-09-13_issue76_larger_a.json) | `628ee738735e4ade5569c0095e05dbe5c75e2b94c112298600aead44b5497633` |
+| [Larger B](evidence/2026-09-13_issue76_larger_b.json) | `e6562deaf09f9015568af3b1570495ca8031e941a60c6ef9fc450518815b936c` |
