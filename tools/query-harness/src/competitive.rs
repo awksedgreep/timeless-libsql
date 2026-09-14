@@ -35,6 +35,9 @@ pub(crate) struct CompetitiveArgs {
     /// Fail if the candidate rejects the ordinary-field sort composition.
     #[arg(long)]
     require_field_sort: bool,
+    /// Fail if the candidate rejects a terminal limit after native count.
+    #[arg(long)]
+    require_count_limit: bool,
     #[arg(long)]
     output: PathBuf,
 }
@@ -1167,6 +1170,7 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
                     );
                     if server.kind == Kind::VictoriaLogs
                         || (probe_name == "field_sort" && args.require_field_sort)
+                        || (probe_name == "count_limit" && args.require_count_limit)
                     {
                         ensure!(
                             status == 200,
@@ -1199,7 +1203,8 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
                     );
                 }
                 capability_probes[probe_name] = json!({"query":expression,"engines":responses,"timed":false,
-                        "required_for_timeless":probe_name == "field_sort" && args.require_field_sort});
+                        "required_for_timeless":(probe_name == "field_sort" && args.require_field_sort)
+                            || (probe_name == "count_limit" && args.require_count_limit)});
             }
         }
         for server in &servers {

@@ -104,7 +104,7 @@ extension.
 
 | ID | pipe | Rust now | Elixir | foundation | target | priority |
 |---|---|---|---|---|---|---|
-| `LQL-P01` | `limit` / `head` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)); a trailing limit after native `count() as total` is unsupported | shipped | yes | `ROWS` | `API` | P0 |
+| `LQL-P01` | `limit` / `head` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)); pagination after scalar count applies to the aggregate result; pagination before count changes its input | shipped | yes | `ROWS` | `API` | P0 |
 | `LQL-P02` | `offset` / `skip` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)) | shipped | yes | `ROWS` | `API` | P0 |
 | `LQL-P03` | `sort` / `order` by explicit fields, including `_time`, asc/desc ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-001-bounded-filter-sort-and-pagination)); ordinary and aggregate fields use bounded natural-order sorting; all-field sorting and inline sort limit/offset/rank/partition clauses are unsupported | shipped | yes | `ROWS`, `SQL` | `API` | P0 |
 | `LQL-P04` | `field_values` ([indexed SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-004-distinct-field-values), [typed SQL](QUERY_SQL_EQUIVALENTS.md#sql-log-012-typed-unique-values-and-counts)) | shipped | no | `VALUES` | `API` | P1 |

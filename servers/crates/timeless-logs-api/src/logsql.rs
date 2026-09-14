@@ -6472,6 +6472,16 @@ fn parse_with_scoped_context(
     for segment in segments {
         let segment = segment.trim();
         let words: Vec<&str> = segment.split_whitespace().collect();
+        if output == LogsqlOutput::Count
+            && pipeline_stage == 4
+            && matches!(words.first(), Some(&("limit" | "head" | "offset" | "skip")))
+        {
+            // Pagination now consumes the aggregate row. Retain the count
+            // operation in the pipeline so storage counts its complete input,
+            // and only then applies pagination to the one-row result.
+            has_session_thirteen_pipeline = true;
+            pipeline_stage = 0;
+        }
         match words.as_slice() {
             [command @ ("limit" | "head")] => {
                 advance_pipeline(&mut pipeline_stage, 3, command)?;
@@ -6511,7 +6521,7 @@ fn parse_with_scoped_context(
                 pipeline.push(sort);
             }
             ["stats", function @ ("count(*)" | "count()")] if output == LogsqlOutput::Rows => {
-                advance_count_pipeline(&mut pipeline_stage)?;
+                has_session_thirteen_pipeline |= advance_count_pipeline(&mut pipeline_stage);
                 let _ = function;
                 output = LogsqlOutput::Count;
                 pipeline.push(PipelineOp::Stats(StatsSpec::ungrouped(vec![
@@ -6529,7 +6539,7 @@ fn parse_with_scoped_context(
             | ["stats", function @ ("count(*)" | "count()"), "total"]
                 if output == LogsqlOutput::Rows =>
             {
-                advance_count_pipeline(&mut pipeline_stage)?;
+                has_session_thirteen_pipeline |= advance_count_pipeline(&mut pipeline_stage);
                 let _ = function;
                 output = LogsqlOutput::Count;
                 pipeline.push(PipelineOp::Stats(StatsSpec::ungrouped(vec![
@@ -10429,14 +10439,12 @@ fn advance_pipeline(stage: &mut u8, next: u8, name: &str) -> Result<(), LogsqlEr
     Ok(())
 }
 
-fn advance_count_pipeline(stage: &mut u8) -> Result<(), LogsqlError> {
-    if *stage >= 2 {
-        return Err(LogsqlError::unsupported(
-            "P0 LogsQL count cannot follow offset or limit because those pipes change count semantics",
-        ));
-    }
+/// A preceding offset/limit changes the input count and must be replayed over
+/// rows. A later pagination stage instead applies to the aggregate result.
+fn advance_count_pipeline(stage: &mut u8) -> bool {
+    let requires_rows = *stage >= 2;
     *stage = 4;
-    Ok(())
+    requires_rows
 }
 
 fn is_sort_pipe(segment: &str) -> bool {
@@ -15362,6 +15370,50 @@ mod tests {
             assert!(
                 parse_at(malformed, TimestampUnit::Microseconds, 0).is_err(),
                 "{malformed:?} was accepted"
+            );
+        }
+    }
+    #[test]
+    fn count_pagination_preserves_aggregation_boundary() {
+        let after = parse_at(
+            "* | stats count() as total | limit 1",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(after.output, LogsqlOutput::Pipeline);
+        assert_eq!(
+            after.spec.limit, 0,
+            "result limit must not become a storage input bound"
+        );
+        assert!(matches!(
+            after.pipeline.as_slice(),
+            [PipelineOp::Stats(_), PipelineOp::Limit(1)]
+        ));
+        let before = parse_at(
+            "* | limit 2 | stats count() as total | limit 1",
+            TimestampUnit::Microseconds,
+            0,
+        )
+        .unwrap();
+        assert_eq!(before.spec.limit, 0);
+        assert!(matches!(
+            before.pipeline.as_slice(),
+            [
+                PipelineOp::Limit(2),
+                PipelineOp::Stats(_),
+                PipelineOp::Limit(1)
+            ]
+        ));
+        for query in [
+            "* | stats count() | limit -1",
+            "* | stats count() | head nope",
+        ] {
+            assert_eq!(
+                parse_at(query, TimestampUnit::Microseconds, 0)
+                    .unwrap_err()
+                    .kind,
+                LogsqlErrorKind::Malformed
             );
         }
     }

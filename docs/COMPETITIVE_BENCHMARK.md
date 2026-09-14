@@ -74,7 +74,8 @@ must then return HTTP 200 and the complete correctly ordered groups. Without
 that flag, older bundles may retain an explicit unsupported result. Candidate
 captures must identify their source commit and must not be described as a
 published release merely because the workspace version is unchanged.
-A second probe records whether native count accepts a following `limit 1`;
+Use `--require-count-limit` for candidates implementing issue #73. The native
+count probe must then return HTTP 200 with the complete count after `limit 1`;
 the timed aggregate queries have no redundant terminal limit. Missing rows,
 wrong timestamps, non-finite samples and diagnostics fail timed workloads.
 

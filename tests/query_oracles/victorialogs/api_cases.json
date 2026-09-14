@@ -2717,6 +2717,133 @@
   ],
   "stats_cases": [
       {
+        "id": "LQL-P01-count-result-limit-one",
+        "query": "numeric_group:=numeric | stats count() as total | limit 1",
+        "expected_rows": [
+          {
+            "total": "9"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-bare-head-one",
+        "query": "numeric_group:=numeric | stats count() | head 1",
+        "expected_rows": [
+          {
+            "count(*)": "9"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-renamed",
+        "query": "numeric_group:=numeric | stats count() as n | limit 1",
+        "expected_rows": [
+          {
+            "n": "9"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-limit-zero",
+        "query": "numeric_group:=numeric | stats count() as total | limit 0",
+        "expected_rows": []
+      },
+      {
+        "id": "LQL-P01-count-result-empty-input",
+        "query": "case:=count-limit-absent | stats count() as total | limit 1",
+        "expected_rows": [
+          {
+            "total": "0"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-filtered",
+        "query": "numeric_group:=numeric first_partition:=a | stats count() as total | limit 1",
+        "expected_rows": [
+          {
+            "total": "5"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-default-head",
+        "query": "numeric_group:=numeric | stats count() as total | head",
+        "expected_rows": [
+          {
+            "total": "9"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-offset",
+        "query": "numeric_group:=numeric | stats count() as total | offset 1 | limit 1",
+        "expected_rows": []
+      },
+      {
+        "id": "LQL-P01-count-result-preceding-limit",
+        "query": "numeric_group:=numeric | limit 2 | stats count() as total | limit 1",
+        "expected_rows": [
+          {
+            "total": "2"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-preceding-offset",
+        "query": "numeric_group:=numeric | offset 2 | stats count() as total | limit 1",
+        "expected_rows": [
+          {
+            "total": "7"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-preceding-zero",
+        "query": "numeric_group:=numeric | limit 0 | stats count() as total | limit 1",
+        "expected_rows": [
+          {
+            "total": "0"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-projection-before-limit",
+        "query": "numeric_group:=numeric | stats count() as total | fields total | limit 1",
+        "expected_rows": [
+          {
+            "total": "9"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-larger-limit",
+        "query": "numeric_group:=numeric | stats count() as total | limit 2",
+        "expected_rows": [
+          {
+            "total": "9"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-projection-after-limit",
+        "query": "numeric_group:=numeric | stats count() as total | limit 1 | fields total",
+        "expected_rows": [
+          {
+            "total": "9"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P01-count-result-filter-before-limit",
+        "query": "numeric_group:=numeric | stats count() as total | filter total:>0 | limit 1",
+        "expected_rows": [
+          {
+            "total": "9"
+          }
+        ]
+      },
+      {
         "id": "LQL-P03-sort-natural-and-missing",
         "query": "numeric_group:=numeric | sort by (n, case) | fields case",
         "expected_rows": [

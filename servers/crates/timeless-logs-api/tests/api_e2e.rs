@@ -20662,3 +20662,138 @@ async fn grouped_field_sort_covers_both_competitive_fixture_sizes() {
         storage.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn native_count_pagination_preserves_scalar_work_and_input_order() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("count-pagination.db");
+    let mut storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage.ingest(numeric_pipeline_entries()).await.unwrap();
+    storage.flush().await.unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/query_oracles/victorialogs/api_cases.json"
+    ))
+    .unwrap();
+    for phase in 0..2 {
+        let app = router(storage.clone());
+        let mut tested = 0;
+        for case in fixture["stats_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| {
+                case["id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("LQL-P01-count-result-")
+            })
+        {
+            let mut expected = case["expected_rows"].as_array().unwrap().clone();
+            for row in &mut expected {
+                // Timeless's established bare-count column is total; the
+                // upstream default is count(*). Explicit aliases are exact.
+                if let Some(value) = row.as_object_mut().unwrap().remove("count(*)") {
+                    row["total"] = value;
+                }
+                for value in row.as_object_mut().unwrap().values_mut() {
+                    *value = serde_json::json!(value.as_str().unwrap().parse::<u64>().unwrap());
+                }
+            }
+            assert_eq!(
+                pipeline_rows(&app, case["query"].as_str().unwrap()).await,
+                expected,
+                "phase={phase}, {}",
+                case["id"]
+            );
+            tested += 1;
+        }
+        assert_eq!(tested, 15);
+        for (expression, alias) in [
+            ("count()", "total"),
+            ("count() as total", "total"),
+            ("count() as n", "n"),
+        ] {
+            for (tail, keep) in [
+                ("limit 1", true),
+                ("head", true),
+                ("limit 0", false),
+                ("offset 1 | limit 1", false),
+            ] {
+                let before = storage.stats().await.unwrap();
+                let query = format!("* | stats {expression} | {tail}");
+                let expected = if keep {
+                    vec![serde_json::json!({(alias):9})]
+                } else {
+                    vec![]
+                };
+                assert_eq!(pipeline_rows(&app, &query).await, expected, "{query}");
+                let after = storage.stats().await.unwrap();
+                assert_eq!(
+                    after.native_count_count - before.native_count_count,
+                    1,
+                    "{query}"
+                );
+                assert_eq!(after.query_count, before.query_count, "{query}");
+                assert_eq!(
+                    after.native_count_decoded_entries, before.native_count_decoded_entries,
+                    "{query}"
+                );
+            }
+        }
+        // Counting persisted metadata remains possible under a one-row work
+        // ceiling; that ceiling must not truncate the nine-log scalar value.
+        let limited = router_with_limits(
+            storage.clone(),
+            LogsQueryLimits {
+                max_work_rows: 1,
+                max_result_rows: 1,
+                ..LogsQueryLimits::default()
+            },
+        );
+        assert_eq!(
+            pipeline_rows(&limited, "* | stats count() as total | limit 1").await,
+            vec![serde_json::json!({"total":9})]
+        );
+        let response = limited
+            .oneshot(logsql_request("* | stats count() as total | limit 2"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(value["reason"], "max_result_rows");
+        for tail in ["limit -1", "head nope"] {
+            let response = app
+                .clone()
+                .oneshot(logsql_request(&format!(
+                    "* | stats count() as total | {tail}"
+                )))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        storage.schedule_optimize().await.unwrap();
+        storage.barrier().await.unwrap();
+        storage.shutdown().await.unwrap();
+        if phase == 0 {
+            storage = Storage::start_with_timestamp_unit(
+                database.clone(),
+                extension.clone().into(),
+                1,
+                8,
+                TimestampUnit::Microseconds,
+            )
+            .unwrap();
+        }
+    }
+}

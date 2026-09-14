@@ -1598,7 +1598,7 @@ cases total, all passing against the immutable image. The fixture then contained
 
 Twelve `LQL-P03-sort-*` cases extend the pinned VictoriaLogs 1.52.0 corpus to
 1,510 cases (400 row-query, one stochastic, 556 error, 553 statistics/pipeline).
-The fixture now contains 1510 cases. They cover natural numeric ordering,
+The fixture then contained 1510 cases. They cover natural numeric ordering,
 missing/null sort keys, quoted and duplicate fields, per-field and global
 ascending/descending direction, grouped aggregates, prior projection/limit,
 subsequent offset/limit, and empty results. Source audit uses
@@ -1617,3 +1617,19 @@ orders service totals by count and then service name. The real-extension
 regression runs these same oracle cases and checks retained types, state/work/
 result limits, optimize, and reopen. Another HTTP regression verifies the
 original grouped-service query on both 8,192- and 16,384-row benchmark fixtures.
+
+
+## Native count pagination (issue #73)
+
+Fifteen `LQL-P01-count-result-*` cases extend the pinned VictoriaLogs corpus to
+1,525 cases (400 row-query, one stochastic, 556 error, 568 statistics/pipeline).
+The fixture now contains 1525 cases. These cover bare/aliased counts, `limit`
+and `head`, zero/larger limits, empty/filtered input, offsets, and projections.
+A limit before aggregation changes the rows counted; a limit after aggregation
+changes the number of aggregate rows returned. Timeless preserves this order
+and its JSON numeric count encoding. Bare count retains Timeless's established
+`total` column (VictoriaLogs defaults to `count(*)`); explicit aliases match.
+A terminal count still uses native
+execution through subsequent pagination, while a preceding limit/offset keeps
+the required input-row pipeline. For example, `* | stats count() as total |
+limit 1` returns the complete count, not a count of one input log.
