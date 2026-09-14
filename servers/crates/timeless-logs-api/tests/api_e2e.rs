@@ -20469,3 +20469,181 @@ async fn native_count_aliases_preserve_work_and_pipeline_semantics() {
     }
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn ordinary_field_sort_matches_pinned_oracle_and_preserves_bounds() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("field-sort.db");
+    let mut storage = Storage::start_with_timestamp_unit(
+        database.clone(),
+        extension.clone().into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    storage.ingest(numeric_pipeline_entries()).await.unwrap();
+    storage.flush().await.unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/query_oracles/victorialogs/api_cases.json"
+    ))
+    .unwrap();
+    for phase in 0..2 {
+        let app = router(storage.clone());
+        let mut tested = 0;
+        for case in fixture["stats_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["id"].as_str().unwrap().starts_with("LQL-P03-sort-"))
+        {
+            let mut expected = case["expected_rows"].as_array().unwrap().clone();
+            // Only aggregate count wire encoding differs from VictoriaLogs.
+            for row in &mut expected {
+                if let Some(n) = row.get("n").and_then(serde_json::Value::as_str) {
+                    row["n"] = serde_json::json!(n.parse::<u64>().unwrap());
+                }
+            }
+            assert_eq!(
+                pipeline_rows(&app, case["query"].as_str().unwrap()).await,
+                expected,
+                "phase={phase}, {}",
+                case["id"]
+            );
+            tested += 1;
+        }
+        assert_eq!(tested, 12);
+        let rows = pipeline_rows(&app, "numeric_group:=numeric | sort by (n,case)").await;
+        assert!(rows[0].get("n").is_none());
+        assert!(rows[1]["n"].is_null());
+        assert_eq!(rows[4]["n"], serde_json::json!(2));
+        assert_eq!(rows[6]["n"], "3");
+        assert_eq!(rows[8]["n"], serde_json::json!(9007199254740993_u64));
+        let limited = router_with_limits(
+            storage.clone(),
+            LogsQueryLimits {
+                max_result_rows: 2,
+                ..LogsQueryLimits::default()
+            },
+        );
+        assert_eq!(
+            pipeline_rows(
+                &limited,
+                "numeric_group:=numeric | sort by (n desc,case) | limit 2 | fields case"
+            )
+            .await,
+            vec![
+                serde_json::json!({"case":"numeric-huge"}),
+                serde_json::json!({"case":"numeric-ten"})
+            ]
+        );
+        for (limits, query, reason) in [
+            (
+                LogsQueryLimits {
+                    max_work_rows: 4,
+                    ..LogsQueryLimits::default()
+                },
+                "numeric_group:=numeric | sort by (n) | limit 1",
+                "max_work_rows",
+            ),
+            (
+                LogsQueryLimits {
+                    max_response_bytes: 64,
+                    ..LogsQueryLimits::default()
+                },
+                "numeric_group:=numeric | sort by (n) | limit 1 | fields case",
+                "max_response_bytes",
+            ),
+            (
+                LogsQueryLimits {
+                    max_result_rows: 2,
+                    ..LogsQueryLimits::default()
+                },
+                "numeric_group:=numeric | stats by (case) count() as n | sort by (n)",
+                "max_result_rows",
+            ),
+        ] {
+            let response = router_with_limits(storage.clone(), limits)
+                .oneshot(logsql_request(query))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{query}"
+            );
+            let value: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(value["reason"], reason);
+        }
+        for query in [
+            "* | sort",
+            "* | sort by ()",
+            "* | sort by (n) rank",
+            "* | sort by (n) limit 1",
+        ] {
+            let response = app.clone().oneshot(logsql_request(query)).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{query}"
+            );
+        }
+        storage.schedule_optimize().await.unwrap();
+        storage.barrier().await.unwrap();
+        storage.shutdown().await.unwrap();
+        if phase == 0 {
+            storage = Storage::start_with_timestamp_unit(
+                database.clone(),
+                extension.clone().into(),
+                1,
+                8,
+                TimestampUnit::Microseconds,
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn grouped_field_sort_covers_both_competitive_fixture_sizes() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    for count in [8192, 16384] {
+        let storage = Storage::start_with_timestamp_unit(
+            temp.path().join(format!("sort-{count}.db")),
+            extension.clone().into(),
+            1,
+            8,
+            TimestampUnit::Microseconds,
+        )
+        .unwrap();
+        let body = (0..count)
+            .map(|i| {
+                serde_json::json!({
+            "_time":1800000000000000_i64, "_msg":format!("competition event {i:08}"),
+            "level":if i%8==0 {"error"} else {"info"}, "service":if i%4==0 {"api"} else {"worker"},
+            "host":format!("h{:02}",i%64)
+        }).to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let app = router(storage.clone());
+        assert_eq!(
+            app.clone()
+                .oneshot(ingest_request(body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        storage.flush().await.unwrap();
+        assert_eq!(pipeline_rows(&app, "_time:[1799999999000000,1800000001000000] * | stats by (service) count() as n | sort by (service)").await,
+            vec![serde_json::json!({"service":"api","n":count/4}), serde_json::json!({"service":"worker","n":count*3/4})]);
+        storage.shutdown().await.unwrap();
+    }
+}

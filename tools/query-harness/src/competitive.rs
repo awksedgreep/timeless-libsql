@@ -32,6 +32,9 @@ pub(crate) struct CompetitiveArgs {
     metric_points: usize,
     #[arg(long, default_value_t = 8192)]
     log_entries: usize,
+    /// Fail if the candidate rejects the ordinary-field sort composition.
+    #[arg(long)]
+    require_field_sort: bool,
     #[arg(long)]
     output: PathBuf,
 }
@@ -1162,6 +1165,14 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
                         matches!(status, 200 | 422),
                         "{probe_name} probe returned HTTP {status}: {body}"
                     );
+                    if server.kind == Kind::VictoriaLogs
+                        || (probe_name == "field_sort" && args.require_field_sort)
+                    {
+                        ensure!(
+                            status == 200,
+                            "required {probe_name} capability rejected: {body}"
+                        );
+                    }
                     if status == 200 {
                         let rows: Vec<Value> = body
                             .lines()
@@ -1187,8 +1198,8 @@ pub(crate) fn run(root: &Path, mut args: CompetitiveArgs) -> Result<()> {
                         json!({"http_status":status,"body":body}),
                     );
                 }
-                capability_probes[probe_name] =
-                    json!({"query":expression,"engines":responses,"timed":false});
+                capability_probes[probe_name] = json!({"query":expression,"engines":responses,"timed":false,
+                        "required_for_timeless":probe_name == "field_sort" && args.require_field_sort});
             }
         }
         for server in &servers {

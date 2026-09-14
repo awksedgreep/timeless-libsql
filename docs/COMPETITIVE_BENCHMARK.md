@@ -11,7 +11,7 @@ repeated measurements and the unsupported query compositions they exposed.
 ## Reproduce
 
 Use a clean canonical checkout, a running Podman Linux runtime, and an extracted
-published Linux bundle whose architecture matches that runtime. Verify the
+published or clean candidate Linux bundle whose architecture matches that runtime. Verify the
 downloaded archive against the release's outer `SHA256SUMS` first. The harness
 also verifies every inner bundle checksum, the clean artifact manifest, and
 the runtime server build identities. Supply an immutable Debian base image
@@ -69,6 +69,11 @@ log rows preserve order. A separate untimed `sort by (service)` probe records
 the capability gap: Timeless supports timestamp sorting, while VictoriaLogs
 also sorts the grouped result by an ordinary field. Failed capability probes
 are retained alongside the timings rather than counted as successful queries.
+Use `--require-field-sort` for candidates implementing issue #72: the probe
+must then return HTTP 200 and the complete correctly ordered groups. Without
+that flag, older bundles may retain an explicit unsupported result. Candidate
+captures must identify their source commit and must not be described as a
+published release merely because the workspace version is unchanged.
 A second probe records whether native count accepts a following `limit 1`;
 the timed aggregate queries have no redundant terminal limit. Missing rows,
 wrong timestamps, non-finite samples and diagnostics fail timed workloads.

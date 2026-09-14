@@ -2716,6 +2716,200 @@
     }
   ],
   "stats_cases": [
+      {
+        "id": "LQL-P03-sort-natural-and-missing",
+        "query": "numeric_group:=numeric | sort by (n, case) | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-missing"
+          },
+          {
+            "case": "numeric-null"
+          },
+          {
+            "case": "numeric-negative"
+          },
+          {
+            "case": "numeric-zero"
+          },
+          {
+            "case": "numeric-two"
+          },
+          {
+            "case": "numeric-decimal"
+          },
+          {
+            "case": "numeric-string"
+          },
+          {
+            "case": "numeric-ten"
+          },
+          {
+            "case": "numeric-huge"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-per-field-descending",
+        "query": "numeric_group:=numeric | sort by (n desc, case) | limit 3 | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-huge"
+          },
+          {
+            "case": "numeric-ten"
+          },
+          {
+            "case": "numeric-string"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-global-descending",
+        "query": "numeric_group:=numeric | sort by (n, case) desc | limit 3 | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-huge"
+          },
+          {
+            "case": "numeric-ten"
+          },
+          {
+            "case": "numeric-string"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-global-reverses-field-direction",
+        "query": "numeric_group:=numeric | sort by (n desc, case desc) desc | limit 5 | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-missing"
+          },
+          {
+            "case": "numeric-null"
+          },
+          {
+            "case": "numeric-negative"
+          },
+          {
+            "case": "numeric-zero"
+          },
+          {
+            "case": "numeric-two"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-quoted-field-and-order-alias",
+        "query": "numeric_group:=numeric | ORDER (\"n\",case) ASC | limit 5 | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-missing"
+          },
+          {
+            "case": "numeric-null"
+          },
+          {
+            "case": "numeric-negative"
+          },
+          {
+            "case": "numeric-zero"
+          },
+          {
+            "case": "numeric-two"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-duplicate-keys",
+        "query": "numeric_group:=numeric | sort by (n, n desc, case) | limit 5 | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-missing"
+          },
+          {
+            "case": "numeric-null"
+          },
+          {
+            "case": "numeric-negative"
+          },
+          {
+            "case": "numeric-zero"
+          },
+          {
+            "case": "numeric-two"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-projection-offset-limit",
+        "query": "numeric_group:=numeric | fields case,n | sort by (n,case) | offset 2 | limit 3 | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-negative"
+          },
+          {
+            "case": "numeric-zero"
+          },
+          {
+            "case": "numeric-two"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-observes-prior-limit",
+        "query": "numeric_group:=numeric | sort by (case) | limit 3 | sort by (n,case) | fields case",
+        "expected_rows": [
+          {
+            "case": "numeric-missing"
+          },
+          {
+            "case": "numeric-decimal"
+          },
+          {
+            "case": "numeric-huge"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-empty-input",
+        "query": "case:=sort-absent | sort by (case) | fields case",
+        "expected_rows": []
+      },
+      {
+        "id": "LQL-P03-sort-zero-limit",
+        "query": "numeric_group:=numeric | sort by (case) | limit 0 | fields case",
+        "expected_rows": []
+      },
+      {
+        "id": "LQL-P03-sort-grouped-results",
+        "query": "numeric_group:=numeric | stats by (first_partition) count() as n | sort by (first_partition)",
+        "expected_rows": [
+          {
+            "first_partition": "a",
+            "n": "5"
+          },
+          {
+            "first_partition": "b",
+            "n": "4"
+          }
+        ]
+      },
+      {
+        "id": "LQL-P03-sort-aggregate-value",
+        "query": "numeric_group:=numeric | stats by (first_partition) count() as n | sort by (n)",
+        "expected_rows": [
+          {
+            "first_partition": "b",
+            "n": "4"
+          },
+          {
+            "first_partition": "a",
+            "n": "5"
+          }
+        ]
+      },
     {
       "id": "LQL-S12-json-values-sorts-and-omits-missing-fields",
       "query": "state_group:=state | stats json_values(case,probe) sort by (case) as selected",

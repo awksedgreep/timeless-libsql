@@ -6053,6 +6053,10 @@ pub(crate) enum PipelineOp {
     SortTime {
         descending: bool,
     },
+    SortFields {
+        fields: Vec<PipelineSortField>,
+        descending: bool,
+    },
     Offset(usize),
     Limit(usize),
     Sample(u64),
@@ -6489,11 +6493,22 @@ fn parse_with_scoped_context(
                 pipeline.push(PipelineOp::Offset(spec.offset));
             }
             _ if is_sort_pipe(segment) => {
-                advance_pipeline(&mut pipeline_stage, 1, "sort")?;
-                spec.descending = parse_time_sort(segment)?;
-                pipeline.push(PipelineOp::SortTime {
-                    descending: spec.descending,
-                });
+                let sort = parse_sort_pipe(segment)?;
+                if let PipelineOp::SortTime { descending } = &sort {
+                    if !has_session_thirteen_pipeline && output == LogsqlOutput::Rows {
+                        advance_pipeline(&mut pipeline_stage, 1, "sort")?;
+                        spec.descending = *descending;
+                    } else {
+                        pipeline_stage = 1;
+                        has_session_thirteen_pipeline = true;
+                    }
+                } else {
+                    // General sorting consumes the current pipeline rows,
+                    // including aggregate output or an earlier limited set.
+                    pipeline_stage = 1;
+                    has_session_thirteen_pipeline = true;
+                }
+                pipeline.push(sort);
             }
             ["stats", function @ ("count(*)" | "count()")] if output == LogsqlOutput::Rows => {
                 advance_count_pipeline(&mut pipeline_stage)?;
@@ -10425,7 +10440,7 @@ fn advance_count_pipeline(stage: &mut u8) -> Result<(), LogsqlError> {
 }
 
 fn is_sort_pipe(segment: &str) -> bool {
-    segment.starts_with("sort ") || segment.starts_with("order ")
+    is_first_last_pipe(segment, "sort") || is_first_last_pipe(segment, "order")
 }
 
 fn is_stats_pipe(segment: &str) -> bool {
@@ -10439,21 +10454,61 @@ fn is_stats_pipe(segment: &str) -> bool {
             .is_some_and(char::is_whitespace)
 }
 
-fn parse_time_sort(segment: &str) -> Result<bool, LogsqlError> {
-    match segment {
-        "sort by (_time)"
-        | "sort by (_time) asc"
-        | "sort (_time)"
-        | "sort (_time) asc"
-        | "order by (_time)"
-        | "order by (_time) asc" => Ok(false),
-        "sort by (_time) desc" | "sort (_time) desc" | "order by (_time) desc" => Ok(true),
-        "sort by (_time asc)" | "sort (_time asc)" | "order by (_time asc)" => Ok(false),
-        "sort by (_time desc)" | "sort (_time desc)" | "order by (_time desc)" => Ok(true),
-        _ => Err(LogsqlError::unsupported(format!(
-            "P0 LogsQL sorting supports only _time asc/desc, not {segment:?}"
-        ))),
+fn parse_sort_pipe(segment: &str) -> Result<PipelineOp, LogsqlError> {
+    let operation = segment.split_whitespace().next().unwrap_or("sort");
+    let tokens = lex_first_pipe(segment, operation)?;
+    let mut cursor = 1;
+    if tokens
+        .get(cursor)
+        .is_some_and(|token| token.eq_ignore_ascii_case("by"))
+    {
+        cursor += 1;
     }
+    if tokens.get(cursor).is_none_or(|token| token != "(") {
+        return Err(LogsqlError::unsupported(
+            "LogsQL sort requires explicit parenthesized fields",
+        ));
+    }
+    let fields = parse_first_sort_fields(&tokens, &mut cursor, operation)?;
+    if fields.is_empty() {
+        return Err(LogsqlError::unsupported(
+            "LogsQL sort requires at least one explicit field",
+        ));
+    }
+    let descending = match tokens.get(cursor).map(String::as_str) {
+        Some(direction) if direction.eq_ignore_ascii_case("desc") => {
+            cursor += 1;
+            true
+        }
+        Some(direction) if direction.eq_ignore_ascii_case("asc") => {
+            cursor += 1;
+            false
+        }
+        _ => false,
+    };
+    if let Some(token) = tokens.get(cursor) {
+        if ["limit", "offset", "rank", "partition"]
+            .iter()
+            .any(|keyword| token.eq_ignore_ascii_case(keyword))
+        {
+            return Err(LogsqlError::unsupported("LogsQL sort inline limit/offset/rank/partition clauses are unsupported; use following offset and limit pipes"));
+        }
+        return Err(LogsqlError::malformed(format!(
+            "unexpected LogsQL sort token {token:?}"
+        )));
+    }
+    if let [PipelineSortField {
+        field: PipelineField::Exact { path, .. },
+        descending: field_descending,
+    }] = fields.as_slice()
+    {
+        if path == &["_time"] {
+            return Ok(PipelineOp::SortTime {
+                descending: descending ^ field_descending,
+            });
+        }
+    }
+    Ok(PipelineOp::SortFields { fields, descending })
 }
 
 enum LogsqlTerm {
@@ -15011,7 +15066,7 @@ mod tests {
 
         for invalid in [
             "* | offset -1",
-            "* | sort by (service) asc",
+            "* | sort by (*) asc",
             "* | sort by (_time) sideways",
             "* | limit 2 | offset 1",
         ] {

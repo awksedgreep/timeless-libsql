@@ -1591,4 +1591,29 @@ booleans return HTTP 400. Duplicate options use the final value, and an
 explicit query option overrides a valid HTTP value after both are validated.
 The fixture remains 167 source rows and now contains 400 row-query cases, one
 stochastic case, 556 error cases, and 541 statistics/pipeline cases: 1,498
-cases total, all passing against the immutable image. The fixture now contains 1498 cases.
+cases total, all passing against the immutable image. The fixture then contained 1498 cases.
+
+
+## Ordinary field sorting (issue #72)
+
+Twelve `LQL-P03-sort-*` cases extend the pinned VictoriaLogs 1.52.0 corpus to
+1,510 cases (400 row-query, one stochastic, 556 error, 553 statistics/pipeline).
+The fixture now contains 1510 cases. They cover natural numeric ordering,
+missing/null sort keys, quoted and duplicate fields, per-field and global
+ascending/descending direction, grouped aggregates, prior projection/limit,
+subsequent offset/limit, and empty results. Source audit uses
+[`pipe_sort.go` at the pinned commit](https://github.com/VictoriaMetrics/VictoriaLogs/blob/46a54c976fa3d404396050e8a5ee6c5b0320efc5/lib/logstorage/pipe_sort.go).
+
+Timeless reuses its bounded `first`/`last` comparator and state accounting for
+ordinary fields and retains the storage path for timestamp-only sorting.
+Equal sort keys preserve input order locally; callers needing a reproducible
+order across engines should name a distinguishing secondary key. Rich field
+types remain intact. Supported syntax requires explicit nonempty fields;
+all-field sorting and inline sort limit/offset/rank/partition clauses remain
+unsupported. Use following `offset` and `limit` pipes for pagination.
+
+For example, `* | stats by (service) count() as n | sort by (n desc, service)`
+orders service totals by count and then service name. The real-extension
+regression runs these same oracle cases and checks retained types, state/work/
+result limits, optimize, and reopen. Another HTTP regression verifies the
+original grouped-service query on both 8,192- and 16,384-row benchmark fixtures.

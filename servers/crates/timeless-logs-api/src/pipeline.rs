@@ -449,6 +449,28 @@ pub(crate) fn execute(
                 });
                 rows
             }
+            PipelineOp::SortFields { fields, descending } => {
+                let spec = FirstSpec {
+                    limit: rows.len(),
+                    by_fields: fields.clone(),
+                    partition_by: Vec::new(),
+                    rank_field: None,
+                };
+                // Sorting retains an intermediate rowset; only the complete
+                // pipeline applies max_result_rows after offset/limit. The
+                // existing sorter still enforces state, work and cancellation.
+                first_last(
+                    rows,
+                    &spec,
+                    PipelineLimits {
+                        max_result_rows: execution.limits.max_state_items,
+                        ..execution.limits
+                    },
+                    execution.cancelled,
+                    *descending,
+                    "sort",
+                )?
+            }
             PipelineOp::Offset(offset) => {
                 if *offset >= rows.len() {
                     Vec::new()
