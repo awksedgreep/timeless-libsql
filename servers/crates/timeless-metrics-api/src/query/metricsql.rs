@@ -3155,6 +3155,7 @@ pub(super) fn execute_dynamic_rollup(
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes,
         series: emitted as u64,

@@ -55,6 +55,8 @@ impl MetricsTable {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct StorageStats {
+    #[serde(flatten)]
+    pub sum_profile: query::InstantSumProfile,
     pub module: String,
     pub raw_retention_seconds: u64,
     pub table_retention_seconds: Option<i64>,
@@ -218,6 +220,7 @@ pub struct FlushReport {
 
 #[derive(Default)]
 struct ApiProfile {
+    sum_profile: query::InstantSumProfile,
     pending: VecDeque<PendingBatch>,
     in_flight_batches: u64,
     in_flight_points: u64,
@@ -1096,6 +1099,7 @@ fn record_read_completion(
     profile.read_retries = profile.read_retries.saturating_add(retries);
     match result {
         Ok(output) => {
+            profile.sum_profile.add(output.sum_profile);
             if profile.last_error.as_deref().is_some_and(is_retryable_read) {
                 profile.last_error = None;
             }
@@ -1923,6 +1927,7 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.api_read_total_ns = profile.read_total_ns;
     stats.api_read_errors = profile.read_errors;
     stats.api_read_retries = profile.read_retries;
+    stats.sum_profile = profile.sum_profile;
     stats.api_read_frame_bytes = profile.read_frame_bytes;
     stats.api_read_response_bytes = profile.read_response_bytes;
     stats.api_read_result_series = profile.read_result_series;

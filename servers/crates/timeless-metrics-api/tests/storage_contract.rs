@@ -16316,3 +16316,134 @@ async fn native_response_byte_limits_apply_to_every_route_and_prometheus_discove
     }
     storage.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn instant_sum_profiles_and_bounds_cover_competitive_cardinalities() {
+    use serde_json::json;
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let base = 1_800_000_000_i64;
+    for count in [512_usize, 2048] {
+        let database = directory.path().join(format!("sum-profile-{count}.db"));
+        let mut storage = Storage::start(
+            database.clone(),
+            extension.clone(),
+            1,
+            8,
+            DEFAULT_RAW_RETENTION,
+        )
+        .unwrap();
+        let app = router(storage.clone());
+        let body=(0..count).map(|i| json!({
+            "metric":{"__name__":"competition_counter_total","host":format!("h{i:05}"),"service":if i%2==0 {"api"} else {"worker"}},
+            "values":(1..=32).map(|value|value*(i+1)).collect::<Vec<_>>(),
+            "timestamps":(0..32).map(|j|(base+j*10)*1000).collect::<Vec<_>>()
+        }).to_string()).collect::<Vec<_>>().join("\n");
+        assert_no_content(post_body(&app, "/api/v1/import", body.as_bytes()).await);
+        drop(app);
+        for phase in 0..3 {
+            let app = router(storage.clone());
+            let before = storage.stats().await.unwrap();
+            let wide = prom_query(&app, "competition_counter_total", base + 310).await;
+            assert_eq!(wide.0, StatusCode::OK, "{}", wide.1);
+            assert_eq!(wide.1["data"]["result"].as_array().unwrap().len(), count);
+            let after = storage.stats().await.unwrap();
+            let child_bytes =
+                (after.api_read_response_bytes - before.api_read_response_bytes) as usize;
+            for (query, expected) in [
+                (
+                    "sum(competition_counter_total)",
+                    vec![json!({"metric":{},"value":[base+310,(16*count*(count+1)).to_string()]})],
+                ),
+                (
+                    "sum by (service) (competition_counter_total)",
+                    vec![
+                        json!({"metric":{"service":"api"},"value":[base+310,(32*(count/2)*(count/2)).to_string()]}),
+                        json!({"metric":{"service":"worker"},"value":[base+310,(32*(count/2)*(count/2+1)).to_string()]}),
+                    ],
+                ),
+            ] {
+                let before = storage.stats().await.unwrap();
+                let response = prom_query(&app, query, base + 310).await;
+                assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+                assert_eq!(
+                    response.1["data"]["result"],
+                    json!(expected),
+                    "phase={phase}, count={count}"
+                );
+                let after = storage.stats().await.unwrap();
+                let before = serde_json::to_value(before).unwrap();
+                let after = serde_json::to_value(after).unwrap();
+                for (key, delta) in [
+                    ("api_promql_sum_queries", 1),
+                    ("api_promql_sum_input_points", count as u64),
+                    ("api_promql_sum_groups", expected.len() as u64),
+                    ("api_promql_sum_input_json_bytes", child_bytes as u64),
+                    ("api_promql_intermediate_points", count as u64),
+                    ("extension_raw_batch_query_count", 1),
+                    (
+                        "extension_raw_batch_query_returned_points",
+                        count as u64 * 31,
+                    ),
+                    ("api_read_frame_bytes", 16 + count as u64 * 508),
+                ] {
+                    assert_eq!(
+                        after[key].as_u64().unwrap() - before[key].as_u64().unwrap(),
+                        delta,
+                        "{key}: {query}"
+                    );
+                }
+                for limits in [
+                    PromQueryLimits {
+                        max_work_points: count * 32 - 1,
+                        ..PromQueryLimits::default()
+                    },
+                    PromQueryLimits {
+                        max_result_points: count - 1,
+                        ..PromQueryLimits::default()
+                    },
+                    PromQueryLimits {
+                        max_response_bytes: child_bytes - 1,
+                        ..PromQueryLimits::default()
+                    },
+                ] {
+                    let limited = router_with_limits(storage.clone(), limits);
+                    let response = prom_query(&limited, query, base + 310).await;
+                    assert_eq!(
+                        response.0,
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "{query}: {}",
+                        response.1
+                    );
+                }
+            }
+            let grouped = prom_query(
+                &app,
+                "sum by (host) (competition_counter_total)",
+                base + 310,
+            )
+            .await;
+            let expected=(0..count).map(|i|json!({"metric":{"host":format!("h{i:05}")},"value":[base+310,(32*(i+1)).to_string()]})).collect::<Vec<_>>();
+            assert_eq!(grouped.1["data"]["result"], json!(expected));
+            if phase == 0 {
+                storage.flush().await.unwrap();
+            }
+            if phase == 1 {
+                storage.schedule_compact().await.unwrap();
+                storage.flush().await.unwrap();
+                drop(app);
+                storage.shutdown().await.unwrap();
+                storage = Storage::start(
+                    database.clone(),
+                    extension.clone(),
+                    1,
+                    8,
+                    DEFAULT_RAW_RETENTION,
+                )
+                .unwrap();
+            }
+        }
+        storage.shutdown().await.unwrap();
+    }
+}

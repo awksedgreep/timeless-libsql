@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use regex::{Regex, RegexBuilder};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -3726,7 +3726,60 @@ impl QueryFeatures {
     }
 }
 
+/// Successful top-level fused instant sums only; unrelated plans report zero.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct InstantSumProfile {
+    pub api_promql_sum_queries: u64,
+    pub api_promql_sum_catalog_ns: u64,
+    pub api_promql_sum_raw_ns: u64,
+    pub api_promql_sum_selection_ns: u64,
+    pub api_promql_sum_grouping_ns: u64,
+    pub api_promql_sum_budget_ns: u64,
+    pub api_promql_sum_encode_ns: u64,
+    pub api_promql_sum_input_points: u64,
+    pub api_promql_sum_groups: u64,
+    pub api_promql_sum_input_json_bytes: u64,
+}
+impl InstantSumProfile {
+    pub(crate) fn add(&mut self, other: Self) {
+        self.api_promql_sum_queries = self
+            .api_promql_sum_queries
+            .saturating_add(other.api_promql_sum_queries);
+        self.api_promql_sum_catalog_ns = self
+            .api_promql_sum_catalog_ns
+            .saturating_add(other.api_promql_sum_catalog_ns);
+        self.api_promql_sum_raw_ns = self
+            .api_promql_sum_raw_ns
+            .saturating_add(other.api_promql_sum_raw_ns);
+        self.api_promql_sum_selection_ns = self
+            .api_promql_sum_selection_ns
+            .saturating_add(other.api_promql_sum_selection_ns);
+        self.api_promql_sum_grouping_ns = self
+            .api_promql_sum_grouping_ns
+            .saturating_add(other.api_promql_sum_grouping_ns);
+        self.api_promql_sum_budget_ns = self
+            .api_promql_sum_budget_ns
+            .saturating_add(other.api_promql_sum_budget_ns);
+        self.api_promql_sum_encode_ns = self
+            .api_promql_sum_encode_ns
+            .saturating_add(other.api_promql_sum_encode_ns);
+        self.api_promql_sum_input_points = self
+            .api_promql_sum_input_points
+            .saturating_add(other.api_promql_sum_input_points);
+        self.api_promql_sum_groups = self
+            .api_promql_sum_groups
+            .saturating_add(other.api_promql_sum_groups);
+        self.api_promql_sum_input_json_bytes = self
+            .api_promql_sum_input_json_bytes
+            .saturating_add(other.api_promql_sum_input_json_bytes);
+    }
+}
+fn profile_elapsed(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 pub(crate) struct ReadOutput {
+    pub sum_profile: InstantSumProfile,
     pub body: Vec<u8>,
     pub frame_bytes: usize,
     pub series: u64,
@@ -4944,6 +4997,56 @@ fn execute_prometheus_aggregate(
     cancelled: &AtomicBool,
 ) -> Result<ReadOutput, String> {
     check_cancelled(cancelled)?;
+    if instant && aggregate.op == PromAggregateOp::Sum && aggregate.param.is_none() {
+        if let PromPlan::Selector { selector, lookback } = aggregate.inner.as_ref() {
+            if let MetricSelection::Exact(metric) = &selector.metric {
+                return execute_instant_sum_selector(
+                    conn,
+                    features,
+                    aggregate,
+                    selector,
+                    metric,
+                    start,
+                    *lookback,
+                    query_start,
+                    query_end,
+                    limits,
+                    cancelled,
+                );
+            }
+        }
+    }
+    execute_prometheus_aggregate_rows(
+        conn,
+        features,
+        aggregate,
+        start,
+        stop,
+        step,
+        instant,
+        query_start,
+        query_end,
+        limits,
+        annotations,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prometheus_aggregate_rows(
+    conn: &Connection,
+    features: QueryFeatures,
+    aggregate: &PromAggregatePlan,
+    start: i64,
+    stop: i64,
+    step: i64,
+    instant: bool,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    annotations: &mut PromAnnotations,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
     let child = execute_prometheus(
         conn,
         features,
@@ -5058,6 +5161,178 @@ fn execute_prometheus_aggregate(
         limits,
         cancelled,
     )
+}
+
+/// Fuse only the immediate instant-selector/sum boundary. The raw frame keeps
+/// the selector's last-in-stable-order duplicate rule and IEEE values. Native
+/// latest currently uses first-at-timestamp and cannot substitute for it.
+#[allow(clippy::too_many_arguments)]
+fn execute_instant_sum_selector(
+    conn: &Connection,
+    features: QueryFeatures,
+    aggregate: &PromAggregatePlan,
+    selector: &Selector,
+    metric: &str,
+    timestamp: i64,
+    lookback: i64,
+    query_start: i64,
+    query_end: i64,
+    limits: PromQueryLimits,
+    cancelled: &AtomicBool,
+) -> Result<ReadOutput, String> {
+    let mut profile = InstantSumProfile {
+        api_promql_sum_queries: 1,
+        ..Default::default()
+    };
+    let selection_time = selector
+        .timing
+        .selection_time(timestamp, query_start, query_end)?;
+    let lower = selection_time.saturating_sub(lookback);
+    let started = Instant::now();
+    let catalog = catalog(conn, features.table, metric, &selector.filter)?;
+    profile.api_promql_sum_catalog_ns = profile_elapsed(started);
+    let started = Instant::now();
+    let raw = if catalog.is_empty() {
+        RawQuery {
+            series: Vec::new(),
+            frame: None,
+            frame_bytes: 0,
+        }
+    } else {
+        raw_query(
+            conn,
+            features,
+            metric,
+            &selector.filter,
+            storage_seconds_floor(lower),
+            storage_seconds_floor(selection_time),
+            Some(limits.max_work_points),
+        )?
+    };
+    let mut remaining_work = limits.max_work_points;
+    consume_prometheus_work(
+        &mut remaining_work,
+        raw.series.iter().map(RawSeries::len).sum(),
+        limits,
+    )?;
+    profile.api_promql_sum_raw_ns = profile_elapsed(started);
+    let started = Instant::now();
+    let by_id: HashMap<_, _> = raw
+        .series
+        .iter()
+        .map(|series| (series.id, series))
+        .collect();
+    profile.api_promql_sum_selection_ns = profile_elapsed(started);
+    let mut groups = BTreeMap::<BTreeMap<String, String>, PromAggregateState>::new();
+    // Preserve the old child-vector response bound without retaining that
+    // vector. Reuse one serialized item as an exact byte-budget scratch space.
+    let mut scratch = Vec::new();
+    write_prometheus_prefix(&mut scratch, true);
+    let mut child_bytes = scratch.len();
+    enforce_prometheus_output(&scratch, 0, limits)?;
+    let mut points = 0_u64;
+    for mut meta in catalog {
+        check_cancelled(cancelled)?;
+        let Some(series) = by_id.get(&meta.id) else {
+            continue;
+        };
+        // The row executor checks a tentative item's prefix before it knows
+        // whether lookback will emit a point. Preserve that exact bound too.
+        let started = Instant::now();
+        scratch.clear();
+        if points > 0 {
+            scratch.push(b',');
+        }
+        write_prometheus_item_prefix(&mut scratch, Some(metric), &meta.labels, true, limits)?;
+        if child_bytes
+            .checked_add(scratch.len())
+            .ok_or("PromQL child byte accounting overflow")?
+            > limits.max_response_bytes
+        {
+            return Err(prometheus_response_limit_error(limits));
+        }
+        profile.api_promql_sum_budget_ns = profile
+            .api_promql_sum_budget_ns
+            .saturating_add(profile_elapsed(started));
+        let started = Instant::now();
+        let mut selected = None;
+        for index in (0..series.len()).rev() {
+            check_cancelled(cancelled)?;
+            let time = seconds_to_millis(series.timestamp(raw.frame.as_deref(), index)?);
+            if time <= lower {
+                break;
+            }
+            if time <= selection_time {
+                selected = Some(series.value(raw.frame.as_deref(), index)?);
+                break;
+            }
+        }
+        profile.api_promql_sum_selection_ns = profile
+            .api_promql_sum_selection_ns
+            .saturating_add(profile_elapsed(started));
+        let Some(value) = selected else { continue };
+        admit_prometheus_point(points, limits)?;
+        points += 1;
+        enforce_intermediate_work(points, limits)?;
+        let started = Instant::now();
+        write_prometheus_sample(&mut scratch, timestamp, value)?;
+        write_prometheus_item_suffix(&mut scratch, true);
+        child_bytes = child_bytes
+            .checked_add(scratch.len())
+            .ok_or("PromQL child byte accounting overflow")?;
+        if child_bytes > limits.max_response_bytes {
+            return Err(prometheus_response_limit_error(limits));
+        }
+        profile.api_promql_sum_budget_ns = profile
+            .api_promql_sum_budget_ns
+            .saturating_add(profile_elapsed(started));
+        let started = Instant::now();
+        // Match PrometheusLabels' authoritative metric-name override.
+        meta.labels.insert("__name__".into(), metric.to_owned());
+        let labels = aggregate.grouping.output_labels(&meta.labels);
+        match groups.entry(labels) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(PromAggregateState::new(PromAggregateOp::Sum, value));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().add(PromAggregateOp::Sum, value);
+            }
+        }
+        profile.api_promql_sum_grouping_ns = profile
+            .api_promql_sum_grouping_ns
+            .saturating_add(profile_elapsed(started));
+    }
+    scratch.clear();
+    write_prometheus_suffix(&mut scratch);
+    child_bytes = child_bytes
+        .checked_add(scratch.len())
+        .ok_or("PromQL child byte accounting overflow")?;
+    if child_bytes > limits.max_response_bytes {
+        return Err(prometheus_response_limit_error(limits));
+    }
+    profile.api_promql_sum_input_json_bytes = child_bytes as u64;
+    profile.api_promql_sum_input_points = points;
+    profile.api_promql_sum_groups = groups.len() as u64;
+    let started = Instant::now();
+    let mut series = Vec::with_capacity(groups.len());
+    for (labels, state) in groups {
+        check_cancelled(cancelled)?;
+        series.push(IntermediateSeries {
+            labels,
+            points: vec![(timestamp, state.finish(PromAggregateOp::Sum))],
+        });
+    }
+    let mut output = encode_prometheus_intermediate(
+        IntermediateValue::Vector(series),
+        true,
+        raw.frame_bytes,
+        points,
+        limits,
+        cancelled,
+    )?;
+    profile.api_promql_sum_encode_ns = profile_elapsed(started);
+    output.sum_profile = profile;
+    Ok(output)
 }
 
 impl PromAggregateOp {
@@ -7622,6 +7897,7 @@ fn encode_prometheus_intermediate(
     debug_assert_eq!(points, expected_points);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes,
         series,
@@ -7857,6 +8133,7 @@ fn execute_prometheus_range_subquery(
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, result_points, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes,
         series: emitted as u64,
@@ -8239,6 +8516,7 @@ fn empty_prometheus_matrix(limits: PromQueryLimits) -> Result<ReadOutput, String
     let body = br#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#.to_vec();
     enforce_prometheus_output(&body, 0, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes: 0,
         series: 0,
@@ -8257,6 +8535,7 @@ fn empty_prometheus_vector_or_matrix(
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, 0, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes: 0,
         series: 0,
@@ -8288,6 +8567,7 @@ fn execute_prometheus_string(
     body.extend_from_slice(b"]}}");
     enforce_prometheus_output(&body, 1, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes: 0,
         series: 0,
@@ -8341,6 +8621,7 @@ fn execute_prometheus_scalar(
         enforce_prometheus_output(&body, points, limits)?;
     }
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes: 0,
         series: u64::from(!instant),
@@ -8436,6 +8717,7 @@ fn execute_prometheus_range_selector(
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes,
         series: emitted,
@@ -8605,6 +8887,7 @@ fn execute_prometheus_selector_value(
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes,
         series: emitted as u64,
@@ -8716,6 +8999,7 @@ fn execute_prometheus_window(
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes,
         series: emitted as u64,
@@ -8978,6 +9262,7 @@ fn execute_prometheus_range_raw(
     write_prometheus_suffix(&mut body);
     enforce_prometheus_output(&body, points, limits)?;
     Ok(ReadOutput {
+        sum_profile: InstantSumProfile::default(),
         body,
         frame_bytes,
         series: emitted as u64,
@@ -9496,6 +9781,156 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires TIMELESS_EXT_PATH pointing at libtimeless_ext"]
+    fn fused_instant_sums_match_row_execution_and_its_exact_bounds() {
+        let extension = std::env::var("TIMELESS_EXT_PATH").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        unsafe {
+            let _guard = rusqlite::LoadExtensionGuard::new(&conn).unwrap();
+            conn.load_extension(extension, None::<&str>).unwrap();
+        }
+        conn.execute_batch("CREATE VIRTUAL TABLE metric_samples USING timeless_metrics")
+            .unwrap();
+        let mut insert = conn
+            .prepare("INSERT INTO metric_samples(name,labels,ts,value) VALUES(?1,?2,?3,?4)")
+            .unwrap();
+        let entries = [
+            ("a", "east", vec![(1000, 1.0), (1010, 2.0), (1010, 3.0)]),
+            ("b", "east", vec![(710, 90.0), (711, 4.0)]),
+            ("c", "", vec![(1010, -0.0), (1011, 999.0)]),
+        ];
+        for (host, group, points) in entries {
+            let labels = json!({"host":host,"group":group,"escaped":"quote\" slash\\ newline\n λ"})
+                .to_string();
+            for (timestamp, value) in points {
+                insert
+                    .execute(params!["sum_edges", labels, timestamp, value])
+                    .unwrap();
+            }
+        }
+        for (host, value) in [
+            ("a", f64::NAN),
+            ("b", f64::INFINITY),
+            ("c", f64::NEG_INFINITY),
+        ] {
+            // The public textual ingest preserves IEEE values, unlike an
+            // SQLite REAL parameter carrying NaN (which becomes SQL NULL).
+            let text = format!(
+                "sum_ieee{{host=\"{host}\"}} {} 1010000\n",
+                format_prometheus_value(value)
+            );
+            conn.execute(
+                "INSERT INTO metric_samples(metric_samples) VALUES(?1)",
+                [text.as_bytes()],
+            )
+            .unwrap();
+        }
+        drop(insert);
+        let limits = PromQueryLimits::default();
+        let cancelled = AtomicBool::new(false);
+        for phase in 0..2 {
+            let features = QueryFeatures::discover(&conn, MetricsTable::Canonical).unwrap();
+            for query in [
+                "sum(sum_edges)",
+                "sum by (group) (sum_edges)",
+                "sum without(host) (sum_edges)",
+                "sum by (__name__) (sum_edges)",
+                "sum by(missing) (sum_edges)",
+                "sum(sum_edges offset 1s)",
+                "sum(sum_edges @ 1010)",
+                "sum(sum_ieee)",
+                "sum by(host) (sum_ieee)",
+                "sum(absent_metric)",
+            ] {
+                let PromPlan::Aggregate(aggregate) = lower_promql(query, 300_000).unwrap() else {
+                    panic!("aggregate expected")
+                };
+                let PromPlan::Selector { selector, lookback } = aggregate.inner.as_ref() else {
+                    unreachable!()
+                };
+                for time in [710_000, 1_010_000, 1_010_500, 1_310_000] {
+                    let run = |fused: bool, limits, cancelled: &AtomicBool| {
+                        let mut notes = PromAnnotations::default();
+                        if fused {
+                            execute_prometheus_aggregate(
+                                &conn, features, &aggregate, time, time, 1000, true, time, time,
+                                limits, &mut notes, cancelled,
+                            )
+                        } else {
+                            execute_prometheus_aggregate_rows(
+                                &conn, features, &aggregate, time, time, 1000, true, time, time,
+                                limits, &mut notes, cancelled,
+                            )
+                        }
+                    };
+                    let optimized = run(true, limits, &cancelled).unwrap();
+                    let original = run(false, limits, &cancelled).unwrap();
+                    assert_eq!(
+                        optimized.body, original.body,
+                        "phase={phase}, {query} @ {time}"
+                    );
+                    assert_eq!(optimized.frame_bytes, original.frame_bytes);
+                    assert_eq!(optimized.intermediate_points, original.intermediate_points);
+                    assert_eq!(optimized.sum_profile.api_promql_sum_queries, 1);
+                    let child = execute_prometheus_selector(
+                        &conn, features, selector, time, time, 1000, *lookback, true, time, time,
+                        limits, &cancelled,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        optimized.sum_profile.api_promql_sum_input_json_bytes,
+                        child.body.len() as u64
+                    );
+                    for bytes in [
+                        1,
+                        child.body.len() - 1,
+                        child.body.len(),
+                        child.body.len() + 1,
+                    ] {
+                        let bounded = PromQueryLimits {
+                            max_response_bytes: bytes,
+                            ..limits
+                        };
+                        assert_eq!(
+                            run(true, bounded, &cancelled).is_ok(),
+                            run(false, bounded, &cancelled).is_ok(),
+                            "byte bound={bytes}, {query}"
+                        );
+                    }
+                    for bound in [1, 2] {
+                        for bounded in [
+                            PromQueryLimits {
+                                max_result_points: bound,
+                                ..limits
+                            },
+                            PromQueryLimits {
+                                max_work_points: bound,
+                                ..limits
+                            },
+                        ] {
+                            assert_eq!(
+                                run(true, bounded, &cancelled).is_ok(),
+                                run(false, bounded, &cancelled).is_ok(),
+                                "point bound={bound}, {query}"
+                            );
+                        }
+                    }
+                    assert!(run(true, limits, &AtomicBool::new(true)).is_err());
+                    if query == "sum(sum_edges)" && time == 1_010_000 {
+                        let value: Value = serde_json::from_slice(&optimized.body).unwrap();
+                        assert_eq!(
+                            value["data"]["result"],
+                            json!([{"metric":{},"value":[1010,"7"]}])
+                        );
+                    }
+                }
+            }
+            conn.execute_batch("INSERT INTO metric_samples(metric_samples) VALUES('flush')")
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn user_regex_compilation_is_bounded() {
         // M6: unauthenticated patterns get a length cap and a compiled-
         // program budget. Normal patterns compile and anchor as before.
@@ -9772,6 +10207,7 @@ mod tests {
         let body = br#"{"status":"success","data":{"resultType":"vector","result":[]}}"#.to_vec();
         let original_len = body.len();
         let mut output = ReadOutput {
+            sum_profile: InstantSumProfile::default(),
             body,
             frame_bytes: 0,
             series: 0,

@@ -254,6 +254,7 @@ impl Context<'_> {
     ) -> Result<ReadOutput, String> {
         self.result_points(rows as u128)?;
         Ok(ReadOutput {
+            sum_profile: InstantSumProfile::default(),
             body: body.bytes,
             frame_bytes,
             series: series as u64,

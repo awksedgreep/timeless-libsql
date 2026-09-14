@@ -111,7 +111,7 @@ they do not justify a PromQL-aware extension API.
 | `PQL-O06` | `on(...)` and `ignoring(...)` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-013-on-and-ignoring-label-matching)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O07` | `group_left` and `group_right` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-014-group_left-and-group_right)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O08` | trigonometric binary `atan2` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-055-atan2)); scalar/vector directions, vector matching/modifiers, range grids, IEEE quadrants, deterministic Go-compatible rounding, limits, SQL, oracle parity, and reopen are pinned | shipped | no | `SQL` | `API` | P1 |
-| `PQL-O09` | `sum` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label)) | shipped | yes | `SQL` | `API` | P0 |
+| `PQL-O09` | `sum` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-003-cross-series-sum-by-label)); instant sums over an exact-metric selector feed typed samples directly into compensated group state, preserving raw selection order and the child vector's work/result/byte bounds | shipped | yes | `RAW`, `SQL` | `API` | P0 |
 | `PQL-O10` | `avg` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-015-cross-series-average-by-label)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O11` | `min` and `max` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-016-cross-series-minimum-and-maximum)) | shipped | yes | `SQL` | `API` | P0 |
 | `PQL-O12` | `count` and `group` with `by`/`without` ([SQL](QUERY_SQL_EQUIVALENTS.md#sql-prom-017-cross-series-count-and-group)) | shipped | yes | `SQL` | `API` | P0 |
@@ -370,3 +370,10 @@ justifies a new `EXT` query vector.
 Direct SQLite/libSQL equivalents for the current selector/window surface and
 planned SQL-composed aggregations, joins, and top-k are maintained in the
 [SQL equivalents cookbook](QUERY_SQL_EQUIVALENTS.md).
+
+Successful top-level direct-selector instant sums expose `api_promql_sum_*`
+phase counters in metrics stats: catalog lookup, raw reads, sample selection,
+grouping, byte-budget checks, and final encoding. `api_promql_sum_input_json_bytes`
+is the exact child-vector byte budget charged through one reusable item buffer;
+the complete input vector is neither retained as JSON nor parsed back. Range
+queries and other child expressions retain the general evaluator.
