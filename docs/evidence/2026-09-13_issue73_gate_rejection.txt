@@ -1,0 +1,15 @@
+competitive: metrics exact verified for every engine and iteration
+competitive: metrics wide verified for every engine and iteration
+competitive: metrics sum verified for every engine and iteration
+competitive: metrics grouped_sum verified for every engine and iteration
+competitive: metrics rate verified for every engine and iteration
+competitive: metrics range verified for every engine and iteration
+competitive: logs count_as_n verified for every engine and iteration
+competitive: logs filtered_count_as_n verified for every engine and iteration
+competitive: logs count_as_total verified for every engine and iteration
+competitive: logs filtered_count_as_total verified for every engine and iteration
+competitive: logs grouped_count verified for every engine and iteration
+competitive: logs exact_message verified for every engine and iteration
+competitive: logs indexed_rows verified for every engine and iteration
+competitive: logs wide_rows verified for every engine and iteration
+Error: required count_limit capability rejected: {"error":"unsupported_capability","message":"duplicate or out-of-order LogsQL limit pipeline","reason":"unsupported_logsql"}

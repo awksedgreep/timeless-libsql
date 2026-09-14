@@ -112,3 +112,44 @@ No new release was tagged.
 | [Small B](evidence/2026-09-13_issue72_small_b.json) | `8dc61939b0ab02cb5a28eedd4ddb3aef01bc653ccff6b4c2d7f9ef132214a4b6` |
 | [Larger A](evidence/2026-09-13_issue72_larger_a.json) | `cd04617eab5ffc617e4e450572e52fe9bf134487abf87ab1d4a15108dee96444` |
 | [Larger B](evidence/2026-09-13_issue72_larger_b.json) | `877813b6909dd29bf122a9b224a60dfc6fa3cfb54571dc8765c2b5af92c4a076` |
+
+## #73: pagination after native count
+
+[Issue #73](https://github.com/awksedgreep/timeless-libsql/issues/73) is implemented
+in `f910c23be008d9eccdc5fd7de3672e785f51d9a7`. `limit`, `head`, and `offset`
+after scalar count now apply to its aggregate result. The complete count is
+computed first through native execution. Pagination before count retains the
+input-row pipeline, so `limit 2 | stats count() as total` returns two while
+`stats count() as total | limit 1` returns the complete count.
+Bare `stats count()` keeps the established Timeless `total` column (upstream's
+default is `count(*)`); explicit aliases and JSON numeric types are preserved.
+
+All **277 logs-package tests** passed with the real extension and ignored
+integrations enabled, including parser boundaries, native work counters,
+empty/filtered input, zero/larger limits, aliases, bounds, optimize, and reopen.
+All **1,525 pinned VictoriaLogs cases** passed, including 15 new pagination
+cases ([retained output](evidence/2026-09-13_issue73_oracle.txt)). The final
+harness's 64 tests and strict Clippy passed, as did strict logs Clippy, oracle
+manifest validation, and query contracts.
+
+The clean unpublished native Linux candidate uses source `f910c23`, bundle
+SHA-256 `30961d6bc48ef8758ac3545f20dad7eee4c4631d0bf2f8cfaa3a145068fcb618`.
+It passed the same packager and native ARM64 build checks as the earlier fixes.
+Harness source `095ee4a` additionally records public work counters around each
+untimed capability probe. Four captures require both `--require-field-sort`
+and `--require-count-limit`; all **6,800 timed responses** and both complete-data
+restart checks passed, along with both required capabilities.
+
+In every capture, `stats count() as total | limit 1` returned HTTP 200 with
+8,192 or 16,384, as appropriate. Each probe performed **one native count,
+zero row queries, zero decoded entries, and zero native-count payload reads**;
+metadata accounted for every fixture entry. The gate also
+[rejected the pre-fix bundle](evidence/2026-09-13_issue73_gate_rejection.txt).
+No release tag or storage-format change was made.
+
+| Capture | SHA-256 |
+|---|---|
+| [Small A](evidence/2026-09-13_issue73_small_a.json) | `cf1443227e80a96d4bbe772623f342ee23632d6a4f2842529fad1bfcbfd14e5f` |
+| [Small B](evidence/2026-09-13_issue73_small_b.json) | `b2964d1b9ddb91d3898b20a9e9579d4d79de53aa8d436606f007e5734d3d49d1` |
+| [Larger A](evidence/2026-09-13_issue73_larger_a.json) | `0a04723d29d464085825a6f2e8a859bdc4c648943f93ce713d1d1c37b8558971` |
+| [Larger B](evidence/2026-09-13_issue73_larger_b.json) | `541171d47fe4d4e9f85149a9ebb56f6a3115b684ac3427f46c02e58618c95cfd` |
