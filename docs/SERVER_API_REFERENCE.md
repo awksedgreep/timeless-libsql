@@ -474,11 +474,14 @@ Guidance:
   builds a catalog over 20 MiB. Size the ceilings to at least twice the
   projected population, or set `0` to make them unbounded and rely on the
   request deadline and `..._MAX_RESPONSE_BYTES` instead.
-- **Memory.** A catalog is materialized and decoded per read, and
-  `TIMELESS_METRICS_READER_CONNECTIONS` readers may run concurrently. An
-  unbounded catalog ceiling on a very large store trades a bounded rejection for
-  the risk of exhausting the process; leave the ceilings finite unless the host
-  has headroom, and prefer narrowing selectors over raising them.
+- **Memory.** Discovery rows stream lazily: `timeless_series` builds one row
+  per `xNext`, and the label-name/value routes accumulate only distinct
+  strings, so peak memory is O(distinct output) rather than O(catalog). A
+  broad PromQL selector still collects the series it matches (execution needs
+  them), so the catalog ceilings remain the backstop there;
+  `TIMELESS_METRICS_READER_CONNECTIONS` readers may run concurrently. Leave the
+  ceilings finite unless the host has headroom, and prefer narrowing selectors
+  over raising them.
 - **PromQL gotcha.** A regex or negative matcher (`{__name__=~".+"}`,
   `{job!="x"}`) cannot use a name index and therefore builds the full catalog.
   Exact metric names (`node_load1`, `{__name__="node_load1"}`) do not. See

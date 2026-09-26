@@ -38,6 +38,14 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   Defaults and sizing guidance are documented in the
   [server API reference](docs/SERVER_API_REFERENCE.md#cardinality-and-query-limits).
   (`timeless-metrics-api`)
+- **Metrics catalog reads stream rows instead of materializing the whole
+  catalog.** `timeless_series` records the ordered series ids in `xFilter` and
+  builds one row per `xNext`, so a full-catalog read no longer clones every
+  series' labels into memory at once; ordering is unchanged
+  (`metric_name`, `series_id`). The native discovery routes that only
+  accumulate distinct label names or values now stream the catalog through a
+  visitor instead of building a `Vec<SeriesMeta>`. Row order is unchanged.
+  (`crates/timeless-core`, `crates/timeless-ext`, `timeless-metrics-api`)
 
 ### Fixed
 

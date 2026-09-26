@@ -5666,6 +5666,67 @@ impl Engine {
         self.series_overview_by_ids_inner(series_ids)
     }
 
+    /// One catalog row, built on demand. A streaming cursor calls this per row
+    /// so a full-catalog read never holds every series' cloned labels in
+    /// memory at once. Everything here is in-memory state (chunk index,
+    /// buffers, registry); it reads no store bytes and needs no read permit,
+    /// so it is safe to call between `xFilter` and `xNext`.
+    pub fn series_overview_by_id(&self, series_id: i64) -> Option<SeriesOverview> {
+        let _transition = self.transition_read();
+        let (name, labels) = {
+            let reg = self.series_read();
+            let info = reg.info_for(series_id)?;
+            (info.metric_name.clone(), info.labels.clone())
+        };
+
+        let mut min_ts: Option<i64> = None;
+        let mut max_ts: Option<i64> = None;
+        let mut disk_points: u64 = 0;
+        let mut chunks: usize = 0;
+        {
+            let index = self.index_read();
+            let pk = PartitionKey { series_id };
+            for ((_, _, _), meta) in index
+                .range((pk, i64::MIN, u64::MIN)..)
+                .take_while(|((key, _, _), _)| key == &pk)
+            {
+                min_ts = Some(min_ts.map_or(meta.min_ts, |current: i64| current.min(meta.min_ts)));
+                max_ts = Some(max_ts.map_or(meta.max_ts, |current: i64| current.max(meta.max_ts)));
+                disk_points += meta.point_count as u64;
+                chunks += 1;
+            }
+        }
+
+        let buffered = self.partitions.get(&PartitionKey { series_id });
+        let (buffered_count, buffer_min, buffer_max) = match buffered.as_ref() {
+            Some(buf) => (
+                buf.timestamps.len(),
+                buf.timestamps.iter().min().copied(),
+                buf.timestamps.iter().max().copied(),
+            ),
+            None => (0, None, None),
+        };
+        min_ts = match (min_ts, buffer_min) {
+            (Some(chunk), Some(buffer)) => Some(chunk.min(buffer)),
+            (chunk, buffer) => chunk.or(buffer),
+        };
+        max_ts = match (max_ts, buffer_max) {
+            (Some(chunk), Some(buffer)) => Some(chunk.max(buffer)),
+            (chunk, buffer) => chunk.or(buffer),
+        };
+
+        Some(SeriesOverview {
+            series_id,
+            name,
+            labels,
+            min_ts,
+            max_ts,
+            disk_points,
+            chunks,
+            buffered: buffered_count,
+        })
+    }
+
     fn series_overview_by_ids_inner(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
         let candidates: Vec<(i64, String, Labels)> = {
             let reg = self.series_read();

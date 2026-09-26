@@ -246,6 +246,119 @@ impl Context<'_> {
         Ok(selected)
     }
 
+    /// Stream the selected catalog through `visit` without collecting it.
+    /// Discovery routes that only accumulate distinct names or values use this
+    /// so a high-cardinality store never builds a `Vec<SeriesMeta>`. Matches
+    /// [`Self::selected`]; rows are visited in the extension's
+    /// `(metric_name, series_id)` order.
+    fn for_each_selected(
+        &self,
+        metric: Option<&str>,
+        selectors: &[Selector],
+        mut visit: impl FnMut(SeriesMeta) -> Result<(), String>,
+    ) -> Result<usize, String> {
+        if !self.features.catalog_work_limit {
+            return Err(
+                "incompatible extension: bounded timeless_series catalog capability is required"
+                    .into(),
+            );
+        }
+        let (read_metric, read_filter) = if selectors.is_empty() {
+            (metric, None)
+        } else if let [selector] = selectors {
+            match &selector.metric {
+                MetricSelection::Exact(exact) => (Some(exact.as_str()), Some(&selector.filter)),
+                _ => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "SELECT series_id,name,labels FROM timeless_series('{}',?1,?2,?3,?4)",
+                self.features.table.name()
+            ))
+            .map_err(|error| super::catalog_error("prepare bounded catalog", error))?;
+        let mut rows = statement
+            .query(params![
+                read_metric,
+                read_filter.map(|filter| &filter.pushdown_json),
+                crate::catalog_limit_sql(self.limits.max_catalog_series),
+                crate::catalog_limit_sql(self.limits.max_catalog_bytes)
+            ])
+            .map_err(|error| super::catalog_error("query bounded catalog", error))?;
+        let mut bytes = 0_usize;
+        let mut evaluations = 0_usize;
+        let mut emitted = 0_usize;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| super::catalog_error("read bounded catalog", error))?
+        {
+            self.check()?;
+            let metric_name = row
+                .get_ref(1)
+                .and_then(|value| value.as_str().map_err(Into::into))
+                .map_err(|error| format!("read catalog metric: {error}"))?;
+            let labels_json = row
+                .get_ref(2)
+                .and_then(|value| value.as_str().map_err(Into::into))
+                .map_err(|error| format!("read catalog labels: {error}"))?;
+            bytes = bytes
+                .checked_add(metric_name.len())
+                .and_then(|total| total.checked_add(labels_json.len()))
+                .ok_or_else(|| "catalog byte accounting overflow".to_string())?;
+            if self.limits.max_catalog_bytes != 0 && bytes > self.limits.max_catalog_bytes {
+                return Err(format!(
+                    "query exceeded the maximum catalog-size limit of {} bytes; \
+                     raise TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES (0 disables the \
+                     ceiling), or narrow the metric selector",
+                    self.limits.max_catalog_bytes
+                ));
+            }
+            let labels = decode_labels(labels_json)?;
+            let matched = if selectors.is_empty() {
+                read_filter.is_none_or(|filter| filter.matches(&labels))
+            } else {
+                let mut hit = false;
+                for selector in selectors {
+                    if evaluations == self.limits.max_work_points {
+                        return Err(format!(
+                            "query exceeded the maximum selector-work limit of {}",
+                            self.limits.max_work_points
+                        ));
+                    }
+                    evaluations += 1;
+                    let metric_matches = match &selector.metric {
+                        MetricSelection::Exact(name) => name == metric_name,
+                        MetricSelection::Regex(regex) => regex.is_match(metric_name),
+                        MetricSelection::Matchers(matchers) => matchers
+                            .iter()
+                            .all(|matcher| matcher.matches_value(metric_name)),
+                        MetricSelection::All => true,
+                    };
+                    if metric_matches && selector.filter.matches(&labels) {
+                        hit = true;
+                        break;
+                    }
+                }
+                hit
+            };
+            if matched {
+                visit(SeriesMeta {
+                    id: row
+                        .get(0)
+                        .map_err(|error| format!("read catalog id: {error}"))?,
+                    metric: metric_name.to_owned(),
+                    labels_json: labels_json.to_owned(),
+                    labels,
+                })?;
+                emitted += 1;
+            }
+        }
+        Ok(emitted)
+    }
+
     fn output(
         &self,
         body: Body,
@@ -315,26 +428,23 @@ pub(super) fn execute(
             aggregate,
         } => range(&context, &metric, &filter, start, stop, step, aggregate),
         NativeRequest::Labels { selectors } => {
-            let catalog = context.selected(None, &selectors)?;
             let mut names = BTreeSet::from(["__name__".to_string()]);
-            for meta in &catalog {
-                context.check()?;
+            let count = context.for_each_selected(None, &selectors, |meta| {
                 for name in meta.labels.keys() {
                     names.insert(name.clone());
                     context.result_points(names.len() as u128)?;
                 }
-            }
-            context.strings(names, catalog.len())
+                Ok(())
+            })?;
+            context.strings(names, count)
         }
         NativeRequest::LabelValues {
             name,
             metric,
             selectors,
         } => {
-            let catalog = context.selected(metric.as_deref(), &selectors)?;
             let mut values = BTreeSet::new();
-            for meta in &catalog {
-                context.check()?;
+            let count = context.for_each_selected(metric.as_deref(), &selectors, |meta| {
                 if let Some(value) = if name == "__name__" {
                     Some(&meta.metric)
                 } else {
@@ -343,15 +453,9 @@ pub(super) fn execute(
                     values.insert(value.clone());
                     context.result_points(values.len() as u128)?;
                 }
-            }
-            context.strings(
-                values,
-                if selectors.is_empty() {
-                    0
-                } else {
-                    catalog.len()
-                },
-            )
+                Ok(())
+            })?;
+            context.strings(values, if selectors.is_empty() { 0 } else { count })
         }
         NativeRequest::Series { metric, selectors } => {
             let catalog = context.selected(metric.as_deref(), &selectors)?;

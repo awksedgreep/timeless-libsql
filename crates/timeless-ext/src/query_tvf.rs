@@ -4278,8 +4278,10 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
             base: ffi::sqlite3_vtab_cursor::default(),
             db: self.db,
             source: self.source.clone(),
-            rows: Vec::new(),
+            shared: None,
+            ids: Vec::new(),
             pos: 0,
+            current: None,
             phantom: PhantomData,
         })
     }
@@ -4290,9 +4292,44 @@ pub(crate) struct SeriesCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
     db: *mut ffi::sqlite3,
     source: Option<(String, String)>,
-    rows: Vec<timeless_core::SeriesOverview>,
+    /// Streaming catalog: `xFilter` records the ordered series ids (8 bytes
+    /// each), and `xNext` materializes one row at a time. This keeps a
+    /// full-catalog read from holding every series' cloned labels in memory.
+    shared: Option<Arc<SharedEngine<Engine>>>,
+    ids: Vec<i64>,
     pos: usize,
+    current: Option<timeless_core::SeriesOverview>,
     phantom: PhantomData<&'vtab SeriesTab>,
+}
+
+impl SeriesCursor<'_> {
+    /// Sort the selected ids into the catalog's `(metric_name, series_id)`
+    /// order and load the first row. Sorting reads registry names under a
+    /// short read lock; labels are never cloned for ordering.
+    fn finish_filter(&mut self, shared: &Arc<SharedEngine<Engine>>, mut ids: Vec<i64>) {
+        {
+            let reg = shared.engine.series_read();
+            ids.sort_by(|a, b| {
+                let a_name = reg.info_for(*a).map(|info| info.metric_name.as_str());
+                let b_name = reg.info_for(*b).map(|info| info.metric_name.as_str());
+                (a_name, *a).cmp(&(b_name, *b))
+            });
+        }
+        self.shared = Some(Arc::clone(shared));
+        self.ids = ids;
+        self.pos = 0;
+        self.load_current();
+    }
+
+    fn load_current(&mut self) {
+        self.current = if self.pos < self.ids.len() {
+            self.shared
+                .as_ref()
+                .and_then(|shared| shared.engine.series_overview_by_id(self.ids[self.pos]))
+        } else {
+            None
+        };
+    }
 }
 
 unsafe impl VTabCursor for SeriesCursor<'_> {
@@ -4410,11 +4447,10 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 }
                 ids
             };
-            self.rows = shared.engine.series_overview_by_ids(&ids);
-            self.pos = 0;
+            self.finish_filter(&shared, ids);
             return Ok(());
         }
-        self.rows = match (metric, selection) {
+        let ids = match (metric, selection) {
             (_, SeriesSelection::Empty) => Vec::new(),
             (metric, SeriesSelection::Id(series_id)) => {
                 let matches = {
@@ -4430,41 +4466,47 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                     })
                 };
                 if matches {
-                    shared.engine.series_overview_by_ids(&[series_id])
+                    vec![series_id]
                 } else {
                     Vec::new()
                 }
             }
             (Some(metric), SeriesSelection::All) => {
-                let series_ids: Vec<i64> = {
-                    let reg = shared.engine.series_read();
-                    reg.find_series(&metric, &eq)
-                        .into_iter()
-                        .filter(|series_id| {
-                            reg.info_for(*series_id)
-                                .is_some_and(|info| matchers_pass(&info.labels, &matchers))
-                        })
-                        .collect()
-                };
-                shared.engine.series_overview_by_ids(&series_ids)
+                let reg = shared.engine.series_read();
+                reg.find_series(&metric, &eq)
+                    .into_iter()
+                    .filter(|series_id| {
+                        reg.info_for(*series_id)
+                            .is_some_and(|info| matchers_pass(&info.labels, &matchers))
+                    })
+                    .collect()
             }
-            (None, SeriesSelection::All) => shared.engine.series_overview(),
+            (None, SeriesSelection::All) => {
+                let reg = shared.engine.series_read();
+                reg.iter_series(None)
+                    .map(|(series_id, _)| series_id)
+                    .collect()
+            }
         };
-        self.pos = 0;
+        self.finish_filter(&shared, ids);
         Ok(())
     }
 
     fn next(&mut self) -> Result<()> {
         self.pos += 1;
+        self.load_current();
         Ok(())
     }
 
     fn eof(&self) -> bool {
-        self.pos >= self.rows.len()
+        self.pos >= self.ids.len()
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let row = &self.rows[self.pos];
+        let row = self
+            .current
+            .as_ref()
+            .ok_or_else(|| module_err("timeless_series: cursor row is missing".into()))?;
         match col {
             0 => ctx.set_result(&row.name),
             1 => ctx.set_result(&labels_to_json(&row.labels)),
