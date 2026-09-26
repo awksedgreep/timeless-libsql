@@ -14,6 +14,26 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- **Bounded `prune-after:<unix-seconds>` repair command for metrics.** It
+  removes whole raw and rollup chunks whose coverage begins after the cutoff,
+  sweeping every persisted tier. This is the operator path for samples stored
+  under a mistaken timestamp unit: a collector that emitted milliseconds into
+  a seconds table lands samples tens of thousands of years out, they never
+  match a query, and — being newer than every retention cutoff — retention can
+  never remove them. Block-granular; returns `1` while more rollup chunks
+  remain. (`crates/timeless-core`, `crates/timeless-ext`)
+
+### Fixed
+
+- **The metrics VictoriaMetrics import rejects implausible timestamps.** The
+  wire contract is milliseconds, so a value outside 1900..=2100 is a unit
+  mistake (seconds, microseconds, or nanoseconds). Such a line is counted as
+  an import error and skipped instead of being stored, which previously let a
+  single mistaken sample poison the reported `oldest/newest_timestamp_seconds`
+  range and the UI's data range. (`timeless-metrics-api`)
+
 ## [0.8.4] — 2026-09-13
 
 ### Added

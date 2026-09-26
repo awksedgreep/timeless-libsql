@@ -181,3 +181,46 @@ fn block_engine_retention() {
         "old block pruned at the second flush (cutoff 11_000)"
     );
 }
+
+/// Repair: `prune_after` drops whole chunks whose coverage begins after the
+/// cutoff. This is the bounded operator path for samples stored under a
+/// mistaken timestamp unit (milliseconds in a seconds store), which land
+/// tens of thousands of years out, never match a query, and are newer than
+/// every retention cutoff so retention can never remove them.
+#[test]
+fn prune_after_removes_future_chunks() {
+    let dir = temp_dir("prune_after");
+    let labels: HashMap<String, String> = HashMap::new();
+    let sid;
+    {
+        let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+        sid = engine.resolve_cached("cpu", &labels).unwrap();
+
+        // A normal chunk at sane epoch seconds, flushed on its own.
+        engine.write_point(sid, 1000, 1.0);
+        engine.write_point(sid, 1010, 2.0);
+        engine.flush_all().unwrap();
+
+        // A chunk from a collector that emitted milliseconds.
+        engine.write_point(sid, 1_787_288_405_969, 3.0);
+        engine.flush_all().unwrap();
+        assert_eq!(count_points(&engine, sid), 3, "both chunks present");
+
+        // The cutoff is far above sane seconds but far below the ms chunk.
+        let (deleted, more, errors) = engine.prune_after(2_000_000_000);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(deleted, 1, "the future chunk is the only victim");
+        assert!(!more, "nothing left to sweep");
+        assert_eq!(
+            engine
+                .query_range_by_id(sid, i64::MIN, i64::MAX)
+                .unwrap()
+                .iter()
+                .map(|&(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec![1000, 1010],
+            "sane chunk retained; future chunk gone"
+        );
+        engine.shutdown().unwrap();
+    }
+}

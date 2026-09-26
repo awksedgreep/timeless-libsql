@@ -1711,6 +1711,34 @@ err=$(sqlite3 "$TMP/f3_bad.db" ".load $EXT" \
   "CREATE VIRTUAL TABLE b USING timeless_metrics(rollups='1h@0,5m@0');" 2>&1 || true)
 check_eq "descending ladder rejected at CREATE" "$(grep -c 'must ascend' <<<"$err")" "1"
 
+# Repair: 'prune-after' drops chunks stored under a mistaken timestamp unit
+# (milliseconds written as seconds land far in the future). Retention can never
+# remove them because they are newer than every cutoff.
+PRDB="$TMP/f2_prune_after.db"
+got=$(sqlite3 "$PRDB" <<SQL
+.load $EXT
+CREATE VIRTUAL TABLE m USING timeless_metrics;
+INSERT INTO m(name, ts, value, labels) VALUES ('cpu', 1000, 1.0, '{"host":"a"}');
+INSERT INTO m(m) VALUES ('flush');
+INSERT INTO m(name, ts, value, labels) VALUES ('cpu', 1787288405969, 2.0, '{"host":"a"}');
+INSERT INTO m(m) VALUES ('flush');
+SELECT 'total_before', COUNT(*) FROM m;
+INSERT INTO m(m) VALUES ('prune-after:2000000000');
+SELECT 'marker', last_insert_rowid();
+SELECT 'total_after', COUNT(*) FROM m;
+SELECT 'max_ts', MAX(ts) FROM m;
+SQL
+)
+check_eq "prune-after drops the far-future chunk and keeps sane data" \
+  "$(grep -E '^(total_before|marker|total_after|max_ts)\|' <<<"$got")" \
+  'total_before|2
+marker|0
+total_after|1
+max_ts|1000'
+err=$(sqlite3 "$PRDB" ".load $EXT" "INSERT INTO m(m) VALUES ('prune-after:nope');" 2>&1 || true)
+check_eq "prune-after rejects a bad cutoff" \
+  "$(grep -c 'prune-after: expected' <<<"$err")" "1"
+
 # ---------------------------------------------------------------------------
 echo "== section 26: F4 bucket kernels (timeless_log_buckets / timeless_trace_buckets) =="
 F4DB="$TMP/f4_buckets.db"

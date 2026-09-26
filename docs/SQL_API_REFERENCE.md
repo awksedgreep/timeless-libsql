@@ -231,6 +231,14 @@ previously resolved `series_id`. Use the hidden command column for:
 - `prune:<unix-seconds>` removes whole raw chunks older than the explicit
   cutoff. Declared rollup retention is applied by maintenance; use the
   bounded `clear-rollups` command for an explicit full-tier removal.
+- `prune-after:<unix-seconds>` removes whole raw and rollup chunks whose
+  coverage *begins* after the explicit cutoff, across every persisted tier.
+  This is the repair path for samples stored under a mistaken timestamp unit
+  (for example milliseconds in a seconds table): they land far in the future,
+  never match a query, and are newer than every retention cutoff, so retention
+  can never remove them. Block-granular, so a chunk straddling the cutoff is
+  retained. Returns `1` through `last_insert_rowid()` while more rollup chunks
+  remain to sweep; repeat until it returns `0`.
 
 The authoritative per-series flush threshold is 4,096 points. A successful
 command participates in the surrounding SQLite transaction; rollback restores

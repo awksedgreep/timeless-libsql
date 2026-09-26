@@ -16,7 +16,8 @@
 //!
 //!   TEXT  → maintenance/configuration command: `flush` | `compact` |
 //!           `compact-step:<series>[:<points>:<bytes>]` | `prune:<unix_ts>` |
-//!           `rollups:none|<ladder>` | `clear-rollups` |
+//!           `prune-after:<unix_ts>` (repair chunks stored under a mistaken
+//!           timestamp unit) | `rollups:none|<ladder>` | `clear-rollups` |
 //!           `clear-rollups-step:<chunks>`
 //!           (the FTS5 idiom: an insert that sets only the hidden column
 //!           runs maintenance instead of storing a row).
@@ -597,12 +598,33 @@ impl MetricsTab {
             if !errors.is_empty() {
                 return Err(module_err(format!("prune errors: {}", errors.join("; "))));
             }
+        } else if let Some(ts_str) = cmd.strip_prefix("prune-after:") {
+            // Repair: drop whole chunks whose coverage STARTS after the cutoff,
+            // raw and rollup. This is the bounded operator path for chunks
+            // stored under a mistaken timestamp unit (e.g. milliseconds in a
+            // seconds store), which retention can never remove because they
+            // sit newer than every cutoff. Returns 1 while more rollup chunks
+            // remain to sweep.
+            let ts: i64 = ts_str.trim().parse().map_err(|_| {
+                module_err(format!(
+                    "prune-after: expected 'prune-after:<unix_ts>', got {cmd:?}"
+                ))
+            })?;
+            let (_deleted, more, errors) = self.shared.engine.prune_after(ts);
+            if !errors.is_empty() {
+                return Err(module_err(format!(
+                    "prune-after errors: {}",
+                    errors.join("; ")
+                )));
+            }
+            return Ok(i64::from(more));
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'schema', 'flush', 'compact', \
                  'compact-step:<series>[:<points>:<bytes>]', 'rollup', \
                  'rollups:none|<ladder>', \
-                 'clear-rollups', 'clear-rollups-step:<chunks>', 'prune:<unix_ts>'"
+                 'clear-rollups', 'clear-rollups-step:<chunks>', \
+                 'prune:<unix_ts>', 'prune-after:<unix_ts>'"
             )));
         }
         Ok(0)

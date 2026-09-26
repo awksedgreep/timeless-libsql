@@ -98,6 +98,14 @@ impl VictoriaBatch {
     }
 }
 
+/// Widest millisecond timestamp accepted on the VictoriaMetrics import. The
+/// wire contract is milliseconds; a sample outside 1900..=2100 is a unit
+/// mistake (seconds, microseconds, or nanoseconds) that would otherwise be
+/// stored and poison the reported time range. Rejecting it here keeps the
+/// store's min/max and the UI's data range honest.
+const MIN_PLAUSIBLE_MILLIS: i64 = -2_208_988_800_000; // 1900-01-01
+const MAX_PLAUSIBLE_MILLIS: i64 = 4_102_444_800_000; // 2100-01-01
+
 pub(crate) fn parse(body: &[u8]) -> VictoriaBatch {
     let mut batch = VictoriaBatch::default();
     let mut series_index: HashMap<Series, u32> = HashMap::new();
@@ -114,6 +122,14 @@ pub(crate) fn parse(body: &[u8]) -> VictoriaBatch {
             continue;
         }
         if line.values.is_empty() {
+            continue;
+        }
+        if line
+            .timestamps
+            .iter()
+            .any(|&ts| !(MIN_PLAUSIBLE_MILLIS..=MAX_PLAUSIBLE_MILLIS).contains(&ts))
+        {
+            batch.errors = batch.errors.saturating_add(1);
             continue;
         }
         let name = match line.metric.entry("__name__".to_string()) {
@@ -173,6 +189,20 @@ mod tests {
         assert_eq!(batch.points[0].timestamp_seconds, 1_700_000_000);
         assert_eq!(batch.points[1].timestamp_seconds, -1);
         assert_eq!(f64::from_bits(batch.points[2].value_bits), 3.0);
+    }
+
+    #[test]
+    fn unit_mistaken_timestamps_are_rejected_not_stored() {
+        // The historical failure: a collector emitted milliseconds, a writer
+        // multiplied by 1000, and the server's /1000 stored a seconds value
+        // ~56,000 years out. That chunk never matched a query and, being newer
+        // than every retention cutoff, could never be pruned.
+        let body = br#"{"metric":{"__name__":"icmp"},"values":[1],"timestamps":[1787288405969000]}
+{"metric":{"__name__":"cpu"},"values":[2],"timestamps":[1700000000000]}"#;
+        let batch = parse(body);
+        assert_eq!(batch.errors, 1, "the unit-mistaken line is rejected");
+        assert_eq!(batch.point_count(), 1);
+        assert_eq!(batch.series[0].name, "cpu");
     }
 
     #[test]

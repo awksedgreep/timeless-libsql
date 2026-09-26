@@ -4630,6 +4630,21 @@ impl Engine {
             .clone()
     }
 
+    /// Distinct resolutions present in the persisted rollup index, including
+    /// tiers no longer declared by an active ladder. Used by the repair path,
+    /// which must sweep every stored tier rather than only current ones.
+    pub fn rollup_resolutions(&self) -> Vec<i64> {
+        let rollups = self.rollup_read();
+        let mut resolutions: Vec<i64> = rollups
+            .groups
+            .keys()
+            .map(|group| group.resolution)
+            .collect();
+        resolutions.sort_unstable();
+        resolutions.dedup();
+        resolutions
+    }
+
     /// Max queryable RAW ts (chunk index + buffers) — the data-time
     /// reference for retention and rollup settling.
     fn raw_high_water(&self) -> Option<i64> {
@@ -4977,6 +4992,46 @@ impl Engine {
         (victims.len(), more, Vec::new())
     }
 
+    /// Repair inverse of [`Self::delete_rollups_before`]: drop rollup chunks
+    /// for `resolution` whose coverage *begins* after `after_ts`, in one
+    /// bounded batch. Returns (deleted, more_may_remain, errors).
+    fn delete_rollups_after(&self, resolution: i64, after_ts: i64) -> (usize, bool, Vec<String>) {
+        let _transition = self.transition_write();
+        let mut journal = self.txn_guard();
+        let mut rollups = self.rollup_write();
+        let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
+            .groups
+            .iter()
+            .filter(|(group, _)| group.resolution == resolution)
+            .flat_map(|(group, entries)| {
+                entries
+                    .iter()
+                    .filter(|entry| entry.min_ts > after_ts)
+                    .map(|entry| ((*group, entry.min_ts, entry.rowid), *entry))
+            })
+            .take(ROLLUP_RETENTION_DELETE_BATCH + 1)
+            .collect();
+        let more = victims.len() > ROLLUP_RETENTION_DELETE_BATCH;
+        victims.truncate(ROLLUP_RETENTION_DELETE_BATCH);
+        if victims.is_empty() {
+            return (0, false, Vec::new());
+        }
+        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, entry)| entry.loc()).collect();
+        let errors = self.store.delete_chunks(&locs);
+        if !errors.is_empty() {
+            return (0, more, errors);
+        }
+        for (key, entry) in &victims {
+            rollups.remove(key);
+            if let Some(journal) = journal.as_deref_mut() {
+                if !journal.rollup_added.remove(key) {
+                    journal.rollup_removed.push((*key, *entry));
+                }
+            }
+        }
+        (victims.len(), more, Vec::new())
+    }
+
     /// Delete one bounded batch of persisted rollup rows across every tier.
     /// Callers must disable the ladder first or maintenance could recreate the
     /// rows. Returns (deleted, more_may_remain, errors).
@@ -5233,6 +5288,78 @@ impl Engine {
         let errors = self.store.delete_chunks(&units);
 
         (entries_removed, files_deleted, errors)
+    }
+
+    /// Repair inverse of [`Self::delete_before`]: drop whole raw chunks whose
+    /// coverage *begins* after `after_ts`. Block-granular: a chunk straddling
+    /// the cutoff is retained.
+    pub fn delete_after(&self, after_ts: i64) -> (usize, usize, Vec<String>) {
+        let _transition = self.transition_write();
+        let mut j = self.txn_guard();
+        let mut index = self.index_write();
+
+        let to_remove: Vec<ChunkKey> = index
+            .iter()
+            .filter(|(_, meta)| meta.min_ts > after_ts)
+            .map(|(k, _)| *k)
+            .collect();
+
+        let entries_removed = to_remove.len();
+        let mut unit_refcount: HashMap<ChunkLoc, usize> = HashMap::new();
+        for meta in index.values() {
+            *unit_refcount.entry(meta.loc.unit()).or_insert(0) += 1;
+        }
+
+        let mut units_to_delete: HashSet<ChunkLoc> = HashSet::new();
+        for key in &to_remove {
+            if let Some(meta) = index.remove(key) {
+                let unit = meta.loc.unit();
+                if let Some(count) = unit_refcount.get_mut(&unit) {
+                    *count -= 1;
+                    if *count == 0 {
+                        units_to_delete.insert(unit);
+                    }
+                }
+                if let Some(j) = j.as_deref_mut() {
+                    if !j.added.remove(key) {
+                        j.removed.push((*key, meta));
+                    }
+                }
+            }
+        }
+
+        drop(index);
+        drop(j);
+        let files_deleted = units_to_delete.len();
+        let units: Vec<ChunkLoc> = units_to_delete.into_iter().collect();
+        let errors = self.store.delete_chunks(&units);
+
+        (entries_removed, files_deleted, errors)
+    }
+
+    /// Operator repair for chunks stored under a mistaken timestamp unit (a
+    /// collector emitting milliseconds into a seconds store lands samples
+    /// tens of thousands of years out). Such chunks never match a query and,
+    /// being newer than every retention cutoff, are never removed by
+    /// retention. Drops raw and rollup chunks whose coverage begins after
+    /// `after_ts`. Rollup deletion is batch-bounded; call again while `more`
+    /// is true. Returns (deleted, more_may_remain, errors).
+    pub fn prune_after(&self, after_ts: i64) -> (usize, bool, Vec<String>) {
+        let (mut deleted, _units, raw_errors) = self.delete_after(after_ts);
+        if !raw_errors.is_empty() {
+            return (deleted, true, raw_errors);
+        }
+        let mut more = false;
+        for resolution in self.rollup_resolutions() {
+            let (rollup_deleted, rollup_more, rollup_errors) =
+                self.delete_rollups_after(resolution, after_ts);
+            if !rollup_errors.is_empty() {
+                return (deleted + rollup_deleted, true, rollup_errors);
+            }
+            deleted += rollup_deleted;
+            more |= rollup_more;
+        }
+        (deleted, more, Vec::new())
     }
 
     // ── Authoritative state recovery/refresh ─────────────────────────
