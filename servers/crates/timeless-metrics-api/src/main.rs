@@ -137,6 +137,20 @@ async fn main() -> ExitCode {
             Ok(value) => value,
             Err(error) => return usage_error(error),
         },
+        max_catalog_series: match non_negative_usize_from_env(
+            "TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES",
+            defaults.prom_query_limits.max_catalog_series,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
+        max_catalog_bytes: match non_negative_usize_from_env(
+            "TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES",
+            defaults.prom_query_limits.max_catalog_bytes,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
         max_response_bytes: match positive_usize_from_env(
             "TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES",
             defaults.prom_query_limits.max_response_bytes,
@@ -214,6 +228,19 @@ fn positive_usize_from_env(name: &str, default: usize) -> Result<usize, String> 
         return Err(format!("{name} must be positive"));
     }
     Ok(value)
+}
+
+/// Like [`positive_usize_from_env`] but accepts `0`, which the catalog
+/// settings read as "no ceiling".
+fn non_negative_usize_from_env(name: &str, default: usize) -> Result<usize, String> {
+    let value = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(default),
+        Err(error) => return Err(format!("read {name}: {error}")),
+    };
+    value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid {name}={value:?}: {error}"))
 }
 
 fn interval_from_env(name: &str, default: Duration) -> Result<Duration, String> {

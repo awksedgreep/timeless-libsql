@@ -409,8 +409,10 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows through the same 64-row transaction budget. The HTTP API does not require persisted rollups. |
 | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Native and PromQL range evaluation-grid points per series; valid range 1–11,000. Raw export uses the total result-point limit. |
 | `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` | metrics | `100000` | Final native and PromQL result points; discovery counts returned names, values, or series. |
-| `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Cumulative PromQL storage/intermediate points. Native reads bound storage work, examined catalog series, and discovery selector evaluations separately by this value. |
-| `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` | metrics | `16777216` | Serialized native and PromQL response bytes. Also bounds native/discovery catalog metadata before response rendering. |
+| `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Cumulative PromQL storage/intermediate points. Native reads bound storage work and discovery selector evaluations separately by this value. Catalog reads use the dedicated catalog limits below. |
+| `TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES` | metrics | `1000000` | Series examined while building a metric catalog for native discovery and the PromQL selector catalog. `0` disables the ceiling. Catalog reads are deliberately **not** charged to `MAX_WORK_POINTS`; a small discovery response can still require reading a large catalog. Raise this (and `..._MAX_CATALOG_BYTES`) with cardinality. |
+| `TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES` | metrics | `268435456` | Catalog metadata bytes (metric name plus label keys and values) read while building a catalog. `0` disables the ceiling. Deliberately **not** tied to `MAX_RESPONSE_BYTES`; raise it independently for high-cardinality stores. |
+| `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` | metrics | `16777216` | Serialized native and PromQL response bytes. This bounds the response body only; catalog reads use the dedicated catalog limits above. |
 | `TIMELESS_METRICS_PROMQL_DEFAULT_SUBQUERY_STEP_MS` | metrics | `15000` | Omitted PromQL subquery resolution in milliseconds. |
 | `TIMELESS_METRICS_PROMQL_DEADLINE_MS` | metrics | `30000` | Hard execution deadline for native metrics, PromQL/MetricsQL, and discovery reads. |
 | `TIMELESS_LOGS_READER_CONNECTIONS` | logs | `2` | Independent bounded SQLite readers. |
@@ -442,6 +444,45 @@ integers and an invalid value stops startup with status 2.
 unset, the build script records the current Git commit when available. Cargo
 supplies target and profile. These values are returned by `--version` and
 health/readiness build identity.
+
+### Cardinality and query limits
+
+A large deployment must size the metrics read limits before it grows into them.
+Every limit below is a hard, per-request ceiling; a request that exceeds one
+returns a client error naming the limit, and the setting that raised it, without
+partially rendering. All limits can be raised per deployment, and the documented
+defaults are the ship-time values.
+
+| concern | default | setting |
+|---|---:|---|
+| Catalog series examined (discovery and PromQL selector expansion) | `1,000,000` | `TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES` (`0` = unbounded) |
+| Catalog metadata bytes read | `256 MiB` | `TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES` (`0` = unbounded) |
+| Result points returned | `100,000` | `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` |
+| Evaluation/storage work points | `100,000` | `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` |
+| Response body bytes | `16 MiB` | `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` |
+| Evaluation-grid points per series | `11,000` | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` |
+| Execution deadline | `30 s` | `TIMELESS_METRICS_PROMQL_DEADLINE_MS` |
+
+Guidance:
+- **Catalog limits are independent of response size.** Discovery routes such as
+  `/api/v1/label/__name__/values` build a full catalog but return a small body;
+  the catalog bytes they read are governed by `..._MAX_CATALOG_BYTES`, not
+  `..._MAX_RESPONSE_BYTES`. Raise the catalog limits first when discovery fails
+  on a high-cardinality store.
+- **Scaling.** Catalog bytes grow with the number of series and the size of
+  their label sets; a store with roughly 50,000 DOCSIS-style series already
+  builds a catalog over 20 MiB. Size the ceilings to at least twice the
+  projected population, or set `0` to make them unbounded and rely on the
+  request deadline and `..._MAX_RESPONSE_BYTES` instead.
+- **Memory.** A catalog is materialized and decoded per read, and
+  `TIMELESS_METRICS_READER_CONNECTIONS` readers may run concurrently. An
+  unbounded catalog ceiling on a very large store trades a bounded rejection for
+  the risk of exhausting the process; leave the ceilings finite unless the host
+  has headroom, and prefer narrowing selectors over raising them.
+- **PromQL gotcha.** A regex or negative matcher (`{__name__=~".+"}`,
+  `{job!="x"}`) cannot use a name index and therefore builds the full catalog.
+  Exact metric names (`node_load1`, `{__name__="node_load1"}`) do not. See
+  [PromQL matrix](PROMQL_FEATURE_MATRIX.md).
 
 ## Authentication and admission
 

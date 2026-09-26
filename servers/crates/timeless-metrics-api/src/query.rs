@@ -3878,25 +3878,48 @@ struct SeriesMeta {
     labels: BTreeMap<String, String>,
 }
 
+/// Attach operator guidance to a catalog-budget rejection. A bare
+/// "limit exceeded" does not tell a large deployment which setting to raise,
+/// so name the dedicated catalog settings and the escape hatch.
+fn catalog_error(context: &str, error: impl std::fmt::Display) -> String {
+    let error = error.to_string();
+    if error.contains("catalog work point limit") || error.contains("catalog byte limit") {
+        format!(
+            "{context}: {error}; raise TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES / \
+             TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES (0 disables the ceiling), \
+             or narrow the metric selector"
+        )
+    } else {
+        format!("{context}: {error}")
+    }
+}
+
 fn catalog(
     conn: &Connection,
     table: MetricsTable,
     metric: &str,
     filter: &FilterPlan,
+    limits: PromQueryLimits,
 ) -> Result<Vec<SeriesMeta>, String> {
     let mut stmt = conn
         .prepare(&format!(
             "SELECT series_id, labels
-               FROM timeless_series('{}', ?1, ?2)
+               FROM timeless_series('{}', ?1, ?2, ?3, ?4)
               ORDER BY labels, series_id",
             table.name()
         ))
-        .map_err(|error| format!("prepare series catalog: {error}"))?;
+        .map_err(|error| catalog_error("prepare series catalog", error))?;
     let rows = stmt
-        .query_map(params![metric, filter.pushdown_json], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|error| format!("query series catalog: {error}"))?;
+        .query_map(
+            params![
+                metric,
+                filter.pushdown_json,
+                crate::catalog_limit_sql(limits.max_catalog_series),
+                crate::catalog_limit_sql(limits.max_catalog_bytes)
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|error| catalog_error("query series catalog", error))?;
     let mut output = Vec::new();
     for row in rows {
         let (id, labels_json) = row.map_err(|error| format!("read series catalog: {error}"))?;
@@ -3921,7 +3944,7 @@ fn prometheus_catalogs(
     cancelled: &AtomicBool,
 ) -> Result<Vec<(String, Vec<SeriesMeta>)>, String> {
     if let MetricSelection::Exact(metric) = &selector.metric {
-        let catalog = catalog(conn, table, metric, &selector.filter)?;
+        let catalog = catalog(conn, table, metric, &selector.filter, limits)?;
         return Ok(if catalog.is_empty() {
             Vec::new()
         } else {
@@ -3932,27 +3955,32 @@ fn prometheus_catalogs(
     let mut stmt = conn
         .prepare(&format!(
             "SELECT series_id, name, labels
-               FROM timeless_series('{}')
+               FROM timeless_series('{}', NULL, NULL, ?1, ?2)
               ORDER BY name, labels, series_id",
             table.name()
         ))
-        .map_err(|error| format!("prepare PromQL complete series catalog: {error}"))?;
+        .map_err(|error| catalog_error("prepare PromQL complete series catalog", error))?;
     let mut rows = stmt
-        .query([])
-        .map_err(|error| format!("query PromQL complete series catalog: {error}"))?;
+        .query(params![
+            crate::catalog_limit_sql(limits.max_catalog_series),
+            crate::catalog_limit_sql(limits.max_catalog_bytes)
+        ])
+        .map_err(|error| catalog_error("query PromQL complete series catalog", error))?;
     let mut considered = 0_usize;
     let mut selected_bytes = 0_usize;
     let mut grouped = BTreeMap::<String, Vec<SeriesMeta>>::new();
     while let Some(row) = rows
         .next()
-        .map_err(|error| format!("read PromQL complete series catalog: {error}"))?
+        .map_err(|error| catalog_error("read PromQL complete series catalog", error))?
     {
         check_cancelled(cancelled)?;
         considered = considered.saturating_add(1);
-        if considered > limits.max_work_points {
+        if limits.max_catalog_series != 0 && considered > limits.max_catalog_series {
             return Err(format!(
-                "query exceeded the maximum catalog-work limit of {} series",
-                limits.max_work_points
+                "query exceeded the maximum catalog-work limit of {} series; \
+                 raise TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES (0 disables the \
+                 ceiling), or narrow the selector",
+                limits.max_catalog_series
             ));
         }
         let id = row
@@ -3983,10 +4011,12 @@ fn prometheus_catalogs(
             .checked_add(metric.len())
             .and_then(|bytes| bytes.checked_add(labels_json.len()))
             .ok_or_else(|| "PromQL catalog byte accounting overflow".to_string())?;
-        if selected_bytes > limits.max_response_bytes {
+        if limits.max_catalog_bytes != 0 && selected_bytes > limits.max_catalog_bytes {
             return Err(format!(
-                "query exceeded the maximum catalog-size limit of {} bytes",
-                limits.max_response_bytes
+                "query exceeded the maximum catalog-size limit of {} bytes; \
+                 raise TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES (0 disables the \
+                 ceiling), or narrow the selector",
+                limits.max_catalog_bytes
             ));
         }
         grouped.entry(metric.clone()).or_default().push(SeriesMeta {
@@ -5189,7 +5219,7 @@ fn execute_instant_sum_selector(
         .selection_time(timestamp, query_start, query_end)?;
     let lower = selection_time.saturating_sub(lookback);
     let started = Instant::now();
-    let catalog = catalog(conn, features.table, metric, &selector.filter)?;
+    let catalog = catalog(conn, features.table, metric, &selector.filter, limits)?;
     profile.api_promql_sum_catalog_ns = profile_elapsed(started);
     let started = Instant::now();
     let raw = if catalog.is_empty() {

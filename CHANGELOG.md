@@ -25,6 +25,20 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   never remove them. Block-granular; returns `1` while more rollup chunks
   remain. (`crates/timeless-core`, `crates/timeless-ext`)
 
+### Changed
+
+- **Metrics catalog reads get dedicated, decoupled limits.** The 0.8.4 query
+  budget charged catalog metadata against `..._MAX_RESPONSE_BYTES` and
+  `..._MAX_WORK_POINTS`, so a small discovery response could fail on a
+  high-cardinality store, and raising the catalog ceiling forced the response
+  cap up with it. Catalog reads now use `..._MAX_CATALOG_SERIES` (default
+  `1,000,000`) and `..._MAX_CATALOG_BYTES` (default `256 MiB`); `0` disables
+  either ceiling. The PromQL selector catalog is bounded by them too, where it
+  was previously unbounded. Catalog rejections now name the setting to raise.
+  Defaults and sizing guidance are documented in the
+  [server API reference](docs/SERVER_API_REFERENCE.md#cardinality-and-query-limits).
+  (`timeless-metrics-api`)
+
 ### Fixed
 
 - **The metrics VictoriaMetrics import rejects implausible timestamps.** The

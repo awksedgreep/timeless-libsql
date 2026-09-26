@@ -54,6 +54,16 @@ pub struct PromQueryLimits {
     pub max_points_per_series: usize,
     pub max_result_points: usize,
     pub max_work_points: usize,
+    /// Series examined while building a metric catalog (native discovery and
+    /// the PromQL selector catalog). `0` disables the ceiling. Deliberately
+    /// separate from `max_work_points`: a small discovery response can still
+    /// require reading a large catalog, so the two must scale independently.
+    pub max_catalog_series: usize,
+    /// Catalog metadata bytes (metric name plus label keys and values) read
+    /// while building a metric catalog. `0` disables the ceiling. Deliberately
+    /// separate from `max_response_bytes` so an operator can raise catalog
+    /// capacity without raising the response-body cap.
+    pub max_catalog_bytes: usize,
     pub max_response_bytes: usize,
     /// Resolution used by PromQL subqueries that omit their step. This is a
     /// query-engine setting (Prometheus calls it the global evaluation
@@ -68,10 +78,28 @@ impl Default for PromQueryLimits {
             max_points_per_series: 11_000,
             max_result_points: 100_000,
             max_work_points: 100_000,
+            // Sized for high-cardinality dedicated deployments: a catalog of
+            // one million series or 256 MiB of metadata is read before a broad
+            // discovery or regex selector is rejected. Operators raise or
+            // disable these (0) with the TIMELESS_METRICS_PROMQL_MAX_CATALOG_*
+            // settings. See docs/SERVER_API_REFERENCE.md.
+            max_catalog_series: 1_000_000,
+            max_catalog_bytes: 256 * 1024 * 1024,
             max_response_bytes: 16 * 1024 * 1024,
             default_subquery_step: Duration::from_secs(15),
             deadline: Duration::from_secs(30),
         }
+    }
+}
+
+/// SQL INTEGER argument for `timeless_series`'s catalog ceilings. The server
+/// spells "no ceiling" as `0`; the extension takes a positive bound, so an
+/// unbounded dimension is passed as `i64::MAX` (its accounting saturates).
+pub fn catalog_limit_sql(limit: usize) -> i64 {
+    if limit == 0 {
+        i64::MAX
+    } else {
+        limit as i64
     }
 }
 
@@ -91,6 +119,12 @@ impl PromQueryLimits {
         }
         if self.max_work_points > i64::MAX as usize || self.max_response_bytes > i64::MAX as usize {
             return Err("query work and response limits must fit SQLite INTEGER".into());
+        }
+        // Catalog ceilings accept 0 (unbounded), so only reject values that
+        // cannot be passed as a SQL INTEGER.
+        if self.max_catalog_series > i64::MAX as usize || self.max_catalog_bytes > i64::MAX as usize
+        {
+            return Err("catalog limits must fit SQLite INTEGER".into());
         }
         if self.default_subquery_step.is_zero()
             || self.default_subquery_step.as_millis() > i64::MAX as u128
@@ -372,6 +406,34 @@ mod tests {
         assert_eq!(
             limits.validate().unwrap_err(),
             "default_subquery_step must be in 1ms..=i64::MAXms"
+        );
+    }
+
+    #[test]
+    fn catalog_limits_are_decoupled_and_zero_disables_the_ceiling() {
+        let defaults = PromQueryLimits::default();
+        assert_eq!(defaults.max_catalog_series, 1_000_000);
+        assert_eq!(defaults.max_catalog_bytes, 256 * 1024 * 1024);
+        assert_eq!(catalog_limit_sql(0), i64::MAX);
+        assert_eq!(catalog_limit_sql(5), 5);
+
+        let unbounded = PromQueryLimits {
+            max_catalog_series: 0,
+            max_catalog_bytes: 0,
+            ..defaults
+        };
+        assert!(
+            unbounded.validate().is_ok(),
+            "0 disables the catalog ceiling"
+        );
+
+        let overflow = PromQueryLimits {
+            max_catalog_series: usize::MAX,
+            ..defaults
+        };
+        assert_eq!(
+            overflow.validate().unwrap_err(),
+            "catalog limits must fit SQLite INTEGER"
         );
     }
 }

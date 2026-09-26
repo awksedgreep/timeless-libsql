@@ -143,20 +143,20 @@ impl Context<'_> {
                 "SELECT series_id,name,labels FROM timeless_series('{}',?1,?2,?3,?4)",
                 self.features.table.name()
             ))
-            .map_err(|error| format!("prepare bounded catalog: {error}"))?;
+            .map_err(|error| super::catalog_error("prepare bounded catalog", error))?;
         let mut rows = statement
             .query(params![
                 metric,
                 filter.map(|filter| &filter.pushdown_json),
-                self.limits.max_work_points as i64,
-                self.limits.max_response_bytes as i64
+                crate::catalog_limit_sql(self.limits.max_catalog_series),
+                crate::catalog_limit_sql(self.limits.max_catalog_bytes)
             ])
-            .map_err(|error| format!("query bounded catalog: {error}"))?;
+            .map_err(|error| super::catalog_error("query bounded catalog", error))?;
         let mut catalog = Vec::new();
         let mut bytes = 0_usize;
         while let Some(row) = rows
             .next()
-            .map_err(|error| format!("read bounded catalog: {error}"))?
+            .map_err(|error| super::catalog_error("read bounded catalog", error))?
         {
             self.check()?;
             // Borrow TEXT before allocating or decoding escaped label JSON.
@@ -172,10 +172,12 @@ impl Context<'_> {
                 .checked_add(metric.len())
                 .and_then(|n| n.checked_add(labels.len()))
                 .ok_or_else(|| "catalog byte accounting overflow".to_string())?;
-            if bytes > self.limits.max_response_bytes {
+            if self.limits.max_catalog_bytes != 0 && bytes > self.limits.max_catalog_bytes {
                 return Err(format!(
-                    "query exceeded the maximum catalog-size limit of {} bytes",
-                    self.limits.max_response_bytes
+                    "query exceeded the maximum catalog-size limit of {} bytes; \
+                     raise TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES (0 disables the \
+                     ceiling), or narrow the metric selector",
+                    self.limits.max_catalog_bytes
                 ));
             }
             let decoded = decode_labels(labels)?;

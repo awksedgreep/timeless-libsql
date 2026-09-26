@@ -1427,7 +1427,7 @@ async fn session_three_promql_nameless_selectors_expand_before_reads_and_reopen(
     let catalog_limited = router_with_limits(
         storage.clone(),
         PromQueryLimits {
-            max_work_points: 3,
+            max_catalog_series: 3,
             ..PromQueryLimits::default()
         },
     );
@@ -1440,10 +1440,15 @@ async fn session_three_promql_nameless_selectors_expand_before_reads_and_reopen(
     )
     .await;
     assert_eq!(rejected.0, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(rejected.1["error"]
-        .as_str()
-        .unwrap()
-        .contains("maximum catalog-work limit of 3 series"));
+    let catalog_message = rejected.1["error"].as_str().unwrap();
+    assert!(
+        catalog_message.contains("catalog work point limit"),
+        "{catalog_message}"
+    );
+    assert!(
+        catalog_message.contains("TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES"),
+        "catalog rejection must name the setting to raise: {catalog_message}"
+    );
 
     drop(catalog_limited);
     drop(limited);
@@ -16100,6 +16105,8 @@ async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
             max_points_per_series: 1,
             max_result_points: 1,
             max_work_points: 1,
+            max_catalog_series: 1,
+            max_catalog_bytes: 64,
             max_response_bytes: 64,
             ..PromQueryLimits::default()
         },
@@ -16159,10 +16166,13 @@ async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
     assert_eq!(get_json(&limited, "/api/v1/query_range?metric=m&host=a&start=1700000000&end=1700000002&step=3&aggregate=avg").await.0, StatusCode::OK);
     // A one-point work budget permits the persisted newest-value fast path,
     // but must reject decoding a three-point chunk or scanning extra buffers.
+    // Catalog selection is a separate budget, so both are tightened here: a
+    // second catalog candidate is rejected before filtering.
     let work = router_with_limits(
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_catalog_series: 1,
             ..PromQueryLimits::default()
         },
     );
