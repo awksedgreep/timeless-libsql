@@ -14,6 +14,23 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Changed
+
+- **Stored points decoded and points kept are bounded apart.** One bound,
+  `..._MAX_WORK_POINTS`, covered both what a query decoded from storage and
+  what it held while evaluating. A chunk is decoded whole, so a query about
+  one moment inside a chunk of 16,384 points was charged all of them for the
+  few it kept, and a ranking over a history of large chunks was refused for
+  what it threw away. Measured, decoding costs about 5 ms a million points;
+  it is the points kept that memory depends on. Decoding is now bounded by
+  `TIMELESS_METRICS_PROMQL_MAX_STORAGE_POINTS` (default `5,000,000`), checked
+  from the chunk index before any payload is read, and `..._MAX_WORK_POINTS`
+  (default `100,000`, unchanged) bounds the points a query keeps from the
+  windows it reads and every intermediate vector. The native range, export,
+  latest, and window routes bound their storage reads by the new setting
+  too. A query refused for what it kept says so: `work point limit N
+  exceeded (M points kept from storage)`. (`servers/crates/timeless-metrics-api`)
+
 ## [0.8.5] — 2026-09-26
 
 ### Added

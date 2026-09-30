@@ -504,7 +504,7 @@ fn latest(
                 metric,
                 filter.pushdown_json,
                 stop,
-                context.limits.max_work_points as i64
+                context.limits.max_storage_points as i64
             ],
             |row| row.get(0),
         )
@@ -549,7 +549,7 @@ fn export(
         filter,
         start,
         stop,
-        Some(context.limits.max_work_points),
+        Some(context.limits.max_storage_points),
     )?;
     let by_id: HashMap<_, _> = raw
         .series
@@ -630,7 +630,7 @@ fn range(
                     stop,
                     step,
                     aggregate.native_name().unwrap(),
-                    context.limits.max_work_points as i64
+                    context.limits.max_storage_points as i64
                 ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )
@@ -674,7 +674,7 @@ fn range(
             filter,
             start,
             stop,
-            Some(context.limits.max_work_points),
+            Some(context.limits.max_storage_points),
         )?;
         frame_bytes = raw.frame_bytes;
         let by_id: HashMap<_, _> = raw

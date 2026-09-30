@@ -137,6 +137,13 @@ async fn main() -> ExitCode {
             Ok(value) => value,
             Err(error) => return usage_error(error),
         },
+        max_storage_points: match positive_usize_from_env(
+            "TIMELESS_METRICS_PROMQL_MAX_STORAGE_POINTS",
+            defaults.prom_query_limits.max_storage_points,
+        ) {
+            Ok(value) => value,
+            Err(error) => return usage_error(error),
+        },
         max_catalog_series: match non_negative_usize_from_env(
             "TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES",
             defaults.prom_query_limits.max_catalog_series,

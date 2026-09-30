@@ -409,7 +409,8 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows through the same 64-row transaction budget. The HTTP API does not require persisted rollups. |
 | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` | metrics | `11000` | Native and PromQL range evaluation-grid points per series; valid range 1–11,000. Raw export uses the total result-point limit. |
 | `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` | metrics | `100000` | Final native and PromQL result points; discovery counts returned names, values, or series. |
-| `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Cumulative PromQL storage/intermediate points. Native reads bound storage work and discovery selector evaluations separately by this value. Catalog reads use the dedicated catalog limits below. |
+| `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` | metrics | `100000` | Points a query keeps as it evaluates: the points of the windows it reads, and every intermediate vector. This is what a query's memory depends on. Discovery selector evaluations are bounded separately by this value. Catalog reads use the dedicated catalog limits below. |
+| `TIMELESS_METRICS_PROMQL_MAX_STORAGE_POINTS` | metrics | `5000000` | Stored points decoded to answer a query, checked from the chunk index before any payload is read. A chunk is decoded whole, so a query about one moment inside a chunk of 16,384 points decodes all of them for the few it keeps. Measured, decoding costs about 5 ms a million points: this is a bound on CPU, not on memory, and is sized apart from `..._MAX_WORK_POINTS` so that a query that reads much and keeps little is not refused for what it does not keep. Native reads bound their storage work by this value too. |
 | `TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES` | metrics | `1000000` | Series examined while building a metric catalog for native discovery and the PromQL selector catalog. `0` disables the ceiling. Catalog reads are deliberately **not** charged to `MAX_WORK_POINTS`; a small discovery response can still require reading a large catalog. Raise this (and `..._MAX_CATALOG_BYTES`) with cardinality. |
 | `TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES` | metrics | `268435456` | Catalog metadata bytes (metric name plus label keys and values) read while building a catalog. `0` disables the ceiling. Deliberately **not** tied to `MAX_RESPONSE_BYTES`; raise it independently for high-cardinality stores. |
 | `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` | metrics | `16777216` | Serialized native and PromQL response bytes. This bounds the response body only; catalog reads use the dedicated catalog limits above. |
@@ -458,12 +459,19 @@ defaults are the ship-time values.
 | Catalog series examined (discovery and PromQL selector expansion) | `1,000,000` | `TIMELESS_METRICS_PROMQL_MAX_CATALOG_SERIES` (`0` = unbounded) |
 | Catalog metadata bytes read | `256 MiB` | `TIMELESS_METRICS_PROMQL_MAX_CATALOG_BYTES` (`0` = unbounded) |
 | Result points returned | `100,000` | `TIMELESS_METRICS_PROMQL_MAX_RESULT_POINTS` |
-| Evaluation/storage work points | `100,000` | `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` |
+| Points kept while evaluating | `100,000` | `TIMELESS_METRICS_PROMQL_MAX_WORK_POINTS` |
+| Stored points decoded | `5,000,000` | `TIMELESS_METRICS_PROMQL_MAX_STORAGE_POINTS` |
 | Response body bytes | `16 MiB` | `TIMELESS_METRICS_PROMQL_MAX_RESPONSE_BYTES` |
 | Evaluation-grid points per series | `11,000` | `TIMELESS_METRICS_PROMQL_MAX_POINTS_PER_SERIES` |
 | Execution deadline | `30 s` | `TIMELESS_METRICS_PROMQL_DEADLINE_MS` |
 
 Guidance:
+- **Decoding and keeping are bounded apart.** A ranking or a sum at one
+  moment inside a large chunk decodes the whole chunk of every series it
+  matches and keeps a point or two of each. Raise
+  `..._MAX_STORAGE_POINTS` for a store whose chunks have grown large and whose
+  readers go back through time; raise `..._MAX_WORK_POINTS` only for queries
+  that hold many points at once, such as long ranges over many series.
 - **Catalog limits are independent of response size.** Discovery routes such as
   `/api/v1/label/__name__/values` build a full catalog but return a small body;
   the catalog bytes they read are governed by `..._MAX_CATALOG_BYTES`, not

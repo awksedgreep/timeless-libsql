@@ -53,7 +53,18 @@ const WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(300);
 pub struct PromQueryLimits {
     pub max_points_per_series: usize,
     pub max_result_points: usize,
+    /// Points a query holds as it evaluates: the points of the window it
+    /// asks about, and every intermediate vector. This is what the query's
+    /// memory depends on.
     pub max_work_points: usize,
+    /// Stored points decoded to answer a query. A chunk is decoded whole,
+    /// so a query about one moment inside a chunk of 16,384 points decodes
+    /// all of them for the few it keeps; measured, that costs about 5 ms a
+    /// million. It is a bound on CPU, not on memory, and is sized apart
+    /// from `max_work_points` so that a query that reads much and keeps
+    /// little is not refused for what it does not keep. Checked before any
+    /// payload is read, from the chunk index.
+    pub max_storage_points: usize,
     /// Series examined while building a metric catalog (native discovery and
     /// the PromQL selector catalog). `0` disables the ceiling. Deliberately
     /// separate from `max_work_points`: a small discovery response can still
@@ -78,6 +89,7 @@ impl Default for PromQueryLimits {
             max_points_per_series: 11_000,
             max_result_points: 100_000,
             max_work_points: 100_000,
+            max_storage_points: 5_000_000,
             // Sized for high-cardinality dedicated deployments: a catalog of
             // one million series or 256 MiB of metadata is read before a broad
             // discovery or regex selector is rejected. Operators raise or
@@ -114,10 +126,16 @@ impl PromQueryLimits {
         if self.max_work_points == 0 {
             return Err("max_work_points must be positive".into());
         }
+        if self.max_storage_points == 0 {
+            return Err("max_storage_points must be positive".into());
+        }
         if self.max_response_bytes == 0 {
             return Err("max_response_bytes must be positive".into());
         }
-        if self.max_work_points > i64::MAX as usize || self.max_response_bytes > i64::MAX as usize {
+        if self.max_work_points > i64::MAX as usize
+            || self.max_storage_points > i64::MAX as usize
+            || self.max_response_bytes > i64::MAX as usize
+        {
             return Err("query work and response limits must fit SQLite INTEGER".into());
         }
         // Catalog ceilings accept 0 (unbounded), so only reject values that

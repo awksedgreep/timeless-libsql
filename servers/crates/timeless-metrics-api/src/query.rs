@@ -4029,14 +4029,21 @@ fn prometheus_catalogs(
     Ok(grouped.into_iter().collect())
 }
 
+// The points a query keeps from the windows it reads, against
+// `max_work_points`. What it decoded to find them is bounded apart, by
+// `max_storage_points`, before any payload is read.
 fn consume_prometheus_work(
     remaining: &mut usize,
     work_points: usize,
     limits: PromQueryLimits,
 ) -> Result<(), String> {
     *remaining = remaining.checked_sub(work_points).ok_or_else(|| {
+        let kept = limits
+            .max_work_points
+            .saturating_sub(*remaining)
+            .saturating_add(work_points);
         format!(
-            "query exceeded the maximum storage-work limit of {} points",
+            "work point limit {} exceeded ({kept} points kept from storage)",
             limits.max_work_points
         )
     })?;
@@ -5236,7 +5243,7 @@ fn execute_instant_sum_selector(
             &selector.filter,
             storage_seconds_floor(lower),
             storage_seconds_floor(selection_time),
-            Some(limits.max_work_points),
+            Some(limits.max_storage_points),
         )?
     };
     let mut remaining_work = limits.max_work_points;
@@ -8699,7 +8706,7 @@ fn execute_prometheus_range_selector(
             &selector.filter,
             storage_seconds_floor(lower),
             storage_seconds_floor(selection_time),
-            Some(remaining_work),
+            Some(limits.max_storage_points),
         )?;
         let work_points = raw.series.iter().map(RawSeries::len).sum();
         consume_prometheus_work(&mut remaining_work, work_points, limits)?;
@@ -8838,7 +8845,7 @@ fn execute_prometheus_selector_value(
             &selector.filter,
             storage_seconds_floor(read_start.saturating_sub(lookback)),
             storage_seconds_floor(read_stop),
-            Some(remaining_work),
+            Some(limits.max_storage_points),
         )?;
         let work_points = raw.series.iter().map(RawSeries::len).sum();
         consume_prometheus_work(&mut remaining_work, work_points, limits)?;
@@ -8946,8 +8953,9 @@ fn execute_prometheus_window(
     let native_op = op
         .native_name()
         .ok_or_else(|| format!("{} has no public window kernel", op.name()))?;
-    let max_work_points = i64::try_from(limits.max_work_points)
-        .map_err(|_| "PromQL max_work_points exceeds SQLite INTEGER range".to_string())?;
+    // The kernel's bound is on what it decodes, which is storage work.
+    let max_storage_points = i64::try_from(limits.max_storage_points)
+        .map_err(|_| "PromQL max_storage_points exceeds SQLite INTEGER range".to_string())?;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT labels, buckets
@@ -8966,7 +8974,7 @@ fn execute_prometheus_window(
                 step,
                 window,
                 native_op,
-                max_work_points
+                max_storage_points
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
@@ -9091,7 +9099,7 @@ fn execute_prometheus_range_raw(
             &selector.filter,
             storage_seconds_floor(read_start.saturating_sub(window)),
             storage_seconds_floor(read_stop),
-            Some(remaining_work),
+            Some(limits.max_storage_points),
         )?;
         let work_points = raw.series.iter().map(RawSeries::len).sum();
         consume_prometheus_work(&mut remaining_work, work_points, limits)?;
@@ -9935,6 +9943,10 @@ mod tests {
                             },
                             PromQueryLimits {
                                 max_work_points: bound,
+                                ..limits
+                            },
+                            PromQueryLimits {
+                                max_storage_points: bound,
                                 ..limits
                             },
                         ] {

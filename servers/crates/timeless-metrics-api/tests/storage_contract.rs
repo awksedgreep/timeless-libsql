@@ -3200,6 +3200,7 @@ async fn session_five_promql_sum_groups_labels_limits_and_reopen() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 2,
+            max_storage_points: 2,
             ..PromQueryLimits::default()
         },
     );
@@ -4855,6 +4856,7 @@ async fn session_two_promql_limits_bound_grid_work_results_response_and_deadline
         storage.clone(),
         PromQueryLimits {
             max_work_points: 2,
+            max_storage_points: 2,
             ..PromQueryLimits::default()
         },
     );
@@ -5070,6 +5072,7 @@ async fn session_six_promql_avg_over_time_is_compensated_ieee_bounded_and_reopen
         storage.clone(),
         PromQueryLimits {
             max_work_points: 2,
+            max_storage_points: 2,
             ..PromQueryLimits::default()
         },
     );
@@ -5211,6 +5214,7 @@ async fn session_six_promql_min_over_time_boundaries_ieee_limits_and_reopen() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -5340,6 +5344,7 @@ async fn session_six_promql_max_over_time_boundaries_ieee_limits_and_reopen() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -5492,6 +5497,7 @@ async fn session_six_promql_sum_over_time_is_compensated_ieee_bounded_and_reopen
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -5611,6 +5617,7 @@ async fn session_six_promql_count_over_time_includes_ieee_limits_and_reopen() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -5737,6 +5744,7 @@ async fn session_six_promql_last_over_time_preserves_name_ieee_limits_and_reopen
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -5881,6 +5889,7 @@ async fn session_six_promql_present_over_time_tracks_presence_limits_and_reopen(
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -6057,6 +6066,7 @@ async fn session_six_promql_quantile_over_time_interpolates_ieee_and_reopens() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -6197,6 +6207,7 @@ async fn session_six_promql_stddev_over_time_is_population_ieee_and_reopenable()
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -6335,6 +6346,7 @@ async fn session_six_promql_stdvar_over_time_is_population_ieee_and_reopenable()
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -6550,6 +6562,7 @@ async fn session_seven_promql_rate_extrapolates_resets_bounds_and_reopens() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -6742,6 +6755,7 @@ async fn session_seven_promql_irate_uses_last_two_samples_and_reopens() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -6949,6 +6963,7 @@ async fn session_seven_promql_increase_extrapolates_without_rate_normalization()
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -7146,6 +7161,7 @@ async fn session_seven_promql_delta_extrapolates_gauges_without_counter_correcti
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -7342,6 +7358,7 @@ async fn session_seven_promql_idelta_uses_only_the_final_gauge_pair() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -7530,6 +7547,7 @@ async fn session_seven_promql_deriv_matches_centered_compensated_regression() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -7724,6 +7742,7 @@ async fn session_seven_promql_predict_linear_anchors_at_evaluation_time() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -7910,6 +7929,7 @@ async fn session_seven_promql_changes_counts_float_transitions() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -8093,6 +8113,7 @@ async fn session_seven_promql_resets_counts_strict_float_decreases() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -10146,6 +10167,7 @@ async fn session_eight_promql_absent_over_time_pins_windows_subqueries_limits_an
         storage.clone(),
         PromQueryLimits {
             max_work_points: 2,
+            max_storage_points: 2,
             ..PromQueryLimits::default()
         },
     );
@@ -10452,6 +10474,7 @@ async fn session_eight_promql_scalar_vector_convert_types_cardinality_and_reopen
         storage.clone(),
         PromQueryLimits {
             max_work_points: 2,
+            max_storage_points: 2,
             ..PromQueryLimits::default()
         },
     );
@@ -10636,6 +10659,7 @@ async fn session_eight_promql_time_timestamp_pin_clock_provenance_and_reopen() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -10781,6 +10805,7 @@ async fn session_eight_promql_calendar_part_one_uses_utc_defaults_and_reopens() 
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -10919,6 +10944,7 @@ async fn session_eight_promql_calendar_part_two_pins_leap_years_and_reopens() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -11288,6 +11314,7 @@ async fn session_nine_promql_classic_histogram_quantile_matches_oracle_and_reope
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             ..PromQueryLimits::default()
         },
     );
@@ -11895,6 +11922,7 @@ async fn session_fourteen_histogram_fraction_matches_classic_buckets_and_reopens
         storage.clone(),
         PromQueryLimits {
             max_work_points: 5,
+            max_storage_points: 5,
             ..PromQueryLimits::default()
         },
     );
@@ -14526,6 +14554,7 @@ async fn session_fifteen_metricsql_running_aggregates_match_victoriametrics_and_
         storage.clone(),
         PromQueryLimits {
             max_work_points: 5,
+            max_storage_points: 5,
             ..PromQueryLimits::default()
         },
     );
@@ -16066,6 +16095,115 @@ async fn native_export_honors_limits_and_deadline() {
     storage.shutdown().await.unwrap();
 }
 
+/// A query about one moment inside a chunk decodes the chunk whole, and
+/// keeps the few points of its window. The two are bounded apart: the
+/// points decoded by `max_storage_points`, the points kept by
+/// `max_work_points`. Before they were one bound, and a ranking over a
+/// history of large chunks was refused for what it decoded and threw away.
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn storage_points_are_bounded_apart_from_the_points_a_query_keeps() {
+    let extension = extension_path();
+    assert!(extension.is_file(), "missing {}", extension.display());
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("storage_points.db");
+    let base = 1_700_600_000_i64;
+    let storage = Storage::start(
+        database.clone(),
+        extension.clone(),
+        1,
+        16,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+
+    let app = router(storage.clone());
+
+    // Twenty series of 6,000 points, one a second: 120,000 points in
+    // chunks, more than the old bound of 100,000. A query at the last
+    // second with the default lookback of five minutes keeps 301 of each,
+    // the window being closed at both ends.
+    let series = 20_usize;
+    let points_per_series = 6_000_i64;
+    for index in 0..series {
+        let value = index + 1;
+        let body: String = (0..points_per_series)
+            .map(|offset| {
+                format!(
+                    "wide{{host=\"h{index}\"}} {value} {}\n",
+                    (base + offset) * 1_000
+                )
+            })
+            .collect();
+        assert_no_content(post_body(&app, "/api/v1/import/prometheus", body.as_bytes()).await);
+    }
+    assert_eq!(post_json(&app, "/api/v1/flush").await.0, StatusCode::OK);
+    let last = base + points_per_series - 1;
+
+    // By default the query is answered: it decodes 120,000 points, under
+    // the storage bound, and keeps 6,020, under the work bound.
+    let ranked = prom_query(&app, "topk(3, wide)", last).await;
+    assert_eq!(ranked.0, StatusCode::OK, "{}", ranked.1);
+    assert_eq!(ranked.1["data"]["result"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        ranked.1["data"]["result"][0]["value"][1],
+        serde_json::json!("20")
+    );
+
+    // Bounded to what the old bound was, the storage side refuses it.
+    let storage_bound = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_storage_points: 100_000,
+            ..PromQueryLimits::default()
+        },
+    );
+    let refused = prom_query(&storage_bound, "topk(3, wide)", last).await;
+    assert_eq!(refused.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.1);
+    let message = refused.1["error"].as_str().unwrap();
+    assert!(
+        message.contains("raw batch work point limit 100000 exceeded"),
+        "{message}"
+    );
+    assert!(message.contains("candidate points: 120000"), "{message}");
+
+    // The work bound is on what is kept: 6,020 points pass 6,020 and fail
+    // 6,019, whatever was decoded to find them.
+    let kept_bound = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 6_020,
+            ..PromQueryLimits::default()
+        },
+    );
+    assert_eq!(
+        prom_query(&kept_bound, "topk(3, wide)", last).await.0,
+        StatusCode::OK
+    );
+    let kept_bound = router_with_limits(
+        storage.clone(),
+        PromQueryLimits {
+            max_work_points: 6_019,
+            ..PromQueryLimits::default()
+        },
+    );
+    let refused = prom_query(&kept_bound, "topk(3, wide)", last).await;
+    assert_eq!(refused.0, StatusCode::UNPROCESSABLE_ENTITY, "{}", refused.1);
+    let message = refused.1["error"].as_str().unwrap();
+    assert!(
+        message.contains("work point limit 6019 exceeded (6020 points kept from storage)"),
+        "{message}"
+    );
+
+    // The reader is reusable after a refusal.
+    assert_eq!(
+        prom_query(&app, "topk(3, wide)", last).await.0,
+        StatusCode::OK
+    );
+
+    storage.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
 async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
@@ -16172,6 +16310,7 @@ async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 1,
+            max_storage_points: 1,
             max_catalog_series: 1,
             ..PromQueryLimits::default()
         },
@@ -16184,6 +16323,7 @@ async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
         storage.clone(),
         PromQueryLimits {
             max_work_points: 3,
+            max_storage_points: 3,
             ..PromQueryLimits::default()
         },
     );
@@ -16405,8 +16545,9 @@ async fn instant_sum_profiles_and_bounds_cover_competitive_cardinalities() {
                     );
                 }
                 for limits in [
+                    // The chunk holds count * 32 points, decoded whole.
                     PromQueryLimits {
-                        max_work_points: count * 32 - 1,
+                        max_storage_points: count * 32 - 1,
                         ..PromQueryLimits::default()
                     },
                     PromQueryLimits {

@@ -3055,7 +3055,7 @@ pub(super) fn execute_dynamic_rollup(
             &plan.selector.filter,
             storage_seconds_floor(read_start.saturating_sub(history)),
             storage_seconds_floor(read_stop),
-            Some(remaining_work),
+            Some(limits.max_storage_points),
         )?;
         let work_points = raw.series.iter().map(RawSeries::len).sum();
         consume_prometheus_work(&mut remaining_work, work_points, limits)?;
