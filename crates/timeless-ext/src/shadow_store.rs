@@ -1176,6 +1176,30 @@ impl ChunkStore for ShadowTableStore {
         Ok(out)
     }
 
+    /// Rows go inside the host's transaction, as chunk deletions do, and
+    /// both generations move: the catalog token because rows are gone,
+    /// and the shape generation because an id may be given out again and
+    /// a delta refresh must not trust ids past its watermark.
+    fn delete_series(&self, ids: &[i64]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = Self::conn()?;
+        for batch in ids.chunks(500) {
+            let list = batch
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("DELETE FROM {} WHERE id IN ({list})", self.series_ident);
+            conn.execute(&sql, [])
+                .map_err(|e| format!("series delete failed: {e}"))?;
+        }
+        self.bump_shape_generation(&conn)?;
+        self.bump_chunk_generation(&conn)?;
+        Ok(())
+    }
+
     fn migrate_series(&self, series: &[StoredSeries]) -> Result<(), String> {
         if !self.allow_legacy_migration {
             return Err(

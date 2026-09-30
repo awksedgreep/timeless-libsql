@@ -16,6 +16,23 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **Retention removes the series it has left nothing of (#82).** When a
+  maintenance pass prunes the last raw and rollup chunk of a series, the
+  series goes too: its catalog row, its registry entry, and its label
+  postings, inside the same transaction and journaled for rollback. A store
+  whose series come and go (processes, containers, jobs) no longer holds
+  every series it has ever seen in memory and on disk. Series with buffered
+  points, or created in the pruning transaction, are kept. `timeless_stats`
+  reports `retention_series_removed`; `ChunkStore` gains `delete_series`.
+- **Rollup chunks are merged (#81).** Each rollup pass wrote one chunk per
+  series and tier, and nothing merged them: a 5-minute bucket cost 13 bytes
+  and an hourly one 44 on a day-old store. `rollup` and `compact` now merge
+  a group's neighbouring chunks size-tiered (four or more, together at least
+  twice the largest, cut at 4,096 buckets), and a series with no raw chunk
+  left has its pieces put together once. On a 26-hour store of 44,654 series,
+  406,241 rollup chunks became 104,923 in six seconds and the rollup payload
+  halved; every bucket reads as before. `timeless_stats` reports
+  `rollup_merge_chunks_removed` and `rollup_merge_chunks_written`.
 - **Strict log time bounds retain limit pushdown (#89).** Integer `<` and `>`
   bounds, including half-open ranges and one-sided paging, now use the same
   bounded ordered scan as equivalent inclusive bounds. Empty ranges and i64

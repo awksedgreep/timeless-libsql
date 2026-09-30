@@ -4955,6 +4955,18 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(info.compaction_merge_total_ns as i64),
                     ),
                     (
+                        "retention_series_removed",
+                        Value::Integer(info.retention_series_removed as i64),
+                    ),
+                    (
+                        "rollup_merge_chunks_removed",
+                        Value::Integer(info.rollup_merge_chunks_removed as i64),
+                    ),
+                    (
+                        "rollup_merge_chunks_written",
+                        Value::Integer(info.rollup_merge_chunks_written as i64),
+                    ),
+                    (
                         "prometheus_ingest_batches",
                         Value::Integer(info.prometheus_ingest_batches as i64),
                     ),

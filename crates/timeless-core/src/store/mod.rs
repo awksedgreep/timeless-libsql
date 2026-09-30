@@ -254,6 +254,16 @@ pub trait ChunkStore: Send + Sync {
             .collect()
     }
 
+    /// Remove authoritative series rows: the engine calls this for series
+    /// that retention has left no chunk of, inside the caller's
+    /// transaction, so a rollback puts the rows back. A store that owns
+    /// series identity must implement it; the catalog token and the
+    /// append watermark must both change, since rows are gone and a
+    /// series id may be given out again.
+    fn delete_series(&self, _ids: &[i64]) -> Result<(), String> {
+        Err("this store cannot remove series".to_string())
+    }
+
     /// Import legacy registry rows. Implementations must be idempotent so
     /// two processes opening the same legacy database cannot corrupt it.
     fn migrate_series(&self, _series: &[StoredSeries]) -> Result<(), String> {
@@ -300,11 +310,10 @@ pub trait ChunkStore: Send + Sync {
     /// reload (the always-correct fallback).
     ///
     /// The shadow-store implementation returns
-    /// `(max _series id, chunk generation counter)`: the series half is
-    /// sound because committed catalog rows are append-only (rollback undo
-    /// is page-level and removes only never-committed rows) — if a series
-    /// GC/delete path is ever added, that half MUST move to a bumped
-    /// counter too.
+    /// `(max _series id, chunk generation counter)`: the series half
+    /// covers inserts, which only ever raise the maximum, and
+    /// `delete_series` bumps the chunk half, so a removal changes the
+    /// token too.
     fn catalog_generation(&self) -> Result<Option<(i64, i64)>, String> {
         Ok(None)
     }

@@ -224,3 +224,109 @@ fn prune_after_removes_future_chunks() {
         engine.shutdown().unwrap();
     }
 }
+
+/// A series retention has left nothing of is removed with its last
+/// chunk: from the registry, so that what the store holds in memory is
+/// what it holds on disk. A series with data still buffered, and one
+/// created in the transaction that prunes, are left alone.
+#[test]
+fn retention_removes_series_it_has_left_nothing_of() {
+    let dir = temp_dir("sweep");
+    let labels: HashMap<String, String> = HashMap::new();
+    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    engine.set_retention(Some(100));
+    let gone = engine.resolve_cached("gone", &labels).unwrap();
+    let kept = engine.resolve_cached("kept", &labels).unwrap();
+
+    // Both have a chunk at 1000; only `kept` goes on.
+    engine.write_point(gone, 1000, 1.0);
+    engine.write_point(kept, 1000, 1.0);
+    engine.flush_all().unwrap();
+    assert_eq!(engine.info().series_count, 2);
+
+    engine.write_point(kept, 1200, 2.0);
+    engine.flush_all().unwrap();
+    let info = engine.info();
+    assert_eq!(
+        info.series_count, 1,
+        "the series whose only chunk was pruned is gone"
+    );
+    assert_eq!(info.retention_series_removed, 1);
+    assert!(engine.series_read().list_metrics() == vec!["kept".to_string()]);
+    assert_eq!(count_points(&engine, gone), 0);
+    assert_eq!(count_points(&engine, kept), 1);
+
+    // A series with points buffered and not yet flushed has data.
+    let buffered = engine.resolve_cached("buffered", &labels).unwrap();
+    engine.write_point(buffered, 1250, 3.0);
+    engine.write_point(kept, 1400, 4.0);
+    // Compaction applies retention too, and `buffered` is still in its
+    // buffer while the cutoff passes `kept`'s first chunk.
+    engine.compact_partitions(i64::MAX).unwrap();
+    assert!(engine
+        .series_read()
+        .list_metrics()
+        .contains(&"buffered".to_string()));
+
+    // Once it has flushed and expired, it goes like any other.
+    engine.flush_all().unwrap();
+    engine.write_point(kept, 1600, 5.0);
+    engine.flush_all().unwrap();
+    assert!(!engine
+        .series_read()
+        .list_metrics()
+        .contains(&"buffered".to_string()));
+    assert_eq!(engine.info().retention_series_removed, 2);
+
+    // And the name can be used again, as a new series.
+    let again = engine.resolve_cached("gone", &labels).unwrap();
+    engine.write_point(again, 1600, 6.0);
+    engine.flush_all().unwrap();
+    assert_eq!(count_points(&engine, again), 1);
+    engine.shutdown().unwrap();
+
+    // The registry that was saved knows nothing of them either.
+    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let mut names = engine.series_read().list_metrics();
+    names.sort();
+    assert_eq!(names, vec!["gone".to_string(), "kept".to_string()]);
+    engine.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The removal is journaled: rolled back, the series is back, with its
+/// id, and can be written to as before.
+#[test]
+fn rollback_restores_a_series_retention_removed() {
+    let dir = temp_dir("sweep_rollback");
+    let labels: HashMap<String, String> = HashMap::new();
+    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    engine.set_retention(Some(100));
+    let gone = engine.resolve_cached("gone", &labels).unwrap();
+    let kept = engine.resolve_cached("kept", &labels).unwrap();
+    engine.write_point(gone, 1000, 1.0);
+    engine.write_point(kept, 1000, 1.0);
+    engine.flush_all().unwrap();
+
+    engine.txn_begin();
+    engine.write_point(kept, 1200, 2.0);
+    engine.flush_all().unwrap();
+    assert_eq!(
+        engine.info().series_count,
+        1,
+        "removed inside the transaction"
+    );
+    engine.txn_rollback();
+
+    assert_eq!(engine.info().series_count, 2, "and back with the rollback");
+    assert_eq!(
+        engine.resolve_cached("gone", &labels).unwrap(),
+        gone,
+        "with the id it had"
+    );
+    // The chunk itself is the host's to bring back with its rollback, and
+    // this file store has no host: what comes back with the data is shown
+    // over SQLite, in the extension's tests.
+    engine.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

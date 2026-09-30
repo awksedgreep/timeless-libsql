@@ -231,6 +231,13 @@ previously resolved `series_id`. Use the hidden command column for:
 - `prune:<unix-seconds>` removes whole raw chunks older than the explicit
   cutoff. Declared rollup retention is applied by maintenance; use the
   bounded `clear-rollups` command for an explicit full-tier removal.
+- Retention also removes every series it has left nothing of: no raw chunk,
+  no rollup chunk, and no buffered point. The catalog row and the registry
+  entry go in the same transaction and come back on rollback. A series with
+  a rollup chunk in a tier kept `forever` is therefore kept forever.
+- `rollup` and `compact` merge a series' small rollup chunks into large
+  ones as they accumulate, size-tiered, so a bucket is rewritten a few times
+  over its life; the merged chunks read exactly as the pieces did.
 - `prune-after:<unix-seconds>` removes whole raw and rollup chunks whose
   coverage *begins* after the explicit cutoff, across every persisted tier.
   This is the repair path for samples stored under a mistaken timestamp unit
@@ -589,7 +596,7 @@ persists the counters in the same host transaction.
 
 | Signal | Public storage and maintenance keys |
 |---|---|
-| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
+| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, `retention_series_removed`, `rollup_merge_chunks_removed`, `rollup_merge_chunks_written`, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `ingest_raw_bytes_total`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
 | traces | `blocks`, `raw_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `ingest_raw_bytes_total`, `duration_bounded_blocks`, `duration_unknown_blocks`, `attribute_index_fields`, `attribute_bloom_rows`, `attribute_bloom_bytes`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
 

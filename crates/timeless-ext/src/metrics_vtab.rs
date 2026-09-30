@@ -1750,4 +1750,277 @@ mod schema_tests {
         assert!(names.contains(&"user_data".to_string()));
         assert!(inventory_names(&db).is_empty());
     }
+
+    use rusqlite::params;
+
+    fn series_rows(db: &Connection, table: &str) -> Vec<String> {
+        db.prepare(&format!("SELECT name FROM {table}_series ORDER BY name"))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn stat(db: &Connection, table: &str, key: &str) -> i64 {
+        db.query_row(
+            "SELECT value FROM timeless_stats(?1) WHERE key = ?2",
+            params![table, key],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A series retention has left nothing of goes with its last chunk:
+    /// out of the catalog row, the registry, and the public views. A
+    /// rollup chunk keeps it, until that expires too.
+    #[test]
+    fn retention_removes_a_series_with_its_last_chunk() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE m USING timeless_metrics(retention='100s', rollups='10s@1000s');",
+        )
+        .unwrap();
+        let write = |name: &str, ts: i64| {
+            db.execute(
+                "INSERT INTO m(name, ts, value, labels) VALUES (?1, ?2, 1.0, '{}')",
+                params![name, ts],
+            )
+            .unwrap();
+        };
+        let command = |what: &str| {
+            db.execute("INSERT INTO m(m) VALUES (?1)", [what]).unwrap();
+        };
+        // Both begin at 1000; `kept` goes on to 1050, which settles the
+        // 1000 bucket, and the rollup for both is built.
+        write("gone", 1000);
+        write("kept", 1000);
+        write("kept", 1050);
+        command("flush");
+        command("compact");
+        assert_eq!(series_rows(&db, "m"), ["gone", "kept"]);
+        assert_eq!(stat(&db, "m", "rollup_chunks"), 2);
+
+        // At 1200 the raw cutoff is 1100: `gone`'s only raw chunk is
+        // pruned, and its rollup chunk keeps it a series.
+        write("kept", 1200);
+        command("flush");
+        assert_eq!(
+            series_rows(&db, "m"),
+            ["gone", "kept"],
+            "kept by its rollup"
+        );
+        assert_eq!(stat(&db, "m", "retention_series_removed"), 0);
+
+        // At 2100 the rollup cutoff is 1100: the rollup goes, and with it
+        // the series.
+        write("kept", 2100);
+        command("flush");
+        assert_eq!(series_rows(&db, "m"), ["kept"]);
+        assert_eq!(stat(&db, "m", "retention_series_removed"), 1);
+        assert_eq!(stat(&db, "m", "series"), 1);
+        let names: Vec<String> = db
+            .prepare("SELECT name FROM timeless_m_series ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(names, ["kept"], "and out of the public catalog");
+
+        // The name is free to be a new series.
+        write("gone", 2100);
+        command("flush");
+        assert_eq!(series_rows(&db, "m"), ["gone", "kept"]);
+        let points: i64 = db
+            .query_row("SELECT count(*) FROM m WHERE name = 'gone'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(points, 1);
+    }
+
+    /// Removed inside a transaction that is rolled back, the series is
+    /// back: its row with SQLite's rollback, its registry entry with the
+    /// engine's journal, and its data readable as before.
+    #[test]
+    fn rollback_restores_a_series_retention_removed() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(retention='100s');")
+            .unwrap();
+        let write = |name: &str, ts: i64| {
+            db.execute(
+                "INSERT INTO m(name, ts, value, labels) VALUES (?1, ?2, 1.0, '{}')",
+                params![name, ts],
+            )
+            .unwrap();
+        };
+        write("gone", 1000);
+        write("kept", 1000);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        let id: i64 = db
+            .query_row("SELECT id FROM m_series WHERE name = 'gone'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        db.execute_batch("BEGIN;").unwrap();
+        write("kept", 1200);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        assert_eq!(
+            series_rows(&db, "m"),
+            ["kept"],
+            "removed inside the transaction"
+        );
+        db.execute_batch("ROLLBACK;").unwrap();
+
+        assert_eq!(series_rows(&db, "m"), ["gone", "kept"]);
+        let again: i64 = db
+            .query_row("SELECT id FROM m_series WHERE name = 'gone'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(again, id, "with the id it had");
+        let points: Vec<i64> = db
+            .prepare("SELECT ts FROM m WHERE name = 'gone'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(points, [1000], "and its chunk, and its place in the index");
+        assert_eq!(stat(&db, "m", "series"), 2);
+    }
+
+    /// Another connection on the same database sees the removal: the
+    /// catalog token changes, and its next refresh drops the series.
+    #[test]
+    fn another_connection_sees_a_removed_series() {
+        let dir = std::env::temp_dir().join(format!(
+            "timeless_ext_series_removal_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m.db");
+        let writer = Connection::open(&path).unwrap();
+        crate::register_telemetry(&writer).unwrap();
+        writer
+            .execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(retention='100s');")
+            .unwrap();
+        let write = |name: &str, ts: i64| {
+            writer
+                .execute(
+                    "INSERT INTO m(name, ts, value, labels) VALUES (?1, ?2, 1.0, '{}')",
+                    params![name, ts],
+                )
+                .unwrap();
+        };
+        write("gone", 1000);
+        write("kept", 1000);
+        writer
+            .execute("INSERT INTO m(m) VALUES ('flush')", [])
+            .unwrap();
+
+        let reader = Connection::open(&path).unwrap();
+        crate::register_telemetry(&reader).unwrap();
+        let catalog = |db: &Connection| -> Vec<String> {
+            db.prepare("SELECT name FROM timeless_m_series ORDER BY name")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(catalog(&reader), ["gone", "kept"]);
+
+        write("kept", 1200);
+        writer
+            .execute("INSERT INTO m(m) VALUES ('flush')", [])
+            .unwrap();
+        assert_eq!(catalog(&reader), ["kept"]);
+        assert_eq!(stat(&reader, "m", "series"), 1);
+
+        drop(reader);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rollup chunks written a pass at a time are merged into few, and
+    /// what they say does not change.
+    #[test]
+    fn rollup_chunks_are_merged_and_say_the_same() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(rollups='10s@0');")
+            .unwrap();
+        let rollup = |db: &Connection| -> Vec<(i64, f64)> {
+            db.prepare(
+                "SELECT ts, value FROM timeless_rollup('m', 'cpu', NULL, 10, 0, 1000000, 'sum') \
+                 ORDER BY ts",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+        // Twenty passes, each settling one more bucket of two samples, and
+        // each writing a rollup chunk of its own: as an hourly pass does.
+        let mut expected = Vec::new();
+        for pass in 0..20_i64 {
+            let bucket = 1000 + pass * 10;
+            for (ts, value) in [(bucket, 1.0), (bucket + 5, 2.0)] {
+                db.execute(
+                    "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', ?1, ?2, '{}')",
+                    params![ts, value],
+                )
+                .unwrap();
+            }
+            // A bucket settles once a whole bucket has passed it.
+            db.execute(
+                "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', ?1, 0.0, '{}')",
+                params![bucket + 20],
+            )
+            .unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('rollup')", [])
+                .unwrap();
+            expected.push((bucket, 3.0));
+        }
+        let chunks = stat(&db, "m", "rollup_chunks");
+        assert!(chunks < 8, "twenty passes left {chunks} chunks, not twenty");
+        assert!(stat(&db, "m", "rollup_merge_chunks_removed") >= 12);
+        assert!(stat(&db, "m", "rollup_merge_chunks_written") >= 1);
+        let rolled = rollup(&db);
+        // The settle margin keeps the last bucket or two in raw.
+        assert!(rolled.len() >= 18, "{rolled:?}");
+        assert_eq!(rolled, expected[..rolled.len()], "every bucket as it was");
+
+        // Rolled back, the pieces are back and say the same.
+        let before = stat(&db, "m", "rollup_chunks");
+        db.execute_batch("BEGIN;").unwrap();
+        for pass in 20..30_i64 {
+            let bucket = 1000 + pass * 10;
+            db.execute(
+                "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', ?1, 3.0, '{}')",
+                params![bucket],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', ?1, 0.0, '{}')",
+                params![bucket + 20],
+            )
+            .unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('rollup')", [])
+                .unwrap();
+        }
+        assert!(rollup(&db).len() >= 28);
+        db.execute_batch("ROLLBACK;").unwrap();
+        assert_eq!(stat(&db, "m", "rollup_chunks"), before);
+        assert_eq!(rollup(&db), rolled);
+    }
 }

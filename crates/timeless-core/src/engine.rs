@@ -66,6 +66,11 @@ impl MetricsCompactionBudget {
 /// drained over successive maintenance passes instead of allocating and
 /// deleting millions of rollup identities in one transaction.
 const ROLLUP_RETENTION_DELETE_BATCH: usize = 4096;
+/// Rollup chunks a merge makes at most: at a 5-minute tier a fortnight,
+/// at an hourly one nearly half a year, each a row of some kilobytes.
+const ROLLUP_MERGE_TARGET_BUCKETS: usize = 4096;
+/// Neighbouring rollup chunks it takes to be worth a merge.
+const ROLLUP_MERGE_MIN_CHUNKS: usize = 4;
 
 /// Explicit rollup cleanup can use a larger bounded batch than automatic
 /// retention: it is operator-requested and must make practical progress on
@@ -871,6 +876,11 @@ pub struct Engine {
     compaction_merge_input_bytes: AtomicU64,
     compaction_merge_output_bytes: AtomicU64,
     compaction_merge_total_ns: AtomicU64,
+    /// Series removed because retention left nothing of them, cumulative.
+    retention_series_removed: AtomicU64,
+    /// Rollup chunks merged away, and merged chunks written, cumulative.
+    rollup_merge_chunks_removed: AtomicU64,
+    rollup_merge_chunks_written: AtomicU64,
     /// Fast resolution cache: hash(metric, labels) → series_id.
     /// Persists across batches — steady-state scraping is pure cache hits.
     resolve_cache: DashMap<u64, i64>,
@@ -1032,6 +1042,10 @@ struct TxnFrame {
     removed: Vec<(ChunkKey, ChunkMeta)>,
     /// Authoritative series rows first inserted inside this frame.
     series_added: HashSet<i64>,
+    /// Series removed inside this frame because retention left nothing
+    /// of them: identity enough to put them back on rollback (the store's
+    /// rows come back with the host's rollback).
+    series_removed: Vec<(i64, String, Labels)>,
     /// F3: rollup index entries added / removed inside this frame (same
     /// cancel rule as added/removed on the raw index).
     rollup_added: HashSet<RollupKey>,
@@ -1302,6 +1316,7 @@ impl Engine {
         frame.added.clear();
         frame.removed.clear();
         frame.series_added.clear();
+        frame.series_removed.clear();
         frame.rollup_added.clear();
         frame.rollup_removed.clear();
         frame.rollup_tiers_before = None;
@@ -1379,10 +1394,18 @@ impl Engine {
                 .unwrap_or_else(|error| error.into_inner()) = tiers;
         }
 
-        if !frame.series_added.is_empty() {
+        if !frame.series_added.is_empty() || !frame.series_removed.is_empty() {
             let mut series = self.series_write();
             for id in frame.series_added.drain() {
                 series.remove_id(id);
+            }
+            for (id, name, labels) in frame.series_removed.drain(..) {
+                // Cannot collide: the id was this series' before the frame,
+                // and nothing else took it inside the frame that is being
+                // undone.
+                if let Err(err) = series.insert_known(id, &name, &labels, true) {
+                    debug_assert!(false, "rollback could not restore series {id}: {err}");
+                }
             }
             self.resolve_cache.clear();
         }
@@ -1431,6 +1454,7 @@ impl Engine {
             parent.rollup_tiers_before = child.rollup_tiers_before.take();
         }
         parent.series_added.extend(child.series_added.drain());
+        parent.series_removed.append(&mut child.series_removed);
     }
 
     /// Insert freshly-persisted chunk metas into the index, journaling
@@ -1609,6 +1633,9 @@ impl Engine {
             compaction_merge_input_bytes: AtomicU64::new(0),
             compaction_merge_output_bytes: AtomicU64::new(0),
             compaction_merge_total_ns: AtomicU64::new(0),
+            retention_series_removed: AtomicU64::new(0),
+            rollup_merge_chunks_removed: AtomicU64::new(0),
+            rollup_merge_chunks_written: AtomicU64::new(0),
             resolve_cache: DashMap::new(),
             prometheus_ingest_batches: AtomicU64::new(0),
             prometheus_ingest_points: AtomicU64::new(0),
@@ -4678,7 +4705,183 @@ impl Engine {
     pub fn rollup(&self) -> EngineResult<(usize, usize)> {
         let (chunks, buckets, more) = self.rollup_inner(None)?;
         debug_assert!(!more);
+        self.merge_rollups()?;
         Ok((chunks, buckets))
+    }
+
+    /// Merge a group's small rollup chunks into large ones.
+    ///
+    /// A rollup pass writes one chunk per series and tier, of the buckets
+    /// settled since the last pass: hourly passes over a 5-minute tier
+    /// leave a series with twelve buckets a chunk, and after a month with
+    /// 720 chunks, each a row and a compressed frame of its own. Measured
+    /// on such a store, a 5-minute bucket cost 13 bytes and an hourly one
+    /// 44, where the buckets themselves are worth about one.
+    ///
+    /// Size-tiered, so that a bucket is rewritten about log(n) times over
+    /// its life and not at every pass: a run of neighbouring chunks is
+    /// merged when there are at least [`ROLLUP_MERGE_MIN_CHUNKS`] of them
+    /// and together they hold at least twice what the largest holds, and
+    /// the result is cut at [`ROLLUP_MERGE_TARGET_BUCKETS`]. New chunks
+    /// are written and put in the index before the old rows are deleted,
+    /// all in the caller's transaction and journaled, as compaction is.
+    ///
+    /// Returns (chunks removed, chunks written).
+    pub fn merge_rollups(&self) -> EngineResult<(usize, usize)> {
+        // Plan from a read snapshot; nothing here needs the writer's view.
+        let plans: Vec<(RollupGroupKey, Vec<RollupIndexEntry>)> = {
+            let rollups = self.rollup_read();
+            // A series with no raw chunk left has nothing more to roll up:
+            // its pieces are put together once, however few they are.
+            let with_raw: HashSet<i64> = self
+                .index_read()
+                .keys()
+                .map(|(pk, _, _)| pk.series_id)
+                .collect();
+            let mut plans = Vec::new();
+            for (group, entries) in &rollups.groups {
+                let live = with_raw.contains(&group.series_id);
+                let at_least = if live { ROLLUP_MERGE_MIN_CHUNKS } else { 2 };
+                let mut run: Vec<RollupIndexEntry> = Vec::new();
+                let mut buckets = 0usize;
+                let close = |run: &mut Vec<RollupIndexEntry>, plans: &mut Vec<_>| {
+                    let largest = run
+                        .iter()
+                        .map(|e| e.point_count as usize)
+                        .max()
+                        .unwrap_or(0);
+                    let total: usize = run.iter().map(|e| e.point_count as usize).sum();
+                    if run.len() >= at_least && (!live || total >= largest.saturating_mul(2)) {
+                        plans.push((*group, std::mem::take(run)));
+                    } else {
+                        run.clear();
+                    }
+                };
+                for entry in entries {
+                    let count = entry.point_count as usize;
+                    if count >= ROLLUP_MERGE_TARGET_BUCKETS {
+                        // Full already: a boundary, not a member.
+                        close(&mut run, &mut plans);
+                        buckets = 0;
+                        continue;
+                    }
+                    if !run.is_empty() && buckets + count > ROLLUP_MERGE_TARGET_BUCKETS {
+                        close(&mut run, &mut plans);
+                        buckets = 0;
+                    }
+                    run.push(*entry);
+                    buckets += count;
+                }
+                close(&mut run, &mut plans);
+            }
+            plans
+        };
+        if plans.is_empty() {
+            return Ok((0, 0));
+        }
+
+        // Phase 1: read and re-encode, with no engine locks held.
+        let mut batch: Vec<EncodedRollupChunk> = Vec::new();
+        let mut merged: Vec<(RollupGroupKey, Vec<RollupIndexEntry>, usize)> = Vec::new();
+        for (group, entries) in plans {
+            let locs: Vec<ChunkLoc> = entries.iter().map(|entry| entry.loc()).collect();
+            let payloads = self.store.read_chunks(&locs)?;
+            let mut buckets = Vec::new();
+            for payload in &payloads {
+                buckets.extend(decode_rollup_payload(payload.ts())?);
+            }
+            // Passes append in coverage order and never overlap; a group
+            // that says otherwise is left as it is rather than rewritten.
+            if buckets
+                .windows(2)
+                .any(|pair| pair[1].bucket_ts <= pair[0].bucket_ts)
+            {
+                continue;
+            }
+            let mut written = 0;
+            for slice in buckets.chunks(ROLLUP_MERGE_TARGET_BUCKETS) {
+                batch.push(EncodedRollupChunk {
+                    series_id: group.series_id,
+                    resolution: group.resolution,
+                    min_ts: slice[0].bucket_ts,
+                    max_ts: slice[slice.len() - 1].bucket_ts + group.resolution - 1,
+                    bucket_count: u32::try_from(slice.len())
+                        .map_err(|_| "rollup merge: bucket count exceeds u32::MAX".to_string())?,
+                    payload: encode_rollup_payload(slice)?,
+                });
+                written += 1;
+            }
+            merged.push((group, entries, written));
+        }
+        if batch.is_empty() {
+            return Ok((0, 0));
+        }
+        let locs = self
+            .store
+            .put_rollup_chunks(&batch)
+            .map_err(|err| format!("rollup merge write failed: {err}"))?;
+        if locs.len() != batch.len() {
+            return Err(format!(
+                "rollup store wrote {} of {} merged chunks",
+                locs.len(),
+                batch.len()
+            ));
+        }
+
+        // Phase 2: swap the index, journaled, before any old row goes,
+        // so that no reader is sent to a row that is not there.
+        let mut old_locs: Vec<ChunkLoc> = Vec::new();
+        {
+            let _transition = self.transition_write();
+            let mut journal = self.txn_guard();
+            let mut rollups = self.rollup_write();
+            let mut new = batch.iter().zip(locs);
+            for (group, entries, written) in &merged {
+                for entry in entries {
+                    let key = (*group, entry.min_ts, entry.rowid);
+                    if rollups.remove(&key).is_some() {
+                        if let Some(journal) = journal.as_deref_mut() {
+                            if !journal.rollup_added.remove(&key) {
+                                journal.rollup_removed.push((key, *entry));
+                            }
+                        }
+                    }
+                    old_locs.push(entry.loc());
+                }
+                for _ in 0..*written {
+                    let Some((chunk, loc)) = new.next() else {
+                        break;
+                    };
+                    let ChunkLoc::Row { rowid } = loc else {
+                        return Err(format!(
+                            "rollup store returned non-row location {loc:?} for series {}",
+                            chunk.series_id
+                        ));
+                    };
+                    let entry = RollupIndexEntry {
+                        min_ts: chunk.min_ts,
+                        max_ts: chunk.max_ts,
+                        rowid,
+                        point_count: chunk.bucket_count,
+                        encoding: ENC_ROLLUP_V1,
+                    };
+                    let key = (*group, entry.min_ts, entry.rowid);
+                    rollups.insert(*group, entry);
+                    if let Some(journal) = journal.as_deref_mut() {
+                        journal.rollup_added.insert(key);
+                    }
+                }
+            }
+        }
+        let errors = self.store.delete_chunks(&old_locs);
+        if !errors.is_empty() {
+            return Err(format!("rollup merge delete failed: {}", errors.join("; ")));
+        }
+        self.rollup_merge_chunks_removed
+            .fetch_add(old_locs.len() as u64, Ordering::Relaxed);
+        self.rollup_merge_chunks_written
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+        Ok((old_locs.len(), batch.len()))
     }
 
     /// Visit at most `max_groups` `(tier, series)` groups in one transaction.
@@ -4690,7 +4893,13 @@ impl Engine {
         if max_groups == 0 {
             return Err("bounded rollup requires a positive group budget".into());
         }
-        self.rollup_inner(Some(max_groups))
+        let out = self.rollup_inner(Some(max_groups))?;
+        if !out.2 {
+            // A cycle is complete: what it and the cycles before it wrote
+            // in pieces is put together.
+            self.merge_rollups()?;
+        }
+        Ok(out)
     }
 
     fn rollup_inner(&self, max_groups: Option<usize>) -> EngineResult<(usize, usize, bool)> {
@@ -5233,10 +5442,84 @@ impl Engine {
             pruned += chunks;
             retention_complete &= !more;
         }
+        if pruned > 0 {
+            // What the pruned chunks were the last of is gone with them.
+            self.remove_series_without_data()?;
+        }
         if retention_complete {
             self.retention_floor.store(high_water, Ordering::Relaxed);
         }
         Ok(pruned)
+    }
+
+    /// Remove every series that has no chunk, no rollup chunk, and no
+    /// buffered point: retention has taken the last of it, and a series
+    /// that is kept after its data costs its registry entry, its catalog
+    /// row, and its label postings for as long as the store lives. Series
+    /// created in the current transaction are left alone; their data is
+    /// on its way.
+    ///
+    /// Journaled like the chunk deletions around it: a rollback puts the
+    /// registry entries back, and the host's rollback puts the rows back.
+    /// Returns how many were removed.
+    pub fn remove_series_without_data(&self) -> EngineResult<usize> {
+        let _transition = self.transition_write();
+        let doomed: Vec<i64> = {
+            let mut journal = self.txn_guard();
+            let index = self.index_read();
+            let rollups = self.rollup_read();
+            let mut live: HashSet<i64> = HashSet::new();
+            live.extend(index.keys().map(|(pk, _, _)| pk.series_id));
+            live.extend(rollups.groups.keys().map(|group| group.series_id));
+            live.extend(
+                self.partitions
+                    .iter()
+                    .filter(|entry| !entry.value().timestamps.is_empty())
+                    .map(|entry| entry.key().series_id),
+            );
+            if let Some(journal) = journal.as_deref() {
+                live.extend(journal.series_added.iter().copied());
+            }
+            let mut series = self.series_write();
+            let doomed: Vec<i64> = series
+                .series_info
+                .keys()
+                .filter(|id| !live.contains(id))
+                .copied()
+                .collect();
+            for id in &doomed {
+                if let Some(info) = series.series_info.get(id) {
+                    if let Some(journal) = journal.as_deref_mut() {
+                        journal.series_removed.push((
+                            *id,
+                            info.metric_name.clone(),
+                            info.labels.clone(),
+                        ));
+                    }
+                }
+                series.remove_id(*id);
+                // An emptied buffer is the last thing left of it.
+                self.partitions.remove(&PartitionKey { series_id: *id });
+            }
+            if !doomed.is_empty() {
+                series.dirty = true;
+            }
+            doomed
+        };
+        if doomed.is_empty() {
+            return Ok(0);
+        }
+        self.resolve_cache.clear();
+        // No engine locks here: store DML can re-enter the vtab's
+        // savepoint hooks (invariant 1), as with every other store write.
+        if self.authoritative_series {
+            self.store
+                .delete_series(&doomed)
+                .map_err(|err| format!("series removal failed: {err}"))?;
+        }
+        self.retention_series_removed
+            .fetch_add(doomed.len() as u64, Ordering::Relaxed);
+        Ok(doomed.len())
     }
 
     pub fn delete_before(&self, before_ts: i64) -> (usize, usize, Vec<String>) {
@@ -5879,6 +6162,9 @@ impl Engine {
                 .compaction_merge_output_bytes
                 .load(Ordering::Relaxed),
             compaction_merge_total_ns: self.compaction_merge_total_ns.load(Ordering::Relaxed),
+            retention_series_removed: self.retention_series_removed.load(Ordering::Relaxed),
+            rollup_merge_chunks_removed: self.rollup_merge_chunks_removed.load(Ordering::Relaxed),
+            rollup_merge_chunks_written: self.rollup_merge_chunks_written.load(Ordering::Relaxed),
             prometheus_ingest_batches: self.prometheus_ingest_batches.load(Ordering::Relaxed),
             prometheus_ingest_points: self.prometheus_ingest_points.load(Ordering::Relaxed),
             prometheus_ingest_errors: self.prometheus_ingest_errors.load(Ordering::Relaxed),
@@ -5967,6 +6253,9 @@ pub struct EngineInfo {
     pub compaction_merge_input_bytes: u64,
     pub compaction_merge_output_bytes: u64,
     pub compaction_merge_total_ns: u64,
+    pub retention_series_removed: u64,
+    pub rollup_merge_chunks_removed: u64,
+    pub rollup_merge_chunks_written: u64,
     pub prometheus_ingest_batches: u64,
     pub prometheus_ingest_points: u64,
     pub prometheus_ingest_errors: u64,
