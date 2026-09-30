@@ -148,18 +148,53 @@ fn validate_manifest(root: &Path, manifest: &OracleManifest) -> Result<Vec<Strin
 }
 
 pub(super) fn command_output(program: &str, args: &[String], timeout: Duration) -> Result<Output> {
+    // Waiting before draining pipes deadlocks once either output exceeds the
+    // platform's pipe capacity (Podman image inspection exceeds Linux's 8 KiB
+    // pipes). Files also keep timeout cleanup independent of descendant FDs.
+    use std::io::{Read, Seek, SeekFrom};
+    let mut stdout = tempfile::tempfile().context("create child stdout capture")?;
+    let mut stderr = tempfile::tempfile().context("create child stderr capture")?;
     let mut child = Command::new(program)
         .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(stdout.try_clone()?))
+        .stderr(Stdio::from(stderr.try_clone()?))
         .spawn()
         .with_context(|| format!("start {program}"))?;
-    if child.wait_timeout(timeout)?.is_none() {
+    let Some(status) = child.wait_timeout(timeout)? else {
         child.kill().ok();
         let _ = child.wait();
         bail!("{program} timed out after {} seconds", timeout.as_secs());
-    }
-    child.wait_with_output().context("collect child output")
+    };
+    stdout.seek(SeekFrom::Start(0))?;
+    stderr.seek(SeekFrom::Start(0))?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    stdout.read_to_end(&mut out)?;
+    stderr.read_to_end(&mut err)?;
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn command_capture_does_not_block_on_large_stdout_or_stderr() {
+    let output = command_output("sh", &[
+        "-c".into(),
+        "i=0; while [ $i -lt 10000 ]; do printf '0123456789abcdef'; printf 'fedcba9876543210' >&2; i=$((i+1)); done".into()
+    ], Duration::from_secs(10)).unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"0123456789abcdef".repeat(10000));
+    assert_eq!(output.stderr, b"fedcba9876543210".repeat(10000));
+    let error = command_output(
+        "sh",
+        &["-c".into(), "exec sleep 10".into()],
+        Duration::from_millis(20),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("timed out"));
 }
 
 fn container_args(oracle: &OracleDefinition, extra: &[String]) -> Vec<String> {
