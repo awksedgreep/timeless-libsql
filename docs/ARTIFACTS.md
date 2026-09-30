@@ -9,26 +9,26 @@ reachable from `main`.
 
 ## Current publication status
 
-[`v0.8.5`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.5)
-was published on 2026-09-26 at 16:33:21 UTC from `main` commit
-`e8a6362a8a3dcc2780b2f48f48b37da0df9dc33b`. It contains the decoupled metrics
-catalog read limits and streaming catalog reads, VictoriaMetrics import
-timestamp-unit validation, and the bounded `prune-after` repair command
-described in the [changelog](../CHANGELOG.md).
+[`v0.8.6`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.6)
+was published on 2026-09-30 at 02:34:26 UTC from `main` commit
+`a24957b211becb0c0af9e85572a9be5a48528061`. It bounds the points a metrics
+query decodes from storage (`TIMELESS_METRICS_PROMQL_MAX_STORAGE_POINTS`)
+apart from the points it keeps, as described in the
+[changelog](../CHANGELOG.md).
 
-The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/36255176975)
+The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/36659821659)
 built, identity-checked, and install/remove-drilled all four native Linux/macOS
 archives, verified the complete outer `SHA256SUMS`, and published the four
 archives plus that checksum file as permanent release assets. All assets were
 downloaded and independently verified after publication; every archive passed
 `sha256sum -c` against the published checksum file. See the
-[release validation record](RELEASE_0_8_5.md)
-for the complete post-bump local checklist, dispatched CI, and archive hashes.
+[release validation record](RELEASE_0_8_6.md)
+for the complete post-bump local checklist and archive hashes.
 
 This is the current download channel. Complete published releases also exist
-for `v0.8.4`, `v0.8.3`, `v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.9`, `v0.7.8`,
-`v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`, `v0.6.4`, `v0.6.2`,
-`v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
+for `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`, `v0.8.1`, `v0.8.0`, `v0.7.9`,
+`v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`, `v0.6.4`,
+`v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
 
 Documentation on `main` also covers changes in the
 [Unreleased changelog](../CHANGELOG.md#unreleased). Those changes require a
