@@ -1,0 +1,170 @@
+{
+  "source_commit": "69fcf2f488e783bf0a622b57b04a6d1994719d47",
+  "baseline_extension_sha256": "26039b3c5786cbc5363c0e0a59f75ffb93d83b3960efb1b15d42cff284721dea",
+  "candidate_extension_sha256": "11cd0477c988be7c38577ab39aea3172106410ad5736ab25e9ecbea9d5d73dcf",
+  "host": "Intel Core Ultra 9 185H, x86_64 Linux, 22 logical CPUs; shared development workstation",
+  "method": "Five fresh sqlite3 processes per shape/build, on the same database with warmed filesystem cache. Child wall time and RUSAGE_CHILDREN.ru_maxrss measured by an otherwise fresh Python parent for each sample. stdout checked for count and paging, discarded for the complete metadata scan.",
+  "fixture": {
+    "database_bytes": 37068800,
+    "rows": 274118
+  },
+  "results": [
+    {
+      "query": "count",
+      "version": "before",
+      "samples": [
+        {
+          "seconds": 1.0107106390059926,
+          "peak_rss_kib": 1359768
+        },
+        {
+          "seconds": 0.9861237320001237,
+          "peak_rss_kib": 1359552
+        },
+        {
+          "seconds": 0.953261446004035,
+          "peak_rss_kib": 1359536
+        },
+        {
+          "seconds": 0.9939591260044836,
+          "peak_rss_kib": 1359748
+        },
+        {
+          "seconds": 0.9855973000230733,
+          "peak_rss_kib": 1359236
+        }
+      ]
+    },
+    {
+      "query": "count",
+      "version": "after",
+      "samples": [
+        {
+          "seconds": 0.028982090996578336,
+          "peak_rss_kib": 27324
+        },
+        {
+          "seconds": 0.031536101014353335,
+          "peak_rss_kib": 27704
+        },
+        {
+          "seconds": 0.028718393994495273,
+          "peak_rss_kib": 27448
+        },
+        {
+          "seconds": 0.02996935701230541,
+          "peak_rss_kib": 27452
+        },
+        {
+          "seconds": 0.030794179008807987,
+          "peak_rss_kib": 27260
+        }
+      ]
+    },
+    {
+      "query": "strict_limit",
+      "version": "before",
+      "samples": [
+        {
+          "seconds": 1.0275954639946576,
+          "peak_rss_kib": 1359724
+        },
+        {
+          "seconds": 1.0039594319823664,
+          "peak_rss_kib": 1359768
+        },
+        {
+          "seconds": 1.0205779839889146,
+          "peak_rss_kib": 1359360
+        },
+        {
+          "seconds": 0.9788706870167516,
+          "peak_rss_kib": 1359644
+        },
+        {
+          "seconds": 0.9596956789901014,
+          "peak_rss_kib": 1359992
+        }
+      ]
+    },
+    {
+      "query": "strict_limit",
+      "version": "after",
+      "samples": [
+        {
+          "seconds": 0.0163013499986846,
+          "peak_rss_kib": 29748
+        },
+        {
+          "seconds": 0.016041103983297944,
+          "peak_rss_kib": 30152
+        },
+        {
+          "seconds": 0.01605696600745432,
+          "peak_rss_kib": 30224
+        },
+        {
+          "seconds": 0.016714033001335338,
+          "peak_rss_kib": 30128
+        },
+        {
+          "seconds": 0.018097801017574966,
+          "peak_rss_kib": 30064
+        }
+      ]
+    },
+    {
+      "query": "metadata_reduction",
+      "version": "before",
+      "samples": [
+        {
+          "seconds": 1.1461990679963492,
+          "peak_rss_kib": 1359332
+        },
+        {
+          "seconds": 1.1119888910034206,
+          "peak_rss_kib": 1359620
+        },
+        {
+          "seconds": 1.1138265629997477,
+          "peak_rss_kib": 1359912
+        },
+        {
+          "seconds": 1.0989391060138587,
+          "peak_rss_kib": 1360068
+        },
+        {
+          "seconds": 1.1533334380073939,
+          "peak_rss_kib": 1359556
+        }
+      ]
+    },
+    {
+      "query": "metadata_reduction",
+      "version": "after",
+      "samples": [
+        {
+          "seconds": 0.6066706999845337,
+          "peak_rss_kib": 44696
+        },
+        {
+          "seconds": 0.5932009560056031,
+          "peak_rss_kib": 44924
+        },
+        {
+          "seconds": 0.5837989559804555,
+          "peak_rss_kib": 44876
+        },
+        {
+          "seconds": 0.5834002810006496,
+          "peak_rss_kib": 44752
+        },
+        {
+          "seconds": 0.5751104690134525,
+          "peak_rss_kib": 44692
+        }
+      ]
+    }
+  ],
+  "baseline_embedded_build_commit": "eb2ed465584cb8ce5d5b6111b28e46f89e5f2bc1"
+}
