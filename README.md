@@ -470,6 +470,7 @@ in [RESULTS.md](RESULTS.md) and are labeled as historical.
 | [SQLite extension API](docs/SQL_API_REFERENCE.md) | Canonical tables, columns, TVFs, commands, batches, frames, capabilities, transactions, and errors. |
 | [Rust signal server API](docs/SERVER_API_REFERENCE.md) | Binaries, routes, authentication, limits, lifecycle, backup, and configuration. |
 | [Query cookbook](docs/QUERIES.md) | Copyable SQL query patterns. |
+| [Showcase ideas](docs/SHOWCASE_IDEAS.md) | Proposed applications of current capabilities, recommended starting points, and demonstration evidence. |
 | [PromQL matrix](docs/PROMQL_FEATURE_MATRIX.md) | Exact PromQL and MetricsQL coverage and dispositions. |
 | [LogsQL matrix](docs/LOGSQL_FEATURE_MATRIX.md) | Exact LogsQL coverage and dispositions. |
 | [SQL equivalents](docs/QUERY_SQL_EQUIVALENTS.md) | Executable SQL foundations for language features. |
