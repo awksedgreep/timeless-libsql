@@ -130,7 +130,8 @@ fn document() -> &'static str {
                     "max_catalog_bytes": true
                 },
                 "timeless_logs": {
-                    "max_work_entries": true
+                    "max_work_entries": true,
+                    "streaming_projection_v1": true
                 },
                 "timeless_log_count": {
                     "max_work_entries": true
@@ -141,7 +142,8 @@ fn document() -> &'static str {
                 "timeless_log_query_stats": {
                     "request_local": true,
                     "same_connection": true,
-                    "single_use": true
+                    "single_use": true,
+                    "stream_materialization_counters": true
                 }
             },
             "sql_surfaces": {

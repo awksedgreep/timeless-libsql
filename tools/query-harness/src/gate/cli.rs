@@ -627,6 +627,164 @@ fn stat(current: &BTreeMap<String, Option<i64>>, key: &str) -> Result<i64> {
         .with_context(|| format!("missing non-NULL stat {key}"))
 }
 
+fn logs_streaming(extension: &Path, database: &Path) -> Result<()> {
+    let connection = open(extension, database)?;
+    connection.execute_batch(
+        "CREATE VIRTUAL TABLE logs USING timeless_logs(index_keys='service');
+         CREATE TABLE oracle(ts INTEGER,level TEXT,message TEXT,metadata TEXT);
+         WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<16399)
+         INSERT INTO oracle SELECT x,'notice','request '||x,
+           json_object('array',json_array(1,'2',NULL),'empty','',
+             'n',CASE WHEN x%3=0 THEN 2 WHEN x%3=1 THEN '2' ELSE NULL END,
+             'nested',json_object('flag',x%2),'service',CASE WHEN x%2=0 THEN 'api' ELSE 'db' END) FROM n;
+         INSERT INTO logs(ts,level,message,metadata) SELECT * FROM oracle;"
+    )?;
+    for phase in ["buffered", "flushed", "optimized", "reopened"] {
+        match phase {
+            "flushed" => connection.execute_batch("INSERT INTO logs(logs) VALUES('flush')")?,
+            "optimized" => connection.execute_batch("INSERT INTO logs(logs) VALUES('optimize')")?,
+            _ => {}
+        }
+        let reopened;
+        let conn = if phase == "reopened" {
+            reopened = open(extension, database)?;
+            &reopened
+        } else {
+            &connection
+        };
+        for query in [
+            "SELECT count(*) FROM TABLE",
+            "SELECT count(*) FROM TABLE WHERE json_extract(metadata,'$.n')=2",
+            "SELECT count(*) FROM TABLE WHERE json_extract(metadata,'$.n')='2'",
+            "SELECT json_type(metadata,'$.n'),json_extract(metadata,'$.nested.flag'),count(*) FROM TABLE GROUP BY 1,2 ORDER BY 1,2",
+            "SELECT ts,level,message,metadata FROM TABLE WHERE ts>16390 ORDER BY ts",
+        ] {
+            let expected = values(conn, &query.replace("TABLE", "oracle"), &[])?;
+            let got = values(conn, &query.replace("TABLE", "logs"), &[])?;
+            ensure!(got == expected, "{phase}: {query}");
+        }
+        let _ = values(conn, "SELECT metadata FROM logs", &[])?;
+        let report = values(conn, "SELECT streamed,stream_peak_entries,decoded_entries,values_read,returned_entries FROM timeless_log_query_stats('logs')", &[])?;
+        ensure!(report[0][0] == Value::Integer(1));
+        ensure!(
+            matches!(report[0][1], Value::Integer(n) if n <= 8208),
+            "{phase}: {report:?}"
+        );
+        ensure!(report[0][4] == Value::Integer(16400));
+        ensure!(
+            matches!((&report[0][2], &report[0][3]), (Value::Integer(decoded), Value::Integer(values)) if *values <= 2 * decoded + 48),
+            "{phase}: {report:?}"
+        );
+        // SQLite may close a streaming cursor at LIMIT; its report must be
+        // complete, single-use, and count only the blocks actually read.
+        ensure!(values(conn, "SELECT metadata FROM logs LIMIT 3", &[])?.len() == 3);
+        let report = values(
+            conn,
+            "SELECT returned_entries,decoded_entries FROM timeless_log_query_stats('logs')",
+            &[],
+        )?;
+        ensure!(report[0][0] == Value::Integer(3));
+        ensure!(matches!(report[0][1], Value::Integer(n) if n <= 8192));
+        ensure!(values(conn, "SELECT * FROM timeless_log_query_stats('logs')", &[]).is_err());
+        // The work guard must still reject a full scan, never publish a
+        // successful partial report, and leave the reader reusable.
+        ensure!(values(
+            conn,
+            "SELECT count(*) FROM logs WHERE max_work_entries=10000",
+            &[]
+        )
+        .is_err());
+        ensure!(values(conn, "SELECT * FROM timeless_log_query_stats('logs')", &[]).is_err());
+        ensure!(scalar_i64(conn, "SELECT count(*) FROM logs")? == 16400);
+    }
+    println!("PASS: streamed log projection preserves typed SQL, limits, reports, and reopen");
+    Ok(())
+}
+
+fn logs_bounds(extension: &Path, database: &Path) -> Result<()> {
+    let connection = open(extension, database)?;
+    connection.execute_batch(
+        "CREATE VIRTUAL TABLE logs USING timeless_logs;
+         CREATE TABLE oracle(ts INTEGER, message TEXT);
+         WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<999)
+         INSERT INTO oracle SELECT x,printf('row-%04d',x) FROM n;
+         INSERT INTO oracle VALUES(-9223372036854775808,'min'),(9223372036854775807,'max');
+         INSERT INTO logs(ts,level,message) SELECT ts,'info',message FROM oracle WHERE ts<500;
+         INSERT INTO logs(logs) VALUES('flush');
+         INSERT INTO logs(ts,level,message) SELECT ts,'info',message FROM oracle WHERE ts>=500;",
+    )?;
+    for phase in ["buffered", "flushed", "optimized", "reopened"] {
+        match phase {
+            "flushed" => connection.execute_batch("INSERT INTO logs(logs) VALUES('flush')")?,
+            "optimized" => connection.execute_batch("INSERT INTO logs(logs) VALUES('optimize')")?,
+            _ => {}
+        }
+        let reopened;
+        let conn = if phase == "reopened" {
+            reopened = open(extension, database)?;
+            &reopened
+        } else {
+            &connection
+        };
+        for (strict, inclusive) in [
+            ("ts>=100 AND ts<900", "ts BETWEEN 100 AND 899"),
+            ("ts>100 AND ts<=900", "ts BETWEEN 101 AND 900"),
+            ("ts>100 AND ts<900", "ts BETWEEN 101 AND 899"),
+            ("ts<900", "ts<=899"),
+            ("ts>100", "ts>=101"),
+        ] {
+            for order in ["ASC", "DESC"] {
+                let query = |table, bounds| {
+                    format!(
+                    "SELECT ts,message FROM {table} WHERE {bounds} ORDER BY ts {order} LIMIT ?1 OFFSET ?2"
+                )
+                };
+                let parameters = [Value::Integer(7), Value::Integer(3)];
+                let expected = values(conn, &query("oracle", strict), &parameters)?;
+                let baseline = values(conn, &query("logs", inclusive), &parameters)?;
+                let report = "SELECT processed_blocks,decoded_entries,returned_entries FROM timeless_log_query_stats('logs')";
+                let baseline_work = values(conn, report, &[])?;
+                let actual = values(conn, &query("logs", strict), &parameters)?;
+                let actual_work = values(conn, report, &[])?;
+                ensure!(
+                    actual == expected && actual == baseline,
+                    "{phase}: {strict} {order}"
+                );
+                ensure!(actual_work == baseline_work, "{phase}: {strict} {order}: strict work {actual_work:?} != inclusive {baseline_work:?}");
+                ensure!(actual_work[0][2] == Value::Integer(10));
+            }
+        }
+        for bound in [
+            "ts>9223372036854775807",
+            "ts<-9223372036854775808",
+            "ts>-9223372036854775808",
+            "ts<9223372036854775807",
+            "ts>NULL",
+            "ts<NULL",
+            "ts>900 AND ts<100",
+            "ts>100.5",
+            "ts<100.5",
+            "ts>'100'",
+            "ts<'100'",
+            "ts<'abc'",
+            "ts>100 AND ts>900",
+            "ts<900 AND message LIKE '%7%'",
+        ] {
+            for order in ["ASC", "DESC"] {
+                let query = |table| {
+                    format!("SELECT ts,message FROM {table} WHERE {bound} ORDER BY ts {order} LIMIT 7 OFFSET 3")
+                };
+                ensure!(
+                    values(conn, &query("logs"), &[])? == values(conn, &query("oracle"), &[])?,
+                    "{phase}: {bound} {order}"
+                );
+            }
+        }
+    }
+    println!("PASS: strict log bounds preserve SQL results and bounded engine work");
+    Ok(())
+}
+
 fn logs_optimize(extension: &Path, database: &Path) -> Result<()> {
     let connection = open(extension, database)?;
     connection.execute(
@@ -955,6 +1113,8 @@ pub(super) fn run(
         CliSection::SeriesId => series_id(extension, database),
         CliSection::Frames => frames(extension, database, auxiliary),
         CliSection::LogsOptimize => logs_optimize(extension, database),
+        CliSection::LogsBounds => logs_bounds(extension, database),
+        CliSection::LogsStreaming => logs_streaming(extension, database),
         CliSection::TraceReads => trace_reads(extension, database),
     }
 }

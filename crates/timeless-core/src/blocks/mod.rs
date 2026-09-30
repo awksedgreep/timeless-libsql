@@ -36,12 +36,12 @@ pub mod template;
 mod tests;
 
 pub use codec::{
-    decode_block, encode_block, is_raw_codec, CODEC_COLUMNAR, CODEC_COLUMNAR_V2, CODEC_RAW,
-    CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_RICH_TEMPLATE, CODEC_ZSTD,
+    decode_block, encode_block, is_raw_codec, LogProjection, CODEC_COLUMNAR, CODEC_COLUMNAR_V2,
+    CODEC_RAW, CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_RICH_TEMPLATE, CODEC_ZSTD,
 };
 pub use engine::{
     BlockEngine, BlockEngineConfig, BlockEngineProfileSnapshot, LogQuery, LogQueryExecutionReport,
-    LogQueryOrder,
+    LogQueryOrder, LogQueryStream,
 };
 pub use mem::MemBlockStore;
 

@@ -307,6 +307,40 @@ WHERE message_contains='timeout' AND ts >= :start
 ORDER BY ts DESC LIMIT 100;
 ```
 
+Integer time bounds support both inclusive and strict comparisons, including
+half-open ranges (`ts >= :start AND ts < :stop`) and one-sided paging
+(`ts < :before`). These retain at most `LIMIT + OFFSET` matching rows when
+every predicate is exact in the engine. SQLite-side predicates such as `LIKE`,
+or non-integer time-bound values, require an unbounded scan for rechecking.
+`EXPLAIN QUERY PLAN` shows `bounded-ts-asc` or `bounded-ts-desc` for eligible
+plans; `timeless_log_query_stats` reports the work actually performed.
+
+Unordered log scans stream one decoded block at a time, plus their owned live
+buffer snapshot. SQLite applies any remaining predicates and `LIMIT` as it
+consumes rows. `count(*)` skips message and metadata payloads, and selecting
+only `metadata` skips message reconstruction and the rich metadata's auxiliary
+string-pair projection. JSON typing and SQL results are unchanged. Use an
+explicit `ORDER BY` whenever row order matters.
+
+The `timeless_logs.streaming_projection_v1` query capability advertises this
+execution path; older extensions remain SQL-compatible but materialize scans.
+The additive `timeless_log_query_stats.stream_materialization_counters`
+capability advertises `streamed` and `stream_peak_entries` in that TVF. The
+latter is the maximum decoded-block rows plus buffered snapshot rows retained
+by a stream; ordered materialized queries set `streamed=0` and report zero in
+that stream-only field. Cumulative `query_stream_count`,
+`query_stream_max_entries`, and `query_values_read` are available through
+`timeless_stats` and the logs server stats route. Reports remain connection
+local and single use; read them after finishing the statement.
+
+The logs API's existing metadata reductions use this path automatically,
+retaining their typed predicates, textual group identities, work/group/response
+limits and cancellation. Unsupported reductions keep their existing fallback.
+This changes neither the stored format nor indexes. A narrow time slice may
+still decode every row in an overlapping block; `max_work_entries` continues
+to account for that physical work. Message-filtered scans retain their existing
+decoder and pruning behavior.
+
 For an exact scalar count without materializing rows, or bounded field-value
 discovery, use the public TVFs. Existing shorter arities remain compatible;
 the optional final argument is the same positive pre-decode work guard:

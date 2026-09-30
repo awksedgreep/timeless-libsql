@@ -18,8 +18,9 @@ use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use super::codec::{
-    block_message_feasible, decode_block, decode_block_filtered, encode_block, is_raw_codec,
-    CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR, CODEC_RICH_RAW, CODEC_RICH_TEMPLATE,
+    block_message_feasible, decode_block, decode_block_filtered, decode_block_projected,
+    encode_block, is_raw_codec, LogProjection, CODEC_COLUMNAR_V2, CODEC_RAW, CODEC_RICH_COLUMNAR,
+    CODEC_RICH_RAW, CODEC_RICH_TEMPLATE,
 };
 use super::{
     canonical_severity, level_from_name, level_name, BlockLoc, BlockMeta, BlockStore, EncodedBlock,
@@ -136,6 +137,9 @@ pub struct BlockEngineProfileSnapshot {
     pub query_payload_bytes_read: u64,
     pub query_candidate_blocks: u64,
     pub query_decoded_entries: u64,
+    pub query_values_read: u64,
+    pub query_stream_count: u64,
+    pub query_stream_max_entries: u64,
     pub query_clp_pruned_blocks: u64,
     pub query_clp_skipped_rows: u64,
     pub query_matched_entries: u64,
@@ -205,11 +209,16 @@ pub struct LogQueryExecutionReport {
     pub matched_entries: u64,
     pub returned_entries: u64,
     /// Timeless log blocks have three logical non-timestamp value slots per
-    /// row: severity, message, and the complete metadata envelope. Current
-    /// codecs decode all three together rather than selecting physical fields.
+    /// row: severity, message, and the complete metadata envelope. Projected
+    /// scans charge only the columns they decode (rich severity shares its
+    /// physical envelope with metadata).
     pub values_read: u64,
     pub timestamps_read: u64,
     pub stable_location_snapshot: bool,
+    pub streamed: bool,
+    /// Maximum retained decoded rows plus buffered snapshot rows, for streams.
+    /// Ordered materialized queries report zero here and `streamed=false`.
+    pub stream_peak_entries: u64,
 }
 
 #[derive(Default)]
@@ -236,6 +245,9 @@ struct BlockEngineProfile {
     query_payload_bytes_read: AtomicU64,
     query_candidate_blocks: AtomicU64,
     query_decoded_entries: AtomicU64,
+    query_values_read: AtomicU64,
+    query_stream_count: AtomicU64,
+    query_stream_max_entries: AtomicU64,
     query_clp_pruned_blocks: AtomicU64,
     query_clp_skipped_rows: AtomicU64,
     query_matched_entries: AtomicU64,
@@ -299,6 +311,9 @@ impl BlockEngineProfile {
             query_payload_bytes_read: load(&self.query_payload_bytes_read),
             query_candidate_blocks: load(&self.query_candidate_blocks),
             query_decoded_entries: load(&self.query_decoded_entries),
+            query_values_read: load(&self.query_values_read),
+            query_stream_count: load(&self.query_stream_count),
+            query_stream_max_entries: load(&self.query_stream_max_entries),
             query_clp_pruned_blocks: load(&self.query_clp_pruned_blocks),
             query_clp_skipped_rows: load(&self.query_clp_skipped_rows),
             query_matched_entries: load(&self.query_matched_entries),
@@ -348,6 +363,7 @@ fn duration_ns(duration: Duration) -> u64 {
 
 /// One query. All filters are optional except the ts range (pass
 /// i64::MIN / i64::MAX for "unbounded", like the metrics vtab).
+#[derive(Clone)]
 pub struct LogQuery {
     pub ts_min: i64,
     pub ts_max: i64,
@@ -396,6 +412,22 @@ struct LogQuerySnapshot {
     candidate_blocks: u64,
     payload_bytes: u64,
     stable_locations: bool,
+}
+
+/// An owned, unordered read snapshot. Only one decoded block is retained at
+/// a time; callers finish the stream when exhausted, cancelled, or dropped.
+pub struct LogQueryStream {
+    query: LogQuery,
+    blocks: std::vec::IntoIter<LogQueryBlockSnapshot>,
+    buffered: std::vec::IntoIter<LogEntry>,
+    decoded: std::vec::IntoIter<LogEntry>,
+    projection: LogProjection,
+    max_work_entries: Option<usize>,
+    report: LogQueryExecutionReport,
+    buffered_matches: u64,
+    clp_pruned_blocks: u64,
+    clp_skipped_rows: u64,
+    finished: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2430,41 +2462,253 @@ impl BlockEngine {
             values_read: processed_entries.saturating_mul(3),
             timestamps_read: processed_entries,
             stable_location_snapshot: stable_locations,
+            streamed: false,
+            stream_peak_entries: 0,
         };
 
+        self.record_query_report(
+            &report,
+            buffered_entries,
+            clp_pruned_blocks,
+            clp_skipped_rows,
+            max_entries,
+        );
+        Ok((out, report))
+    }
+
+    /// Start a projection-aware scan, releasing the host read gate once the
+    /// snapshot owns its locations/payloads and buffered rows.
+    pub fn query_stream_after_snapshot<F>(
+        &self,
+        q: &LogQuery,
+        mut projection: LogProjection,
+        max_work_entries: Option<usize>,
+        after_snapshot: F,
+    ) -> Result<LogQueryStream, String>
+    where
+        F: FnOnce(),
+    {
+        if max_work_entries == Some(0) {
+            return Err("max_work_entries must be positive".into());
+        }
+        projection.message |= q.message_contains.is_some();
+        projection.metadata_pairs |= !q.metadata_eq.is_empty();
+        projection.severity |= q.severity.is_some();
+        let started = Instant::now();
+        let snapshot = self.snapshot_query(q, false, max_work_entries)?;
+        let snapshot_ns = elapsed_ns(started);
+        after_snapshot();
+        let buffered_matches = snapshot.buffered.len() as u64;
+        let buffered_work = snapshot.buffered_entries_considered as u64;
+        Ok(LogQueryStream {
+            query: q.clone(),
+            blocks: snapshot.blocks.into_iter(),
+            buffered: snapshot.buffered.into_iter(),
+            decoded: Vec::new().into_iter(),
+            projection,
+            max_work_entries,
+            buffered_matches,
+            clp_pruned_blocks: 0,
+            clp_skipped_rows: 0,
+            finished: false,
+            report: LogQueryExecutionReport {
+                query_total_ns: snapshot_ns,
+                query_snapshot_ns: snapshot_ns,
+                snapshot_payload_bytes: snapshot.payload_bytes,
+                payload_bytes_read: snapshot.payload_bytes,
+                candidate_blocks: snapshot.candidate_blocks,
+                buffered_entries_processed: buffered_work,
+                processed_entries: buffered_work,
+                matched_entries: buffered_matches,
+                values_read: buffered_work.saturating_mul(3),
+                timestamps_read: buffered_work,
+                stable_location_snapshot: snapshot.stable_locations,
+                streamed: true,
+                stream_peak_entries: buffered_matches,
+                ..LogQueryExecutionReport::default()
+            },
+        })
+    }
+
+    pub fn query_stream_next(
+        &self,
+        stream: &mut LogQueryStream,
+    ) -> Result<Option<LogEntry>, String> {
+        // A SQLite-backed checkpoint executes SQL. Bound cancellation latency
+        // without preparing an extra statement for every returned row.
+        if stream.report.returned_entries.is_multiple_of(256) {
+            self.store.check_cancelled()?;
+        }
+        loop {
+            if let Some(entry) = stream.decoded.next() {
+                stream.report.returned_entries += 1;
+                return Ok(Some(entry));
+            }
+            if let Some(block) = stream.blocks.next() {
+                self.store.check_cancelled()?;
+                let started = Instant::now();
+                let bytes = match (block.payload, block.location) {
+                    (Some(bytes), None) => bytes,
+                    (None, Some(location)) => {
+                        let bytes = self.store.read_block(&location)?;
+                        stream.report.payload_bytes_read += bytes.len() as u64;
+                        bytes
+                    }
+                    _ => return Err("invalid log query block snapshot".into()),
+                };
+                stream.report.processed_blocks += 1;
+                let needle = stream
+                    .query
+                    .message_contains
+                    .as_deref()
+                    .filter(|needle| !needle.is_empty());
+                let (entries, decoded, values_per_row) = if let Some(needle) = needle {
+                    if matches!(block_message_feasible(&bytes, needle), Ok(false)) {
+                        stream.clp_pruned_blocks += 1;
+                        let elapsed = elapsed_ns(started);
+                        stream.report.query_materialize_ns += elapsed;
+                        stream.report.query_total_ns += elapsed;
+                        continue;
+                    }
+                    let filtered = decode_block_filtered(&bytes, needle)?;
+                    stream.clp_skipped_rows +=
+                        (filtered.total_rows as u64).saturating_sub(filtered.candidate_rows);
+                    (
+                        filtered
+                            .rows
+                            .into_iter()
+                            .map(|(_, row)| row)
+                            .collect::<Vec<_>>(),
+                        filtered.candidate_rows,
+                        3,
+                    )
+                } else {
+                    Self::enforce_query_work_limit(
+                        stream
+                            .report
+                            .processed_entries
+                            .saturating_add(block.meta.entry_count as u64)
+                            as usize,
+                        stream.max_work_entries,
+                    )?;
+                    let entries = decode_block_projected(&bytes, stream.projection)?;
+                    let count = entries.len() as u64;
+                    let values = 1
+                        + u64::from(stream.projection.message)
+                        + u64::from(
+                            stream.projection.metadata
+                                || stream.projection.metadata_pairs
+                                || (stream.projection.severity
+                                    && matches!(
+                                        block.meta.codec,
+                                        CODEC_RICH_RAW | CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE
+                                    )),
+                        );
+                    (entries, count, values)
+                };
+                stream.report.decoded_entries += decoded;
+                stream.report.stream_peak_entries = stream
+                    .report
+                    .stream_peak_entries
+                    .max(entries.len() as u64 + stream.buffered.len() as u64);
+                stream.report.processed_entries += decoded;
+                stream.report.values_read += decoded.saturating_mul(values_per_row);
+                stream.report.timestamps_read += decoded;
+                Self::enforce_query_work_limit(
+                    stream.report.processed_entries as usize,
+                    stream.max_work_entries,
+                )?;
+                let entries: Vec<_> = entries
+                    .into_iter()
+                    .filter(|entry| entry_matches(entry, &stream.query))
+                    .collect();
+                stream.report.matched_entries += entries.len() as u64;
+                stream.decoded = entries.into_iter();
+                let elapsed = elapsed_ns(started);
+                stream.report.query_materialize_ns += elapsed;
+                stream.report.query_total_ns += elapsed;
+                self.store.check_cancelled()?;
+                continue;
+            }
+            if let Some(entry) = stream.buffered.next() {
+                stream.report.returned_entries += 1;
+                return Ok(Some(entry));
+            }
+            self.finish_query_stream(stream)?;
+            return Ok(None);
+        }
+    }
+
+    pub fn finish_query_stream(
+        &self,
+        stream: &mut LogQueryStream,
+    ) -> Result<LogQueryExecutionReport, String> {
+        if !stream.finished {
+            stream.finished = true;
+            self.record_query_report(
+                &stream.report,
+                stream.buffered_matches,
+                stream.clp_pruned_blocks,
+                stream.clp_skipped_rows,
+                None,
+            );
+        }
+        self.store.check_cancelled()?;
+        Ok(stream.report)
+    }
+
+    fn record_query_report(
+        &self,
+        report: &LogQueryExecutionReport,
+        buffered_entries: u64,
+        clp_pruned_blocks: u64,
+        clp_skipped_rows: u64,
+        max_entries: Option<usize>,
+    ) {
+        self.profile
+            .query_values_read
+            .fetch_add(report.values_read, Ordering::Relaxed);
+        if report.streamed {
+            self.profile
+                .query_stream_count
+                .fetch_add(1, Ordering::Relaxed);
+            self.profile
+                .query_stream_max_entries
+                .fetch_max(report.stream_peak_entries, Ordering::Relaxed);
+        }
         self.profile.query_count.fetch_add(1, Ordering::Relaxed);
         self.profile
             .query_total_ns
-            .fetch_add(total_ns, Ordering::Relaxed);
+            .fetch_add(report.query_total_ns, Ordering::Relaxed);
         self.profile
             .query_snapshot_ns
-            .fetch_add(snapshot_ns, Ordering::Relaxed);
+            .fetch_add(report.query_snapshot_ns, Ordering::Relaxed);
         self.profile
             .query_materialize_ns
-            .fetch_add(materialize_ns, Ordering::Relaxed);
+            .fetch_add(report.query_materialize_ns, Ordering::Relaxed);
         self.profile
             .query_snapshot_payload_bytes
-            .fetch_add(snapshot_payload_bytes, Ordering::Relaxed);
+            .fetch_add(report.snapshot_payload_bytes, Ordering::Relaxed);
         self.profile
             .query_snapshot_payload_max_bytes
-            .fetch_max(snapshot_payload_bytes, Ordering::Relaxed);
+            .fetch_max(report.snapshot_payload_bytes, Ordering::Relaxed);
         self.profile
             .query_snapshot_buffered_entries
             .fetch_add(buffered_entries, Ordering::Relaxed);
-        if stable_locations {
+        if report.stable_location_snapshot {
             self.profile
                 .query_stable_location_snapshots
                 .fetch_add(1, Ordering::Relaxed);
         }
         self.profile
             .query_payload_bytes_read
-            .fetch_add(payload_bytes_read, Ordering::Relaxed);
+            .fetch_add(report.payload_bytes_read, Ordering::Relaxed);
         self.profile
             .query_candidate_blocks
-            .fetch_add(candidate_blocks, Ordering::Relaxed);
+            .fetch_add(report.candidate_blocks, Ordering::Relaxed);
         self.profile
             .query_decoded_entries
-            .fetch_add(decoded_entries, Ordering::Relaxed);
+            .fetch_add(report.decoded_entries, Ordering::Relaxed);
         self.profile
             .query_clp_pruned_blocks
             .fetch_add(clp_pruned_blocks, Ordering::Relaxed);
@@ -2473,10 +2717,10 @@ impl BlockEngine {
             .fetch_add(clp_skipped_rows, Ordering::Relaxed);
         self.profile
             .query_matched_entries
-            .fetch_add(matched_entries, Ordering::Relaxed);
+            .fetch_add(report.matched_entries, Ordering::Relaxed);
         self.profile
             .query_returned_entries
-            .fetch_add(out.len() as u64, Ordering::Relaxed);
+            .fetch_add(report.returned_entries, Ordering::Relaxed);
         if let Some(capacity) = max_entries {
             let capacity = capacity as u64;
             self.profile
@@ -2490,9 +2734,8 @@ impl BlockEngine {
                 .fetch_max(capacity, Ordering::Relaxed);
             self.profile
                 .query_blocks_skipped_by_bound
-                .fetch_add(blocks_skipped_by_bound, Ordering::Relaxed);
+                .fetch_add(report.blocks_skipped_by_bound, Ordering::Relaxed);
         }
-        Ok((out, report))
     }
 
     fn enforce_query_work_limit(

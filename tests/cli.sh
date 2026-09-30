@@ -661,8 +661,8 @@ echo "== section 10b: logs bounded ORDER BY/LIMIT/OFFSET pushdown =="
 # The bounded path must return the same exact window while retaining only
 # LIMIT+OFFSET rows. Equal timestamps use the released product's canonical
 # message/severity/metadata comparator regardless of block/insertion order.
-# LIKE and strict bounds remain on the conservative unbounded path because
-# SQLite still performs those exact checks.
+# LIKE remains on the conservative unbounded path because SQLite still
+# performs that exact check. Strict integer bounds are exact in the engine.
 BOUNDEDLOGDB="$TMP/logs_bounded.db"
 got=$(sqlite3 "$BOUNDEDLOGDB" <<SQL
 .load $EXT
@@ -700,8 +700,22 @@ like|30|b0-30-a
 like|30|b0-30-b
 strict|40|b1-40
 strict|50|buf-50
-profile|3|13|5'
+profile|4|15|5'
 check_eq "bounded log windows exact; unsafe rechecks stay unbounded" "$got" "$expected"
+
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli logs-bounds --extension "$EXT" --database "$TMP/logs_bounds.db"; then
+  pass "strict log bounds preserve SQL results and bounded engine work"
+else
+  fail "strict log bounds preserve SQL results and bounded engine work"
+fi
+
+if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
+  gate cli logs-streaming --extension "$EXT" --database "$TMP/logs_streaming.db"; then
+  pass "streamed log projection preserves typed SQL, limits, reports, and reopen"
+else
+  fail "streamed log projection preserves typed SQL, limits, reports, and reopen"
+fi
 
 # ---------------------------------------------------------------------------
 echo "== section 11: logs prune removes blocks AND their term rows =="

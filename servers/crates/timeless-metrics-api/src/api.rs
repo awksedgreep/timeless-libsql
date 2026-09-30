@@ -670,6 +670,7 @@ fn compatibility_server_error(error: String) -> Response {
 fn read_error(error: String) -> Response {
     if error.starts_with("query exceeded the maximum")
         || error.contains("work point limit")
+        || error.contains("storage point limit")
         || error.contains("catalog byte limit")
     {
         return client_error(error);

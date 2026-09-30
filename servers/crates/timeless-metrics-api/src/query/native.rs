@@ -32,6 +32,7 @@ pub(crate) enum NativeRequest {
     Series {
         metric: Option<String>,
         selectors: Vec<Selector>,
+        window: Option<(i64, i64)>,
     },
 }
 
@@ -114,6 +115,82 @@ struct Context<'a> {
 }
 
 impl Context<'_> {
+    /// Catalog extrema are actual sample timestamps, so most recent-window
+    /// discovery needs no payload reads. A window strictly inside a series'
+    /// extent needs an exact existence probe (the extent may contain gaps).
+    fn series_in_window(
+        &self,
+        catalog: Vec<SeriesMeta>,
+        start: i64,
+        stop: i64,
+    ) -> Result<Vec<SeriesMeta>, String> {
+        if start > stop {
+            return Ok(Vec::new());
+        }
+        let mut overview = self
+            .conn
+            .prepare(&format!(
+                "SELECT min_ts,max_ts,points FROM timeless_series('{}') WHERE series_id=?1",
+                self.features.table.name()
+            ))
+            .map_err(|error| format!("prepare series window catalog: {error}"))?;
+        let mut probe = None;
+        let mut remaining = self.limits.max_storage_points as u64;
+        let mut selected = Vec::new();
+        for meta in catalog {
+            self.check()?;
+            let (min, max, points): (Option<i64>, Option<i64>, i64) = overview
+                .query_row([meta.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(|error| format!("read series window catalog: {error}"))?;
+            let points = u64::try_from(points)
+                .map_err(|_| "invalid negative series point count".to_string())?;
+            let (Some(min), Some(max)) = (min, max) else {
+                continue;
+            };
+            if max < start || min > stop {
+                continue;
+            }
+            if min >= start || max <= stop {
+                selected.push(meta);
+                continue;
+            }
+            if !self.features.latest_work_limit {
+                return Err("incompatible extension: bounded timeless_latest capability is required for historical series discovery".into());
+            }
+            // Conservatively reserve the series' full point count across all
+            // probes. This bounds the whole request without racy cumulative
+            // counter deltas or charging discarded samples to work points.
+            if points > remaining {
+                return Err(format!("series discovery storage point limit {} exceeded while checking historical gaps", self.limits.max_storage_points));
+            }
+            remaining -= points;
+            if probe.is_none() {
+                probe = Some(
+                    self.conn
+                        .prepare(&format!(
+                    "SELECT 1 FROM timeless_latest('{}',?1,NULL,?2,?3,?4) WHERE series_id=?5",
+                    self.features.table.name()
+                ))
+                        .map_err(|error| format!("prepare series window probe: {error}"))?,
+                );
+            }
+            let exists = probe
+                .as_mut()
+                .unwrap()
+                .query_row(
+                    params![meta.metric, start, stop, points.max(1) as i64, meta.id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|error| format!("query series window probe: {error}"))?
+                .is_some();
+            if exists {
+                selected.push(meta);
+            }
+        }
+        Ok(selected)
+    }
+
     fn check(&self) -> Result<(), String> {
         check_cancelled(self.cancelled)
     }
@@ -457,8 +534,15 @@ pub(super) fn execute(
             })?;
             context.strings(values, if selectors.is_empty() { 0 } else { count })
         }
-        NativeRequest::Series { metric, selectors } => {
-            let catalog = context.selected(metric.as_deref(), &selectors)?;
+        NativeRequest::Series {
+            metric,
+            selectors,
+            window,
+        } => {
+            let mut catalog = context.selected(metric.as_deref(), &selectors)?;
+            if let Some((start, stop)) = window {
+                catalog = context.series_in_window(catalog, start, stop)?;
+            }
             context.result_points(catalog.len() as u128)?;
             let mut body = Body::new(limits.max_response_bytes);
             body.text(br#"{"status":"success","data":["#)?;

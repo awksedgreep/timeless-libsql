@@ -397,7 +397,7 @@ pub(crate) struct LogQueryStatsTab {
     reports: Arc<LogQueryReportState>,
 }
 
-const LOG_QUERY_STATS_TBL: c_int = 16;
+const LOG_QUERY_STATS_TBL: c_int = 18;
 
 unsafe impl<'vtab> VTab<'vtab> for LogQueryStatsTab {
     type Aux = Arc<LogQueryReportState>;
@@ -435,6 +435,8 @@ unsafe impl<'vtab> VTab<'vtab> for LogQueryStatsTab {
                 values_read INTEGER,\
                 timestamps_read INTEGER,\
                 stable_location_snapshot INTEGER,\
+                streamed INTEGER,\
+                stream_peak_entries INTEGER,\
                 tbl HIDDEN)",
             ),
             LogQueryStatsTab {
@@ -533,6 +535,8 @@ unsafe impl VTabCursor for LogQueryStatsCursor<'_> {
             13 => report_i64("values_read", report.values_read)?,
             14 => report_i64("timestamps_read", report.timestamps_read)?,
             15 => i64::from(report.stable_location_snapshot),
+            16 => i64::from(report.streamed),
+            17 => report_i64("stream_peak_entries", report.stream_peak_entries)?,
             _ => {
                 return ctx.set_result(&rusqlite::types::Null);
             }
@@ -5198,6 +5202,18 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "query_decoded_entries",
                         Value::Integer(profile.query_decoded_entries as i64),
+                    ),
+                    (
+                        "query_values_read",
+                        Value::Integer(profile.query_values_read as i64),
+                    ),
+                    (
+                        "query_stream_count",
+                        Value::Integer(profile.query_stream_count as i64),
+                    ),
+                    (
+                        "query_stream_max_entries",
+                        Value::Integer(profile.query_stream_max_entries as i64),
                     ),
                     (
                         "query_clp_pruned_blocks",

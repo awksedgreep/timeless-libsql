@@ -12,6 +12,113 @@ use tower::ServiceExt;
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn series_discovery_windows_are_exact_bounded_and_reopenable() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("series-windows.db");
+    let connection = open_with_extension(&database, &extension);
+    connection
+        .execute_batch(
+            "CREATE VIRTUAL TABLE metrics USING timeless_metrics;
+         INSERT INTO metrics(name,ts,value,labels) VALUES
+           ('m',-10,1,'{\"host\":\"a\"}'),('m',10,1,'{\"host\":\"a\"}'),
+           ('m',0,1,'{\"host\":\"b\"}'),('m',20,1,'{\"host\":\"b\"}'),
+           ('m',-10,1,'{\"host\":\"gap\"}'),('m',20,1,'{\"host\":\"gap\"}'),
+           ('m',-10,1,'{\"host\":\"inside\"}'),('m',5,1,'{\"host\":\"inside\"}'),
+           ('m',20,1,'{\"host\":\"inside\"}');
+         INSERT INTO metrics(metrics) VALUES('flush');",
+        )
+        .unwrap();
+    drop(connection);
+    for reopened in [false, true] {
+        let storage = Storage::start(
+            database.clone(),
+            extension.clone(),
+            1,
+            8,
+            DEFAULT_RAW_RETENTION,
+        )
+        .unwrap();
+        if !reopened {
+            storage
+                .submit_named_batch(named_series_batch("live", &[(15, 1.0)]), 1)
+                .await
+                .unwrap();
+        }
+        let app = router(storage.clone());
+        for route in ["/api/v1/series", "/prometheus/api/v1/series"] {
+            for (window, expected) in [
+                ("", vec!["a", "b", "gap", "inside"]),
+                ("&start=10&end=10", vec!["a"]),
+                ("&start=0&end=0", vec!["b"]),
+                ("&start=4&end=6", vec!["inside"]),
+                ("&start=11&end=19", vec![]),
+                ("&start=10.001&end=19.999", vec![]),
+                ("&start=-10.001&end=-9.999", vec!["a", "gap", "inside"]),
+                ("&start=20", vec!["b", "gap", "inside"]),
+                ("&end=-10", vec!["a", "gap", "inside"]),
+                (
+                    "&start=1970-01-01T00:00:04Z&end=1970-01-01T00:00:06Z",
+                    vec!["inside"],
+                ),
+                ("&start=5.1&end=5.2", vec![]),
+            ] {
+                let (status, body) =
+                    get_json(&app, &format!("{route}?match%5B%5D=m{window}")).await;
+                assert_eq!(status, StatusCode::OK, "{route}{window}: {body}");
+                let hosts: Vec<_> = body["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["host"].as_str().unwrap())
+                    .collect();
+                assert_eq!(hosts, expected, "{route}{window}: {body}");
+            }
+            for window in ["&start=bad", "&end=NaN", "&start=20&end=10"] {
+                assert_eq!(
+                    get_json(&app, &format!("{route}?match%5B%5D=m{window}"))
+                        .await
+                        .0,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+        }
+        let (_, body) = get_json(&app, "/api/v1/series?metric=m&start=4&end=6").await;
+        assert_eq!(
+            body,
+            serde_json::json!({"status":"success","data":[{"labels":{"host":"inside"}}]})
+        );
+        let (_, body) = get_json(
+            &app,
+            "/api/v1/series?match%5B%5D=m&match%5B%5D=m&start=4&end=6",
+        )
+        .await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        let limited = router_with_limits(
+            storage.clone(),
+            PromQueryLimits {
+                max_storage_points: 1,
+                ..PromQueryLimits::default()
+            },
+        );
+        // Catalog proofs succeed even though nine stored points exceed the
+        // decode budget. Gap probes share a single conservative allowance.
+        let (status, body) = get_json(&limited, "/api/v1/series?metric=m&start=10").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"].as_array().unwrap().len(), 4);
+        let (status, body) = get_json(&limited, "/api/v1/series?metric=m&start=4&end=6").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("storage point limit"));
+        let (status, body) = get_json(&app, "/api/v1/series?metric=live&start=15&end=15").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        storage.flush().await.unwrap();
+        storage.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn default_retention_preserves_declared_windows_and_historical_backfills() {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

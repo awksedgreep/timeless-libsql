@@ -78,10 +78,10 @@ The "Required scope" column applies **only when auth is enabled**
 | `metrics` | `GET, POST` | `/api/v1/query_range` | `metrics:read` | Native range query with `metric=`, or PromQL range query with `query=`. |
 | `metrics` | `GET` | `/api/v1/labels` | `metrics:read` | Native label-name discovery. |
 | `metrics` | `GET` | `/api/v1/label/{name}/values` | `metrics:read` | Native label-value discovery. |
-| `metrics` | `GET` | `/api/v1/series` | `metrics:read` | Native series discovery. |
+| `metrics` | `GET` | `/api/v1/series` | `metrics:read` | Native series discovery; optional inclusive `start`/`end`. |
 | `metrics` | `GET` | `/prometheus/api/v1/labels` | `metrics:read` | Prometheus-compatible label-name alias. |
 | `metrics` | `GET` | `/prometheus/api/v1/label/{name}/values` | `metrics:read` | Prometheus-compatible label-value alias. |
-| `metrics` | `GET` | `/prometheus/api/v1/series` | `metrics:read` | Prometheus-compatible series discovery; requires `match[]`. |
+| `metrics` | `GET` | `/prometheus/api/v1/series` | `metrics:read` | Prometheus-compatible series discovery; requires `match[]`; optional inclusive `start`/`end`. |
 | `metrics` | `GET, POST` | `/prometheus/api/v1/query` | `metrics:read` | Stable PromQL instant endpoint. |
 | `metrics` | `GET, POST` | `/prometheus/api/v1/query_range` | `metrics:read` | Stable PromQL range endpoint. |
 | `metrics` | `GET, POST` | `/metricsql/api/v1/query` | `metrics:read` | Explicit MetricsQL instant compatibility tier. |
@@ -123,6 +123,25 @@ in-flight backup completes.
 | `traces` | `POST` | `/insert/opentelemetry/v1/traces` | `traces:write` | OTLP JSON or protobuf ingestion, optionally gzip-compressed. |
 
 <!-- public-server-routes:end -->
+
+Both series-discovery routes accept optional inclusive `start` and `end` in
+Unix seconds (including fractions) or RFC 3339. For example,
+`/api/v1/series?metric=cpu&start=1790000000&end=1790000030` returns series with
+at least one raw sample in that window. A missing endpoint is unbounded;
+omitting both preserves the existing catalog response. Invalid timestamps and
+reversed windows return a query-validation error. Storage has whole-second
+timestamps, so fractional bounds include only stored seconds inside the range.
+
+Catalog extrema prove activity without payload decoding whenever an endpoint
+sample lies inside the window. Historical windows strictly between the first
+and last sample require exact, series-id-constrained `timeless_latest` probes
+to exclude gaps. Those probes conservatively reserve each ambiguous series'
+full catalog point count against the request's shared
+`TIMELESS_METRICS_PROMQL_MAX_STORAGE_POINTS`; exhaustion returns an explicit
+limit error. Ordinary recent-window discovery does not use that decode budget
+or charge sample counts against `MAX_WORK_POINTS`. Catalog, selector, result
+and response limits still apply. The probes use the existing bounded public
+SQL capability, so this server change requires no new storage format.
 
 An unregistered route always returns HTTP 422 with
 `{"error":"unsupported_capability","reason":"unsupported_route"}`. The

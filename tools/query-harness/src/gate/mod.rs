@@ -135,6 +135,8 @@ enum CliSection {
     SeriesId,
     Frames,
     LogsOptimize,
+    LogsBounds,
+    LogsStreaming,
     TraceReads,
 }
 

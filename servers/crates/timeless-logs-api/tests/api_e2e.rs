@@ -20862,6 +20862,11 @@ async fn metadata_reductions_preserve_types_groups_and_complete_scan_bounds() {
             after.api_query_result_rows - before.api_query_result_rows,
             3
         );
+        assert_eq!(after.query_stream_count - before.query_stream_count, 1);
+        assert!(after.query_stream_max_entries <= 8);
+        if phase > 0 {
+            assert_eq!(after.query_values_read - before.query_values_read, 16);
+        }
         assert_eq!(after.native_count_count, before.native_count_count);
         for (query, expected) in [
             (

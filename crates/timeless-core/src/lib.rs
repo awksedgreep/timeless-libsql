@@ -22,8 +22,8 @@ pub mod waist;
 
 pub use blocks::{
     canonical_severity, level_from_name, level_name, BlockEngine, BlockEngineConfig, BlockLoc,
-    BlockMeta, BlockStore, EncodedBlock, LogEntry, LogQuery, LogQueryExecutionReport,
-    LogQueryOrder, MemBlockStore,
+    BlockMeta, BlockStore, EncodedBlock, LogEntry, LogProjection, LogQuery,
+    LogQueryExecutionReport, LogQueryOrder, LogQueryStream, MemBlockStore,
 };
 pub use engine::*;
 pub use rollup::{

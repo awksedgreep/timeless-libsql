@@ -14,6 +14,25 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Strict log time bounds retain limit pushdown (#89).** Integer `<` and `>`
+  bounds, including half-open ranges and one-sided paging, now use the same
+  bounded ordered scan as equivalent inclusive bounds. Empty ranges and i64
+  overflow edges return no rows. SQLite rechecks non-integer bound values.
+- **Series discovery accepts time windows (#88).** Both series routes accept
+  inclusive Unix-seconds or RFC 3339 `start`/`end` bounds and return only series
+  with a raw sample in the window. Catalog timestamps prove recent activity
+  without decoding chunks; bounded public-SQL probes resolve historical gaps.
+  Omitting both bounds preserves catalog discovery, including empty series.
+- **Unordered logs stream projected blocks (#77).** Unordered SQL scans and
+  the logs API's metadata reductions retain one decoded block plus the live
+  buffer snapshot. Unused messages and metadata are skipped, rich metadata
+  avoids an unused string-pair projection, and SQL no longer duplicates each
+  row's metadata JSON. Existing typed filters, grouping, work limits and
+  cancellation remain in force. New public capabilities and counters expose
+  streaming and retained-row work without changing the storage format.
+
 ## [0.8.6] — 2026-09-29
 
 ### Changed

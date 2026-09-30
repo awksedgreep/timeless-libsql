@@ -3309,7 +3309,30 @@ pub(crate) fn series_request(
     params: &Params,
     prometheus_alias: bool,
 ) -> Result<ReadRequest, String> {
-    params.ensure_only(&["metric", "match[]", "match"])?;
+    params.ensure_only(&["metric", "match[]", "match", "start", "end"])?;
+    let window = if params.get("start").is_some() || params.get("end").is_some() {
+        let start = parse_prom_time(params.get("start"), i64::MIN)?;
+        let stop = parse_prom_time(params.get("end"), i64::MAX)?;
+        if start > stop {
+            return Err("end must not be before start".into());
+        }
+        // Storage timestamps are whole seconds; keep only samples inside the
+        // inclusive millisecond window, including negative/fractional bounds.
+        Some((
+            if params.get("start").is_none() {
+                i64::MIN
+            } else {
+                start.div_euclid(1000) + i64::from(start.rem_euclid(1000) != 0)
+            },
+            if params.get("end").is_none() {
+                i64::MAX
+            } else {
+                stop.div_euclid(1000)
+            },
+        ))
+    } else {
+        None
+    };
     let selectors = parse_selectors(params)?;
     let metric = params.get("metric").map(ToOwned::to_owned);
     if prometheus_alias && selectors.is_empty() {
@@ -3321,6 +3344,7 @@ pub(crate) fn series_request(
     Ok(ReadRequest::native(NativeRequest::Series {
         metric,
         selectors,
+        window,
     }))
 }
 
@@ -3688,6 +3712,7 @@ pub(crate) struct QueryFeatures {
     raw_frame_work_limit: bool,
     window_batch_work_limit: bool,
     latest_frame_work_limit: bool,
+    latest_work_limit: bool,
     catalog_work_limit: bool,
 }
 
@@ -3720,6 +3745,7 @@ impl QueryFeatures {
             raw_frame_work_limit: has_work_limit("timeless_raw_frame"),
             window_batch_work_limit: has_work_limit("timeless_window_batches"),
             latest_frame_work_limit: has_work_limit("timeless_latest_frame"),
+            latest_work_limit: has_work_limit("timeless_latest"),
             catalog_work_limit: has_work_limit("timeless_series")
                 && capabilities["query_surfaces"]["timeless_series"]["max_catalog_bytes"] == true,
         })

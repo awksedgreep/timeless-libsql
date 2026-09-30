@@ -48,6 +48,99 @@ fn full_range_query() -> LogQuery {
 }
 
 #[test]
+fn projected_log_codecs_preserve_requested_fields() {
+    use super::codec::{decode_block_projected, LogProjection};
+    for codec in [
+        CODEC_RAW,
+        CODEC_ZSTD,
+        CODEC_COLUMNAR,
+        CODEC_COLUMNAR_V2,
+        CODEC_RICH_RAW,
+        CODEC_RICH_COLUMNAR,
+        CODEC_RICH_TEMPLATE,
+    ] {
+        let mut rows = vec![
+            entry(1, 1, "a long message", &[("n", "2")]),
+            entry(2, 1, "another message", &[]),
+        ];
+        if codec >= CODEC_RICH_RAW {
+            rows[0].severity = Some("notice".into());
+            rows[0].metadata_json =
+                Some(r#"{"array":[null,2,"2"],"n":2,"nested":{"a":true}}"#.into());
+            rows[1].metadata_json = Some(r#"{"n":"2"}"#.into());
+        }
+        let (bytes, _) = encode_block(&rows, codec, 7).unwrap();
+        let full = decode_block(&bytes).unwrap();
+        for bits in 0..16 {
+            let projection = LogProjection::from_bits(bits);
+            let decoded = decode_block_projected(&bytes, projection).unwrap();
+            for (expected, actual) in full.iter().zip(&decoded) {
+                assert_eq!(actual.ts, expected.ts);
+                if projection.message {
+                    assert_eq!(actual.message, expected.message);
+                } else {
+                    assert!(actual.message.is_empty());
+                }
+                if projection.severity {
+                    assert_eq!(actual.severity_name(), expected.severity_name());
+                }
+                if projection.metadata {
+                    assert_eq!(actual.metadata_json, expected.metadata_json);
+                }
+                if projection.metadata_pairs || (projection.metadata && codec < CODEC_RICH_RAW) {
+                    assert_eq!(actual.metadata, expected.metadata);
+                } else {
+                    assert!(actual.metadata.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn log_stream_owns_snapshot_and_retains_only_one_block() {
+    use super::codec::LogProjection;
+    let engine = BlockEngine::new(
+        Box::new(MemBlockStore::new()),
+        BlockEngineConfig {
+            flush_threshold: 4,
+            auto_optimize_interval_flushes: 0,
+            ..BlockEngineConfig::default()
+        },
+    )
+    .unwrap();
+    for ts in 0..14 {
+        engine
+            .push(entry(ts, 1, "payload", &[("host", "a")]))
+            .unwrap();
+    }
+    let mut stream = engine
+        .query_stream_after_snapshot(
+            &full_range_query(),
+            LogProjection::from_bits(2),
+            Some(14),
+            || {
+                // Maintenance runs after snapshot ownership; a memory store's
+                // deleted payloads must not invalidate the owned scan.
+                engine.prune(100).unwrap();
+            },
+        )
+        .unwrap();
+    let mut timestamps = Vec::new();
+    while let Some(row) = engine.query_stream_next(&mut stream).unwrap() {
+        assert!(row.message.is_empty() || row.ts >= 12); // live-buffer rows are already decoded
+        timestamps.push(row.ts);
+    }
+    timestamps.sort();
+    assert_eq!(timestamps, (0..14).collect::<Vec<_>>());
+    let report = engine.finish_query_stream(&mut stream).unwrap();
+    assert!(report.streamed);
+    assert_eq!(report.returned_entries, 14);
+    assert_eq!(report.stream_peak_entries, 6);
+    assert_eq!(engine.profile().query_stream_count, 1);
+}
+
+#[test]
 fn rich_log_codecs_preserve_severity_and_typed_metadata() {
     let rich = LogEntry {
         ts: 1_785_600_000_123_456,
@@ -2186,6 +2279,35 @@ fn query_work_limits_bound_decode_and_cancellation_leaves_the_engine_reusable() 
             .len(),
         10
     );
+    let mut stream = engine
+        .query_stream_after_snapshot(
+            &full_range_query(),
+            super::LogProjection::ALL,
+            Some(12),
+            || {},
+        )
+        .unwrap();
+    cancel_on_read.store(true, Ordering::Release);
+    assert_eq!(
+        engine.query_stream_next(&mut stream).unwrap_err(),
+        "test log query cancelled"
+    );
+    assert!(engine.finish_query_stream(&mut stream).is_err());
+    cancel_on_read.store(false, Ordering::Release);
+    cancelled.store(false, Ordering::Release);
+    let mut stream = engine
+        .query_stream_after_snapshot(
+            &full_range_query(),
+            super::LogProjection::ALL,
+            Some(12),
+            || {},
+        )
+        .unwrap();
+    let mut count = 0;
+    while engine.query_stream_next(&mut stream).unwrap().is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 12);
 }
 
 #[test]

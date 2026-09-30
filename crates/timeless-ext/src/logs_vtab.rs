@@ -53,7 +53,7 @@ use rusqlite::vtab::{
 use rusqlite::{Connection, Error, Result};
 use timeless_core::{
     canonical_severity, level_from_name, BlockEngine, BlockEngineConfig, BlockStore, LogEntry,
-    LogQuery, LogQueryExecutionReport, LogQueryOrder,
+    LogProjection, LogQuery, LogQueryExecutionReport, LogQueryOrder, LogQueryStream,
 };
 
 use crate::batch::BatchReader;
@@ -149,10 +149,11 @@ const PLAN_BOUNDED_TS_ASC: &str = "bounded-ts-asc";
 const PLAN_BOUNDED_TS_ASC_OFFSET: &str = "bounded-ts-asc-offset";
 const PLAN_BOUNDED_TS_DESC: &str = "bounded-ts-desc";
 const PLAN_BOUNDED_TS_DESC_OFFSET: &str = "bounded-ts-desc-offset";
-const PLAN_BOUNDED_ANY: &str = "bounded-any";
-const PLAN_BOUNDED_ANY_OFFSET: &str = "bounded-any-offset";
 const PLAN_WORK_LIMIT: &str = "work-limit";
 const PLAN_WORK_LIMIT_SUFFIX: &str = "+work-limit";
+const PLAN_TS_GT_SUFFIX: &str = "+ts-gt";
+const PLAN_TS_LT_SUFFIX: &str = "+ts-lt";
+const PLAN_ORDERED_SUFFIX: &str = "+ordered";
 
 /// Number of fixed (non-hidden) columns before the index-key columns:
 /// 0=ts 1=level 2=message 3=metadata.
@@ -903,8 +904,8 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
     /// row-filtering constraint is exact in the engine. SQLite still rechecks
     /// those constraints and still applies LIMIT/OFFSET; xFilter returns the
     /// already ordered `LIMIT + OFFSET` prefix so that rechecking is harmless.
-    /// Strict timestamp bounds and compatibility message LIKE remain
-    /// unbounded because their exact semantics still live above this boundary.
+    /// Strict integer timestamp bounds are normalized to inclusive bounds.
+    /// Compatibility message LIKE still requires SQLite's exact recheck.
     fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
         use IndexConstraintOp::*;
 
@@ -914,6 +915,8 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         let mut level_c: Option<usize> = None;
         let mut lo_c: Option<usize> = None;
         let mut hi_c: Option<usize> = None;
+        let mut lo_strict = false;
+        let mut hi_strict = false;
         let mut like_c: Option<usize> = None;
         let mut contains_c: Option<usize> = None;
         let mut work_limit_c: Option<usize> = None;
@@ -958,11 +961,11 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
                 (0, SQLITE_INDEX_CONSTRAINT_LE) if hi_c.is_none() => hi_c = Some(i),
                 (0, SQLITE_INDEX_CONSTRAINT_GT) if lo_c.is_none() => {
                     lo_c = Some(i);
-                    bounded_safe = false;
+                    lo_strict = true;
                 }
                 (0, SQLITE_INDEX_CONSTRAINT_LT) if hi_c.is_none() => {
                     hi_c = Some(i);
-                    bounded_safe = false;
+                    hi_strict = true;
                 }
                 (col, SQLITE_INDEX_CONSTRAINT_EQ) => {
                     let col = col as usize;
@@ -993,7 +996,6 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
         } else {
             None
         };
-        let bounded_any = bounded_safe && limit_c.is_some() && info.num_of_order_by() == 0;
 
         // Pass 2 (mutable): claim argv slots in canonical order.
         let mut mask: c_int = 0;
@@ -1013,38 +1015,51 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             claim(info, *c, 1 << (FIRST_KEY_BIT_SHIFT + k));
         }
         claim(info, contains_c, BIT_MSG_CONTAINS);
-        if bounded_order.is_some() || bounded_any {
+        if bounded_order.is_some() {
             claim(info, limit_c, 0);
             claim(info, offset_c, 0);
         }
         claim(info, work_limit_c, 0);
 
         info.set_idx_num(mask);
-        let bounded_plan = bounded_order
-            .map(|order| match (order, offset_c.is_some()) {
-                (LogQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
-                (LogQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
-                (LogQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
-                (LogQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
-            })
-            .or_else(|| {
-                bounded_any.then_some(if offset_c.is_some() {
-                    PLAN_BOUNDED_ANY_OFFSET
-                } else {
-                    PLAN_BOUNDED_ANY
-                })
-            });
-        if let Some(plan) = bounded_plan {
-            let plan = if work_limit_c.is_some() {
-                format!("{plan}{PLAN_WORK_LIMIT_SUFFIX}")
-            } else {
-                plan.to_owned()
-            };
-            info.set_idx_str(&plan);
+        let bounded_plan = bounded_order.map(|order| match (order, offset_c.is_some()) {
+            (LogQueryOrder::Asc, false) => PLAN_BOUNDED_TS_ASC,
+            (LogQueryOrder::Asc, true) => PLAN_BOUNDED_TS_ASC_OFFSET,
+            (LogQueryOrder::Desc, false) => PLAN_BOUNDED_TS_DESC,
+            (LogQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
+        });
+        let mut plan = bounded_plan.unwrap_or("").to_owned();
+        if bounded_plan.is_some() {
             info.set_order_by_consumed(bounded_order.is_some());
             info.set_estimated_rows(100);
-        } else if work_limit_c.is_some() {
-            info.set_idx_str(PLAN_WORK_LIMIT);
+        }
+        if work_limit_c.is_some() {
+            plan.push_str(if plan.is_empty() {
+                PLAN_WORK_LIMIT
+            } else {
+                PLAN_WORK_LIMIT_SUFFIX
+            });
+        }
+        if lo_strict {
+            plan.push_str(PLAN_TS_GT_SUFFIX);
+        }
+        if hi_strict {
+            plan.push_str(PLAN_TS_LT_SUFFIX);
+        }
+        if info.num_of_order_by() != 0 {
+            plan.push_str(PLAN_ORDERED_SUFFIX);
+        }
+        let columns = info.col_used();
+        let key_mask = ((1_u64 << self.index_keys.len()) - 1) << FIXED_COLS;
+        let projection = LogProjection {
+            message: columns & (1 << 2) != 0,
+            metadata: columns & (1 << 3) != 0,
+            metadata_pairs: columns & key_mask != 0,
+            severity: columns & (1 << 1) != 0,
+        };
+        plan.push_str(&format!("+projection={}", projection.bits()));
+        if !plan.is_empty() {
+            info.set_idx_str(&plan);
         }
         // Any pushed constraint prunes blocks via terms or ts range; a
         // bare scan decompresses everything. Steer the planner.
@@ -1063,6 +1078,8 @@ unsafe impl<'vtab> VTab<'vtab> for LogsTab {
             index_keys: self.index_keys.clone(),
             query_reports: Arc::clone(&self.query_reports),
             rows: Vec::new(),
+            stream: None,
+            current: None,
             pos: 0,
             message_contains: None,
             max_work_entries: None,
@@ -1316,14 +1333,6 @@ impl SavepointVTab for LogsTab {
 // The cursor
 // ---------------------------------------------------------------------------
 
-/// One output row, materialized at filter() time. Keeps the decoded
-/// entry (column() digs index-key values out of its metadata) plus the
-/// metadata pre-rendered to canonical sorted flat JSON.
-struct OutRow {
-    entry: LogEntry,
-    metadata_json: String,
-}
-
 #[repr(C)]
 pub struct LogsCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
@@ -1335,7 +1344,9 @@ pub struct LogsCursor<'vtab> {
     database_name: String,
     index_keys: Vec<String>,
     query_reports: Arc<LogQueryReportState>,
-    rows: Vec<OutRow>,
+    rows: Vec<LogEntry>,
+    stream: Option<LogQueryStream>,
+    current: Option<LogEntry>,
     pos: usize,
     /// Bound value of the public exact-search hidden column. Returning it from
     /// column() lets SQLite safely recheck `message_contains = ?`.
@@ -1344,12 +1355,87 @@ pub struct LogsCursor<'vtab> {
     phantom: PhantomData<&'vtab LogsTab>,
 }
 
+impl LogsCursor<'_> {
+    fn finish_stream(&mut self, successful: bool) {
+        if let Some(mut stream) = self.stream.take() {
+            let _bind = DbGuard::bind(self.db);
+            let report = self.shared.engine.finish_query_stream(&mut stream);
+            if let (true, Ok(report)) = (successful, report) {
+                self.query_reports
+                    .publish(&self.database_name, &self.table_name, report);
+            } else {
+                self.query_reports
+                    .clear(&self.database_name, &self.table_name);
+            }
+        }
+    }
+
+    fn advance_stream(&mut self) -> Result<()> {
+        let result = self
+            .shared
+            .engine
+            .query_stream_next(self.stream.as_mut().expect("active stream"));
+        match result {
+            Ok(row) => {
+                self.current = row;
+                if self.current.is_none() {
+                    self.finish_stream(true);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.current = None;
+                self.finish_stream(false);
+                Err(module_err(error))
+            }
+        }
+    }
+}
+
+impl Drop for LogsCursor<'_> {
+    fn drop(&mut self) {
+        // SQLite may stop an unordered stream at LIMIT before xNext sees EOF.
+        self.finish_stream(true);
+    }
+}
+
 unsafe impl VTabCursor for LogsCursor<'_> {
     /// Decode the pushed constraints per the best_index bitmask, run
     /// one engine query (sequential block reads — no rayon anywhere on
-    /// this path, per the Session 3 deadlock lesson), materialize rows.
+    /// this path). Ordered scans retain their canonical row order; unordered
+    /// scans prime a projection-aware stream over an owned snapshot.
     fn filter(&mut self, idx_num: c_int, idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         let started = Instant::now();
+        self.finish_stream(true);
+        self.rows.clear();
+        self.current = None;
+        self.pos = 0;
+        let (idx_str, projection) = match idx_str.and_then(|plan| plan.rsplit_once("+projection="))
+        {
+            Some((plan, bits)) => (
+                Some(plan),
+                LogProjection::from_bits(
+                    bits.parse::<u8>()
+                        .map_err(|_| module_err("invalid log projection plan".into()))?,
+                ),
+            ),
+            None => (idx_str, LogProjection::ALL),
+        };
+        let (idx_str, ordered) =
+            match idx_str.and_then(|plan| plan.strip_suffix(PLAN_ORDERED_SUFFIX)) {
+                Some(plan) => (Some(plan), true),
+                None => (idx_str, false),
+            };
+        let (idx_str, hi_strict) =
+            match idx_str.and_then(|plan| plan.strip_suffix(PLAN_TS_LT_SUFFIX)) {
+                Some(plan) => (Some(plan), true),
+                None => (idx_str, false),
+            };
+        let (idx_str, lo_strict) =
+            match idx_str.and_then(|plan| plan.strip_suffix(PLAN_TS_GT_SUFFIX)) {
+                Some(plan) => (Some(plan), true),
+                None => (idx_str, false),
+            };
         // A failed or cancelled scan must never leave a prior successful
         // statement's report observable.
         self.query_reports
@@ -1386,30 +1472,42 @@ unsafe impl VTabCursor for LogsCursor<'_> {
         } else {
             (None, None)
         };
-        let ts_min: i64 = if idx_num & BIT_TS_LO != 0 {
-            let v: Option<i64> = args.get(next())?;
-            match v {
-                Some(v) => v,
-                None => {
-                    impossible = true; // ts >= NULL matches nothing
-                    i64::MIN
-                }
+        // xFilter receives dynamic SQLite values. Only integer bounds can be
+        // normalized here without reproducing SQLite's affinity/comparison
+        // rules. Other types keep an ordered, unbounded scan for its recheck.
+        let mut exact_ts = true;
+        let mut timestamp_bound = |bit: c_int, strict: bool, lower: bool| -> Result<i64> {
+            let unbounded = if lower { i64::MIN } else { i64::MAX };
+            if idx_num & bit == 0 {
+                return Ok(unbounded);
             }
-        } else {
-            i64::MIN
-        };
-        let ts_max: i64 = if idx_num & BIT_TS_HI != 0 {
-            let v: Option<i64> = args.get(next())?;
-            match v {
-                Some(v) => v,
-                None => {
+            match args.get::<rusqlite::types::Value>(next())? {
+                rusqlite::types::Value::Integer(value) => {
+                    let bound = if !strict {
+                        Some(value)
+                    } else if lower {
+                        value.checked_add(1)
+                    } else {
+                        value.checked_sub(1)
+                    };
+                    if bound.is_none() {
+                        impossible = true;
+                    }
+                    Ok(bound.unwrap_or(unbounded))
+                }
+                rusqlite::types::Value::Null => {
                     impossible = true;
-                    i64::MAX
+                    Ok(unbounded)
+                }
+                _ => {
+                    exact_ts = false;
+                    Ok(unbounded)
                 }
             }
-        } else {
-            i64::MAX
         };
+        let ts_min = timestamp_bound(BIT_TS_LO, lo_strict, true)?;
+        let ts_max = timestamp_bound(BIT_TS_HI, hi_strict, false)?;
+        impossible |= ts_min > ts_max;
         // F6: the LIKE pattern, for trigram block pruning only (SQLite
         // rechecks rows — omit was never set). NULL pattern: LIKE NULL
         // matches nothing, but leave that to SQLite's recheck.
@@ -1452,8 +1550,6 @@ unsafe impl VTabCursor for LogsCursor<'_> {
             Some(PLAN_BOUNDED_TS_ASC_OFFSET) => Some((LogQueryOrder::Asc, true)),
             Some(PLAN_BOUNDED_TS_DESC) => Some((LogQueryOrder::Desc, false)),
             Some(PLAN_BOUNDED_TS_DESC_OFFSET) => Some((LogQueryOrder::Desc, true)),
-            Some(PLAN_BOUNDED_ANY) => Some((LogQueryOrder::Asc, false)),
-            Some(PLAN_BOUNDED_ANY_OFFSET) => Some((LogQueryOrder::Asc, true)),
             _ => None,
         };
         let bounded = if let Some((order, has_offset)) = bounded_order {
@@ -1475,7 +1571,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 // rejected by SQLite's own LIMIT bytecode after xFilter.
                 _ => None,
             };
-            Some((order, capacity))
+            Some((order, capacity.filter(|_| exact_ts)))
         } else {
             None
         };
@@ -1514,6 +1610,22 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 message_contains,
                 message_like_prune,
             };
+            // Preserve canonical timestamp ties for all ordered scans,
+            // including LIKE/other predicates SQLite must recheck itself.
+            if bounded.is_none() && !ordered {
+                self.stream = Some(
+                    self.shared
+                        .engine
+                        .query_stream_after_snapshot(
+                            &query,
+                            projection,
+                            max_work_entries,
+                            move || drop(read),
+                        )
+                        .map_err(module_err)?,
+                );
+                return self.advance_stream();
+            }
             let (order, capacity) = bounded.unwrap_or((LogQueryOrder::Asc, None));
             self.shared
                 .engine
@@ -1527,19 +1639,7 @@ unsafe impl VTabCursor for LogsCursor<'_> {
                 .map_err(module_err)?
         };
 
-        self.rows = entries
-            .into_iter()
-            .map(|entry| {
-                let metadata_json = entry
-                    .metadata_json
-                    .clone()
-                    .unwrap_or_else(|| pairs_to_json(&entry.metadata));
-                OutRow {
-                    metadata_json,
-                    entry,
-                }
-            })
-            .collect();
+        self.rows = entries;
         report.query_total_ns = elapsed_ns(started);
         report.returned_entries = self.rows.len() as u64;
         self.query_reports
@@ -1549,27 +1649,37 @@ unsafe impl VTabCursor for LogsCursor<'_> {
     }
 
     fn next(&mut self) -> Result<()> {
+        let _bind = DbGuard::bind(self.db);
         self.pos += 1;
+        if self.stream.is_some() {
+            self.advance_stream()?;
+        }
         Ok(())
     }
 
     fn eof(&self) -> bool {
-        self.pos >= self.rows.len()
+        self.current.is_none() && self.pos >= self.rows.len()
     }
 
     fn column(&self, ctx: &mut Context, i: c_int) -> Result<()> {
-        let row = &self.rows[self.pos];
+        let row = self
+            .current
+            .as_ref()
+            .unwrap_or_else(|| &self.rows[self.pos]);
         let i = i as usize;
         match i {
-            0 => ctx.set_result(&row.entry.ts),
-            1 => ctx.set_result(&row.entry.severity_name()),
-            2 => ctx.set_result(&row.entry.message),
-            3 => ctx.set_result(&row.metadata_json),
+            0 => ctx.set_result(&row.ts),
+            1 => ctx.set_result(&row.severity_name()),
+            2 => ctx.set_result(&row.message),
+            3 => match &row.metadata_json {
+                Some(json) => ctx.set_result(json),
+                None => ctx.set_result(&pairs_to_json(&row.metadata)),
+            },
             _ if i >= FIXED_COLS && i < FIXED_COLS + self.index_keys.len() => {
                 // Index-key hidden column: surface the value from the
                 // entry's metadata so SELECT service works. NULL when
                 // the entry has no such key.
-                match row.entry.meta_value(&self.index_keys[i - FIXED_COLS]) {
+                match row.meta_value(&self.index_keys[i - FIXED_COLS]) {
                     Some(v) => ctx.set_result(&v),
                     None => ctx.set_result(&Null),
                 }

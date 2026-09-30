@@ -312,6 +312,54 @@ pub fn encode_block(
 /// every codec ever written — existing databases must stay decodable
 /// forever, whatever optimize() currently emits.
 pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
+    decode_block_projected(bytes, LogProjection::ALL)
+}
+
+/// Payload needed by an unordered SQL scan. Timestamps and level buckets are
+/// always decoded; rich severity shares a physical envelope with metadata.
+#[derive(Clone, Copy, Debug)]
+pub struct LogProjection {
+    pub message: bool,
+    pub metadata: bool,
+    pub metadata_pairs: bool,
+    pub severity: bool,
+}
+
+impl LogProjection {
+    pub const ALL: Self = Self {
+        message: true,
+        metadata: true,
+        metadata_pairs: true,
+        severity: true,
+    };
+
+    pub fn bits(self) -> u8 {
+        u8::from(self.message)
+            | (u8::from(self.metadata) << 1)
+            | (u8::from(self.metadata_pairs) << 2)
+            | (u8::from(self.severity) << 3)
+    }
+
+    pub fn from_bits(bits: u8) -> Self {
+        Self {
+            message: bits & 1 != 0,
+            metadata: bits & 2 != 0,
+            metadata_pairs: bits & 4 != 0,
+            severity: bits & 8 != 0,
+        }
+    }
+
+    fn rich_envelope(self) -> bool {
+        self.metadata || self.metadata_pairs || self.severity
+    }
+}
+
+/// Decode only requested payload columns. Skipped columns retain structural
+/// framing checks; their contents are validated when a caller reads them.
+pub fn decode_block_projected(
+    bytes: &[u8],
+    projection: LogProjection,
+) -> Result<Vec<LogEntry>, String> {
     let mut r = Reader::new(bytes);
     let version = r.u8("format version")?;
     if version != FORMAT_VERSION {
@@ -356,19 +404,23 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
                 return Err(format!("block: entry {i} has invalid level byte {lvl}"));
             }
         }
-        let messages = if codec == CODEC_RICH_TEMPLATE {
+        let messages = if !projection.message {
+            vec![String::new(); n]
+        } else if codec == CODEC_RICH_TEMPLATE {
             template::decode_template_str(stored[2], n)?
         } else {
             decode_str(stored[2], n)?
         };
         let rich = matches!(codec, CODEC_RICH_COLUMNAR | CODEC_RICH_TEMPLATE);
-        let rich_metadatas = if rich {
+        let rich_metadatas = if rich && projection.rich_envelope() {
             let raw = zstd_decompress(stored[3], "rich metadata column")?;
-            Some(parse_rich_metadata(&raw, n)?)
+            Some(parse_rich_metadata_projected(&raw, n, projection)?)
         } else {
             None
         };
-        let metadatas = if codec == CODEC_COLUMNAR_V2 {
+        let metadatas = if !projection.metadata && !projection.metadata_pairs {
+            vec![Vec::new(); n]
+        } else if codec == CODEC_COLUMNAR_V2 {
             decode_pairs_column(stored[3], n, "metadata", parse_metadata)?
         } else if rich {
             Vec::new()
@@ -382,7 +434,7 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
         let mut md_it = metadatas.into_iter();
         let mut rich_it = rich_metadatas.into_iter().flatten();
         for i in 0..n {
-            let (metadata, severity, metadata_json) = if rich {
+            let (metadata, severity, metadata_json) = if rich && projection.rich_envelope() {
                 let rich = rich_it.next().unwrap();
                 (rich.metadata, Some(rich.severity), Some(rich.metadata_json))
             } else {
@@ -404,7 +456,7 @@ pub fn decode_block(bytes: &[u8]) -> Result<Vec<LogEntry>, String> {
     }
 
     // ── Codecs 1/2 — the Session 5 decode path, byte-for-byte ────────
-    let entries = decode_block_legacy(codec, n, stored, ts_min, ts_max)?;
+    let entries = decode_block_legacy(codec, n, stored, ts_min, ts_max, projection)?;
     Ok(entries)
 }
 
@@ -635,6 +687,7 @@ fn decode_block_legacy(
     stored: Vec<&[u8]>,
     ts_min: i64,
     ts_max: i64,
+    projection: LogProjection,
 ) -> Result<Vec<LogEntry>, String> {
     // Decompress columns for codec 2. `Cow`-style: raw columns borrow,
     // zstd columns own — a Vec<u8> per column either way keeps it simple
@@ -643,10 +696,33 @@ fn decode_block_legacy(
         stored
             .iter()
             .enumerate()
-            .map(|(i, c)| zstd_decompress(c, COLUMN_NAMES[i]))
+            .map(|(i, c)| {
+                if (i == 2 && !projection.message)
+                    || (i == 3 && !projection.metadata && !projection.metadata_pairs)
+                {
+                    Ok(Vec::new())
+                } else {
+                    zstd_decompress(c, COLUMN_NAMES[i])
+                }
+            })
             .collect::<Result<_, _>>()?
     } else {
-        stored.iter().map(|c| c.to_vec()).collect()
+        stored
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                if (i == 2 && !projection.message)
+                    || (i == 3
+                        && !(projection.metadata
+                            || projection.metadata_pairs
+                            || (codec == CODEC_RICH_RAW && projection.severity)))
+                {
+                    Vec::new()
+                } else {
+                    c.to_vec()
+                }
+            })
+            .collect()
     };
 
     // ── Column 1: timestamps ─────────────────────────────────────────
@@ -687,6 +763,10 @@ fn decode_block_legacy(
     let mut messages = Vec::with_capacity(n);
     let mut mr = Reader::new(&cols[2]);
     for i in 0..n {
+        if !projection.message {
+            messages.push(String::new());
+            continue;
+        }
         let len = mr.u32("message length")? as usize;
         let b = mr.take(len, "message bytes")?;
         let s = std::str::from_utf8(b)
@@ -699,12 +779,14 @@ fn decode_block_legacy(
 
     // ── Column 4: metadata ───────────────────────────────────────────
     let rich = codec == CODEC_RICH_RAW;
-    let rich_metadatas = if rich {
-        Some(parse_rich_metadata(&cols[3], n)?)
+    let rich_metadatas = if rich && projection.rich_envelope() {
+        Some(parse_rich_metadata_projected(&cols[3], n, projection)?)
     } else {
         None
     };
-    let metadatas = if rich {
+    let metadatas = if !projection.metadata && !projection.metadata_pairs {
+        vec![Vec::new(); n]
+    } else if rich {
         Vec::new()
     } else {
         parse_metadata(&cols[3], n)?
@@ -716,7 +798,7 @@ fn decode_block_legacy(
     let mut md_it = metadatas.into_iter();
     let mut rich_it = rich_metadatas.into_iter().flatten();
     for i in 0..n {
-        let (metadata, severity, metadata_json) = if rich {
+        let (metadata, severity, metadata_json) = if rich && projection.rich_envelope() {
             let rich = rich_it.next().unwrap();
             (rich.metadata, Some(rich.severity), Some(rich.metadata_json))
         } else {
@@ -798,7 +880,11 @@ fn serialize_rich_metadata(entries: &[LogEntry]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn parse_rich_metadata(bytes: &[u8], n: usize) -> Result<Vec<RichMetadata>, String> {
+fn parse_rich_metadata_projected(
+    bytes: &[u8],
+    n: usize,
+    projection: LogProjection,
+) -> Result<Vec<RichMetadata>, String> {
     let mut reader = Reader::new(bytes);
     let mut out = Vec::with_capacity(n);
     for index in 0..n {
@@ -811,9 +897,17 @@ fn parse_rich_metadata(bytes: &[u8], n: usize) -> Result<Vec<RichMetadata>, Stri
         let json_len = reader.u32("metadata JSON length")? as usize;
         let json = std::str::from_utf8(reader.take(json_len, "metadata JSON bytes")?)
             .map_err(|_| format!("block: entry {index}: metadata JSON is not UTF-8"))?;
-        let metadata_json = canonical_metadata_json(json)
-            .map_err(|error| format!("block: entry {index}: {error}"))?;
-        let metadata = metadata_pairs_from_json(&metadata_json)?;
+        let metadata_json = if projection.metadata || projection.metadata_pairs {
+            canonical_metadata_json(json)
+                .map_err(|error| format!("block: entry {index}: {error}"))?
+        } else {
+            String::new()
+        };
+        let metadata = if projection.metadata_pairs {
+            metadata_pairs_from_json(&metadata_json)?
+        } else {
+            Vec::new()
+        };
         out.push(RichMetadata {
             severity,
             metadata,
