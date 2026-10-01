@@ -28,11 +28,16 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   series and tier, and nothing merged them: a 5-minute bucket cost 13 bytes
   and an hourly one 44 on a day-old store. `rollup` and `compact` now merge
   a group's neighbouring chunks size-tiered (four or more, together at least
-  twice the largest, cut at 4,096 buckets), and a series with no raw chunk
+  twice the largest, cut at 256 buckets, since retention is chunk-granular
+  and a tier may overrun its window by a chunk), and a series with no raw chunk
   left has its pieces put together once. On a 26-hour store of 44,654 series,
   406,241 rollup chunks became 104,923 in six seconds and the rollup payload
   halved; every bucket reads as before. `timeless_stats` reports
   `rollup_merge_chunks_removed` and `rollup_merge_chunks_written`.
+- **A changed window applies at the next maintenance pass.** `rollups:` and
+  `retention:` reset the retention floor, so a shortened tier is pruned at
+  the next flush or compaction rather than once the newest sample has moved
+  a slice of the old window.
 - **Strict log time bounds retain limit pushdown (#89).** Integer `<` and `>`
   bounds, including half-open ranges and one-sided paging, now use the same
   bounded ordered scan as equivalent inclusive bounds. Empty ranges and i64

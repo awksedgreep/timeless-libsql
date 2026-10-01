@@ -2023,4 +2023,55 @@ mod schema_tests {
         assert_eq!(stat(&db, "m", "rollup_chunks"), before);
         assert_eq!(rollup(&db), rolled);
     }
+
+    /// A shortened tier is applied at the next maintenance pass, and not
+    /// once the newest sample has moved a slice of the old window.
+    #[test]
+    fn a_shortened_rollup_tier_is_applied_at_once() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        // A long window to begin with, so that maintenance has set its
+        // floor under it.
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(rollups='10s@100000s');")
+            .unwrap();
+        // Twelve passes of five buckets each, so the tier is in several
+        // chunks and a cutoff can fall between them.
+        for pass in 0..12_i64 {
+            for bucket in (0..5).map(|n| 1000 + pass * 50 + n * 10) {
+                db.execute(
+                    "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', ?1, 1.0, '{}')",
+                    params![bucket],
+                )
+                .unwrap();
+            }
+            db.execute(
+                "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', ?1, 0.0, '{}')",
+                params![1000 + pass * 50 + 60],
+            )
+            .unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('compact')", [])
+                .unwrap();
+        }
+        let buckets = |db: &Connection| -> i64 {
+            db.query_row(
+                "SELECT count(*) FROM timeless_rollup('m', 'cpu', NULL, 10, 0, 100000, 'sum')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let all = buckets(&db);
+        assert!(all >= 55, "{all}");
+
+        // Then for a hundred seconds: the next compaction
+        // prunes the chunks wholly older than that behind the newest
+        // sample, with nothing new written.
+        db.execute("INSERT INTO m(m) VALUES ('rollups:10s@100s')", [])
+            .unwrap();
+        db.execute("INSERT INTO m(m) VALUES ('compact')", [])
+            .unwrap();
+        let left = buckets(&db);
+        assert!(left < all / 2, "{left} buckets left of {all}");
+    }
 }

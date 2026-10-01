@@ -66,9 +66,11 @@ impl MetricsCompactionBudget {
 /// drained over successive maintenance passes instead of allocating and
 /// deleting millions of rollup identities in one transaction.
 const ROLLUP_RETENTION_DELETE_BATCH: usize = 4096;
-/// Rollup chunks a merge makes at most: at a 5-minute tier a fortnight,
-/// at an hourly one nearly half a year, each a row of some kilobytes.
-const ROLLUP_MERGE_TARGET_BUCKETS: usize = 4096;
+/// Buckets a merged rollup chunk holds at most. Retention is chunk-granular,
+/// so this is also how far a tier may overrun its window: at a 5-minute
+/// tier 21 hours, at an hourly one 11 days. Per bucket, the row and frame
+/// a chunk costs come to well under a byte at this size.
+const ROLLUP_MERGE_TARGET_BUCKETS: usize = 256;
 /// Neighbouring rollup chunks it takes to be worth a merge.
 const ROLLUP_MERGE_MIN_CHUNKS: usize = 4;
 
@@ -4627,6 +4629,9 @@ impl Engine {
         if *current != tiers {
             *current = tiers;
             self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+            // A new window is applied at the next boundary, not once the
+            // high-water mark has moved a slice of the old one.
+            self.retention_floor.store(i64::MIN, Ordering::Relaxed);
         }
     }
 
@@ -4648,6 +4653,7 @@ impl Engine {
         }
         *current = tiers;
         self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+        self.retention_floor.store(i64::MIN, Ordering::Relaxed);
     }
 
     pub fn rollup_tiers(&self) -> Vec<RollupTier> {
@@ -5381,8 +5387,10 @@ impl Engine {
     /// None disables). Idempotent — called at every connect with the
     /// persisted table setting.
     pub fn set_retention(&self, native: Option<i64>) {
-        self.retention_native
-            .store(native.unwrap_or(0).max(0), Ordering::Relaxed);
+        let native = native.unwrap_or(0).max(0);
+        if self.retention_native.swap(native, Ordering::Relaxed) != native {
+            self.retention_floor.store(i64::MIN, Ordering::Relaxed);
+        }
     }
 
     /// Apply the configured retention window, if any. Cutoff is DATA
