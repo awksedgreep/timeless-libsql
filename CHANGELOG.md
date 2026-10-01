@@ -16,6 +16,37 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ### Fixed
 
+- **A compaction sweep ends, is planned once, and merges small chunks
+  (#92, #93).** A store written to at a steady cadence by thousands of
+  series kept its sweep going: every step planned afresh over the whole
+  chunk index, took the few raw chunks flushed since the last, and
+  compressed them by themselves, and nothing merged chunks that small. On
+  a workstation after 13.6 hours of per-process series that was 3.3
+  million chunks of 3.8 points, one core, two gigabytes, and queries
+  refused as busy. Three changes:
+  - The metrics server passes the time a sweep began as its cutoff
+    (`compact-step:…:<cutoff>`, new optional argument): a chunk whose newest
+    sample is at or past it waits for the next sweep, so a sweep over a
+    store being written to ends. Direct SQLite hosts pass the same.
+  - A sweep is planned once from the index for its cutoff and stepped
+    through; a step costs its budget, not the size of the store. A group
+    whose chunks retention has taken meanwhile is passed over, and a sweep
+    found empty is not planned again until a chunk has been added. The
+    bounded rollup cycle that shares the sweep's steps reads its series
+    from the index once, at the cycle's start, where every step walked
+    every chunk. `timeless_stats` reports `compaction_plans` and
+    `compaction_planned_groups`; `/metrics` has them as
+    `timeless_metrics_compaction_plans_total` and
+    `timeless_metrics_compaction_planned_groups`.
+  - Compressed chunks of one series merge size-tiered by count as well as
+    by fill: smallest first, a chunk joining a run only while it is no
+    larger than what the run holds, and a run of four or more merged.
+    Thirty-point chunks become one chunk a day in about six rewrites of
+    each point; a large chunk is never rewritten for a small arrival. A
+    series not written in the last hour has ended, as a process's does,
+    and its pieces are put together once, however few. The fixed
+    1,024-point arrival of the size-tiered fixture is now rewritten 2.5
+    times over its life rather than 1.5.
 - **Retention removes the series it has left nothing of (#82).** When a
   maintenance pass prunes the last raw and rollup chunk of a series, the
   series goes too: its catalog row, its registry entry, and its label

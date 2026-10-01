@@ -542,6 +542,16 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 "Chunks in rollup tiers.",
                 stats.rollup_chunks,
             );
+            x.counter(
+                "timeless_metrics_compaction_plans_total",
+                "Times a compaction sweep was planned from the chunk index.",
+                stats.extension_compaction_plans,
+            );
+            x.gauge(
+                "timeless_metrics_compaction_planned_groups",
+                "Groups the current compaction sweep still has to do.",
+                stats.extension_compaction_planned_groups,
+            );
             x.gauge(
                 "timeless_metrics_storage_bytes",
                 "Bytes of chunk payload on disk.",

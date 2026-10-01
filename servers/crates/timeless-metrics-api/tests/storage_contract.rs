@@ -308,6 +308,73 @@ async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_avail
 
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
+async fn a_scheduled_sweep_is_planned_once_and_leaves_what_is_newer_than_its_cutoff() {
+    let extension = extension_path();
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start_with_queue_bytes_and_rollups(
+        directory.path().join("sweep-cutoff.db"),
+        extension,
+        2,
+        128,
+        DEFAULT_RAW_RETENTION,
+        Storage::DEFAULT_QUEUE_BYTES,
+        Some("none"),
+    )
+    .unwrap();
+
+    // Seventy series with a sample in the past, and one stamped an hour
+    // ahead of the sweep: a chunk whose newest sample is past the sweep's
+    // cutoff is the next sweep's, as a chunk flushed during the sweep is.
+    let ahead = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + 3_600;
+    for series in 0..70 {
+        let batch = named_series_batch(
+            &format!("sweep_cutoff_{series}"),
+            &[(1_700_000_000, series as f64)],
+        );
+        storage.submit_named_batch(batch, 1).await.unwrap();
+    }
+    storage
+        .submit_named_batch(named_series_batch("sweep_cutoff_ahead", &[(ahead, 1.0)]), 1)
+        .await
+        .unwrap();
+    storage.flush().await.unwrap();
+
+    storage.schedule_compact().await.unwrap();
+
+    let stats = storage.stats().await.unwrap();
+    assert_eq!(stats.compact_count, 1);
+    assert!(stats.compact_step_count >= 2, "{stats:?}");
+    assert_eq!(stats.extension_compaction_raw_chunks, 70);
+    // Planned once for the sweep, and once more at its end to see that
+    // nothing was left; not at every step.
+    assert_eq!(stats.extension_compaction_plans, 2);
+    assert_eq!(stats.extension_compaction_planned_groups, 0);
+    assert_eq!(stats.raw_chunk_index_entries, 71);
+
+    // The chunk ahead of the cutoff is still raw, and still read.
+    let app = router(storage.clone());
+    let (status, body) = get_json(
+        &app,
+        &format!(
+            "/api/v1/query_range?metric=sweep_cutoff_ahead&start={}&end={}&step=60",
+            ahead - 60,
+            ahead + 60
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["series"].as_array().map(Vec::len), Some(1), "{body}");
+
+    drop(app);
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
 async fn exhausted_writer_conflict_is_retryable_observable_and_recovers() {
     let extension = extension_path();
     let directory = TempDir::new().unwrap();

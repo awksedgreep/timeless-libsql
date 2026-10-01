@@ -8,7 +8,7 @@ use crate::rollup::{rollup_buckets, RollupBucket, RollupTier};
 use crate::store::{EncodedRollupChunk, StoredRollupChunk};
 use dashmap::DashMap;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -44,6 +44,13 @@ pub const METRICS_COMPACTION_TARGET_POINTS: usize = 32 * 1024;
 /// raw and compressed groups are capped by the target above.
 pub const METRICS_COMPACTION_STEP_INPUT_POINTS: usize = 256 * 1024;
 pub const METRICS_COMPACTION_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Compressed chunks of one series it takes to be worth a merge, however few
+/// points they hold between them. A series written once a flush and
+/// compressed once a sweep makes a chunk of a few points a sweep; counted
+/// rather than measured, those are merged size-tiered as they come, and a
+/// point is rewritten about log(n) times over its life.
+const METRICS_MERGE_MIN_CHUNKS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MetricsCompactionBudget {
@@ -118,6 +125,18 @@ struct MetricsCompactionGroup {
     key: PartitionKey,
     sources: Vec<(ChunkKey, ChunkMeta)>,
     kind: MetricsCompactionKind,
+}
+
+/// The groups one sweep is to do, planned once from the index and stepped
+/// through from the front by every bounded call that passes the same cutoff.
+/// Planning walks the whole index; a store of millions of chunks cannot
+/// afford that at each of hundreds of steps.
+struct MetricsCompactionPlan {
+    cutoff_ts: i64,
+    groups: VecDeque<MetricsCompactionGroup>,
+    /// The chunk sequence at which the plan was found empty, when it was:
+    /// until a chunk is added, there is nothing for it to find again.
+    drained_at_seq: Option<u64>,
 }
 
 #[derive(Default)]
@@ -866,6 +885,11 @@ pub struct Engine {
     buffer_memory: AtomicUsize,
     cold_flush_running: AtomicBool,
     compaction_running: AtomicBool,
+    compaction_plan: Mutex<Option<MetricsCompactionPlan>>,
+    compaction_plans: AtomicU64,
+    /// The series a bounded rollup cycle is walking, read from the index at
+    /// the cycle's start.
+    rollup_cycle_series: Mutex<Vec<i64>>,
     compaction_raw_steps: AtomicU64,
     compaction_raw_chunks: AtomicU64,
     compaction_raw_points: AtomicU64,
@@ -1135,6 +1159,18 @@ impl Engine {
 
     fn flush_queue_lock(&self) -> MutexGuard<'_, Vec<PartitionKey>> {
         self.flush_queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn compaction_plan_lock(&self) -> MutexGuard<'_, Option<MetricsCompactionPlan>> {
+        self.compaction_plan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn rollup_cycle_series_lock(&self) -> MutexGuard<'_, Vec<i64>> {
+        self.rollup_cycle_series
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn txn_lock(&self) -> MutexGuard<'_, TxnJournal> {
@@ -1623,6 +1659,9 @@ impl Engine {
             buffer_memory: AtomicUsize::new(0),
             cold_flush_running: AtomicBool::new(false),
             compaction_running: AtomicBool::new(false),
+            compaction_plan: Mutex::new(None),
+            compaction_plans: AtomicU64::new(0),
+            rollup_cycle_series: Mutex::new(Vec::new()),
             compaction_raw_steps: AtomicU64::new(0),
             compaction_raw_chunks: AtomicU64::new(0),
             compaction_raw_points: AtomicU64::new(0),
@@ -2617,22 +2656,35 @@ impl Engine {
         };
         let _transition = self.transition_write();
 
-        // Snapshot eligible metadata. Planning never reads payloads and never
-        // mixes raw conversion with compressed merging in one group.
-        let planned = Self::plan_metrics_compaction(self.metrics_compaction_candidates(cutoff_ts));
-        if planned.is_empty() {
+        // The sweep's plan: made once from the index for the cutoff the
+        // caller keeps passing, and stepped through from the front. Planning
+        // never reads payloads and never mixes raw conversion with compressed
+        // merging in one group.
+        let mut plan_guard = self.compaction_plan_lock();
+        let seq = self.chunk_seq.load(Ordering::Relaxed);
+        let kept = matches!(
+            plan_guard.as_ref(),
+            Some(plan) if plan.cutoff_ts == cutoff_ts
+                && (!plan.groups.is_empty() || plan.drained_at_seq == Some(seq))
+        );
+        if !kept {
+            *plan_guard = Some(self.plan_metrics_sweep(cutoff_ts));
+        }
+        let plan = plan_guard.as_mut().expect("a plan was kept or made");
+        if plan.groups.is_empty() {
             return Ok(MetricsCompactionOutcome::default());
         }
 
-        // Select complete groups until any budget is exhausted. One first
+        // Take complete groups until any budget is exhausted. One first
         // oversized group is admitted as a progress exception for legacy
-        // chunks written before these limits existed.
+        // chunks written before these limits existed. A group planned
+        // earlier in the sweep whose chunks retention has since taken is
+        // passed over.
         let mut selected = Vec::new();
         let mut selected_series = HashSet::new();
         let mut selected_points = 0usize;
         let mut selected_bytes = 0u64;
-        let mut budget_limited = false;
-        for group in planned {
+        while let Some(group) = plan.groups.front() {
             let points = group.sources.iter().fold(0usize, |total, (_, meta)| {
                 total.saturating_add(meta.point_count as usize)
             });
@@ -2644,14 +2696,19 @@ impl Engine {
             let exceeds_points = selected_points.saturating_add(points) > budget.max_input_points;
             let exceeds_bytes = selected_bytes.saturating_add(bytes) > budget.max_input_bytes;
             if !selected.is_empty() && (exceeds_series || exceeds_points || exceeds_bytes) {
-                budget_limited = true;
                 break;
+            }
+            let group = plan.groups.pop_front().expect("the front group is there");
+            if !self.sources_present(&group) {
+                continue;
             }
             selected_points = selected_points.saturating_add(points);
             selected_bytes = selected_bytes.saturating_add(bytes);
             selected_series.insert(group.key);
             selected.push(group);
         }
+        let budget_limited = !plan.groups.is_empty();
+        drop(plan_guard);
 
         // Phase 1: re-encode every replacement chunk in memory — nothing
         // is persisted or visible to queries yet. `add` holds the chunks
@@ -2718,6 +2775,9 @@ impl Engine {
         }
 
         if plans.is_empty() {
+            if !outcome.more {
+                outcome.more = self.replan_metrics_sweep(cutoff_ts);
+            }
             return Ok(outcome);
         }
 
@@ -2792,14 +2852,63 @@ impl Engine {
         if !outcome.more {
             // Every size-tier boundary is a real transaction boundary: only
             // after replacements are committed can their output unlock a
-            // larger tier. A metadata-only re-plan lets a full sweep drain
-            // that next tier without merging it in the same transaction.
-            outcome.more =
-                !Self::plan_metrics_compaction(self.metrics_compaction_candidates(cutoff_ts))
-                    .is_empty();
+            // larger tier. Once a sweep has drained its plan it is planned
+            // again, so the next tier is reached without being merged in the
+            // same transaction.
+            outcome.more = self.replan_metrics_sweep(cutoff_ts);
         }
         self.record_metrics_compaction(&outcome);
         Ok(outcome)
+    }
+
+    /// Plan a sweep: every actionable group for the cutoff, in the order it
+    /// is to be done. Counted, so that a host can see how often the index
+    /// was walked for it.
+    fn plan_metrics_sweep(&self, cutoff_ts: i64) -> MetricsCompactionPlan {
+        self.compaction_plans.fetch_add(1, Ordering::Relaxed);
+        let groups: VecDeque<MetricsCompactionGroup> = Self::plan_metrics_compaction(
+            self.metrics_compaction_candidates(cutoff_ts),
+            &self.series_written_lately(),
+        )
+        .into();
+        let drained_at_seq = groups
+            .is_empty()
+            .then(|| self.chunk_seq.load(Ordering::Relaxed));
+        MetricsCompactionPlan {
+            cutoff_ts,
+            groups,
+            drained_at_seq,
+        }
+    }
+
+    /// The series written in the last hour. A series that has ended, as a
+    /// process's does, is not among them: its few small chunks are worth
+    /// putting together once, however few they are.
+    fn series_written_lately(&self) -> HashSet<PartitionKey> {
+        let now = Instant::now();
+        self.partitions
+            .iter()
+            .filter(|entry| {
+                now.duration_since(entry.value().last_write).as_secs() < COMPACT_MIN_AGE_SECS as u64
+            })
+            .map(|entry| *entry.key())
+            .collect()
+    }
+
+    /// Plan the sweep again from the index as it now is, and say whether
+    /// there is anything left to do.
+    fn replan_metrics_sweep(&self, cutoff_ts: i64) -> bool {
+        let plan = self.plan_metrics_sweep(cutoff_ts);
+        let more = !plan.groups.is_empty();
+        *self.compaction_plan_lock() = Some(plan);
+        more
+    }
+
+    /// Whether every chunk a planned group was made of is still in the index.
+    /// Chunks are immutable, so one that is there is as it was planned.
+    fn sources_present(&self, group: &MetricsCompactionGroup) -> bool {
+        let index = self.index_read();
+        group.sources.iter().all(|(key, _)| index.contains_key(key))
     }
 
     fn metrics_compaction_candidates(
@@ -2824,6 +2933,7 @@ impl Engine {
 
     fn plan_metrics_compaction(
         candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>>,
+        written_lately: &HashSet<PartitionKey>,
     ) -> Vec<MetricsCompactionGroup> {
         let mut groups = Vec::new();
         for (key, chunks) in candidates {
@@ -2860,7 +2970,12 @@ impl Engine {
                 });
             }
 
-            Self::plan_metrics_compressed_groups(key, compressed, &mut groups);
+            let at_least = if written_lately.contains(&key) {
+                METRICS_MERGE_MIN_CHUNKS
+            } else {
+                2
+            };
+            Self::plan_metrics_compressed_groups(key, compressed, &mut groups, at_least);
         }
         // First compression always wins over optional merges. Within each
         // phase, oldest data advances first so old/backfilled series cannot be
@@ -2880,10 +2995,19 @@ impl Engine {
         groups
     }
 
+    /// Size-tiered: smallest first, and a chunk joins a run only while it is
+    /// no larger than what the run already holds, so that a run is always at
+    /// least twice its largest member and a small arrival never rewrites a
+    /// large tail. A run is merged when it has `at_least` members
+    /// ([`METRICS_MERGE_MIN_CHUNKS`] for a series still being written, two
+    /// for one that has ended) or holds at least half the target; the result
+    /// is cut at the target, with a quarter's grace so two half-full peers
+    /// converge.
     fn plan_metrics_compressed_groups(
         key: PartitionKey,
         mut chunks: Vec<(ChunkKey, ChunkMeta)>,
         groups: &mut Vec<MetricsCompactionGroup>,
+        at_least: usize,
     ) {
         chunks.sort_by_key(|(_, meta)| (meta.point_count, meta.min_ts, meta.max_ts));
         let merge_limit = METRICS_COMPACTION_TARGET_POINTS
@@ -2892,20 +3016,28 @@ impl Engine {
         let mut current_points = 0usize;
         for source in chunks {
             let points = source.1.point_count as usize;
-            if !current.is_empty() && current_points.saturating_add(points) > merge_limit {
-                Self::push_metrics_compressed_group(key, std::mem::take(&mut current), groups);
+            if !current.is_empty()
+                && (points > current_points || current_points.saturating_add(points) > merge_limit)
+            {
+                Self::push_metrics_compressed_group(
+                    key,
+                    std::mem::take(&mut current),
+                    groups,
+                    at_least,
+                );
                 current_points = 0;
             }
             current_points = current_points.saturating_add(points);
             current.push(source);
         }
-        Self::push_metrics_compressed_group(key, current, groups);
+        Self::push_metrics_compressed_group(key, current, groups, at_least);
     }
 
     fn push_metrics_compressed_group(
         key: PartitionKey,
         sources: Vec<(ChunkKey, ChunkMeta)>,
         groups: &mut Vec<MetricsCompactionGroup>,
+        at_least: usize,
     ) {
         if sources.len() < 2 {
             return;
@@ -2919,7 +3051,10 @@ impl Engine {
             .max()
             .unwrap_or(0);
         let minimum_fill = METRICS_COMPACTION_TARGET_POINTS.div_ceil(2);
-        if points < minimum_fill || points < largest.saturating_mul(2) {
+        if points < largest.saturating_mul(2) {
+            return;
+        }
+        if sources.len() < at_least && points < minimum_fill {
             return;
         }
         groups.push(MetricsCompactionGroup {
@@ -4726,9 +4861,9 @@ impl Engine {
     ///
     /// Size-tiered, so that a bucket is rewritten about log(n) times over
     /// its life and not at every pass: a run of neighbouring chunks is
-    /// merged when there are at least [`ROLLUP_MERGE_MIN_CHUNKS`] of them
+    /// merged when there are at least `ROLLUP_MERGE_MIN_CHUNKS` of them
     /// and together they hold at least twice what the largest holds, and
-    /// the result is cut at [`ROLLUP_MERGE_TARGET_BUCKETS`]. New chunks
+    /// the result is cut at `ROLLUP_MERGE_TARGET_BUCKETS`. New chunks
     /// are written and put in the index before the old rows are deleted,
     /// all in the caller's transaction and journaled, as compaction is.
     ///
@@ -4919,12 +5054,18 @@ impl Engine {
             return Ok((0, 0, false));
         };
 
-        let series_ids: Vec<i64> = {
-            let index = self.index_read();
-            let mut ids: Vec<i64> = index.keys().map(|(pk, _, _)| pk.series_id).collect();
-            ids.dedup();
-            ids.sort_unstable();
-            ids.dedup();
+        // A bounded cycle reads its series from the index once, at its
+        // start: a step is then its budget of groups, not a walk of every
+        // chunk there is. A series that arrives meanwhile is the next
+        // cycle's; one that retention removes meanwhile has nothing to read.
+        let cycle_under_way = max_groups.is_some()
+            && self.rollup_maintenance_cursor.load(Ordering::Relaxed) > 0
+            && !self.rollup_cycle_series_lock().is_empty();
+        let series_ids: Vec<i64> = if cycle_under_way {
+            self.rollup_cycle_series_lock().clone()
+        } else {
+            let ids = self.series_in_index();
+            *self.rollup_cycle_series_lock() = ids.clone();
             ids
         };
 
@@ -5046,6 +5187,16 @@ impl Engine {
         self.rollup_maintenance_cursor
             .store(if more { group_end } else { 0 }, Ordering::Relaxed);
         Ok((batch.len(), buckets_total, more))
+    }
+
+    /// Every series with a chunk in the raw tier, in order.
+    fn series_in_index(&self) -> Vec<i64> {
+        let index = self.index_read();
+        let mut ids: Vec<i64> = index.keys().map(|(pk, _, _)| pk.series_id).collect();
+        ids.dedup();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// Read rolled buckets for one series/tier overlapping [start, stop].
@@ -6170,6 +6321,11 @@ impl Engine {
                 .compaction_merge_output_bytes
                 .load(Ordering::Relaxed),
             compaction_merge_total_ns: self.compaction_merge_total_ns.load(Ordering::Relaxed),
+            compaction_plans: self.compaction_plans.load(Ordering::Relaxed),
+            compaction_planned_groups: self
+                .compaction_plan_lock()
+                .as_ref()
+                .map_or(0, |plan| plan.groups.len() as u64),
             retention_series_removed: self.retention_series_removed.load(Ordering::Relaxed),
             rollup_merge_chunks_removed: self.rollup_merge_chunks_removed.load(Ordering::Relaxed),
             rollup_merge_chunks_written: self.rollup_merge_chunks_written.load(Ordering::Relaxed),
@@ -6261,6 +6417,10 @@ pub struct EngineInfo {
     pub compaction_merge_input_bytes: u64,
     pub compaction_merge_output_bytes: u64,
     pub compaction_merge_total_ns: u64,
+    /// Times a sweep was planned from the index.
+    pub compaction_plans: u64,
+    /// Groups the current plan still holds.
+    pub compaction_planned_groups: u64,
     pub retention_series_removed: u64,
     pub rollup_merge_chunks_removed: u64,
     pub rollup_merge_chunks_written: u64,

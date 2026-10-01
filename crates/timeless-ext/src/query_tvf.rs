@@ -4955,6 +4955,14 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(info.compaction_merge_total_ns as i64),
                     ),
                     (
+                        "compaction_plans",
+                        Value::Integer(info.compaction_plans as i64),
+                    ),
+                    (
+                        "compaction_planned_groups",
+                        Value::Integer(info.compaction_planned_groups as i64),
+                    ),
+                    (
                         "retention_series_removed",
                         Value::Integer(info.retention_series_removed as i64),
                     ),

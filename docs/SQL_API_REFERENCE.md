@@ -212,14 +212,23 @@ previously resolved `series_id`. Use the hidden command column for:
   explicit compaction performs the CPU-heavy first compression later.
 - `compact` drains eligible size-tiered metric work in bounded internal steps
   and runs declared rollups.
-- `compact-step:<series>[:<points>:<bytes>]` performs one maintenance step for
-  at most that many metrics series and that many `(rollup tier, series)` groups.
-  Metrics source work also defaults to 262,144 points and 4 MiB of encoded
-  payload; the optional positive point/byte values override those ceilings.
-  One pre-existing oversized source is admitted as a progress exception. It
-  returns `1` through `last_insert_rowid()` when another step remains in the current
-  cycle, otherwise `0`. Commit between repeated steps so readers and ingestion
-  can enter between maintenance transactions.
+- `compact-step:<series>[:<points>:<bytes>][:<cutoff>]` performs one
+  maintenance step for at most that many metrics series and that many
+  `(rollup tier, series)` groups. Metrics source work also defaults to 262,144
+  points and 4 MiB of encoded payload; the optional positive point/byte values
+  override those ceilings. One pre-existing oversized source is admitted as a
+  progress exception. It returns `1` through `last_insert_rowid()` when another
+  step remains in the current cycle, otherwise `0`. Commit between repeated
+  steps so readers and ingestion can enter between maintenance transactions.
+  The optional `cutoff` (Unix seconds; `compact-step:<series>:<cutoff>` is
+  also accepted) is the sweep's: a chunk whose newest sample is at or past it
+  is left for the next sweep, so that a sweep over a store being written to
+  ends. Pass the time the sweep began on every step of it: the sweep is
+  planned once from the chunk index for that cutoff and stepped through, and
+  a step costs its budget, not the size of the store. Without a cutoff every
+  chunk is eligible, and a store that is flushed between steps keeps a sweep
+  going. `timeless_stats` reports `compaction_plans` and
+  `compaction_planned_groups`.
 - `rollup` builds settled buckets for the declared ladder.
 - `rollups:none` disables future persisted rollup production;
   `rollups:<ladder>` transactionally replaces the declared ladder.
@@ -238,6 +247,13 @@ previously resolved `series_id`. Use the hidden command column for:
 - `rollup` and `compact` merge a series' small rollup chunks into large
   ones as they accumulate, size-tiered, so a bucket is rewritten a few times
   over its life; the merged chunks read exactly as the pieces did.
+- Compaction merges a series' small compressed chunks the same way: smallest
+  first, a chunk joining a run only while it is no larger than what the run
+  holds, and a run of four or more, or of at least half the target, merged.
+  A series written a few points a flush and compressed once a sweep therefore
+  stays a handful of chunks, and a large chunk is never rewritten for a small
+  arrival. A series not written in the last hour has ended, as a process's
+  does, and a run of two of its chunks is merged, so what it leaves is one.
 - `prune-after:<unix-seconds>` removes whole raw and rollup chunks whose
   coverage *begins* after the explicit cutoff, across every persisted tier.
   This is the repair path for samples stored under a mistaken timestamp unit

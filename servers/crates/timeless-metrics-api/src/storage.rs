@@ -182,6 +182,8 @@ pub struct StorageStats {
     pub extension_compaction_merge_input_bytes: i64,
     pub extension_compaction_merge_output_bytes: i64,
     pub extension_compaction_merge_total_ns: i64,
+    pub extension_compaction_plans: i64,
+    pub extension_compaction_planned_groups: i64,
     pub extension_raw_batch_query_count: i64,
     pub extension_raw_batch_query_total_ns: i64,
     pub extension_raw_batch_query_series_considered: i64,
@@ -333,7 +335,10 @@ enum WriteCommand {
         explicit: bool,
         reply: oneshot::Sender<Result<FlushReport, String>>,
     },
-    CompactStep(oneshot::Sender<(Result<CompactStepResult, String>, u64)>),
+    CompactStep {
+        cutoff_ts: i64,
+        reply: oneshot::Sender<(Result<CompactStepResult, String>, u64)>,
+    },
     Prune {
         cutoff_seconds: i64,
         reply: oneshot::Sender<Result<(), String>>,
@@ -806,12 +811,18 @@ impl Storage {
         let mut total_ns = 0_u64;
         let mut step_max_ns = 0_u64;
         let mut work = CompactionWork::default();
+        // The sweep's cutoff: what is flushed while it runs is the next
+        // sweep's, so that a sweep over a store being written to ends.
+        let cutoff_ts = unix_seconds_now();
         let result = loop {
             let (reply_tx, reply_rx) = oneshot::channel();
             if self
                 .0
                 .writer
-                .send(WriteCommand::CompactStep(reply_tx))
+                .send(WriteCommand::CompactStep {
+                    cutoff_ts,
+                    reply: reply_tx,
+                })
                 .await
                 .is_err()
             {
@@ -1229,10 +1240,10 @@ fn writer_main(
                 };
                 let _ = reply.send(result);
             }
-            WriteCommand::CompactStep(reply) => {
+            WriteCommand::CompactStep { cutoff_ts, reply } => {
                 let started = Instant::now();
                 let result = compaction_work(&conn, table).and_then(|before| {
-                    run_compact_step(&conn, table, COMPACT_STEP_WORK_ITEMS)
+                    run_compact_step(&conn, table, COMPACT_STEP_WORK_ITEMS, cutoff_ts)
                         .and_then(|more| {
                             if cleanup_rollups {
                                 run_clear_rollup_step(&conn, table, COMPACT_STEP_WORK_ITEMS)
@@ -1670,10 +1681,19 @@ fn run_compact_step(
     conn: &Connection,
     table: MetricsTable,
     work_items: usize,
+    cutoff_ts: i64,
 ) -> Result<bool, String> {
-    let command =
-        format!("compact-step:{work_items}:{COMPACT_STEP_INPUT_POINTS}:{COMPACT_STEP_INPUT_BYTES}");
+    let command = format!(
+        "compact-step:{work_items}:{COMPACT_STEP_INPUT_POINTS}:{COMPACT_STEP_INPUT_BYTES}:{cutoff_ts}"
+    );
     run_continuation_command(conn, table, &command, "run bounded metrics compaction")
+}
+
+fn unix_seconds_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn run_clear_rollup_step(
@@ -1783,6 +1803,8 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
         extension_compaction_merge_input_bytes: integer("compaction_merge_input_bytes"),
         extension_compaction_merge_output_bytes: integer("compaction_merge_output_bytes"),
         extension_compaction_merge_total_ns: integer("compaction_merge_total_ns"),
+        extension_compaction_plans: integer("compaction_plans"),
+        extension_compaction_planned_groups: integer("compaction_planned_groups"),
         extension_raw_batch_query_count: integer("raw_batch_query_count"),
         extension_raw_batch_query_total_ns: integer("raw_batch_query_total_ns"),
         extension_raw_batch_query_series_considered: integer("raw_batch_query_series_considered"),

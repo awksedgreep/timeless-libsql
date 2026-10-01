@@ -523,7 +523,11 @@ fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail()
     assert_eq!(info.compaction_raw_points, ingested);
     assert_eq!(info.compaction_raw_input_bytes, ingested * 16);
     assert!(info.compaction_raw_output_bytes < info.compaction_raw_input_bytes);
-    assert_eq!(info.compaction_merge_points, ingested + ingested / 2);
+    // Four 1K chunks merge at every fourth round; the 4K joins four more at
+    // the eighth, and 4K + 8K + 4K at the sixteenth; 4K + 8K + 16K at the
+    // thirty-second makes the target. Over 32 rounds that is 4 + 8 + 4 + 16
+    // + 4 + 8 + 4 + 32 = 80K rewritten for 32K ingested.
+    assert_eq!(info.compaction_merge_points, ingested * 5 / 2);
     assert!(info.compaction_merge_input_bytes > 0);
     assert!(info.compaction_merge_output_bytes > 0);
     assert_eq!(
@@ -597,6 +601,271 @@ fn compressed_merge_reports_a_newly_unlocked_next_tier() {
             .len(),
         CHUNKS * POINTS_PER_CHUNK
     );
+}
+
+#[test]
+fn small_compressed_chunks_merge_by_count_in_tiers() {
+    // A series written a few points a flush and compressed once a sweep
+    // makes a chunk of a few points a sweep. Counted rather than measured,
+    // those are merged as they come, in tiers, so the series stays a
+    // handful of chunks and a point is rewritten a few times, not at
+    // every round.
+    const ROUNDS: usize = 96;
+    const POINTS_PER_ROUND: usize = 30;
+
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_id = engine.resolve_cached("churn", &labels()).unwrap();
+    let mut most_chunks = 0;
+
+    for round in 0..ROUNDS {
+        for offset in 0..POINTS_PER_ROUND {
+            let ts = (round * POINTS_PER_ROUND + offset) as i64;
+            engine.write_point(series_id, ts, ts as f64);
+        }
+        engine.flush_all().unwrap();
+        loop {
+            let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+            if !more {
+                break;
+            }
+        }
+        most_chunks = most_chunks.max(engine.info().chunk_count);
+        let points = engine
+            .query_range_by_id(series_id, i64::MIN, i64::MAX)
+            .unwrap();
+        assert_eq!(points.len(), (round + 1) * POINTS_PER_ROUND);
+        assert_eq!(
+            points.last().unwrap().0,
+            ((round + 1) * POINTS_PER_ROUND) as i64 - 1
+        );
+    }
+
+    let info = engine.info();
+    let ingested = (ROUNDS * POINTS_PER_ROUND) as u64;
+    assert!(info.compaction_merge_steps > 0);
+    assert!(most_chunks <= 8, "{most_chunks} chunks at the most");
+    assert!(
+        info.chunk_count <= 6,
+        "{} chunks at the end",
+        info.chunk_count
+    );
+    assert!(
+        info.compaction_merge_points <= ingested * 8,
+        "{} points rewritten for {ingested} ingested",
+        info.compaction_merge_points
+    );
+}
+
+#[test]
+fn a_series_that_has_ended_has_its_pieces_put_together_once() {
+    // Two small chunks of a series still being written are left to grow
+    // into a run of four. Reopened, nothing has been written lately: the
+    // series may have ended, as a process's does, and its two chunks are
+    // put together once.
+    const POINTS_PER_ROUND: usize = 30;
+    let store = Arc::new(MemChunkStore::new());
+    let engine = Engine::with_store(
+        Box::new(SharedMemChunkStore(store.clone())),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_id = engine.resolve_cached("ended", &labels()).unwrap();
+    for round in 0..2 {
+        for offset in 0..POINTS_PER_ROUND {
+            let ts = (round * POINTS_PER_ROUND + offset) as i64;
+            engine.write_point(series_id, ts, ts as f64);
+        }
+        engine.flush_all().unwrap();
+        loop {
+            let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+            if !more {
+                break;
+            }
+        }
+    }
+    assert_eq!(engine.info().chunk_count, 2);
+    assert_eq!(engine.info().compaction_merge_steps, 0);
+    drop(engine);
+
+    let engine = Engine::with_store(
+        Box::new(SharedMemChunkStore(store)),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    loop {
+        let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+        if !more {
+            break;
+        }
+    }
+    let info = engine.info();
+    assert_eq!(info.chunk_count, 1);
+    assert_eq!(info.compaction_merge_steps, 1);
+    assert_eq!(
+        engine
+            .query_range_by_id(series_id, i64::MIN, i64::MAX)
+            .unwrap()
+            .len(),
+        2 * POINTS_PER_ROUND
+    );
+}
+
+#[test]
+fn a_sweep_is_planned_once_and_leaves_what_arrives_after_its_cutoff() {
+    const SERIES: usize = 150;
+
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_ids: Vec<_> = (0..SERIES)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("sweep_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    for epoch in 0..2i64 {
+        for &series_id in &series_ids {
+            engine.write_point(series_id, 1_000 + epoch * 100, epoch as f64);
+        }
+        engine.flush_all().unwrap();
+    }
+
+    let cutoff = 2_000;
+    let (series, _, more) = engine.compact_partitions_bounded(cutoff, 64).unwrap();
+    assert_eq!(series, 64);
+    assert!(more);
+    let info = engine.info();
+    assert_eq!(info.compaction_plans, 1);
+    assert_eq!(info.compaction_planned_groups, (SERIES - 64) as u64);
+
+    // Flushed while the sweep is under way and past its cutoff: the next
+    // sweep's, so that this one ends.
+    for &series_id in &series_ids {
+        engine.write_point(series_id, 5_000, 9.0);
+    }
+    engine.flush_all().unwrap();
+
+    let (series, _, more) = engine.compact_partitions_bounded(cutoff, 64).unwrap();
+    assert_eq!(series, 64);
+    assert!(more);
+    let (series, _, more) = engine.compact_partitions_bounded(cutoff, 64).unwrap();
+    assert_eq!(series, SERIES - 128);
+    assert!(!more);
+    let info = engine.info();
+    // Once for the sweep, and once at its end to see that nothing was left.
+    assert_eq!(info.compaction_plans, 2);
+    assert_eq!(info.compaction_planned_groups, 0);
+    assert_eq!(info.compaction_raw_chunks, (SERIES * 2) as u64);
+
+    // Asked again for the same sweep with nothing added since, there is no
+    // planning to do; a chunk added makes it worth looking once more.
+    let (_, _, more) = engine.compact_partitions_bounded(cutoff, 64).unwrap();
+    assert!(!more);
+    assert_eq!(engine.info().compaction_plans, 2);
+    engine.write_point(series_ids[0], 1_500, 4.0);
+    engine.flush_all().unwrap();
+    let (series, _, more) = engine.compact_partitions_bounded(cutoff, 64).unwrap();
+    assert_eq!(series, 1);
+    assert!(!more);
+    assert_eq!(engine.info().compaction_plans, 4);
+
+    // A sweep with a later cutoff takes the late chunks.
+    let (series, _, _) = engine
+        .compact_partitions_bounded(i64::MAX, usize::MAX)
+        .unwrap();
+    assert_eq!(series, SERIES);
+    assert_eq!(engine.info().compaction_raw_chunks, (SERIES * 3 + 1) as u64);
+    for (number, &series_id) in series_ids.iter().enumerate() {
+        assert_eq!(
+            engine
+                .query_range_by_id(series_id, i64::MIN, i64::MAX)
+                .unwrap()
+                .len(),
+            if number == 0 { 4 } else { 3 }
+        );
+    }
+}
+
+#[test]
+fn a_planned_group_whose_chunks_retention_took_is_passed_over() {
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_ids: Vec<_> = (0..3)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("gone_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    for &series_id in &series_ids {
+        engine.write_point(series_id, 1_000, 1.0);
+    }
+    engine.flush_all().unwrap();
+
+    // The sweep is planned for three series and does one.
+    let (series, _, more) = engine.compact_partitions_bounded(i64::MAX, 1).unwrap();
+    assert_eq!(series, 1);
+    assert!(more);
+    assert_eq!(engine.info().compaction_planned_groups, 2);
+
+    // Retention takes every chunk the plan was made of before the sweep
+    // reaches them; the flush that applies it leaves a new raw chunk each.
+    engine.set_retention(Some(100));
+    for &series_id in &series_ids {
+        engine.write_point(series_id, 10_000, 3.0);
+    }
+    engine.flush_all().unwrap();
+
+    let mut compacted = 0;
+    loop {
+        let (series, _, more) = engine.compact_partitions_bounded(i64::MAX, 1).unwrap();
+        compacted += series;
+        if !more {
+            break;
+        }
+    }
+    // The two stale groups were passed over, not counted, and the sweep
+    // went on to the chunks that are there.
+    assert_eq!(compacted, 3);
+    assert_eq!(engine.info().compaction_raw_chunks, 4);
+    for &series_id in &series_ids {
+        assert_eq!(
+            engine
+                .query_range_by_id(series_id, i64::MIN, i64::MAX)
+                .unwrap(),
+            vec![(10_000, 3.0)]
+        );
+    }
 }
 
 #[test]
