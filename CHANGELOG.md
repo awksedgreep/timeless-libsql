@@ -47,6 +47,14 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
     and its pieces are put together once, however few. The fixed
     1,024-point arrival of the size-tiered fixture is now rewritten 2.5
     times over its life rather than 1.5.
+- **A sweep yields to reads (#94).** A read is several statements, each
+  admitted only while no writer holds or waits for the gate, and begun
+  again from the first when one is refused; a sweep whose steps followed
+  each other ten milliseconds apart refused a PromQL read every time for as
+  long as it ran, and the read was answered `storage is temporarily busy`
+  after five seconds. Between two steps the metrics server now waits, for
+  up to half a second, while a read is in flight. `compact_yield_count` and
+  `compact_yield_total_ns` say how often and how long.
 - **Retention removes the series it has left nothing of (#82).** When a
   maintenance pass prunes the last raw and rollup chunk of a series, the
   series goes too: its catalog row, its registry entry, and its label

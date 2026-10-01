@@ -97,3 +97,29 @@ and leaves what is newer than its cutoff, a drained sweep is not planned
 again until a chunk is added, a stale planned group is passed over, and an
 ended series' pieces are put together once; the server's: a scheduled sweep
 is planned once and leaves what is newer than its cutoff.
+
+## Reads during a sweep (#94)
+
+A read is several statements, each admitted by the writer gate only while
+no writer holds or waits for it, and begun again from the first when one is
+refused. A sweep whose steps follow each other ten milliseconds apart
+refuses such a read at every step for as long as it runs. The server now
+waits between two steps, for up to half a second, while a read is in
+flight.
+
+Same plane settings as above, 4,000 series a second (a tenth of them new),
+and one PromQL instant query over the host's series every 100 ms for three
+minutes, `reads.py` beside the writer:
+
+| | without the yield | with it |
+|---|---:|---:|
+| reads | 814 | 1,178 |
+| refused `storage is temporarily busy` | 3 | 0 |
+| p50 / p99 / max | 36 ms / 2,666 ms / 5,025 ms | 46 ms / 167 ms / 221 ms |
+| read retries inside the server | 10,332 | 5,626 |
+| sweeps completed | 13 | 11 |
+| yields | — | 971, 35.5 s in all |
+
+What remains of the question is the shape of a read: a permit a statement,
+not a permit a read, so that a long read on a store with a long sweep is
+still begun again whenever the next step is faster than it.
