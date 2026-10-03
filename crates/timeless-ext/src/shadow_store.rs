@@ -37,7 +37,6 @@
 //! compiler derives Send + Sync — the `unsafe impl Send for HostHandle`
 //! that used to live here is deleted, not relocated.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -767,9 +766,12 @@ impl ChunkStore for ShadowTableStore {
         // ChunkBytes wants ONE contiguous buffer plus ts/val ranges (fs
         // chunks are slices of a cached whole file). We store the payloads
         // as two columns, so stitch them together here on the read path.
+        // Single allocation sized up front: extending the ts Vec would
+        // reallocate + copy it first.
         let ts_len = ts.len();
         let val_len = val.len();
-        let mut buf = ts;
+        let mut buf = Vec::with_capacity(ts_len + val_len);
+        buf.extend_from_slice(&ts);
         buf.extend_from_slice(&val);
         Ok(ChunkBytes {
             data: Arc::new(buf),
@@ -794,6 +796,9 @@ impl ChunkStore for ShadowTableStore {
         // Rowids originate in this store, so inlining them is injection-safe
         // and avoids SQLite's host-parameter ceiling for high-cardinality
         // fan-out. Reorder below because an IN scan has no order contract.
+        // (An ordinal VALUES join with ORDER BY was tried: the temp B-tree
+        // sorts full blob payloads and measures ~25% slower than the
+        // HashMap reorder of Arc handles. See #114.)
         let ids = rowids
             .iter()
             .map(i64::to_string)
@@ -810,7 +815,7 @@ impl ChunkStore for ShadowTableStore {
         let mut rows = stmt
             .query([])
             .map_err(|e| format!("batch chunk read failed: {e}"))?;
-        let mut by_id = HashMap::with_capacity(rowids.len());
+        let mut by_id = std::collections::HashMap::with_capacity(rowids.len());
         while let Some(row) = rows
             .next()
             .map_err(|e| format!("batch chunk read row failed: {e}"))?
@@ -820,7 +825,10 @@ impl ChunkStore for ShadowTableStore {
             let val: Vec<u8> = row.get(2).map_err(|e| e.to_string())?;
             let ts_len = ts.len();
             let val_len = val.len();
-            let mut buf = ts;
+            // Single allocation sized up front: extending the ts Vec
+            // would reallocate + copy it first.
+            let mut buf = Vec::with_capacity(ts_len + val_len);
+            buf.extend_from_slice(&ts);
             buf.extend_from_slice(&val);
             by_id.insert(
                 rowid,
