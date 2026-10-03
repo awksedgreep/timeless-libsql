@@ -167,9 +167,16 @@ fn elapsed_ns(started: Instant) -> u64 {
     started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
-fn canonical_rich_metadata(
-    text: &str,
-) -> std::result::Result<(String, Vec<(String, String)>), String> {
+/// Parse metadata JSON once into a sorted map plus stable string
+/// projections. The map is the single source for canonical encoding,
+/// flatness checks, and index-key overrides — callers must not re-parse
+/// the text they just parsed.
+type ParsedMetadata = (
+    std::collections::BTreeMap<String, serde_json::Value>,
+    Vec<(String, String)>,
+);
+
+fn parse_metadata(text: &str) -> std::result::Result<ParsedMetadata, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|error| format!("invalid JSON: {error}"))?;
     let serde_json::Value::Object(object) = value else {
@@ -187,16 +194,16 @@ fn canonical_rich_metadata(
             (key.clone(), value)
         })
         .collect();
+    Ok((sorted, pairs))
+}
+
+fn canonical_rich_metadata(
+    text: &str,
+) -> std::result::Result<(String, Vec<(String, String)>), String> {
+    let (sorted, pairs) = parse_metadata(text)?;
     let canonical =
         serde_json::to_string(&sorted).map_err(|error| format!("encode JSON: {error}"))?;
     Ok((canonical, pairs))
-}
-
-fn metadata_is_flat_strings(text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .is_some_and(|object| object.values().all(serde_json::Value::is_string))
 }
 
 /// Load the persisted F6 message_index setting ('trigram' => true).
@@ -1209,47 +1216,35 @@ impl UpdateVTab<'_> for LogsTab {
 
         // Rich metadata is retained as canonical typed JSON. Scalar/nested
         // values also derive stable string projections for equality indexes.
+        // Parsed ONCE: the map below is the single source for overrides,
+        // canonical encoding, and the flatness check.
         let metadata_json: Option<String> = args.get(5)?;
-        let (mut canonical_json, mut metadata): (String, Vec<(String, String)>) =
-            match metadata_json {
-                Some(txt) => canonical_rich_metadata(&txt).map_err(module_err)?,
-                None => ("{}".into(), Vec::new()),
-            };
+        let (mut sorted, mut metadata): (
+            std::collections::BTreeMap<String, serde_json::Value>,
+            Vec<(String, String)>,
+        ) = match metadata_json {
+            Some(txt) => parse_metadata(&txt).map_err(module_err)?,
+            None => (std::collections::BTreeMap::new(), Vec::new()),
+        };
 
         // Index-key hidden columns as INSERT shorthand: a non-NULL
         // value is merged into the metadata pairs (overriding a same-key
         // pair from the JSON — the more specific binding wins).
-        let mut metadata_overridden = false;
         for (k, key_name) in self.index_keys.iter().enumerate() {
             let v: Option<String> = args.get(6 + k)?;
             if let Some(v) = v {
-                metadata_overridden = true;
+                sorted.insert(key_name.clone(), serde_json::Value::String(v.clone()));
                 metadata.retain(|(mk, _)| mk != key_name);
                 metadata.push((key_name.clone(), v));
             }
         }
-        if metadata_overridden {
-            let mut value: serde_json::Value = serde_json::from_str(&canonical_json)
-                .map_err(|error| module_err(format!("decode metadata JSON: {error}")))?;
-            let object = value
-                .as_object_mut()
-                .ok_or_else(|| module_err("metadata JSON must be an object".into()))?;
-            for (k, key_name) in self.index_keys.iter().enumerate() {
-                let v: Option<String> = args.get(6 + k)?;
-                if let Some(v) = v {
-                    object.insert(key_name.clone(), serde_json::Value::String(v));
-                }
-            }
-            let sorted: std::collections::BTreeMap<String, serde_json::Value> =
-                object.clone().into_iter().collect();
-            canonical_json = serde_json::to_string(&sorted)
-                .map_err(|error| module_err(format!("encode metadata JSON: {error}")))?;
-        }
+        let canonical_json = serde_json::to_string(&sorted)
+            .map_err(|error| module_err(format!("encode metadata JSON: {error}")))?;
 
         // push() canonicalizes (sorts) metadata, validates, and
         // auto-flushes at the threshold.
         let rich = severity != timeless_core::level_name(level)
-            || !metadata_is_flat_strings(&canonical_json);
+            || !sorted.values().all(serde_json::Value::is_string);
         self.shared
             .engine
             .push(LogEntry {
