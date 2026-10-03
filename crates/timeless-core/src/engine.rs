@@ -3553,9 +3553,22 @@ impl Engine {
                 .collect()
         };
 
+        // One batched store read for all chunks: N+1 single-row reads
+        // (each its own connection borrow + statement prepare) become a
+        // single IN query. Order follows `matching`, so decode order —
+        // and the stable sort below — is unchanged.
+        let locs: Vec<ChunkLoc> = matching.iter().map(|meta| meta.loc.clone()).collect();
+        let chunk_bytes = self.store.read_chunks(&locs)?;
+        if chunk_bytes.len() != locs.len() {
+            return Err(format!(
+                "chunk read returned {} payloads for {} locations",
+                chunk_bytes.len(),
+                locs.len()
+            ));
+        }
         let mut results = Vec::new();
-        for meta in &matching {
-            results.extend(self.read_chunk_data(meta, t_start, t_end)?);
+        for (meta, bytes) in matching.iter().zip(chunk_bytes.iter()) {
+            results.extend(Self::decode_chunk_data(meta, bytes, t_start, t_end)?);
         }
 
         if let Some(buf) = self.partitions.get(&pk) {
