@@ -14,6 +14,7 @@
 //!     rejected; literal UTF-8 in the string works fine;
 //!   - duplicate keys: last one wins (like most JSON parsers).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use timeless_core::Labels;
@@ -72,18 +73,23 @@ fn json_escape_into(out: &mut String, s: &str) {
     }
 }
 
-/// Character-cursor over the input; the parse functions below advance it.
-struct JsonCursor {
-    chars: Vec<char>,
+/// Byte-cursor over the input; the parse functions below advance it.
+/// No copy of the input is made: structural scanning is byte-wise (safe
+/// because UTF-8 continuation bytes never collide with ASCII syntax),
+/// and `parse_string` borrows the slice directly unless escapes force an
+/// owned copy. The old `Vec<char>` copy cost 4x the input on every
+/// labels/filter parse.
+struct JsonCursor<'a> {
+    bytes: &'a [u8],
     pos: usize,
 }
 
-impl JsonCursor {
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+impl<'a> JsonCursor<'a> {
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
     }
 
-    fn bump(&mut self) -> Option<char> {
+    fn bump(&mut self) -> Option<u8> {
         let c = self.peek();
         if c.is_some() {
             self.pos += 1;
@@ -92,44 +98,88 @@ impl JsonCursor {
     }
 
     fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             self.pos += 1;
         }
     }
 
-    fn expect(&mut self, want: char) -> Result<(), String> {
+    fn expect(&mut self, want: u8) -> Result<(), String> {
         match self.bump() {
             Some(c) if c == want => Ok(()),
-            Some(c) => Err(format!("labels JSON: expected '{want}', found '{c}'")),
+            Some(c) => Err(format!(
+                "labels JSON: expected '{}', found '{}'",
+                want as char, c as char
+            )),
             None => Err(format!(
-                "labels JSON: expected '{want}', found end of input"
+                "labels JSON: expected '{}', found end of input",
+                want as char
             )),
         }
     }
 
-    /// Parse a JSON string (cursor on the opening quote).
-    fn parse_string(&mut self) -> Result<String, String> {
-        self.expect('"')?;
+    /// Parse a JSON string (cursor on the opening quote). Borrows the
+    /// input slice when it holds no escapes; otherwise decodes escapes
+    /// into a fresh `String`. Invalid UTF-8 is rejected either way.
+    fn parse_string(&mut self) -> Result<Cow<'a, str>, String> {
+        self.expect(b'"')?;
+        let start = self.pos;
+        // Fast scan for the terminator or the first escape.
+        let mut end = start;
+        let mut escaped = false;
+        while let Some(c) = self.bytes.get(end) {
+            match c {
+                b'"' => break,
+                b'\\' => {
+                    escaped = true;
+                    break;
+                }
+                _ => end += 1,
+            }
+        }
+        if !escaped {
+            let raw = self
+                .bytes
+                .get(start..end)
+                .ok_or_else(|| "labels JSON: unterminated string".to_string())?;
+            if self.bytes.get(end) != Some(&b'"') {
+                return Err("labels JSON: unterminated string".into());
+            }
+            let s = std::str::from_utf8(raw)
+                .map_err(|_| "labels JSON: invalid UTF-8 in string".to_string())?;
+            self.pos = end + 1;
+            return Ok(Cow::Borrowed(s));
+        }
+        // Slow path: escapes present — decode into an owned string.
         let mut out = String::new();
+        // Re-validate the pre-escape run as part of the owned copy.
+        let head = self
+            .bytes
+            .get(start..end)
+            .ok_or_else(|| "labels JSON: unterminated string".to_string())?;
+        out.push_str(
+            std::str::from_utf8(head)
+                .map_err(|_| "labels JSON: invalid UTF-8 in string".to_string())?,
+        );
+        self.pos = end;
         loop {
             match self.bump() {
                 None => return Err("labels JSON: unterminated string".into()),
-                Some('"') => return Ok(out),
-                Some('\\') => match self.bump() {
-                    Some('"') => out.push('"'),
-                    Some('\\') => out.push('\\'),
-                    Some('/') => out.push('/'),
-                    Some('b') => out.push('\u{0008}'),
-                    Some('f') => out.push('\u{000C}'),
-                    Some('n') => out.push('\n'),
-                    Some('r') => out.push('\r'),
-                    Some('t') => out.push('\t'),
-                    Some('u') => {
+                Some(b'"') => return Ok(Cow::Owned(out)),
+                Some(b'\\') => match self.bump() {
+                    Some(b'"') => out.push('"'),
+                    Some(b'\\') => out.push('\\'),
+                    Some(b'/') => out.push('/'),
+                    Some(b'b') => out.push('\u{0008}'),
+                    Some(b'f') => out.push('\u{000C}'),
+                    Some(b'n') => out.push('\n'),
+                    Some(b'r') => out.push('\r'),
+                    Some(b't') => out.push('\t'),
+                    Some(b'u') => {
                         let mut code: u32 = 0;
                         for _ in 0..4 {
                             let d = self
                                 .bump()
-                                .and_then(|c| c.to_digit(16))
+                                .and_then(|c| (c as char).to_digit(16))
                                 .ok_or_else(|| "labels JSON: \\u needs 4 hex digits".to_string())?;
                             code = code * 16 + d;
                         }
@@ -144,10 +194,32 @@ impl JsonCursor {
                         })?;
                         out.push(c);
                     }
-                    Some(c) => return Err(format!("labels JSON: bad escape '\\{c}'")),
+                    Some(c) => return Err(format!("labels JSON: bad escape '\\{}'", c as char)),
                     None => return Err("labels JSON: unterminated escape".into()),
                 },
-                Some(c) => out.push(c),
+                Some(c) => {
+                    // Raw byte of a (possibly multi-byte) run: accumulate
+                    // bytes and validate UTF-8 at the next boundary.
+                    // Collect the maximal raw run first for one check.
+                    let run_start = self.pos - 1;
+                    let mut run_end = self.pos;
+                    while let Some(b) = self.bytes.get(run_end) {
+                        if *b == b'"' || *b == b'\\' {
+                            break;
+                        }
+                        run_end += 1;
+                    }
+                    let raw = self
+                        .bytes
+                        .get(run_start..run_end)
+                        .ok_or_else(|| "labels JSON: unterminated string".to_string())?;
+                    out.push_str(
+                        std::str::from_utf8(raw)
+                            .map_err(|_| "labels JSON: invalid UTF-8 in string".to_string())?,
+                    );
+                    self.pos = run_end;
+                    let _ = c;
+                }
             }
         }
     }
@@ -156,53 +228,60 @@ impl JsonCursor {
 /// Parse a FLAT JSON object of string keys and string values into a map.
 pub(crate) fn parse_labels_json(input: &str) -> Result<HashMap<String, String>, String> {
     let mut cur = JsonCursor {
-        chars: input.chars().collect(),
+        bytes: input.as_bytes(),
         pos: 0,
     };
     let mut out = HashMap::new();
 
     cur.skip_ws();
-    cur.expect('{')?;
+    cur.expect(b'{')?;
     cur.skip_ws();
-    if cur.peek() == Some('}') {
+    if cur.peek() == Some(b'}') {
         cur.bump();
     } else {
         loop {
             cur.skip_ws();
             let key = cur.parse_string()?;
             cur.skip_ws();
-            cur.expect(':')?;
+            cur.expect(b':')?;
             cur.skip_ws();
             match cur.peek() {
-                Some('"') => {
+                Some(b'"') => {
                     let val = cur.parse_string()?;
-                    out.insert(key, val);
+                    out.insert(key.into_owned(), val.into_owned());
                 }
-                Some(c @ ('{' | '[')) => {
+                Some(c @ (b'{' | b'[')) => {
                     return Err(format!(
                         "labels must be a FLAT JSON object of string values; \
-                         found nested '{c}' at key {key:?}"
+                         found nested '{}' at key {key:?}",
+                        c as char
                     ));
                 }
                 Some(c) => {
                     return Err(format!(
-                        "labels values must be JSON strings; found '{c}' at key {key:?} \
-                         (numbers/booleans/null are not supported)"
+                        "labels values must be JSON strings; found '{}' at key {key:?} \
+                         (numbers/booleans/null are not supported)",
+                        c as char
                     ));
                 }
                 None => return Err("labels JSON: unexpected end of input".into()),
             }
             cur.skip_ws();
             match cur.bump() {
-                Some(',') => continue,
-                Some('}') => break,
-                Some(c) => return Err(format!("labels JSON: expected ',' or '}}', found '{c}'")),
+                Some(b',') => continue,
+                Some(b'}') => break,
+                Some(c) => {
+                    return Err(format!(
+                        "labels JSON: expected ',' or '}}', found '{}'",
+                        c as char
+                    ))
+                }
                 None => return Err("labels JSON: unexpected end of input".into()),
             }
         }
     }
     cur.skip_ws();
-    if cur.pos != cur.chars.len() {
+    if cur.pos != cur.bytes.len() {
         return Err("labels JSON: trailing characters after object".into());
     }
     Ok(out)
@@ -225,34 +304,34 @@ pub(crate) enum MatcherSpec {
 /// `parse_labels_json` and remain strictly flat.
 pub(crate) fn parse_matchers_json(input: &str) -> Result<Vec<(String, MatcherSpec)>, String> {
     let mut cur = JsonCursor {
-        chars: input.chars().collect(),
+        bytes: input.as_bytes(),
         pos: 0,
     };
     let mut out: Vec<(String, MatcherSpec)> = Vec::new();
 
     cur.skip_ws();
-    cur.expect('{')?;
+    cur.expect(b'{')?;
     cur.skip_ws();
-    if cur.peek() == Some('}') {
+    if cur.peek() == Some(b'}') {
         cur.bump();
     } else {
         loop {
             cur.skip_ws();
             let key = cur.parse_string()?;
             cur.skip_ws();
-            cur.expect(':')?;
+            cur.expect(b':')?;
             cur.skip_ws();
             let spec = match cur.peek() {
-                Some('"') => MatcherSpec::Eq(cur.parse_string()?),
-                Some('{') => {
+                Some(b'"') => MatcherSpec::Eq(cur.parse_string()?.into_owned()),
+                Some(b'{') => {
                     cur.bump();
                     cur.skip_ws();
                     let op = cur.parse_string()?;
                     cur.skip_ws();
-                    cur.expect(':')?;
+                    cur.expect(b':')?;
                     cur.skip_ws();
                     let val = match cur.peek() {
-                        Some('"') => cur.parse_string()?,
+                        Some(b'"') => cur.parse_string()?.into_owned(),
                         _ => {
                             return Err(format!(
                                 "filter: operator value for {op:?} at key {key:?} \
@@ -262,7 +341,7 @@ pub(crate) fn parse_matchers_json(input: &str) -> Result<Vec<(String, MatcherSpe
                     };
                     cur.skip_ws();
                     match cur.bump() {
-                        Some('}') => {}
+                        Some(b'}') => {}
                         _ => {
                             return Err(format!(
                                 "filter: matcher object at key {key:?} must hold exactly \
@@ -270,7 +349,7 @@ pub(crate) fn parse_matchers_json(input: &str) -> Result<Vec<(String, MatcherSpe
                             ))
                         }
                     }
-                    match op.as_str() {
+                    match op.as_ref() as &str {
                         "neq" => MatcherSpec::Neq(val),
                         "re" => MatcherSpec::Re(val),
                         "nre" => MatcherSpec::Nre(val),
@@ -284,24 +363,30 @@ pub(crate) fn parse_matchers_json(input: &str) -> Result<Vec<(String, MatcherSpe
                 }
                 Some(c) => {
                     return Err(format!(
-                        "filter values must be strings or matcher objects; found '{c}' \
-                         at key {key:?}"
+                        "filter values must be strings or matcher objects; found '{}' \
+                         at key {key:?}",
+                        c as char
                     ))
                 }
                 None => return Err("filter JSON: unexpected end of input".into()),
             };
-            out.push((key, spec));
+            out.push((key.into_owned(), spec));
             cur.skip_ws();
             match cur.bump() {
-                Some(',') => continue,
-                Some('}') => break,
-                Some(c) => return Err(format!("filter JSON: expected ',' or '}}', found '{c}'")),
+                Some(b',') => continue,
+                Some(b'}') => break,
+                Some(c) => {
+                    return Err(format!(
+                        "filter JSON: expected ',' or '}}', found '{}'",
+                        c as char
+                    ))
+                }
                 None => return Err("filter JSON: unexpected end of input".into()),
             }
         }
     }
     cur.skip_ws();
-    if cur.pos != cur.chars.len() {
+    if cur.pos != cur.bytes.len() {
         return Err("filter JSON: trailing characters after object".into());
     }
     Ok(out)
