@@ -10,9 +10,46 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.7 -->
+<!-- release-target: 0.8.8 -->
 
 ## [Unreleased]
+
+## [0.8.8] — 2026-10-03
+
+### Fixed
+
+- **Strict trace bounds, batch units, and batch reserved bytes (#98, #99,
+  #100).** `WHERE start_ts/duration_ns >/</>>` on traces no longer
+  collapses to inclusive bounds (plan-suffix normalization with checked
+  ±1, mirroring logs). `flat-v0` log batches (documented milliseconds)
+  scale ×1000 into `timestamp_unit='us'` tables instead of silent
+  1000× time-travel. Nonzero batch reserved bytes are rejected on all
+  batch paths per the must-be-zero contract.
+- **Upgrade capability and dotted-table routing (#101, #102).**
+  `capabilities()` advertises `timeless_upgrade`, and its spec resolves
+  against `PRAGMA database_list` so bare dotted table names stay in
+  `main` (one quote layer stripped from schema-qualified names).
+- **FFI panic audit (#103).** Every `unwrap`/`expect`/index reachable
+  from virtual-table callbacks now returns a SQL error: bounds-checked
+  batch decoding, fallible frame decoders, checked cursor rows and argv
+  slots, a fallible schema planner, and a panic-free scheduler tick.
+- **Insert-contract pins (#104, #105).** `NULL` for trace flags and
+  dropped-value counters is documented as storing `0` (the OTel
+  default); empty/whitespace metric labels mean `{}` on row insert,
+  matching batches, TVF filters, and omitted labels.
+
+### Improved
+
+- **Batch ingestion and query pruning, all A/B-measured on Ultra 9 185H
+  (#106–#115, `tools/bench/results/2026-10-03_pre_perf_baseline.md`).**
+  Tier-1 admission +25–33% (flat-JSON byte cursor), Tier-2 admission
+  ~2.3× (partitioned bulk append), regex-filtered queries ~2–4×
+  (process-wide regex cache, filter-before-clone), wide batch range
+  ~−10% (single-sweep index walk), substring pruning −7–16% (no
+  materialization), logs Tier-1 ~+10% (single-parse metadata).
+  Neutral-kept: chunked term inserts, batched single-series reads,
+  batched flush persist. One reorder attempt (ordinal join) regressed
+  +25% and was reverted with evidence.
 
 ## [0.8.7] — 2026-10-03
 
@@ -1269,7 +1306,8 @@ Hardened statement atomicity, savepoints, multi-process series identity,
 attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
-[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.5...v0.8.6
 [0.8.3]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.2...v0.8.3
