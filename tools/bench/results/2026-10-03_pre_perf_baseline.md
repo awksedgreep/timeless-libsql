@@ -253,3 +253,16 @@ cross-boundary needles at 3 sizes.
 Tracked `bench-logs` steady (T1 0.34M, LIKE/buckets within band,
 storage byte-identical). Raw:
 `/tmp/baseline_20261003/bench_logs_113_run{1,2}.txt`.
+
+## Retest: #114 chunk stitch (rev 81ee8a5, same protocol)
+
+Kept only the single-alloc stitch; the reorder half was attempted
+(ordinal VALUES join + ORDER BY) and REVERTED after measuring +25% on
+wide batch reads (wide_raw 38k -> 47-48k medians both runs — the temp
+B-tree sorts full blob payloads, far costlier than the HashMap reorder
+of Arc handles). Post-revert `query-read` medians recovered to the
+38-40k band with order verified live. Lesson recorded in-code:
+SQL-level ordering is not free when rows carry blobs.
+Raw: `/tmp/baseline_20261003/query_read_114_run{1,2}.txt` (join
+version, regressed), `/tmp/baseline_20261003/query_read_114b_run{1,2}.txt`
+(reverted, recovered).
