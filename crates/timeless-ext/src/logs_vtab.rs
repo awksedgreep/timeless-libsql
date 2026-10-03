@@ -590,9 +590,9 @@ impl LogsTab {
     /// v0 keeps the original millisecond/four-bucket/flat-string contract:
     ///   0    u8   version = 0x01
     ///   1    u8   flags = 0
-    ///   2    u16  reserved
+    ///   2    u16  reserved = 0
     ///   4    u32  n_entries
-    ///   —    ts[]       n × i64 (ms)
+    ///   —    ts[]       n × i64 (ms; scaled ×1000 on ingest into `us` tables)
     ///   —    level[]    n × u8 (0..=3, strict vocabulary)
     ///   —    message[]  n × { u32 len, utf8 }
     ///   —    metadata[] n × { u32 len, flat-JSON; '' = {} }
@@ -618,7 +618,13 @@ impl LogsTab {
                 "batch blob: unknown flags 0x{flags:02x} (v0/v1 define none; must be 0)"
             )));
         }
-        r.skip(2, "reserved header bytes")?;
+        let reserved = r.take(2, "reserved header bytes")?;
+        if reserved[0] != 0 || reserved[1] != 0 {
+            return Err(module_err(format!(
+                "batch blob: reserved bytes must be zero (got {:02x}{:02x})",
+                reserved[0], reserved[1]
+            )));
+        }
         let n = r.u32("n_entries")? as usize;
 
         let ts_bytes = r.take_array(n, 8, "timestamp column")?;
@@ -664,7 +670,21 @@ impl LogsTab {
                 (metadata, Some(canonical))
             };
             entries.push(LogEntry {
-                ts: i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
+                ts: {
+                    let raw = i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+                    if version == 0x01 && self.native_per_second == 1_000_000 {
+                        // v0 timestamps are milliseconds; us tables store
+                        // microseconds. Scale without silent time-travel;
+                        // overflow rejects the whole batch.
+                        raw.checked_mul(1_000).ok_or_else(|| {
+                            module_err(format!(
+                                "batch blob: entry {i}: timestamp {raw}ms overflows microseconds"
+                            ))
+                        })?
+                    } else {
+                        raw
+                    }
+                },
                 level: levels[i],
                 severity: severities[i].clone(),
                 message,

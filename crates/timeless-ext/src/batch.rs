@@ -60,10 +60,6 @@ impl<'a> BatchReader<'a> {
         self.take(len, what)
     }
 
-    pub(crate) fn skip(&mut self, n: usize, what: &str) -> Result<()> {
-        self.take(n, what).map(|_| ())
-    }
-
     pub(crate) fn u8(&mut self, what: &str) -> Result<u8> {
         Ok(self.take(1, what)?[0])
     }

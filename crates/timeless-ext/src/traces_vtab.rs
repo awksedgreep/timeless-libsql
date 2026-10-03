@@ -123,6 +123,10 @@ const PLAN_BOUNDED_TS_DESC: &str = "bounded-ts-desc";
 const PLAN_BOUNDED_TS_DESC_OFFSET: &str = "bounded-ts-desc-offset";
 const PLAN_ATTRIBUTE: &str = "attribute";
 const PLAN_ATTRIBUTE_SUFFIX: &str = "+attribute";
+const PLAN_TS_GT_SUFFIX: &str = "+ts-gt";
+const PLAN_TS_LT_SUFFIX: &str = "+ts-lt";
+const PLAN_DUR_GT_SUFFIX: &str = "+dur-gt";
+const PLAN_DUR_LT_SUFFIX: &str = "+dur-lt";
 
 /// Declared column indices (argv in xUpdate = these + 2).
 const COL_TRACE_ID: usize = 0;
@@ -552,7 +556,13 @@ impl TracesTab {
                 "batch blob: unknown flags 0x{flags:02x} (v0/v1/v2 define none; must be 0)"
             )));
         }
-        r.skip(2, "reserved header bytes")?;
+        let reserved = r.take(2, "reserved header bytes")?;
+        if reserved[0] != 0 || reserved[1] != 0 {
+            return Err(module_err(format!(
+                "batch blob: reserved bytes must be zero (got {:02x}{:02x})",
+                reserved[0], reserved[1]
+            )));
+        }
         let n = r.u32("n_spans")? as usize;
 
         let trace_ids = r.take_array(n, 16, "trace_id column")?;
@@ -804,8 +814,10 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
     /// canonical order so filter() decodes positions from the mask.
     ///
     /// omit flags: NOT set for anything except trace_id (SQLite
-    /// re-checks the rest above us, so treating strict ts bounds as
-    /// inclusive stays safe, same as metrics/logs). trace_id is the
+    /// re-checks the rest above us). Strict integer bounds are still
+    /// normalized to inclusive bounds in filter() (`> v` → `>= v+1`),
+    /// same as the logs vtab, so the engine decodes exactly the rows
+    /// SQLite keeps. trace_id is the
     /// exception BY DESIGN: `WHERE trace_id = 'af3e...'` (hex TEXT —
     /// what OTel tooling hands people to copy-paste) must work, but
     /// our column returns BLOBs and SQLite's own re-check would reject
@@ -828,6 +840,10 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
         let mut hi_c: Option<usize> = None;
         let mut duration_lo_c: Option<usize> = None;
         let mut duration_hi_c: Option<usize> = None;
+        let mut lo_strict = false;
+        let mut hi_strict = false;
+        let mut duration_lo_strict = false;
+        let mut duration_hi_strict = false;
         let mut attribute_c: Option<usize> = None;
         let mut limit_c: Option<usize> = None;
         let mut offset_c: Option<usize> = None;
@@ -858,10 +874,12 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
                 (COL_START_TS, SQLITE_INDEX_CONSTRAINT_LE) if hi_c.is_none() => hi_c = Some(i),
                 (COL_START_TS, SQLITE_INDEX_CONSTRAINT_GT) if lo_c.is_none() => {
                     lo_c = Some(i);
+                    lo_strict = true;
                     bounded_safe = false;
                 }
                 (COL_START_TS, SQLITE_INDEX_CONSTRAINT_LT) if hi_c.is_none() => {
                     hi_c = Some(i);
+                    hi_strict = true;
                     bounded_safe = false;
                 }
                 (COL_DURATION, SQLITE_INDEX_CONSTRAINT_GE) if duration_lo_c.is_none() => {
@@ -872,10 +890,12 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
                 }
                 (COL_DURATION, SQLITE_INDEX_CONSTRAINT_GT) if duration_lo_c.is_none() => {
                     duration_lo_c = Some(i);
+                    duration_lo_strict = true;
                     bounded_safe = false;
                 }
                 (COL_DURATION, SQLITE_INDEX_CONSTRAINT_LT) if duration_hi_c.is_none() => {
                     duration_hi_c = Some(i);
+                    duration_hi_strict = true;
                     bounded_safe = false;
                 }
                 (COL_ATTRIBUTE_FILTER, SQLITE_INDEX_CONSTRAINT_EQ) if attribute_c.is_none() => {
@@ -958,16 +978,47 @@ unsafe impl<'vtab> VTab<'vtab> for TracesTab {
             (SpanQueryOrder::Desc, true) => PLAN_BOUNDED_TS_DESC_OFFSET,
         });
         if let Some(plan) = bounded_plan {
-            let plan = if attribute_c.is_some() {
+            let mut plan = if attribute_c.is_some() {
                 format!("{plan}{PLAN_ATTRIBUTE_SUFFIX}")
             } else {
                 plan.to_owned()
             };
+            if lo_strict {
+                plan.push_str(PLAN_TS_GT_SUFFIX);
+            }
+            if hi_strict {
+                plan.push_str(PLAN_TS_LT_SUFFIX);
+            }
+            if duration_lo_strict {
+                plan.push_str(PLAN_DUR_GT_SUFFIX);
+            }
+            if duration_hi_strict {
+                plan.push_str(PLAN_DUR_LT_SUFFIX);
+            }
             info.set_idx_str(&plan);
             info.set_order_by_consumed(true);
             info.set_estimated_rows(100);
-        } else if attribute_c.is_some() {
-            info.set_idx_str(PLAN_ATTRIBUTE);
+        } else {
+            let mut plan = if attribute_c.is_some() {
+                PLAN_ATTRIBUTE.to_owned()
+            } else {
+                String::new()
+            };
+            if lo_strict {
+                plan.push_str(PLAN_TS_GT_SUFFIX);
+            }
+            if hi_strict {
+                plan.push_str(PLAN_TS_LT_SUFFIX);
+            }
+            if duration_lo_strict {
+                plan.push_str(PLAN_DUR_GT_SUFFIX);
+            }
+            if duration_hi_strict {
+                plan.push_str(PLAN_DUR_LT_SUFFIX);
+            }
+            if !plan.is_empty() {
+                info.set_idx_str(&plan);
+            }
         }
         // Cost ladder steers the planner: a trace_id lookup is a
         // point probe of the trace index (the entire reason this vtab
@@ -1400,6 +1451,44 @@ unsafe impl VTabCursor for TracesCursor<'_> {
             i
         };
 
+        // Strict integer bounds are normalized to inclusive bounds, mirroring
+        // logs_vtab.rs: `> v` becomes `>= v+1`, `< v` becomes `<= v-1`,
+        // with overflow yielding an empty result. SQLite rechecks the
+        // original constraint above us (omit is never set for these
+        // columns), so this stays exact while avoiding a one-row
+        // over-decode per strict query.
+        let mut lo_strict = false;
+        let mut hi_strict = false;
+        let mut duration_lo_strict = false;
+        let mut duration_hi_strict = false;
+        let mut plan_str = idx_str;
+        // Strip in reverse append order; loop so mixed orders still parse.
+        for _ in 0..4 {
+            let mut stripped = false;
+            if let Some(rest) = plan_str.and_then(|p| p.strip_suffix(PLAN_DUR_LT_SUFFIX)) {
+                duration_hi_strict = true;
+                plan_str = Some(rest);
+                stripped = true;
+            }
+            if let Some(rest) = plan_str.and_then(|p| p.strip_suffix(PLAN_DUR_GT_SUFFIX)) {
+                duration_lo_strict = true;
+                plan_str = Some(rest);
+                stripped = true;
+            }
+            if let Some(rest) = plan_str.and_then(|p| p.strip_suffix(PLAN_TS_LT_SUFFIX)) {
+                hi_strict = true;
+                plan_str = Some(rest);
+                stripped = true;
+            }
+            if let Some(rest) = plan_str.and_then(|p| p.strip_suffix(PLAN_TS_GT_SUFFIX)) {
+                lo_strict = true;
+                plan_str = Some(rest);
+                stripped = true;
+            }
+            if !stripped {
+                break;
+            }
+        }
         // Any constraint value that can't possibly match (bad hex, a
         // NULL, an unknown kind name) yields an EMPTY result, not an
         // error — `WHERE status='oops'` is a valid query that selects
@@ -1467,7 +1556,19 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         };
         let ts_min: i64 = if idx_num & BIT_TS_LO != 0 {
             match args.get::<Option<i64>>(next())? {
-                Some(v) => v,
+                Some(v) => {
+                    if !lo_strict {
+                        v
+                    } else {
+                        match v.checked_add(1) {
+                            Some(bound) => bound,
+                            None => {
+                                impossible = true;
+                                i64::MIN
+                            }
+                        }
+                    }
+                }
                 None => {
                     impossible = true; // ts >= NULL matches nothing
                     i64::MIN
@@ -1478,7 +1579,19 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         };
         let ts_max: i64 = if idx_num & BIT_TS_HI != 0 {
             match args.get::<Option<i64>>(next())? {
-                Some(v) => v,
+                Some(v) => {
+                    if !hi_strict {
+                        v
+                    } else {
+                        match v.checked_sub(1) {
+                            Some(bound) => bound,
+                            None => {
+                                impossible = true;
+                                i64::MAX
+                            }
+                        }
+                    }
+                }
                 None => {
                     impossible = true;
                     i64::MAX
@@ -1489,7 +1602,19 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         };
         let duration_min: i64 = if idx_num & BIT_DURATION_LO != 0 {
             match args.get::<Option<i64>>(next())? {
-                Some(value) => value,
+                Some(value) => {
+                    if !duration_lo_strict {
+                        value
+                    } else {
+                        match value.checked_add(1) {
+                            Some(bound) => bound,
+                            None => {
+                                impossible = true;
+                                i64::MIN
+                            }
+                        }
+                    }
+                }
                 None => {
                     impossible = true;
                     i64::MIN
@@ -1500,7 +1625,19 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         };
         let duration_max: i64 = if idx_num & BIT_DURATION_HI != 0 {
             match args.get::<Option<i64>>(next())? {
-                Some(value) => value,
+                Some(value) => {
+                    if !duration_hi_strict {
+                        value
+                    } else {
+                        match value.checked_sub(1) {
+                            Some(bound) => bound,
+                            None => {
+                                impossible = true;
+                                i64::MAX
+                            }
+                        }
+                    }
+                }
                 None => {
                     impossible = true;
                     i64::MAX
@@ -1509,8 +1646,9 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         } else {
             i64::MAX
         };
-        let has_attribute = matches!(idx_str, Some(PLAN_ATTRIBUTE))
-            || idx_str.is_some_and(|plan| plan.ends_with(PLAN_ATTRIBUTE_SUFFIX));
+        impossible |= ts_min > ts_max || duration_min > duration_max;
+        let has_attribute = matches!(plan_str, Some(PLAN_ATTRIBUTE))
+            || plan_str.is_some_and(|plan| plan.ends_with(PLAN_ATTRIBUTE_SUFFIX));
         let attribute = if has_attribute {
             let encoded: Option<String> = args.get(next())?;
             match encoded {
@@ -1529,7 +1667,7 @@ unsafe impl VTabCursor for TracesCursor<'_> {
         };
         let projection = SpanColumnMask::from_bits((idx_num >> PROJECTION_SHIFT) as u16);
 
-        let plan = idx_str.and_then(|plan| {
+        let plan = plan_str.and_then(|plan| {
             plan.strip_suffix(PLAN_ATTRIBUTE_SUFFIX)
                 .or((plan != PLAN_ATTRIBUTE).then_some(plan))
         });

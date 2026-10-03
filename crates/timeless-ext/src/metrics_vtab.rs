@@ -668,7 +668,13 @@ impl MetricsTab {
                 "batch blob: unknown flags 0x{flags:02x} (v0 defines none; must be 0)"
             )));
         }
-        r.skip(2, "reserved header bytes")?;
+        let reserved = r.take(2, "reserved header bytes")?;
+        if reserved[0] != 0 || reserved[1] != 0 {
+            return Err(module_err(format!(
+                "batch blob: reserved bytes must be zero (got {:02x}{:02x})",
+                reserved[0], reserved[1]
+            )));
+        }
         let n_series = r.u32("n_series")? as usize;
         let n_points = r.u32("n_points")? as usize;
 
@@ -806,7 +812,13 @@ impl MetricsTab {
                 "resolved batch: unknown flags 0x{flags:02x}; must be 0"
             )));
         }
-        r.skip(2, "reserved header bytes")?;
+        let reserved = r.take(2, "reserved header bytes")?;
+        if reserved[0] != 0 || reserved[1] != 0 {
+            return Err(module_err(format!(
+                "resolved batch: reserved bytes must be zero (got {:02x}{:02x})",
+                reserved[0], reserved[1]
+            )));
+        }
         let n_points = r.u32("n_points")? as usize;
         let column_bytes = n_points
             .checked_mul(8)
