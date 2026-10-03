@@ -237,3 +237,19 @@ The cross-borrow statement-cache half is deferred: stale-pointer risk
 across close/reopen needs generation-validated eviction, and the
 measured prize (~1ms/100 chunks here) doesn't justify it now.
 Raw: microbench inline above (no saved output).
+
+## Retest: #113 substring pruning without materialization (rev 5359945)
+
+Dedicated A/B (pre/post binaries, 200k-row table, 25 blocks,
+order-balanced 3x(6+6) trials, medians): `message_contains`
+selective 53.1 -> 49.1 ms (-7.5%), absent-needle 22.8 -> 19.1 ms
+(-16%). Debugging note: the first attempt scanned the whole
+concatenation at once and REGRESSED absent to +17% — one wide
+`windows()` scan measures ~2x slower than per-row scans of the same
+bytes; the kept version scans borrowed rows. Parity test
+(`columnar_feasibility_matches_full_decode`) guards present/absent/
+cross-boundary needles at 3 sizes.
+
+Tracked `bench-logs` steady (T1 0.34M, LIKE/buckets within band,
+storage byte-identical). Raw:
+`/tmp/baseline_20261003/bench_logs_113_run{1,2}.txt`.
