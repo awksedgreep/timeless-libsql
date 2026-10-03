@@ -60,13 +60,35 @@ impl<'a> BatchReader<'a> {
         self.take(len, what)
     }
 
+    /// Fixed-width element `index` of a column slice previously returned by
+    /// `take_array`. Bounds-checked: a corrupt `n_*` count or short column
+    /// is a SQL error, never a Rust panic across the FFI boundary.
+    pub(crate) fn fixed<const N: usize>(buf: &[u8], index: usize, what: &str) -> Result<[u8; N]> {
+        let start = index
+            .checked_mul(N)
+            .ok_or_else(|| module_err(format!("batch blob: {what} index overflow")))?;
+        let end = start
+            .checked_add(N)
+            .ok_or_else(|| module_err(format!("batch blob: {what} index overflow")))?;
+        let bytes = buf
+            .get(start..end)
+            .ok_or_else(|| module_err(format!("batch blob: truncated {what}")))?;
+        bytes
+            .try_into()
+            .map_err(|_| module_err(format!("batch blob: {what} is not {N} bytes")))
+    }
+
     pub(crate) fn u8(&mut self, what: &str) -> Result<u8> {
         Ok(self.take(1, what)?[0])
     }
 
     pub(crate) fn u32(&mut self, what: &str) -> Result<u32> {
         let b = self.take(4, what)?;
-        Ok(u32::from_le_bytes(b.try_into().unwrap()))
+        // `take` guarantees exactly 4 bytes; the conversion cannot fail,
+        // but a SQL error must abort the host, never a Rust panic.
+        b.try_into()
+            .map(u32::from_le_bytes)
+            .map_err(|_| module_err(format!("batch blob: {what} is not 4 bytes")))
     }
 
     /// A u32-length-prefixed UTF-8 string.

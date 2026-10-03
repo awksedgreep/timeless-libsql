@@ -556,7 +556,10 @@ impl ShadowTableStore {
                 .get(*pos..end)
                 .ok_or_else(|| format!("truncated series label catalog reading {what}"))?;
             *pos = end;
-            Ok(u32::from_be_bytes(bytes.try_into().unwrap()) as usize)
+            let bytes: [u8; 4] = bytes
+                .try_into()
+                .map_err(|_| format!("truncated series label catalog reading {what}"))?;
+            Ok(u32::from_be_bytes(bytes) as usize)
         }
 
         fn take_string(
@@ -630,7 +633,10 @@ impl ShadowTableStore {
             ValueRef::Real(f) => Ok(f),
             ValueRef::Integer(i) => Ok(i as f64),
             ValueRef::Blob(b) if b.len() == 8 => {
-                Ok(f64::from_bits(u64::from_le_bytes(b.try_into().unwrap())))
+                let bytes: [u8; 8] = b
+                    .try_into()
+                    .map_err(|_| format!("chunk stat {what} is not 8 bytes"))?;
+                Ok(f64::from_bits(u64::from_le_bytes(bytes)))
             }
             other => Err(format!("chunk stat {what} has unexpected type {other:?}")),
         }

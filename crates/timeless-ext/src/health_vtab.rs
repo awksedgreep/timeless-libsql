@@ -346,7 +346,9 @@ fn scheduler_main(
                 register(&c)?;
                 conn = Some(c);
             }
-            conn.as_ref().unwrap().execute(&sample_sql, [])?;
+            if let Some(c) = conn.as_ref() {
+                c.execute(&sample_sql, [])?;
+            }
             Ok(())
         })();
         match result {

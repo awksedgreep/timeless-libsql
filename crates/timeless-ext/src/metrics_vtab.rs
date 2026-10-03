@@ -771,13 +771,22 @@ impl MetricsTab {
             ))
         })?;
         for i in 0..n_points {
-            let idx = u32::from_le_bytes(idx_bytes[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
-            let sid = sids[idx]; // idx proven in-range in step 4
-            let ts = i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+            let idx = u32::from_le_bytes(BatchReader::fixed::<4>(
+                idx_bytes,
+                i,
+                "series index column",
+            )?) as usize;
+            let sid = *sids.get(idx).ok_or_else(|| {
+                module_err(format!(
+                    "batch blob: point {i}: series index {idx} out of range"
+                ))
+            })?;
+            let ts = i64::from_le_bytes(BatchReader::fixed::<8>(ts_bytes, i, "timestamp column")?);
             // Values are opaque 8-byte payloads here: round-tripping the
             // BITS through u64 avoids ever "interpreting" the float, so
             // NaN payloads etc. survive byte-exact.
-            let val_bits = u64::from_le_bytes(val_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+            let val_bits =
+                u64::from_le_bytes(BatchReader::fixed::<8>(val_bytes, i, "value column")?);
             raw.extend_from_slice(&sid.to_ne_bytes());
             raw.extend_from_slice(&ts.to_ne_bytes());
             raw.extend_from_slice(&val_bits.to_ne_bytes());
@@ -856,9 +865,21 @@ impl MetricsTab {
             ))
         })?;
         for i in 0..n_points {
-            let sid = i64::from_le_bytes(sid_bytes[i * 8..i * 8 + 8].try_into().unwrap());
-            let ts = i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap());
-            let val_bits = u64::from_le_bytes(val_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+            let sid = i64::from_le_bytes(BatchReader::fixed::<8>(
+                sid_bytes,
+                i,
+                "resolved batch series id column",
+            )?);
+            let ts = i64::from_le_bytes(BatchReader::fixed::<8>(
+                ts_bytes,
+                i,
+                "resolved batch timestamp column",
+            )?);
+            let val_bits = u64::from_le_bytes(BatchReader::fixed::<8>(
+                val_bytes,
+                i,
+                "resolved batch value column",
+            )?);
             raw.extend_from_slice(&sid.to_ne_bytes());
             raw.extend_from_slice(&ts.to_ne_bytes());
             raw.extend_from_slice(&val_bits.to_ne_bytes());
@@ -1623,7 +1644,12 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, i: c_int) -> Result<()> {
-        let row = &self.rows[self.pos];
+        // `eof` guards the position, but a desync must be a SQL error,
+        // never a Rust panic across the FFI boundary.
+        let row = self
+            .rows
+            .get(self.pos)
+            .ok_or_else(|| module_err("metrics cursor has no current row".into()))?;
         match i {
             0 => ctx.set_result(&row.name),
             1 => ctx.set_result(&row.ts),

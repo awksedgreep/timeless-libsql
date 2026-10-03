@@ -414,7 +414,10 @@ impl ShadowSpanStore {
         let Some(values) = values.into_iter().collect::<Option<Vec<_>>>() else {
             return Ok(None);
         };
-        Ok(Some(Self::stats_from_values(values.try_into().unwrap())))
+        let values: [i64; 9] = values.try_into().map_err(|_| {
+            "read trace storage counters failed: unexpected counter width".to_string()
+        })?;
+        Ok(Some(Self::stats_from_values(values)))
     }
 
     fn scan_storage_stats(&self, conn: &Connection) -> Result<SpanStorageStats, String> {

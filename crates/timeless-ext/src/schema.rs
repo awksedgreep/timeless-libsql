@@ -415,7 +415,7 @@ pub(crate) fn log_objects(
     table: &str,
     index_keys: &[String],
     per_second: i64,
-) -> Vec<SchemaObject> {
+) -> Result<Vec<SchemaObject>, String> {
     let source = sql_ident::quote(table);
     let mut objects = Vec::new();
     let entries = format!("timeless_{table}_entries");
@@ -463,7 +463,8 @@ pub(crate) fn log_objects(
             name: name.clone(),
             kind: "view",
             version: 1,
-            source_config: serde_json::to_string(index_keys).expect("string list"),
+            source_config: serde_json::to_string(index_keys)
+                .map_err(|e| format!("log index keys are not JSON-serializable: {e}"))?,
             ddl: format!(
                 "CREATE VIEW {} AS SELECT column1 AS field FROM (VALUES {values})",
                 sql_ident::qualified(database, &name)
@@ -473,7 +474,7 @@ pub(crate) fn log_objects(
                 paths stay queryable via json_extract (SQL-LOG-005).",
         });
     }
-    objects
+    Ok(objects)
 }
 
 /// Companion set for one metrics table: a bound, read-only series catalog
@@ -600,7 +601,8 @@ pub(crate) fn install_log_views(
     index_keys: &[String],
     per_second: i64,
 ) -> Result<Vec<String>> {
-    let planned = log_objects(database, table, index_keys, per_second);
+    let planned = log_objects(database, table, index_keys, per_second)
+        .map_err(rusqlite::Error::ModuleError)?;
     let installed = install_objects(host, database, table, &planned)?;
     // Configuration changes can remove companions. Reconcile only the
     // known log objects owned by this source; preserve future definitions.

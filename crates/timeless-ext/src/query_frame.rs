@@ -193,7 +193,11 @@ pub fn decode_aggregate_frame(bytes: &[u8]) -> Result<AggregateFrame, String> {
     if bytes[6..8] != [0, 0] {
         return Err("TAF1: reserved bits must be zero".into());
     }
-    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(
+        bytes[8..12]
+            .try_into()
+            .map_err(|_| "TAF1: truncated count".to_string())?,
+    ) as usize;
     let bitmap_len = bitmap_len(count)?;
     let columns_len = count
         .checked_mul(16)
@@ -215,9 +219,9 @@ pub fn decode_aggregate_frame(bytes: &[u8]) -> Result<AggregateFrame, String> {
     validate_bitmap(&bytes[bitmap_start..words_start], count, "TAF1")?;
     let mut rows = Vec::with_capacity(count);
     for index in 0..count {
-        let series_id = i64_at(bytes, ids_start + index * 8);
+        let series_id = i64_at(bytes, ids_start + index * 8, "TAF1")?;
         let valid = bit(&bytes[bitmap_start..words_start], index);
-        let word = u64_at(bytes, words_start + index * 8);
+        let word = u64_at(bytes, words_start + index * 8, "TAF1")?;
         let value = if !valid {
             if word != 0 {
                 return Err(format!("TAF1: invalid value {index} has a nonzero word"));
@@ -250,7 +254,11 @@ pub fn decode_latest_frame(bytes: &[u8]) -> Result<LatestFrame, String> {
     if &bytes[..4] != LATEST_FRAME_MAGIC {
         return Err("TLF1: unknown magic/version".into());
     }
-    let count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(
+        bytes[4..8]
+            .try_into()
+            .map_err(|_| "TLF1: truncated count".to_string())?,
+    ) as usize;
     let bitmap_len = bitmap_len(count)?;
     let columns_len = count
         .checked_mul(24)
@@ -273,10 +281,10 @@ pub fn decode_latest_frame(bytes: &[u8]) -> Result<LatestFrame, String> {
     validate_bitmap(&bytes[bitmap_start..words_start], count, "TLF1")?;
     let mut rows = Vec::with_capacity(count);
     for index in 0..count {
-        let series_id = i64_at(bytes, ids_start + index * 8);
-        let timestamp = i64_at(bytes, timestamps_start + index * 8);
+        let series_id = i64_at(bytes, ids_start + index * 8, "TLF1")?;
+        let timestamp = i64_at(bytes, timestamps_start + index * 8, "TLF1")?;
         let valid = bit(&bytes[bitmap_start..words_start], index);
-        let word = u64_at(bytes, words_start + index * 8);
+        let word = u64_at(bytes, words_start + index * 8, "TLF1")?;
         let value = if valid {
             let value = f64::from_bits(word);
             if value.is_nan() {
@@ -317,12 +325,20 @@ fn validate_bitmap(bitmap: &[u8], count: usize, name: &str) -> Result<(), String
     Ok(())
 }
 
-fn i64_at(bytes: &[u8], offset: usize) -> i64 {
-    i64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+fn i64_at(bytes: &[u8], offset: usize, name: &str) -> Result<i64, String> {
+    bytes
+        .get(offset..offset + 8)
+        .and_then(|s| s.try_into().ok())
+        .map(i64::from_le_bytes)
+        .ok_or_else(|| format!("{name}: truncated row"))
 }
 
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+fn u64_at(bytes: &[u8], offset: usize, name: &str) -> Result<u64, String> {
+    bytes
+        .get(offset..offset + 8)
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or_else(|| format!("{name}: truncated row"))
 }
 
 #[cfg(test)]

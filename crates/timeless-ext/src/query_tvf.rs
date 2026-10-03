@@ -183,6 +183,24 @@ fn module_err(msg: String) -> Error {
     Error::ModuleError(msg)
 }
 
+/// Resolve a pushed-constraint argv slot. `best_index` claims slots in a
+/// fixed order, but a mismatch must be a SQL error, never a Rust panic
+/// across the FFI boundary.
+fn argv(slots: &[Option<usize>], index: usize) -> Result<usize> {
+    slots.get(index).copied().flatten().ok_or_else(|| {
+        module_err(format!(
+            "TVF constraint slot {index} was not pushed down (planner mismatch)"
+        ))
+    })
+}
+
+/// Borrow the current cursor row. `eof` guards the position, but a desync
+/// must be a SQL error, never a Rust panic across the FFI boundary.
+fn cursor_row<T>(rows: &[T], pos: usize) -> Result<&T> {
+    rows.get(pos)
+        .ok_or_else(|| module_err("TVF cursor has no current row".into()))
+}
+
 fn positive_work_limit(module: &str, args: &Filters<'_>, slot: usize) -> Result<u64> {
     let value = integer_affinity(args.get::<Value>(slot)?).ok_or_else(|| {
         module_err(format!(
@@ -707,16 +725,20 @@ fn decode_args(
         v.ok_or_else(|| module_err(format!("{module}: {what} must not be NULL")))
     };
 
-    let tbl_slot = find("tbl").expect("tbl is required by every module");
-    let metric_slot = find("metric").expect("metric is required by every module");
+    let tbl_slot =
+        find("tbl").ok_or_else(|| module_err(format!("{module}: missing tbl argument")))?;
+    let metric_slot =
+        find("metric").ok_or_else(|| module_err(format!("{module}: missing metric argument")))?;
     let filter_slot = find("filter");
-    let start_slot = find("start").expect("start is required by every module");
-    let stop_slot = find("stop").expect("stop is required by every module");
+    let start_slot =
+        find("start").ok_or_else(|| module_err(format!("{module}: missing start argument")))?;
+    let stop_slot =
+        find("stop").ok_or_else(|| module_err(format!("{module}: missing stop argument")))?;
     let step_slot = find("step");
     let width_slot = find("lookback")
         .or_else(|| find("window"))
         .or_else(|| find("resolution"))
-        .expect("every module declares a width-family argument");
+        .ok_or_else(|| module_err(format!("{module}: missing width argument")))?;
     let agg_slot = find("agg");
 
     let spec = get_text(tbl_slot, "tbl")?;
@@ -1421,7 +1443,7 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (sid, labels, buckets) = &self.rows[self.pos];
+        let (sid, labels, buckets) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(sid),
             1 => {
@@ -1676,11 +1698,11 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
         const M: &str = "timeless_aggregate";
         let slots = named_slots(M, AGGREGATE_ARGS, AGGREGATE_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
-            let v: Option<String> = args.get(slots[i].unwrap())?;
+            let v: Option<String> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let int = |i: usize, what: &str| -> Result<i64> {
-            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            let v: Option<i64> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
 
@@ -1748,7 +1770,7 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (sid, labels, value) = &self.rows[self.pos];
+        let (sid, labels, value) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(sid),
             1 => {
@@ -1833,11 +1855,11 @@ unsafe impl VTabCursor for AggregateFrameCursor<'_> {
         const M: &str = "timeless_aggregate_frame";
         let slots = named_slots(M, AGGREGATE_ARGS, AGGREGATE_REQUIRED, idx_num)?;
         let text = |index: usize, what: &str| -> Result<String> {
-            let value: Option<String> = args.get(slots[index].unwrap())?;
+            let value: Option<String> = args.get(argv(&slots, index)?)?;
             value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let integer = |index: usize, what: &str| -> Result<i64> {
-            let value: Option<i64> = args.get(slots[index].unwrap())?;
+            let value: Option<i64> = args.get(argv(&slots, index)?)?;
             value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let (database, table) = split_spec(&text(0, "tbl")?);
@@ -1891,7 +1913,7 @@ unsafe impl VTabCursor for AggregateFrameCursor<'_> {
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
         match col {
-            0 => ctx.set_result(&self.rows[self.pos]),
+            0 => ctx.set_result(cursor_row(&self.rows, self.pos)?),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -1977,11 +1999,11 @@ unsafe impl VTabCursor for LatestCursor<'_> {
         const M: &str = "timeless_latest";
         let slots = named_slots(M, LATEST_ARGS, LATEST_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
-            let v: Option<String> = args.get(slots[i].unwrap())?;
+            let v: Option<String> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let int = |i: usize, what: &str| -> Result<i64> {
-            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            let v: Option<i64> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
 
@@ -2048,7 +2070,7 @@ unsafe impl VTabCursor for LatestCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (sid, labels, ts, value) = &self.rows[self.pos];
+        let (sid, labels, ts, value) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(sid),
             1 => {
@@ -2131,11 +2153,11 @@ unsafe impl VTabCursor for LatestFrameCursor<'_> {
         const M: &str = "timeless_latest_frame";
         let slots = named_slots(M, LATEST_ARGS, LATEST_REQUIRED, idx_num)?;
         let text = |index: usize, what: &str| -> Result<String> {
-            let value: Option<String> = args.get(slots[index].unwrap())?;
+            let value: Option<String> = args.get(argv(&slots, index)?)?;
             value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let integer = |index: usize, what: &str| -> Result<i64> {
-            let value: Option<i64> = args.get(slots[index].unwrap())?;
+            let value: Option<i64> = args.get(argv(&slots, index)?)?;
             value.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let (database, table) = split_spec(&text(0, "tbl")?);
@@ -2196,7 +2218,7 @@ unsafe impl VTabCursor for LatestFrameCursor<'_> {
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
         match col {
-            0 => ctx.set_result(&self.rows[self.pos]),
+            0 => ctx.set_result(cursor_row(&self.rows, self.pos)?),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -2288,11 +2310,11 @@ unsafe impl VTabCursor for RawCursor<'_> {
         const M: &str = "timeless_raw";
         let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
-            let v: Option<String> = args.get(slots[i].unwrap())?;
+            let v: Option<String> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let int = |i: usize, what: &str| -> Result<i64> {
-            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            let v: Option<i64> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let (database, table) = split_spec(&text(0, "tbl")?);
@@ -2357,7 +2379,7 @@ unsafe impl VTabCursor for RawCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (sid, labels, ts, value) = &self.rows[self.pos];
+        let (sid, labels, ts, value) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(sid),
             1 => ctx.set_result(labels),
@@ -2437,11 +2459,11 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
         const M: &str = "timeless_raw_batches";
         let slots = named_slots(M, RAW_ARGS, RAW_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
-            let v: Option<String> = args.get(slots[i].unwrap())?;
+            let v: Option<String> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let int = |i: usize, what: &str| -> Result<i64> {
-            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            let v: Option<i64> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let (database, table) = split_spec(&text(0, "tbl")?);
@@ -2515,7 +2537,7 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (sid, labels, points) = &self.rows[self.pos];
+        let (sid, labels, points) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(sid),
             1 => {
@@ -2620,11 +2642,11 @@ unsafe impl VTabCursor for RawFrameCursor<'_> {
         const M: &str = "timeless_raw_frame";
         let slots = named_slots(M, RAW_FRAME_ARGS, RAW_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
-            let v: Option<String> = args.get(slots[i].unwrap())?;
+            let v: Option<String> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let int = |i: usize, what: &str| -> Result<i64> {
-            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            let v: Option<i64> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let (database, table) = split_spec(&text(0, "tbl")?);
@@ -2698,7 +2720,7 @@ unsafe impl VTabCursor for RawFrameCursor<'_> {
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
         match col {
-            0 => ctx.set_result(&self.rows[self.pos]),
+            0 => ctx.set_result(cursor_row(&self.rows, self.pos)?),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -2753,7 +2775,8 @@ fn encode_raw_frame(batch: &[(i64, Vec<(i64, f64)>)]) -> Result<Vec<u8>> {
         out.extend_from_slice(&series_id.to_le_bytes());
     }
     for (_, points) in &non_empty {
-        let count = u32::try_from(points.len()).expect("point count checked above");
+        let count = u32::try_from(points.len())
+            .map_err(|_| module_err("encode_raw_frame: point count exceeds u32".into()))?;
         out.extend_from_slice(&count.to_le_bytes());
     }
     for (_, points) in &non_empty {
@@ -2869,7 +2892,7 @@ unsafe impl<T: KernelVTab> VTabCursor for KernelCursor<'_, T> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (series_id, labels, ts, value) = &self.rows[self.pos];
+        let (series_id, labels, ts, value) = cursor_row(&self.rows, self.pos)?;
         match col {
             COL_LABELS => ctx.set_result(labels),
             1 => ctx.set_result(ts),
@@ -3141,7 +3164,7 @@ unsafe impl VTabCursor for RollupBatchCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (series_id, labels, buckets) = &self.rows[self.pos];
+        let (series_id, labels, buckets) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(series_id),
             1 => {
@@ -3353,11 +3376,11 @@ unsafe impl VTabCursor for TraceDiscoveryCursor<'_> {
             }
         };
         let slots = named_slots(module, names, required, idx_num)?;
-        let table_spec: Option<String> = args.get(slots[0].unwrap())?;
+        let table_spec: Option<String> = args.get(argv(&slots, 0)?)?;
         let table_spec =
             table_spec.ok_or_else(|| module_err(format!("{module}: tbl must not be NULL")))?;
         let service = if matches!(self.kind, TraceDiscoveryKind::Operations) {
-            let value: Option<String> = args.get(slots[1].unwrap())?;
+            let value: Option<String> = args.get(argv(&slots, 1)?)?;
             Some(value.ok_or_else(|| module_err(format!("{module}: service must not be NULL")))?)
         } else {
             None
@@ -3388,7 +3411,7 @@ unsafe impl VTabCursor for TraceDiscoveryCursor<'_> {
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
         match col {
-            0 => ctx.set_result(&self.rows[self.pos]),
+            0 => ctx.set_result(cursor_row(&self.rows, self.pos)?),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -3475,7 +3498,7 @@ unsafe impl VTabCursor for LogCountCursor<'_> {
     fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
         const M: &str = "timeless_log_count";
         let slots = named_slots(M, LOG_COUNT_ARGS, LOG_COUNT_REQUIRED, idx_num)?;
-        let table_spec: Option<String> = args.get(slots[0].unwrap())?;
+        let table_spec: Option<String> = args.get(argv(&slots, 0)?)?;
         let table_spec =
             table_spec.ok_or_else(|| module_err(format!("{M}: tbl must not be NULL")))?;
         let (database, table) = split_spec(&table_spec);
@@ -3667,7 +3690,9 @@ unsafe impl VTabCursor for LogValuesCursor<'_> {
         const M: &str = "timeless_log_values";
         let slots = named_slots(M, LOG_VALUES_ARGS, LOG_VALUES_REQUIRED, idx_num)?;
         let required_text = |slot: Option<usize>, name: &str| -> Result<String> {
-            let value: Option<String> = args.get(slot.expect("required slot validated"))?;
+            let slot = slot
+                .ok_or_else(|| module_err(format!("{M}: {name} constraint was not pushed down")))?;
+            let value: Option<String> = args.get(slot)?;
             value
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| module_err(format!("{M}: {name} must not be NULL or empty")))
@@ -3757,7 +3782,7 @@ unsafe impl VTabCursor for LogValuesCursor<'_> {
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
         match col {
-            0 => ctx.set_result(&self.values[self.pos]),
+            0 => ctx.set_result(cursor_row(&self.values, self.pos)?),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -3872,11 +3897,11 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
         const M: &str = "timeless_log_buckets";
         let slots = named_slots(M, LOG_BUCKETS_ARGS, LOG_BUCKETS_REQUIRED, idx_num)?;
         let text = |i: usize, what: &str| -> Result<String> {
-            let v: Option<String> = args.get(slots[i].unwrap())?;
+            let v: Option<String> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let int = |i: usize, what: &str| -> Result<i64> {
-            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            let v: Option<i64> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let (database, table) = split_spec(&text(0, "tbl")?);
@@ -3935,7 +3960,7 @@ unsafe impl VTabCursor for LogBucketsCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (bucket_ts, group, n) = &self.rows[self.pos];
+        let (bucket_ts, group, n) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(bucket_ts),
             1 => ctx.set_result(group),
@@ -4023,10 +4048,10 @@ unsafe impl VTabCursor for TraceBucketsCursor<'_> {
         const M: &str = "timeless_trace_buckets";
         let slots = named_slots(M, TRACE_BUCKETS_ARGS, TRACE_BUCKETS_REQUIRED, idx_num)?;
         let int = |i: usize, what: &str| -> Result<i64> {
-            let v: Option<i64> = args.get(slots[i].unwrap())?;
+            let v: Option<i64> = args.get(argv(&slots, i)?)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
-        let spec: Option<String> = args.get(slots[0].unwrap())?;
+        let spec: Option<String> = args.get(argv(&slots, 0)?)?;
         let spec = spec.ok_or_else(|| module_err(format!("{M}: tbl must not be NULL")))?;
         let (database, table) = split_spec(&spec);
         let service: Option<String> = match slots[1] {
@@ -4066,7 +4091,7 @@ unsafe impl VTabCursor for TraceBucketsCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let b = &self.rows[self.pos];
+        let b = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(&b.bucket_ts),
             1 => ctx.set_result(&b.service),
@@ -4358,7 +4383,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 }
                 source.clone()
             }
-            None => split_spec(&get(slots[0].unwrap(), "tbl")?),
+            None => split_spec(&get(argv(&slots, 0)?, "tbl")?),
         };
         let metric: Option<String> = match slots[1] {
             Some(slot) => args.get(slot)?,
@@ -4417,11 +4442,12 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 let mut bytes = 0_u64;
                 for (id, info) in candidates {
                     work = work.saturating_add(1);
-                    if max_work.is_some_and(|limit| work > limit) {
-                        return Err(module_err(format!(
-                            "catalog work point limit {} exceeded",
-                            max_work.unwrap()
-                        )));
+                    if let Some(limit) = max_work {
+                        if work > limit {
+                            return Err(module_err(format!(
+                                "catalog work point limit {limit} exceeded"
+                            )));
+                        }
                     }
                     if metric
                         .as_deref()
@@ -4441,11 +4467,10 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                                 .saturating_add(value.len() as u64)
                         },
                     );
-                    if max_bytes.is_some_and(|limit| bytes > limit) {
-                        return Err(module_err(format!(
-                            "catalog byte limit {} exceeded",
-                            max_bytes.unwrap()
-                        )));
+                    if let Some(limit) = max_bytes {
+                        if bytes > limit {
+                            return Err(module_err(format!("catalog byte limit {limit} exceeded")));
+                        }
                     }
                     ids.push(id);
                 }
@@ -4624,9 +4649,9 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
             let v: Option<String> = args.get(s)?;
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
-        let (database, table) = split_spec(&get(slots[0].unwrap(), "tbl")?);
-        let metric = get(slots[1].unwrap(), "metric")?;
-        let key = get(slots[2].unwrap(), "key")?;
+        let (database, table) = split_spec(&get(argv(&slots, 0)?, "tbl")?);
+        let metric = get(argv(&slots, 1)?, "metric")?;
+        let key = get(argv(&slots, 2)?, "key")?;
         let filter_text: Option<String> = match slots[3] {
             Some(slot) => args.get(slot)?,
             None => None,
@@ -4683,7 +4708,7 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
         match col {
-            0 => ctx.set_result(&self.rows[self.pos]),
+            0 => ctx.set_result(cursor_row(&self.rows, self.pos)?),
             _ => ctx.set_result(&rusqlite::types::Null),
         }
     }
@@ -5811,7 +5836,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
-        let (key, value) = &self.rows[self.pos];
+        let (key, value) = cursor_row(&self.rows, self.pos)?;
         match col {
             0 => ctx.set_result(key),
             1 => ctx.set_result(value),

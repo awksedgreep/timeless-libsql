@@ -27,7 +27,7 @@ use rusqlite::vtab::{
     Context, CreateVTab, Filters, IndexInfo, Inserts, Module, TransactionVTab, UpdateVTab, Updates,
     VTab, VTabConnection, VTabCursor, VTabKind,
 };
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, Error, Result};
 
 use crate::sql_ident;
 
@@ -270,7 +270,13 @@ unsafe impl VTabCursor for SpikeCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, i: c_int) -> Result<()> {
-        let (_, ts, value) = self.rows[self.pos];
+        // `eof` guards the position, but a desync must be a SQL error,
+        // never a Rust panic across the FFI boundary.
+        let row = self
+            .rows
+            .get(self.pos)
+            .ok_or(Error::ModuleError("spike cursor has no current row".into()))?;
+        let (_, ts, value) = *row;
         match i {
             0 => ctx.set_result(&ts),
             _ => ctx.set_result(&value),
@@ -278,7 +284,10 @@ unsafe impl VTabCursor for SpikeCursor<'_> {
     }
 
     fn rowid(&self) -> Result<i64> {
-        Ok(self.rows[self.pos].0)
+        self.rows
+            .get(self.pos)
+            .map(|row| row.0)
+            .ok_or(Error::ModuleError("spike cursor has no current row".into()))
     }
 }
 

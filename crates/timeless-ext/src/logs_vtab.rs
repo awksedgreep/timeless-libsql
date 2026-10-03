@@ -652,6 +652,9 @@ impl LogsTab {
         for i in 0..n {
             messages.push(r.str(&format!("message {i}"))?.to_owned());
         }
+        // `levels`/`severities` are built to exactly `n` above.
+        debug_assert_eq!(levels.len(), n);
+        debug_assert_eq!(severities.len(), n);
         for (i, message) in messages.into_iter().enumerate() {
             let meta_txt = r.str(&format!("metadata {i}"))?;
             let (metadata, metadata_json) = if version == 0x01 {
@@ -671,7 +674,11 @@ impl LogsTab {
             };
             entries.push(LogEntry {
                 ts: {
-                    let raw = i64::from_le_bytes(ts_bytes[i * 8..i * 8 + 8].try_into().unwrap());
+                    let raw = i64::from_le_bytes(BatchReader::fixed::<8>(
+                        ts_bytes,
+                        i,
+                        "timestamp column",
+                    )?);
                     if version == 0x01 && self.native_per_second == 1_000_000 {
                         // v0 timestamps are milliseconds; us tables store
                         // microseconds. Scale without silent time-travel;
@@ -1391,10 +1398,13 @@ impl LogsCursor<'_> {
     }
 
     fn advance_stream(&mut self) -> Result<()> {
-        let result = self
-            .shared
-            .engine
-            .query_stream_next(self.stream.as_mut().expect("active stream"));
+        // `next` only advances a live stream; a missing stream means the
+        // scan already ended, so there is simply no current row.
+        let Some(stream) = self.stream.as_mut() else {
+            self.current = None;
+            return Ok(());
+        };
+        let result = self.shared.engine.query_stream_next(stream);
         match result {
             Ok(row) => {
                 self.current = row;
@@ -1682,10 +1692,15 @@ unsafe impl VTabCursor for LogsCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, i: c_int) -> Result<()> {
-        let row = self
-            .current
-            .as_ref()
-            .unwrap_or_else(|| &self.rows[self.pos]);
+        // `eof` guards the position, but a desync must be a SQL error,
+        // never a Rust panic across the FFI boundary.
+        let row = match self.current.as_ref() {
+            Some(row) => row,
+            None => self
+                .rows
+                .get(self.pos)
+                .ok_or_else(|| module_err("logs cursor has no current row".into()))?,
+        };
         let i = i as usize;
         match i {
             0 => ctx.set_result(&row.ts),

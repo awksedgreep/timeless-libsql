@@ -701,8 +701,22 @@ impl TracesTab {
         }
 
         let mut entries = Vec::with_capacity(n);
+        // Every column above is built to exactly `n` (older versions use
+        // defaults), so indexed assembly below cannot run past input.
+        // Byte columns still decode through the bounds-checked reader so
+        // a short column is a SQL error, never a panic.
+        debug_assert_eq!(names.len(), n);
+        debug_assert_eq!(services.len(), n);
+        debug_assert_eq!(attributes.len(), n);
+        debug_assert_eq!(status_descriptions.len(), n);
+        debug_assert_eq!(events.len(), n);
+        debug_assert_eq!(resources.len(), n);
+        debug_assert_eq!(scopes.len(), n);
+        debug_assert_eq!(links.len(), n);
+        debug_assert_eq!(trace_states.len(), n);
+        debug_assert_eq!(trace_flags.len(), n);
         for i in 0..n {
-            let parent: [u8; 8] = parent_ids[i * 8..i * 8 + 8].try_into().unwrap();
+            let parent: [u8; 8] = BatchReader::fixed(parent_ids, i, "parent_id column")?;
             let service = otel_json::derive_service(
                 attributes[i].as_ref(),
                 resources[i].as_ref(),
@@ -710,16 +724,24 @@ impl TracesTab {
             )
             .map_err(|error| module_err(format!("batch blob: span {i}: {error}")))?;
             entries.push(SpanEntry {
-                trace_id: trace_ids[i * 16..i * 16 + 16].try_into().unwrap(),
-                span_id: span_ids[i * 8..i * 8 + 8].try_into().unwrap(),
+                trace_id: BatchReader::fixed(trace_ids, i, "trace_id column")?,
+                span_id: BatchReader::fixed(span_ids, i, "span_id column")?,
                 parent_span_id: (parent != [0u8; 8]).then_some(parent),
                 name: std::mem::take(&mut names[i]),
                 service,
                 kind: kinds[i],
                 status: statuses[i],
                 status_description: std::mem::take(&mut status_descriptions[i]),
-                start_ts: i64::from_le_bytes(start_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
-                duration_ns: i64::from_le_bytes(dur_bytes[i * 8..i * 8 + 8].try_into().unwrap()),
+                start_ts: i64::from_le_bytes(BatchReader::fixed(
+                    start_bytes,
+                    i,
+                    "start_ts column",
+                )?),
+                duration_ns: i64::from_le_bytes(BatchReader::fixed(
+                    dur_bytes,
+                    i,
+                    "duration column",
+                )?),
                 attributes: std::mem::take(&mut attributes[i]),
                 events: std::mem::take(&mut events[i]),
                 resource: std::mem::take(&mut resources[i]),
@@ -1778,10 +1800,15 @@ unsafe impl VTabCursor for TracesCursor<'_> {
     }
 
     fn column(&self, ctx: &mut Context, i: c_int) -> Result<()> {
-        let row = self
-            .current
-            .as_ref()
-            .unwrap_or_else(|| &self.rows[self.pos]);
+        // `eof` guards the position, but a desync must be a SQL error,
+        // never a Rust panic across the FFI boundary.
+        let row = match self.current.as_ref() {
+            Some(row) => row,
+            None => self
+                .rows
+                .get(self.pos)
+                .ok_or_else(|| module_err("traces cursor has no current row".into()))?,
+        };
         match i as usize {
             // Ids come back as BLOBs, always (hex() in SQL to display).
             COL_TRACE_ID => ctx.set_result(&&row.trace_id[..]),
