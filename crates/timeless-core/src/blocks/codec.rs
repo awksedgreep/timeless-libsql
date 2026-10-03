@@ -84,8 +84,8 @@ use std::collections::BTreeSet;
 
 use timeless_codec::{
     bitmap_len, check_block_range, check_entry_count, decode_bitmap, decode_i64, decode_str,
-    decode_u8, encode_bitmap, encode_i64, encode_str, encode_u8, zstd_compress, zstd_decompress,
-    Reader,
+    decode_u8, encode_bitmap, encode_i64, encode_str, encode_u8, read_column_frame, zstd_compress,
+    zstd_decompress, Reader, DECOMPRESS_MAX_BYTES, ENC_STR_DICT, ENC_STR_ZSTD,
 };
 
 use super::{template, BlockMeta, LogEntry};
@@ -672,12 +672,108 @@ pub fn block_message_feasible(bytes: &[u8], needle: &str) -> Result<bool, String
         CODEC_RAW | CODEC_RICH_RAW => Ok(contains(msg)),
         // Codec 2: same concatenation behind plain zstd.
         CODEC_ZSTD => Ok(contains(&zstd_decompress(msg, "message column")?)),
-        // Codecs 4/5/7: the typed string column.
+        // Codecs 4/5/7: the typed string column, decided WITHOUT
+        // materializing N owned Strings (see `columnar_message_feasible`).
         CODEC_COLUMNAR | CODEC_COLUMNAR_V2 | CODEC_RICH_COLUMNAR => {
-            let messages = decode_str(msg, n)?;
-            Ok(messages.iter().any(|message| contains(message.as_bytes())))
+            columnar_message_feasible(msg, n, &contains)
         }
         _ => Ok(true),
+    }
+}
+
+/// Columnar-arm feasibility for [`block_message_feasible`]: same
+/// absence-proof contract, without materializing N owned Strings.
+///
+/// Concat+zstd decompresses to the same concatenation the CODEC_ZSTD arm
+/// scans (cross-boundary false positives fall through to full decode —
+/// sound either way). Dictionary scans each DISTINCT entry once for the
+/// needle, then walks the RLE runs for a hit; runs are fully validated
+/// (code range, positive lengths, exact sum) so corruption still errors
+/// exactly where `decode_str` would.
+fn columnar_message_feasible(
+    msg: &[u8],
+    n: usize,
+    contains: &dyn Fn(&[u8]) -> bool,
+) -> Result<bool, String> {
+    use timeless_codec::zstd_decompress_capped;
+    let (enc, payload) = read_column_frame(msg, "message column")?;
+    match enc {
+        ENC_STR_ZSTD => {
+            let raw = zstd_decompress_capped(payload, "message column", DECOMPRESS_MAX_BYTES)?;
+            // Same framing walk `decode_str` performs, but each message
+            // is scanned as a borrowed slice: no owned-String
+            // materialization. Per-row (not whole-blob) scanning also
+            // matches the faster code shape — one wide windows() scan
+            // over the concatenation measures ~2x slower.
+            let mut r = Reader::new(&raw);
+            let mut count = 0usize;
+            let mut found = false;
+            while r.remaining() > 0 {
+                let len = r.u32("string length")? as usize;
+                let bytes = r.take(len, "string bytes")?;
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| format!("string column: value {count} is not valid UTF-8"))?;
+                count += 1;
+                found = found || contains(text.as_bytes());
+            }
+            if count != n {
+                return Err(format!(
+                    "string column: expected {n} strings, found {count}"
+                ));
+            }
+            Ok(found)
+        }
+        ENC_STR_DICT => {
+            let mut r = Reader::new(payload);
+            let dict_count = r.u32("dict count")? as usize;
+            let dict_zstd_len = r.u32("dict zstd length")? as usize;
+            let dict_zstd = r.take(dict_zstd_len, "dict bytes")?;
+            let codes_zstd = r.take(r.remaining(), "code bytes")?;
+            let dict_raw =
+                zstd_decompress_capped(dict_zstd, "message dictionary", DECOMPRESS_MAX_BYTES)?;
+            let mut dr = Reader::new(&dict_raw);
+            let mut hits = vec![false; dict_count];
+            for (index, hit) in hits.iter_mut().enumerate() {
+                let len = dr.u32("dict entry length")? as usize;
+                let bytes = dr.take(len, "dict entry bytes")?;
+                let text = std::str::from_utf8(bytes)
+                    .map_err(|_| format!("string column: dict entry {index} is not valid UTF-8"))?;
+                *hit = contains(text.as_bytes());
+            }
+            if dr.remaining() != 0 {
+                return Err("string column: trailing bytes in dictionary".into());
+            }
+            let codes_raw =
+                zstd_decompress_capped(codes_zstd, "message codes", DECOMPRESS_MAX_BYTES)?;
+            if codes_raw.len() % 8 != 0 {
+                return Err("string column: RLE stream is not (u32,u32) pairs".into());
+            }
+            let mut expanded = 0usize;
+            let mut found = false;
+            for pair in codes_raw.as_chunks::<8>().0 {
+                let run = u32::from_le_bytes(pair[0..4].try_into().unwrap()) as usize;
+                let code = u32::from_le_bytes(pair[4..8].try_into().unwrap()) as usize;
+                if code >= dict_count {
+                    return Err(format!(
+                        "string column: code {code} out of range (dict has {dict_count})"
+                    ));
+                }
+                if run == 0 || expanded.checked_add(run).is_none_or(|total| total > n) {
+                    return Err(format!(
+                        "string column: RLE runs sum past expected count {n}"
+                    ));
+                }
+                expanded += run;
+                found = found || hits[code];
+            }
+            if expanded != n {
+                return Err(format!(
+                    "string column: RLE expanded to {expanded} values, expected {n}"
+                ));
+            }
+            Ok(found)
+        }
+        other => Err(format!("string column: unknown encoding id {other}")),
     }
 }
 
@@ -1187,4 +1283,57 @@ fn parse_metadata(raw: &[u8], n: usize) -> Result<Vec<Vec<(String, String)>>, St
         return Err("block: trailing bytes in metadata column".into());
     }
     Ok(metadatas)
+}
+
+#[cfg(test)]
+mod feasibility_tests {
+    use super::*;
+
+    fn workload_messages(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "order {i} shipped via carrier {} tracking {:04} status ok",
+                    (i * 13) % 9,
+                    (i * 29) % 8000
+                )
+            })
+            .collect()
+    }
+
+    /// `columnar_message_feasible` must agree with full decode + scan on
+    /// present, absent, and cross-boundary needles (absence proof has no
+    /// false negatives either way).
+    #[test]
+    fn columnar_feasibility_matches_full_decode() {
+        for n in [1, 7, 8192] {
+            let msgs = workload_messages(n);
+            let refs: Vec<&str> = msgs.iter().map(|s| s.as_str()).collect();
+            let frame = timeless_codec::encode_str(refs, n, 3)
+                .unwrap()
+                .to_bytes()
+                .unwrap();
+            for needle in [
+                "carrier 3",
+                "zzz-no-such-string-anywhere",
+                "ipped via carrier",
+                "status ok",
+            ] {
+                let expected = {
+                    let all = timeless_codec::decode_str(&frame, n).unwrap();
+                    all.iter().any(|m| {
+                        m.as_bytes()
+                            .windows(needle.len())
+                            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+                    })
+                };
+                let got = columnar_message_feasible(&frame, n, &|t: &[u8]| {
+                    t.windows(needle.len())
+                        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+                })
+                .unwrap();
+                assert_eq!(got, expected, "n={n} needle={needle:?}");
+            }
+        }
+    }
 }
