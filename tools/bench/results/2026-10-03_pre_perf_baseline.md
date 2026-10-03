@@ -1,0 +1,114 @@
+# Pre-perf-work baseline — 2026-10-03 (same host as July baselines)
+
+Starting revision: `df6ceee` on `main` (all 8 correctness fixes #98–#105
+landed, no perf work yet). clean tree. Purpose: regression reference for
+perf issues #106–#115. Method follows TESTING.md and the RESULTS.md
+checkpoints: release build, each binary run twice, second run quoted.
+
+```sh
+cargo build --release -p timeless-ext --locked
+cargo build --release --manifest-path tools/bench/Cargo.toml --locked
+EXT="$PWD/target/release/libtimeless_ext.so"
+./tools/bench/target/release/bench "$EXT"            # x2
+./tools/bench/target/release/bench-logs "$EXT"       # x2
+./tools/bench/target/release/bench-traces "$EXT"     # x2
+./tools/bench/target/release/bench-codec             # x2
+./tools/bench/target/release/query-read "$EXT"       # x2
+```
+
+Environment:
+
+- Arch Linux, x86-64, 93 GB RAM
+- Intel Core Ultra 9 185H, 22 logical CPUs
+- CPU governor: `powersave`
+- Rust/Cargo 1.98.1 (July baselines used 1.97.0), release profile LTO + 1 codegen unit
+- system SQLite 3.53.4 / bundled 3.53.2 (query-read reports 3.53.2)
+- benchmark databases: `/tmp` on `tmpfs`, removed by default
+
+## Metrics (`bench`, 1M points; run2 quoted, run1 in parens)
+
+| workload | run2 | run1 |
+|---|---:|---:|
+| plain ingest | 3.62M pts/s | 3.58M pts/s |
+| Tier 1 ingest | 1.37M pts/s | 1.46M pts/s |
+| Tier 1 / plain | 0.378x | 0.408x |
+| Tier 2 ingest | 16.55M pts/s | 17.23M pts/s |
+| Tier 2 / plain | 4.57x | 4.81x |
+| Tier 1 flush | 34.9 ms | 31.3 ms |
+| Tier 2 flush | 34.0 ms | 28.9 ms |
+| name + range query (10001 rows) | 4.7 ms | 3.9 ms |
+| full-scan count (1M rows) | 235.9 ms | 221.8 ms |
+| compressed size | 18.694 B/pt | 18.694 B/pt |
+| grid TVF (16600 rows) | 3.3 ms | 3.0 ms |
+| window avg TVF | 3.3 ms | 3.1 ms |
+| window exact p95 TVF | 10.9 ms | 10.1 ms |
+| rollup build (1000 chunks) | 115.4 ms | 105.0 ms |
+| rollup tier read | 8.7 ms | 7.9 ms |
+
+## Logs (`bench-logs`, 1M entries; run2 quoted, run1 in parens)
+
+| workload | run2 | run1 |
+|---|---:|---:|
+| tier1 ingest | 0.29M entries/s | 0.29M entries/s |
+| tier2 ingest | 0.46M entries/s | 0.45M entries/s |
+| vtab flush | 0.7 ms | 0.8 ms |
+| vtab optimize (small) | 30.4 ms | 29.2 ms |
+| trigram optimize | 1228.5 ms | 1332.3 ms |
+| level=error, cold / warm (49857 rows) | 48.0 / 4.9 ms | 48.3 / 4.8 ms |
+| service+level+range, cold / pushdown (1704 rows) | 140.5 / 7.3 ms | 143.7 / 7.5 ms |
+| LIKE %timeout%, cold / indexed (58479 rows) | 92.1 / 28.5 ms | 95.0 / 28.5 ms |
+| count(*) after reopen (1M rows) | 61.0 ms | 60.5 ms |
+| log_buckets (200 rows) | 229.2 ms | 218.9 ms |
+| storage | 9.10 B/entry | 9.10 B/entry |
+
+## Traces (`bench-traces`, ~960k spans; run2 quoted, run1 in parens)
+
+| workload | run2 | run1 |
+|---|---:|---:|
+| tier1 ingest | 0.16M spans/s | 0.16M spans/s |
+| batch-v0 ingest | 0.25M spans/s | 0.24M spans/s |
+| batch-v1 rich ingest | 0.19M spans/s | 0.18M spans/s |
+| batch-v0 flush / optimize | 113.0 / 1003.2 ms | 123.5 / 993.0 ms |
+| batch-v1 flush / optimize | 122.5 / 1173.2 ms | 126.3 / 1193.3 ms |
+| point lookup, cold / warm (936 spans) | 0.005 / 0.309 ms | 0.005 / 0.305 ms |
+| status=error, cold / warm (10220 rows) | 58.9 / 1.3 ms | 58.2 / 1.3 ms |
+| service+range, cold / pushdown (32072 rows) | 61.4 / 30.0 ms | 60.8 / 29.9 ms |
+| trace_buckets (500 rows) | 223.6 ms | 228.4 ms |
+| storage | 34.62 B/span | 34.61 B/span |
+
+## Codec (`bench-codec`; run2)
+
+| dataset | codec5 encode | codec5 decode | size vs codec4 |
+|---|---|---:|---:|
+| logs (110.30 MB raw) | 110 MB/s (0.99M e/s) | 538 MB/s (4.88M e/s) | -8.1% |
+| traces (176.04 MB raw) | 140 MB/s (0.76M e/s) | 477 MB/s (2.60M e/s) | +0.0% |
+
+## Query-read (`query-read`, 12000 series x 60 pts; run2 median_us)
+
+Full CSVs: `/tmp/baseline_20261003/query_read_run{1,2}.txt` (retained on
+this host only). Hot medians: `scalar_aggregate_native` ~14.6ms vs
+fallback ~42.7ms; `latest_native` ~15.2ms vs fallback ~43.1ms;
+`latest_frame` ~3.3ms; `grid_count` ~39.5ms; `rollup_avg_count` ~138ms.
+
+## Vs July R1-R8 checkpoint (same host/governor, indicative only)
+
+Two months of engine work plus Rust 1.97.0 -> 1.98.1 sit between these
+numbers, and some workloads changed shape, so this is not an A/B:
+
+| workload | R1-R8 (Jul) | now (run2) | note |
+|---|---:|---:|---|
+| metrics T1 / plain | 0.460x | 0.378x | normalized ingest down; needs A/B to attribute |
+| metrics T2 / plain | 3.792x | 4.57x | up |
+| metrics T2 flush | 210.7 ms | 34.0 ms | workload shape changed; not comparable |
+| metrics name+range | 5.6 ms | 4.7 ms | same direction |
+| metrics full-scan | 201.5 ms | 235.9 ms | slower; needs A/B |
+| metrics B/pt | 8.344 | 18.694 | storage model changed since July |
+| logs ingest | 0.81M e/s | 0.29M (t1) / 0.46M (t2) | workload shape changed; not comparable |
+| logs B/entry | 8.93 | 9.10 | close |
+| traces ingest | 0.55M s/s | 0.16M (t1) / 0.25M (v0) | workload shape changed; not comparable |
+| traces B/span | 37.36 | 34.62 | close |
+| traces point lookup | 3.637 ms | 0.309 ms warm | workload shape changed; not comparable |
+
+Raw outputs: `/tmp/baseline_20261003/` (`bench_run{1,2}.txt`,
+`bench_logs_run{1,2}.txt`, `bench_traces_run{1,2}.txt`,
+`bench_codec_run2.txt`, `query_read_run{1,2}.txt`).
