@@ -3356,21 +3356,40 @@ impl Engine {
         }
 
         let _transition = self.transition_read();
-        let matching: Vec<Vec<ChunkMeta>> = {
+        // One ordered sweep over the chunk index instead of a B-tree
+        // walk per series: sort input positions by series id, then scan
+        // once from the first key. Output order still follows the input
+        // (including duplicate ids), so downstream loc/payload alignment
+        // and work accounting are unchanged.
+        let mut order: Vec<usize> = (0..series_ids.len()).collect();
+        order.sort_unstable_by_key(|&i| series_ids[i]);
+        let mut matching: Vec<Vec<ChunkMeta>> = Vec::with_capacity(series_ids.len());
+        matching.resize_with(series_ids.len(), Vec::new);
+        {
             let index = self.index_read();
-            series_ids
-                .iter()
-                .map(|&series_id| {
-                    let pk = PartitionKey { series_id };
-                    index
-                        .range((pk, i64::MIN, u64::MIN)..)
-                        .take_while(|((key, _, _), _)| key == &pk)
-                        .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-                        .map(|(_, meta)| meta.clone())
-                        .collect()
-                })
-                .collect()
-        };
+            if let Some(&first) = order.first() {
+                let first_pk = PartitionKey {
+                    series_id: series_ids[first],
+                };
+                let mut range = index.range((first_pk, i64::MIN, u64::MIN)..);
+                let mut o = 0;
+                for ((key, _, _), meta) in range.by_ref() {
+                    while o < order.len() && series_ids[order[o]] < key.series_id {
+                        o += 1;
+                    }
+                    if o >= order.len() {
+                        break;
+                    }
+                    let mut p = o;
+                    while p < order.len() && series_ids[order[p]] == key.series_id {
+                        if meta.min_ts <= t_end && meta.max_ts >= t_start {
+                            matching[order[p]].push(meta.clone());
+                        }
+                        p += 1;
+                    }
+                }
+            }
+        }
         let locs: Vec<ChunkLoc> = matching
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
@@ -3422,7 +3441,14 @@ impl Engine {
         let mut buffered_points_considered = 0_u64;
         let mut returned_points = 0_u64;
         for (&series_id, chunks) in series_ids.iter().zip(matching) {
-            let mut points = Vec::new();
+            // Pre-size from the chunk point counts: one allocation per
+            // series instead of geometric regrowth across chunks.
+            let mut points = Vec::with_capacity(
+                chunks
+                    .iter()
+                    .map(|meta| meta.point_count as usize)
+                    .sum::<usize>(),
+            );
             for meta in chunks {
                 let bytes = payloads
                     .next()
@@ -3457,7 +3483,7 @@ impl Engine {
                     }
                 }
             }
-            points.sort_by_key(|&(timestamp, _)| timestamp);
+            points.sort_unstable_by_key(|&(timestamp, _)| timestamp);
             returned_points = returned_points.saturating_add(points.len() as u64);
             result.push((series_id, points));
         }
