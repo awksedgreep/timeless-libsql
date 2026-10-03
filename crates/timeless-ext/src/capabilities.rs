@@ -147,7 +147,7 @@ fn document() -> &'static str {
                 }
             },
             "sql_surfaces": {
-                "scalar_functions": ["timeless_capabilities", "timeless_pins"],
+                "scalar_functions": ["timeless_capabilities", "timeless_pins", "timeless_upgrade"],
                 "storage_modules": [
                     "timeless_metrics",
                     "timeless_logs",
