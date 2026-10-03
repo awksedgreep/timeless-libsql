@@ -132,3 +132,22 @@ Verdict: tier1 admission **+25–33% relative** (0.378–0.408x -> stable
 0.502–0.503x across both runs — outside noise). Tier2 also up
 (series-table labels decode shares the parser). Queries unchanged
 within noise. Raw: `/tmp/baseline_20261003/bench_111_run{1,2}.txt`.
+
+## Retest: #110 partitioned bulk append (rev f790f3d, same protocol)
+
+`bench` double run, second quoted. Bit-exact f64 spot checks pass on
+both runs; storage byte-identical (18.694 B/pt).
+
+| metric | baseline r1 | baseline r2 | #110 r1 | #110 r2 |
+|---|---:|---:|---:|---:|
+| plain | 3.58M | 3.62M | 3.24M | 3.61M |
+| tier2 | 17.23M | 16.55M | 35.31M | 38.84M |
+| **tier2 / plain** | **4.81x** | **4.57x** | **10.9x** | **10.8x** |
+| tier1 | 1.46M | 1.37M | 1.60M | 1.76M |
+| tier1 / plain | 0.408x | 0.378x | 0.494x | 0.488x |
+| flush / compact | 28.9 / 1211 ms | 34.0 / 1330 ms | 33.9 / 1297 ms | 30.7 / 1182 ms |
+
+Verdict: tier2 admission **~2.3x relative** (4.6–4.8x -> stable
+10.8–10.9x across both runs). Tier1 steady at the #111 level.
+Flush/compact/queries/storage unchanged. Raw:
+`/tmp/baseline_20261003/bench_110_run{1,2}.txt`.
