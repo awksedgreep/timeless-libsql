@@ -266,3 +266,17 @@ SQL-level ordering is not free when rows carry blobs.
 Raw: `/tmp/baseline_20261003/query_read_114_run{1,2}.txt` (join
 version, regressed), `/tmp/baseline_20261003/query_read_114b_run{1,2}.txt`
 (reverted, recovered).
+
+## Retest: #115 batched flush persist (rev 5d793da, same protocol)
+
+Tracked `bench` steady (T1 1.60M, T2 39.1M, flush/queries/storage
+within noise). Dedicated A/B (pre/post binaries, 2000 single-flush
+partitions, medians): pre 42.0 ms, post 42.2 ms — **neutral**. The
+store's `insert_chunks` still executes per chunk (it needs per-row
+rowids; multi-row + RETURNING would rely on undocumented output
+order, so it stays). The wider drain-outside-locks redesign is
+deferred with reason: drained-but-unflushed entries would go invisible
+to concurrent queries without a staging area on every query path,
+and the measured lock-hold cost here (~ms per flush) doesn't justify
+that surgery now. Raw:
+`/tmp/baseline_20261003/bench_115_run{1,2}.txt`.
