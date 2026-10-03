@@ -2286,17 +2286,26 @@ impl Engine {
             return Ok(0);
         }
         let mut count = 0;
+        // Drain every eligible partition first, then persist once: one
+        // store round-trip (one borrow, one stats adjust, one generation
+        // bump) and one index insert instead of one per partition. Spans
+        // and logs flushes already persist this way; host-transaction
+        // atomicity is unchanged (rollback still covers every row).
+        let mut batch = Vec::with_capacity(keys.len());
         for key in keys {
             if let Some((timestamps, values)) =
                 self.drain_partition_if(&key, |buf| buf.timestamps.len() >= self.min_flush_size)
             {
                 let cp = self.compress_partition(&key, &timestamps, &values)?;
-                let meta = self.put_single_chunk(&cp)?;
-                self.index_insert_new(vec![(key, meta)]);
+                batch.push(cp);
                 count += 1;
             } else {
                 self.clear_flush_queued(&key);
             }
+        }
+        if !batch.is_empty() {
+            let indexed = self.put_chunk_batch(&batch)?;
+            self.index_insert_new(indexed);
         }
         self.save_series()?;
         Ok(count)
