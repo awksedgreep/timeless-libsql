@@ -166,3 +166,23 @@ per-statement VDBE overhead was only ~1–2 ms of ~20 ms on tmpfs.
 Kept anyway: 9500 statements -> 24 per block with identical semantics
 (OR IGNORE + inserted-row accounting verified), which matters more on
 durable (non-tmpfs) storage with real sync costs.
+
+## Retest: #107 single-parse log metadata (rev c26303c, same protocol)
+
+`bench-logs` double run, second quoted. Counts verified equal,
+storage byte-identical (9.10 B/entry).
+
+| metric | baseline r1 | baseline r2 | #107 r1 | #107 r2 |
+|---|---:|---:|---:|---:|
+| plain | 3.24M | 2.86M | 3.17M | 2.87M |
+| tier1 | 0.29M | 0.29M | 0.32M | 0.32M |
+| **tier1 / plain** | **0.089x** | **0.101x** | **0.101x** | **0.112x** |
+| tier2 | 0.45M | 0.46M | 0.49M | 0.46M |
+| flush / trigram optimize | 0.8 / 1332 ms | 0.7 / 1229 ms | 0.8 / 1313 ms | 0.8 / 1313 ms |
+
+Verdict: tier1 admission **~+10% relative**, borderline against the
+plain-driven variance (baseline ratios themselves span 0.089–0.101x).
+Expected order: the bench uses small flat metadata, so serde was a
+modest share; the removed work (2 parses + 1 serialize + full-map
+clone per row) is strictly less. Kept as simplification + small win.
+Raw: `/tmp/baseline_20261003/bench_logs_107_run{1,2}.txt`.
