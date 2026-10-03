@@ -186,3 +186,22 @@ Expected order: the bench uses small flat metadata, so serde was a
 modest share; the removed work (2 parses + 1 serialize + full-map
 clone per row) is strictly less. Kept as simplification + small win.
 Raw: `/tmp/baseline_20261003/bench_logs_107_run{1,2}.txt`.
+
+## Retest: #112 regex cache + filter-before-clone (rev aa15e8e)
+
+`query-read` double run (median_us) + `bench` double run. Anchoring,
+cache hits, and per-query invalid-pattern errors verified live.
+
+| query-read query | baseline r1 | baseline r2 | #112 r1 | #112 r2 |
+|---|---:|---:|---:|---:|
+| selective_regex_raw_batches | 1983 | 1815 | 420 | 1026 |
+| selective_negative_raw_batches | 23785 | 23273 | 20988 | 21795 |
+| selective_series_discovery | 583 | 586 | 421 | 536 |
+| selective_label_values | 542 | 505 | 465 | 544 |
+
+Verdict: regex-filtered queries clearly faster (selective_regex medians
+1983/1815 -> 420/1026; ranges overlap only at extremes). `bench`
+ingest steady (T1 1.52/1.74M, T2 35.1/35.8M — #110 level held),
+queries/storage within noise. Raw:
+`/tmp/baseline_20261003/query_read_112_run{1,2}.txt`,
+`/tmp/baseline_20261003/bench_112_run{1,2}.txt`.
