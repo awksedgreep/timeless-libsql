@@ -156,7 +156,7 @@
 //! fresh connection recovers the engine the same way xConnect would.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_int, CStr};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -231,8 +231,8 @@ fn read_permit<'a, E>(
 #[derive(Debug)]
 enum LabelMatcher {
     Neq(String),
-    Re(regex::Regex),
-    Nre(regex::Regex),
+    Re(std::sync::Arc<regex::Regex>),
+    Nre(std::sync::Arc<regex::Regex>),
 }
 
 impl LabelMatcher {
@@ -253,12 +253,34 @@ fn matchers_pass(labels: &Labels, matchers: &[(String, LabelMatcher)]) -> bool {
 
 /// Fully anchored, PromQL-style: the pattern must match the WHOLE label
 /// value. `web-.*` means "starts with web-", `.*web.*` means contains.
-fn compile_anchored(module: &str, key: &str, pat: &str) -> Result<regex::Regex> {
-    regex::Regex::new(&format!("^(?:{pat})$")).map_err(|e| {
+/// Compiled regexes are shared process-wide by anchored source: dashboard
+/// queries repeat the same filters, and recompiling per query costs a
+/// full regex build plus per-candidate execution. The cache holds only
+/// successes (invalid patterns re-error per query, which is rare) and
+/// stops caching past 1024 distinct patterns.
+fn compile_anchored(module: &str, key: &str, pat: &str) -> Result<std::sync::Arc<regex::Regex>> {
+    static CACHE: std::sync::LazyLock<
+        std::sync::Mutex<HashMap<String, std::sync::Arc<regex::Regex>>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+    let source = format!("^(?:{pat})$");
+    if let Some(hit) = CACHE
+        .lock()
+        .map(|cache| cache.get(&source).cloned())
+        .unwrap_or_default()
+    {
+        return Ok(hit);
+    }
+    let re = std::sync::Arc::new(regex::Regex::new(&source).map_err(|e| {
         module_err(format!(
             "{module}: filter: invalid regex {pat:?} for label {key:?}: {e}"
         ))
-    })
+    })?);
+    if let Ok(mut cache) = CACHE.lock() {
+        if cache.len() < 1024 {
+            cache.insert(source, std::sync::Arc::clone(&re));
+        }
+    }
+    Ok(re)
 }
 
 /// Split a filter's matchers into the equality set (pushed into the
@@ -1034,8 +1056,11 @@ fn metric_candidates(
         SeriesSelection::All => reg
             .find_series(metric, eq)
             .into_iter()
-            .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-            .filter(|(_, labels)| matchers_pass(labels, matchers))
+            .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info)))
+            // Matchers run on the borrowed registry labels; only
+            // survivors pay the labels clone below.
+            .filter(|(_, info)| matchers_pass(&info.labels, matchers))
+            .map(|(sid, info)| (sid, info.labels.clone()))
             .collect(),
     }
 }
