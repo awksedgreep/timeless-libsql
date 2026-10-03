@@ -205,3 +205,20 @@ ingest steady (T1 1.52/1.74M, T2 35.1/35.8M — #110 level held),
 queries/storage within noise. Raw:
 `/tmp/baseline_20261003/query_read_112_run{1,2}.txt`,
 `/tmp/baseline_20261003/bench_112_run{1,2}.txt`.
+
+## Retest: #109 single-sweep batch range (rev b88780a, same protocol)
+
+`query-read` double run (median_us) + `bench` double run. Core +
+ext + query-harness suites green (traversal order preserved).
+
+| query-read query (12000-series) | baseline r1 | baseline r2 | #109 r1 | #109 r2 |
+|---|---:|---:|---:|---:|
+| wide_raw_batches | 42705 | 41496 | 37631 | 38063 |
+| wide_raw_frame | 37960 | 37090 | 35397 | 34620 |
+| narrow_raw_batches | 660 | 589 | 572 | 574 |
+| exact_raw_batches | 34 | 35 | 29 | 30 |
+
+Verdict: wide batch path **~-10%** on both runs (single sweep +
+pre-sized buffers + unstable sort). `bench` ingest/queries/storage
+steady. Raw: `/tmp/baseline_20261003/query_read_109_run{1,2}.txt`,
+`/tmp/baseline_20261003/bench_109_run{1,2}.txt`.
