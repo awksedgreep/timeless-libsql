@@ -347,6 +347,10 @@ enum WriteCommand {
     },
     CompactStep {
         cutoff_ts: i64,
+        /// Whether to say what the step did: reading the extension's
+        /// counters walks its whole index, twice a step, and only a traced
+        /// sweep has a use for the answer.
+        with_work: bool,
         reply: oneshot::Sender<(Result<CompactStepResult, String>, u64)>,
     },
     Prune {
@@ -831,6 +835,7 @@ impl Storage {
                 .writer
                 .send(WriteCommand::CompactStep {
                     cutoff_ts,
+                    with_work: telemetry.is_some(),
                     reply: reply_tx,
                 })
                 .await
@@ -1261,25 +1266,39 @@ fn writer_main(
                 };
                 let _ = reply.send(result);
             }
-            WriteCommand::CompactStep { cutoff_ts, reply } => {
+            WriteCommand::CompactStep {
+                cutoff_ts,
+                with_work,
+                reply,
+            } => {
                 let started = Instant::now();
-                let result = compaction_work(&conn, table).and_then(|before| {
-                    run_compact_step(&conn, table, COMPACT_STEP_WORK_ITEMS, cutoff_ts)
-                        .and_then(|more| {
+                let step = |conn: &Connection| {
+                    run_compact_step(conn, table, COMPACT_STEP_WORK_ITEMS, cutoff_ts).and_then(
+                        |more| {
                             if cleanup_rollups {
-                                run_clear_rollup_step(&conn, table, COMPACT_STEP_WORK_ITEMS)
+                                run_clear_rollup_step(conn, table, COMPACT_STEP_WORK_ITEMS)
                                     .map(|clear_more| more || clear_more)
                             } else {
                                 Ok(more)
                             }
-                        })
-                        .and_then(|more| {
+                        },
+                    )
+                };
+                let result = if with_work {
+                    compaction_work(&conn, table).and_then(|before| {
+                        step(&conn).and_then(|more| {
                             compaction_work(&conn, table).map(|after| CompactStepResult {
                                 more,
                                 work: after.delta_from(before),
                             })
                         })
-                });
+                    })
+                } else {
+                    step(&conn).map(|more| CompactStepResult {
+                        more,
+                        work: CompactionWork::default(),
+                    })
+                };
                 let _ = reply.send((result, elapsed_ns(started)));
             }
             WriteCommand::Prune {

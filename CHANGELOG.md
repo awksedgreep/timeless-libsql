@@ -47,6 +47,16 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
     and its pieces are put together once, however few. The fixed
     1,024-point arrival of the size-tiered fixture is now rewritten 2.5
     times over its life rather than 1.5.
+- **A sweep's step no longer walks the index.** With the sweep planned once,
+  three walks of the whole chunk index were still made at every step: the
+  metrics server read the extension's statistics before and after each
+  step, to say what the step had done, and the bounded rollup cycle found
+  the newest sample again. On a two-day store of 139,484 series and 433,001
+  chunks, 3,300 steps a sweep, that was a quarter of a core. The server now
+  reads the counters only for a traced sweep; the rollup cycle keeps the
+  newest sample of its start; and a rollup step writes at most its budget
+  of chunks, looking at up to 64 times as many groups to find them, so the
+  groups with nothing to roll up no longer take a transaction each.
 - **A sweep yields to reads (#94).** A read is several statements, each
   admitted only while no writer holds or waits for the gate, and begun
   again from the first when one is refused; a sweep whose steps followed

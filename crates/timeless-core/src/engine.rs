@@ -80,6 +80,11 @@ const ROLLUP_RETENTION_DELETE_BATCH: usize = 4096;
 const ROLLUP_MERGE_TARGET_BUCKETS: usize = 256;
 /// Neighbouring rollup chunks it takes to be worth a merge.
 const ROLLUP_MERGE_MIN_CHUNKS: usize = 4;
+/// Groups a bounded rollup step may look at for each one it may write. Most
+/// groups of a store whose series come and go have nothing to roll up, and
+/// saying so costs a lookup; a step that stopped at its budget of groups
+/// looked at took thousands of transactions to get round them.
+const ROLLUP_STEP_SCAN_FACTOR: usize = 64;
 
 /// Explicit rollup cleanup can use a larger bounded batch than automatic
 /// retention: it is operator-requested and must make practical progress on
@@ -888,8 +893,9 @@ pub struct Engine {
     compaction_plan: Mutex<Option<MetricsCompactionPlan>>,
     compaction_plans: AtomicU64,
     /// The series a bounded rollup cycle is walking, read from the index at
-    /// the cycle's start.
+    /// the cycle's start, and the newest sample there was then.
     rollup_cycle_series: Mutex<Vec<i64>>,
+    rollup_cycle_high_water: AtomicI64,
     compaction_raw_steps: AtomicU64,
     compaction_raw_chunks: AtomicU64,
     compaction_raw_points: AtomicU64,
@@ -1662,6 +1668,7 @@ impl Engine {
             compaction_plan: Mutex::new(None),
             compaction_plans: AtomicU64::new(0),
             rollup_cycle_series: Mutex::new(Vec::new()),
+            rollup_cycle_high_water: AtomicI64::new(i64::MIN),
             compaction_raw_steps: AtomicU64::new(0),
             compaction_raw_chunks: AtomicU64::new(0),
             compaction_raw_points: AtomicU64::new(0),
@@ -5049,24 +5056,30 @@ impl Engine {
             self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
             return Ok((0, 0, false));
         }
-        let Some(high_water) = self.raw_high_water() else {
-            self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
-            return Ok((0, 0, false));
-        };
-
-        // A bounded cycle reads its series from the index once, at its
-        // start: a step is then its budget of groups, not a walk of every
-        // chunk there is. A series that arrives meanwhile is the next
-        // cycle's; one that retention removes meanwhile has nothing to read.
+        // A bounded cycle reads its series and the newest sample from the
+        // index once, at its start: a step is then its budget, not two walks
+        // of every chunk there is. A series or a sample that arrives
+        // meanwhile is the next cycle's; a series that retention removes
+        // meanwhile has nothing to read.
         let cycle_under_way = max_groups.is_some()
             && self.rollup_maintenance_cursor.load(Ordering::Relaxed) > 0
-            && !self.rollup_cycle_series_lock().is_empty();
-        let series_ids: Vec<i64> = if cycle_under_way {
-            self.rollup_cycle_series_lock().clone()
+            && !self.rollup_cycle_series_lock().is_empty()
+            && self.rollup_cycle_high_water.load(Ordering::Relaxed) != i64::MIN;
+        let (high_water, series_ids): (i64, Vec<i64>) = if cycle_under_way {
+            (
+                self.rollup_cycle_high_water.load(Ordering::Relaxed),
+                self.rollup_cycle_series_lock().clone(),
+            )
         } else {
+            let Some(high_water) = self.raw_high_water() else {
+                self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+                return Ok((0, 0, false));
+            };
             let ids = self.series_in_index();
             *self.rollup_cycle_series_lock() = ids.clone();
-            ids
+            self.rollup_cycle_high_water
+                .store(high_water, Ordering::Relaxed);
+            (high_water, ids)
         };
 
         if series_ids.is_empty() {
@@ -5077,20 +5090,29 @@ impl Engine {
             .len()
             .checked_mul(series_ids.len())
             .ok_or_else(|| "rollup maintenance group count exceeds usize::MAX".to_string())?;
-        let (group_start, group_end, more) = match max_groups {
-            None => (0, group_count, false),
+        // A step writes at most its budget of chunks, and looks at up to
+        // ROLLUP_STEP_SCAN_FACTOR times as many groups to find them.
+        let (group_start, scan_end, write_limit) = match max_groups {
+            None => (0, group_count, usize::MAX),
             Some(limit) => {
                 let start = self
                     .rollup_maintenance_cursor
                     .load(Ordering::Relaxed)
                     .min(group_count);
-                let end = start.saturating_add(limit).min(group_count);
-                (start, end, end < group_count)
+                let end = start
+                    .saturating_add(limit.saturating_mul(ROLLUP_STEP_SCAN_FACTOR))
+                    .min(group_count);
+                (start, end, limit)
             }
         };
 
         let mut batch: Vec<EncodedRollupChunk> = Vec::new();
-        for group_ordinal in group_start..group_end {
+        let mut group_end = group_start;
+        for group_ordinal in group_start..scan_end {
+            if batch.len() >= write_limit {
+                break;
+            }
+            group_end = group_ordinal + 1;
             let tier = &tiers[group_ordinal / series_ids.len()];
             let sid = series_ids[group_ordinal % series_ids.len()];
             let r = tier.resolution;
@@ -5133,6 +5155,7 @@ impl Engine {
                 payload,
             });
         }
+        let more = max_groups.is_some() && group_end < group_count;
         if batch.is_empty() {
             self.rollup_maintenance_cursor
                 .store(if more { group_end } else { 0 }, Ordering::Relaxed);

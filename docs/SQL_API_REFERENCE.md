@@ -214,7 +214,8 @@ previously resolved `series_id`. Use the hidden command column for:
   and runs declared rollups.
 - `compact-step:<series>[:<points>:<bytes>][:<cutoff>]` performs one
   maintenance step for at most that many metrics series and that many
-  `(rollup tier, series)` groups. Metrics source work also defaults to 262,144
+  `(rollup tier, series)` groups written, looking at up to 64 times as many
+  groups to find those with a settled bucket to roll up. Metrics source work also defaults to 262,144
   points and 4 MiB of encoded payload; the optional positive point/byte values
   override those ceilings. One pre-existing oversized source is admitted as a
   progress exception. It returns `1` through `last_insert_rowid()` when another

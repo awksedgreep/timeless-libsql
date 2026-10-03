@@ -123,3 +123,34 @@ minutes, `reads.py` beside the writer:
 What remains of the question is the shape of a read: a permit a statement,
 not a permit a read, so that a long read on a store with a long sweep is
 still begun again whenever the next step is faster than it.
+
+## Two days on: the walks that were left (2026-10-03)
+
+A plane on the build above, fed by `timeless_beam_acct` for two days with
+the stack's settings, held 139,484 series, 241,841 raw-tier chunks of 185
+points and 191,160 rollup chunks. Its sweeps ended, 582 of them on
+schedule, and it still took a quarter of a core: 3,300 steps a sweep at
+22 ms a step, twelve hours of sweeping in forty-eight.
+
+Three walks of the whole chunk index were still made at every step. The
+server read the extension's statistics before and after each step, to say
+what the step had done, which only a traced sweep uses; and the bounded
+rollup cycle found the newest sample in the store again. And the steps
+were as many as they were because a rollup step stopped at 64 groups
+looked at, of 418,000, nearly all with nothing to roll up.
+
+The server now reads the counters only for a traced sweep; the rollup
+cycle keeps the newest sample of its start; a rollup step writes at most
+its budget of chunks and looks at up to 64 times as many groups to find
+them.
+
+Two copies of a read-only snapshot of that store, no writes, a sweep every
+twenty seconds, two minutes each:
+
+| | before (`cfb48b6`) | after |
+|---|---:|---:|
+| CPU of a core | 41.4% | 2.3% |
+| sweeps completed | 0 (the first had not ended) | 5 |
+| steps a sweep | about 3,300 | 103 |
+| time in steps | all of it | 2.6 s |
+| longest step | — | 100 ms |

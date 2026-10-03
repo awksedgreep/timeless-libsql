@@ -604,6 +604,70 @@ fn compressed_merge_reports_a_newly_unlocked_next_tier() {
 }
 
 #[test]
+fn a_bounded_rollup_step_passes_over_groups_with_nothing_to_roll_up() {
+    // Most groups of a store whose series come and go have nothing to roll
+    // up. A step that stopped at its budget of groups looked at took a
+    // transaction for every one of them; it now looks past them for the
+    // ones that have something.
+    const SERIES: usize = 130;
+    let engine = new_engine(Box::new(MemChunkStore::new()));
+    engine.set_rollups(vec![RollupTier {
+        resolution: 60,
+        retention: 0,
+    }]);
+    let series_ids: Vec<_> = (0..SERIES)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("idle_{number:03}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    for &series_id in &series_ids {
+        engine.write_point(series_id, 10, 1.0);
+    }
+    engine.write_point(series_ids[0], 200, 1.0);
+    engine.flush_all().unwrap();
+    engine.rollup().unwrap();
+
+    // Two series at the far end of the cycle have a new settled bucket, and
+    // the first has the sample that settles it.
+    for &series_id in &series_ids[SERIES - 2..] {
+        engine.write_point(series_id, 250, 2.0);
+    }
+    engine.write_point(series_ids[0], 500, 2.0);
+    engine.flush_all().unwrap();
+
+    let mut rolled = 0;
+    let mut steps = 0;
+    loop {
+        let (chunks, _buckets, more) = engine.rollup_bounded(1).unwrap();
+        assert!(
+            chunks <= 1,
+            "one step exceeded its budget of chunks written"
+        );
+        rolled += chunks;
+        steps += 1;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(rolled, 3);
+    assert!(
+        steps <= 5,
+        "{steps} steps for three groups with work among {SERIES}"
+    );
+    for &series_id in &series_ids[SERIES - 2..] {
+        assert_eq!(
+            engine
+                .query_rollup_by_id(series_id, 60, 240, 299)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
 fn small_compressed_chunks_merge_by_count_in_tiers() {
     // A series written a few points a flush and compressed once a sweep
     // makes a chunk of a few points a sweep. Counted rather than measured,
