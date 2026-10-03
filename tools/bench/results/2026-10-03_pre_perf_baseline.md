@@ -112,3 +112,23 @@ numbers, and some workloads changed shape, so this is not an A/B:
 Raw outputs: `/tmp/baseline_20261003/` (`bench_run{1,2}.txt`,
 `bench_logs_run{1,2}.txt`, `bench_traces_run{1,2}.txt`,
 `bench_codec_run2.txt`, `query_read_run{1,2}.txt`).
+
+## Retest: #111 flatjson byte cursor (rev 6c9def2, same protocol)
+
+`bench` double run, second quoted. Host ran slower in absolute terms
+(accounting load), so the normalized ratio is the signal:
+
+| metric | baseline r1 | baseline r2 | #111 r1 | #111 r2 |
+|---|---:|---:|---:|---:|
+| plain | 3.58M | 3.62M | 3.44M | 3.21M |
+| tier1 | 1.46M | 1.37M | 1.73M | 1.61M |
+| **tier1 / plain** | **0.408x** | **0.378x** | **0.503x** | **0.502x** |
+| tier2 | 17.23M | 16.55M | 16.69M | 18.46M |
+| tier2 / plain | 4.81x | 4.57x | 4.85x | 5.75x |
+| name+range | 3.9 ms | 4.7 ms | 6.9 ms | 4.8 ms |
+| full-scan | 221.8 ms | 235.9 ms | 243.0 ms | 225.1 ms |
+
+Verdict: tier1 admission **+25–33% relative** (0.378–0.408x -> stable
+0.502–0.503x across both runs — outside noise). Tier2 also up
+(series-table labels decode shares the parser). Queries unchanged
+within noise. Raw: `/tmp/baseline_20261003/bench_111_run{1,2}.txt`.
