@@ -1218,6 +1218,9 @@ impl UpdateVTab<'_> for MetricsTab {
                 let name = name.ok_or_else(|| module_err("name is required (TEXT)".into()))?;
                 let labels_json: Option<String> = args.get(5)?;
                 let labels: HashMap<String, String> = match labels_json {
+                    // Empty/whitespace labels mean no labels, matching the
+                    // batch path (empty field = {}) and TVF filters.
+                    Some(txt) if txt.trim().is_empty() => HashMap::new(),
                     Some(txt) => parse_labels_json(&txt).map_err(module_err)?,
                     None => HashMap::new(),
                 };

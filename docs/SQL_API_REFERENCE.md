@@ -193,7 +193,9 @@ CREATE VIRTUAL TABLE metrics USING timeless_metrics(
 Columns are `name TEXT`, `ts INTEGER`, `value REAL`, `labels TEXT`, hidden
 `series_id INTEGER`, and the hidden command column named after the created
 table. `ts` is epoch seconds. `labels` is a canonical flat JSON object of
-string values; omitted labels become `{}`. Float values retain all IEEE-754
+string values; omitted labels become `{}`. An empty or whitespace-only
+labels string also means `{}` on row insert, matching the batch path
+(empty labels field) and TVF filters. Float values retain all IEEE-754
 bits through binary ingestion and packed queries. Ordinary SQLite REAL
 projection follows SQLite's NaN behavior.
 
@@ -345,7 +347,10 @@ TEXT and are returned as BLOBs. An all-zero parent means no parent. `kind` is
 `attributes`, `resource`, and `instrumentation_scope` are typed JSON objects;
 `events` and `links` are typed JSON arrays. `trace_flags` and all dropped-value
 counts are lossless unsigned 32-bit values represented as non-negative SQLite
-INTEGERs. Legacy rows default links to `[]`, strings to empty, and counts/flags
+INTEGERs. On row insert, `NULL` for any of these six columns stores `0`:
+0 is the OTel default, so a missing value and an explicit `0` are
+contractually identical (batch blobs always carry explicit `u32`s).
+Legacy rows default links to `[]`, strings to empty, and counts/flags
 to `0`. Service identity uses the stored
 `service.name` precedence documented in the [user guide](GUIDE.md#6-storing-traces).
 

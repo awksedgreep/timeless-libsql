@@ -1257,6 +1257,11 @@ impl UpdateVTab<'_> for TracesTab {
         };
         let trace_state: Option<String> = args.get(2 + COL_TRACE_STATE)?;
         let trace_state = trace_state.map(Cow::Owned).unwrap_or(Cow::Borrowed(""));
+        // OTel-typed unsigned fields: NULL on insert stores 0, exactly
+        // like the kind/status/duration defaults above — 0 IS the OTel
+        // default for flags and dropped-value counters, so missing and
+        // explicit 0 are contractually identical on both the row and
+        // batch paths (batches always carry explicit u32s).
         let unsigned = |column: usize, name: &str| -> Result<u32> {
             let value: Option<i64> = args.get(2 + column)?;
             match value {
