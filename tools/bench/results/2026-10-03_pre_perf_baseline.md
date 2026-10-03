@@ -151,3 +151,18 @@ Verdict: tier2 admission **~2.3x relative** (4.6–4.8x -> stable
 10.8–10.9x across both runs). Tier1 steady at the #111 level.
 Flush/compact/queries/storage unchanged. Raw:
 `/tmp/baseline_20261003/bench_110_run{1,2}.txt`.
+
+## Retest: #106 chunked term/trace-index inserts (rev b221bd9)
+
+Tracked workloads (`bench-logs`/`bench-traces` double runs): counts
+verified equal, term rows identical (88713 tg), storage byte-identical,
+flush/optimize/query latencies within noise. No regression.
+
+Dedicated A/B (pre/post binaries, one 8191-row buffer, high-cardinality
+`user` index keys + trigrams = 9500 terms/block, interleaved 6+6,
+fresh DB each trial): pre mean 20.3 ms, post mean 20.0 ms — **neutral**.
+Block encode (zstd) and b-tree index maintenance dominate the flush;
+per-statement VDBE overhead was only ~1–2 ms of ~20 ms on tmpfs.
+Kept anyway: 9500 statements -> 24 per block with identical semantics
+(OR IGNORE + inserted-row accounting verified), which matters more on
+durable (non-tmpfs) storage with real sync costs.
