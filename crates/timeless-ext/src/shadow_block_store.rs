@@ -88,7 +88,11 @@ pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
 pub(crate) struct ShadowBlockStore {
     // Pre-formatted SQL, built once (table names cannot be parameters).
     insert_block_sql: String,
-    insert_term_sql: String,
+    /// Prefix of the multi-row term insert, completed per chunk with
+    /// `(?,?)` groups (see `insert_terms`). OR IGNORE: the engine
+    /// deduplicates terms per block, but a duplicate arriving anyway
+    /// must not abort a flush.
+    insert_term_prefix: String,
     read_sql: String,
     scan_sql: String,
     stats_counter_sql: String,
@@ -124,8 +128,8 @@ impl ShadowBlockStore {
             ),
             // OR IGNORE: the engine deduplicates terms per block, but a
             // duplicate arriving anyway must not abort a flush.
-            insert_term_sql: format!(
-                "INSERT OR IGNORE INTO {terms} (term, block_id) VALUES (?1, ?2)"
+            insert_term_prefix: format!(
+                "INSERT OR IGNORE INTO {terms} (term, block_id) VALUES "
             ),
             read_sql: format!("SELECT data FROM {blocks} WHERE id = ?1"),
             // scan() runs at every xConnect and needs metadata only —
@@ -326,35 +330,61 @@ impl ShadowBlockStore {
     /// without its posting-list entries.
     fn insert_block(&self, conn: &Connection, block: &EncodedBlock) -> Result<BlockLoc, String> {
         self.ensure_storage_stats(conn)?;
-        let mut stmt = conn
+        let mut bstmt = conn
             .prepare_cached(&self.insert_block_sql)
             .map_err(|e| format!("prepare block insert failed: {e}"))?;
-        stmt.execute(params![
-            block.meta.ts_min,
-            block.meta.ts_max,
-            block.meta.entry_count,
-            block.meta.codec,
-            &block.data,
-        ])
-        .map_err(|e| format!("block insert failed: {e}"))?;
+        bstmt
+            .execute(params![
+                block.meta.ts_min,
+                block.meta.ts_max,
+                block.meta.entry_count,
+                block.meta.codec,
+                &block.data,
+            ])
+            .map_err(|e| format!("block insert failed: {e}"))?;
         // `id INTEGER PRIMARY KEY` aliases the rowid, so
         // last_insert_rowid() IS the id we just wrote.
         let id = conn.last_insert_rowid();
 
-        let mut tstmt = conn
-            .prepare_cached(&self.insert_term_sql)
-            .map_err(|e| format!("prepare term insert failed: {e}"))?;
-        let mut inserted_terms = 0_i64;
-        for term in &block.terms {
-            inserted_terms += tstmt
-                .execute(params![term, id])
-                .map_err(|e| format!("term insert ({term:?}) failed: {e}"))?
-                as i64;
-        }
+        let inserted_terms = self.insert_terms(conn, &block.terms, id)?;
         let mut delta = Self::block_delta(block)?;
         delta[5] = inserted_terms;
         self.adjust_storage_stats(conn, delta)?;
         Ok(BlockLoc { id })
+    }
+
+    /// Multi-row term insert, chunked so one statement never approaches
+    /// SQLITE_MAX_VARIABLE_NUMBER (2 params/row, 400 rows = 800 params —
+    /// safe even for the legacy 999 limit). Returns actual inserted rows
+    /// for storage accounting; OR IGNORE keeps duplicate terms harmless.
+    /// `prepare_cached` keys on the SQL string, so each distinct chunk
+    /// fill prepares once and reuses. Terms borrow the block — no copy.
+    fn insert_terms(&self, conn: &Connection, terms: &[String], id: i64) -> Result<i64, String> {
+        const ROWS_PER_CHUNK: usize = 400;
+        let mut inserted = 0_i64;
+        for (c, chunk) in terms.chunks(ROWS_PER_CHUNK).enumerate() {
+            let mut sql = String::with_capacity(self.insert_term_prefix.len() + chunk.len() * 5);
+            sql.push_str(&self.insert_term_prefix);
+            for i in 0..chunk.len() {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?,?)");
+            }
+            let params = params_from_iter(
+                chunk
+                    .iter()
+                    .flat_map(|term| [term as &dyn rusqlite::ToSql, &id as &dyn rusqlite::ToSql]),
+            );
+            inserted += conn
+                .prepare_cached(&sql)
+                .map_err(|e| format!("prepare term insert failed: {e}"))?
+                .execute(params)
+                .map_err(|e| {
+                    format!("term insert (chunk {c}, {} terms) failed: {e}", chunk.len())
+                })? as i64;
+        }
+        Ok(inserted)
     }
 
     /// DELETE term rows then block rows for `ids` — one operation, so
@@ -608,17 +638,7 @@ impl BlockStore for ShadowBlockStore {
         conn.execute(&format!("{}{})", self.delete_terms_prefix, loc.id), [])
             .map_err(|e| format!("reindex term delete failed: {e}"))?;
 
-        let mut stmt = conn
-            .prepare_cached(&self.insert_term_sql)
-            .map_err(|e| format!("prepare reindex term insert failed: {e}"))?;
-
-        let mut inserted = 0_i64;
-        for term in terms {
-            inserted += stmt
-                .execute(params![term, loc.id])
-                .map_err(|e| format!("reindex term insert ({term:?}) failed: {e}"))?
-                as i64;
-        }
+        let inserted = self.insert_terms(&conn, terms, loc.id)?;
         self.adjust_storage_stats(&conn, [0, 0, 0, 0, 0, inserted - previous])?;
 
         Ok(())

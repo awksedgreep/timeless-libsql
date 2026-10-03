@@ -196,8 +196,10 @@ pub(crate) struct ShadowSpanStore {
     // one-time parse — the Session 1 lesson).
     insert_block_sql: String,
     insert_duration_sql: String,
-    insert_term_sql: String,
-    insert_trace_sql: String,
+    /// Prefixes of the multi-row index inserts, completed per chunk with
+    /// `(?,?)` groups (see `insert_terms`/`insert_trace_ids`).
+    insert_term_prefix: String,
+    insert_trace_prefix: String,
     insert_attribute_bloom_sql: String,
     read_sql: String,
     scan_sql: String,
@@ -254,11 +256,11 @@ impl ShadowSpanStore {
             // OR IGNORE on both index tables: the engine deduplicates
             // terms and trace ids per block, but a duplicate arriving
             // anyway must not abort a flush.
-            insert_term_sql: format!(
-                "INSERT OR IGNORE INTO {terms} (term, block_id) VALUES (?1, ?2)"
+            insert_term_prefix: format!(
+                "INSERT OR IGNORE INTO {terms} (term, block_id) VALUES "
             ),
-            insert_trace_sql: format!(
-                "INSERT OR IGNORE INTO {traces} (trace_id, block_id) VALUES (?1, ?2)"
+            insert_trace_prefix: format!(
+                "INSERT OR IGNORE INTO {traces} (trace_id, block_id) VALUES "
             ),
             insert_attribute_bloom_sql: format!(
                 "INSERT INTO {attributes} \
@@ -553,6 +555,77 @@ impl ShadowSpanStore {
         .map_err(|error| format!("read removed trace accounting failed: {error}"))
     }
 
+    /// Multi-row term and trace-index inserts, chunked so one statement
+    /// never approaches SQLITE_MAX_VARIABLE_NUMBER (2 params/row, 400
+    /// rows = 800 params — safe even for the legacy 999 limit). Each
+    /// returns actual inserted rows for storage accounting; OR IGNORE
+    /// keeps duplicates harmless. `prepare_cached` keys on the SQL
+    /// string, so each distinct chunk fill prepares once and reuses.
+    /// Slices borrow the block — no copy.
+    fn insert_terms(&self, conn: &Connection, terms: &[String], id: i64) -> Result<i64, String> {
+        const ROWS_PER_CHUNK: usize = 400;
+        let mut inserted = 0_i64;
+        for (c, chunk) in terms.chunks(ROWS_PER_CHUNK).enumerate() {
+            let mut sql = String::with_capacity(self.insert_term_prefix.len() + chunk.len() * 5);
+            sql.push_str(&self.insert_term_prefix);
+            for i in 0..chunk.len() {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?,?)");
+            }
+            let params = params_from_iter(
+                chunk
+                    .iter()
+                    .flat_map(|term| [term as &dyn rusqlite::ToSql, &id as &dyn rusqlite::ToSql]),
+            );
+            inserted += conn
+                .prepare_cached(&sql)
+                .map_err(|e| format!("prepare term insert failed: {e}"))?
+                .execute(params)
+                .map_err(|e| {
+                    format!("term insert (chunk {c}, {} terms) failed: {e}", chunk.len())
+                })? as i64;
+        }
+        Ok(inserted)
+    }
+
+    fn insert_trace_ids(
+        &self,
+        conn: &Connection,
+        trace_ids: &[[u8; 16]],
+        id: i64,
+    ) -> Result<i64, String> {
+        const ROWS_PER_CHUNK: usize = 400;
+        let mut inserted = 0_i64;
+        for (c, chunk) in trace_ids.chunks(ROWS_PER_CHUNK).enumerate() {
+            let mut sql = String::with_capacity(self.insert_trace_prefix.len() + chunk.len() * 5);
+            sql.push_str(&self.insert_trace_prefix);
+            for i in 0..chunk.len() {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push_str("(?,?)");
+            }
+            let params = params_from_iter(
+                chunk
+                    .iter()
+                    .flat_map(|tid| [tid as &dyn rusqlite::ToSql, &id as &dyn rusqlite::ToSql]),
+            );
+            inserted += conn
+                .prepare_cached(&sql)
+                .map_err(|e| format!("prepare trace-index insert failed: {e}"))?
+                .execute(params)
+                .map_err(|e| {
+                    format!(
+                        "trace-index insert (chunk {c}, {} ids) failed: {e}",
+                        chunk.len()
+                    )
+                })? as i64;
+        }
+        Ok(inserted)
+    }
+
     /// INSERT one block row + its duration, term, and trace-index rows.
     /// The caller's enclosing host transaction makes the operation atomic.
     fn insert_block(
@@ -584,27 +657,8 @@ impl ShadowSpanStore {
                 .map_err(|e| format!("duration-bound insert for block {id} failed: {e}"))?;
         }
 
-        let mut tstmt = conn
-            .prepare_cached(&self.insert_term_sql)
-            .map_err(|e| format!("prepare term insert failed: {e}"))?;
-        let mut inserted_terms = 0_i64;
-        for term in &block.terms {
-            inserted_terms += tstmt
-                .execute(params![term, id])
-                .map_err(|e| format!("term insert ({term:?}) failed: {e}"))?
-                as i64;
-        }
-
-        let mut trstmt = conn
-            .prepare_cached(&self.insert_trace_sql)
-            .map_err(|e| format!("prepare trace-index insert failed: {e}"))?;
-        let mut inserted_traces = 0_i64;
-        for tid in &block.trace_ids {
-            inserted_traces += trstmt
-                .execute(params![&tid[..], id])
-                .map_err(|e| format!("trace-index insert failed: {e}"))?
-                as i64;
-        }
+        let inserted_terms = self.insert_terms(conn, &block.terms, id)?;
+        let inserted_traces = self.insert_trace_ids(conn, &block.trace_ids, id)?;
         let mut astmt = conn
             .prepare_cached(&self.insert_attribute_bloom_sql)
             .map_err(|error| format!("prepare trace attribute bloom insert failed: {error}"))?;
