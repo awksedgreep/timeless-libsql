@@ -10,9 +10,11 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.6 -->
+<!-- release-target: 0.8.7 -->
 
 ## [Unreleased]
+
+## [0.8.7] — 2026-10-03
 
 ### Fixed
 
@@ -1267,7 +1269,8 @@ Hardened statement atomicity, savepoints, multi-process series identity,
 attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
-[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.5...v0.8.6
 [0.8.3]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.1...v0.8.2
