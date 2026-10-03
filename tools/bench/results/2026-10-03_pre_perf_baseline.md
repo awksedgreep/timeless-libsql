@@ -222,3 +222,18 @@ Verdict: wide batch path **~-10%** on both runs (single sweep +
 pre-sized buffers + unstable sort). `bench` ingest/queries/storage
 steady. Raw: `/tmp/baseline_20261003/query_read_109_run{1,2}.txt`,
 `/tmp/baseline_20261003/bench_109_run{1,2}.txt`.
+
+## Retest: #108 batched single-series reads (rev 652720b, same protocol)
+
+Tracked workloads steady (`query-read` wide_raw 37615 vs 37631/38063;
+`bench` T1 1.66M, T2 38.5M, queries/storage within noise).
+
+Dedicated A/B (pre/post binaries, one 800k-point series in 100
+wave-flushed chunks, 5x `timeless_raw` full-range counts): pre ~51.8ms,
+post ~51.8ms — **neutral**. Chunk decode dominates (~50ms); the ~100
+saved borrows+prepares are ~1–2ms on tmpfs. Prefix/latest/aggregate
+single reads intentionally unchanged (early-exit would over-read).
+The cross-borrow statement-cache half is deferred: stale-pointer risk
+across close/reopen needs generation-validated eviction, and the
+measured prize (~1ms/100 chunks here) doesn't justify it now.
+Raw: microbench inline above (no saved output).
