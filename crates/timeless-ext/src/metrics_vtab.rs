@@ -754,46 +754,93 @@ impl MetricsTab {
             .resolve_series_batch(&entries)
             .map_err(module_err)?;
 
-        // ── 6. Re-pack to the engine's raw wire format and write once ─
-        // Engine format: n × [series_id i64, ts i64, val f64] in NATIVE
-        // endianness, 24 bytes/entry. The blob is little-endian; on the
-        // LE targets we run on, from_le_bytes → to_ne_bytes compiles down
-        // to a straight copy, but writing it this way stays correct on a
-        // big-endian machine too (never assume byte order — read LE
-        // explicitly, exactly as PLAN.md says).
-        let raw_len = n_points.checked_mul(24).ok_or_else(|| {
-            module_err("batch blob: point count overflows raw batch length".into())
-        })?;
-        let mut raw: Vec<u8> = Vec::new();
-        raw.try_reserve_exact(raw_len).map_err(|_| {
+        // ── 6. Scatter points into per-series runs and append once ──
+        // Counting sort on the dense series index: one partition lookup,
+        // one reserve+extend, and one memory update per series instead of
+        // per point. No intermediate byte packing — columns decode
+        // straight into the flat per-series runs. All-or-nothing holds:
+        // every index was validated in step 4 (and rechecked below).
+        let mut counts: Vec<usize> = Vec::new();
+        counts.try_reserve_exact(n_series).map_err(|_| {
             module_err(format!(
-                "batch blob: cannot allocate raw batch for {n_points} points"
+                "batch blob: cannot allocate series counts for {n_series} entries"
             ))
         })?;
+        counts.resize(n_series, 0);
+        for chunk in idx_bytes.as_chunks::<4>().0 {
+            let idx = u32::from_le_bytes(*chunk) as usize;
+            *counts.get_mut(idx).ok_or_else(|| {
+                module_err(format!("batch blob: series index {idx} out of range"))
+            })? += 1;
+        }
+        let mut starts: Vec<usize> = Vec::new();
+        starts
+            .try_reserve_exact(n_series.saturating_add(1))
+            .map_err(|_| module_err("batch blob: cannot allocate series run table".into()))?;
+        let mut acc = 0usize;
+        starts.push(0);
+        for &c in &counts {
+            acc = acc
+                .checked_add(c)
+                .ok_or_else(|| module_err("batch blob: point count overflows run table".into()))?;
+            starts.push(acc);
+        }
+        let mut flat_ts: Vec<i64> = Vec::new();
+        flat_ts.try_reserve_exact(n_points).map_err(|_| {
+            module_err(format!(
+                "batch blob: cannot allocate timestamp run for {n_points} points"
+            ))
+        })?;
+        flat_ts.resize(n_points, 0);
+        let mut flat_val: Vec<f64> = Vec::new();
+        flat_val.try_reserve_exact(n_points).map_err(|_| {
+            module_err(format!(
+                "batch blob: cannot allocate value run for {n_points} points"
+            ))
+        })?;
+        flat_val.resize(n_points, 0.0);
+        let mut pos: Vec<usize> = Vec::new();
+        pos.try_reserve_exact(n_series)
+            .map_err(|_| module_err("batch blob: cannot allocate series write cursors".into()))?;
+        pos.extend_from_slice(
+            starts
+                .get(..n_series)
+                .ok_or_else(|| module_err("batch blob: series run table is short".into()))?,
+        );
         for i in 0..n_points {
             let idx = u32::from_le_bytes(BatchReader::fixed::<4>(
                 idx_bytes,
                 i,
                 "series index column",
             )?) as usize;
-            let sid = *sids.get(idx).ok_or_else(|| {
+            let slot = pos.get_mut(idx).ok_or_else(|| {
                 module_err(format!(
                     "batch blob: point {i}: series index {idx} out of range"
                 ))
             })?;
             let ts = i64::from_le_bytes(BatchReader::fixed::<8>(ts_bytes, i, "timestamp column")?);
-            // Values are opaque 8-byte payloads here: round-tripping the
-            // BITS through u64 avoids ever "interpreting" the float, so
-            // NaN payloads etc. survive byte-exact.
-            let val_bits =
-                u64::from_le_bytes(BatchReader::fixed::<8>(val_bytes, i, "value column")?);
-            raw.extend_from_slice(&sid.to_ne_bytes());
-            raw.extend_from_slice(&ts.to_ne_bytes());
-            raw.extend_from_slice(&val_bits.to_ne_bytes());
+            // Values stay opaque 8-byte payloads: from_bits/to_bits round-trips
+            // without interpreting the float, so NaN payloads survive byte-exact.
+            let val = f64::from_bits(u64::from_le_bytes(BatchReader::fixed::<8>(
+                val_bytes,
+                i,
+                "value column",
+            )?));
+            if let (Some(slot_ts), Some(slot_val)) =
+                (flat_ts.get_mut(*slot), flat_val.get_mut(*slot))
+            {
+                *slot_ts = ts;
+                *slot_val = val;
+            } else {
+                return Err(module_err(format!(
+                    "batch blob: point {i}: run slot out of range"
+                )));
+            }
+            *slot += 1;
         }
         self.shared
             .engine
-            .write_batch_raw(&raw)
+            .write_batch_partitioned(&sids, &starts, &flat_ts, &flat_val)
             .map_err(module_err)?;
         self.shared.engine.flush_pending().map_err(module_err)?;
 
@@ -842,7 +889,10 @@ impl MetricsTab {
             )));
         }
 
-        // Validate all ids before mutating any partition buffer.
+        // Validate all ids before mutating any partition buffer, and
+        // renumber them dense for the counting-sort scatter below.
+        let mut dense_of: HashMap<i64, usize> = HashMap::new();
+        let mut uniq: Vec<i64> = Vec::new();
         {
             let registry = self.shared.engine.series_read();
             for (i, bytes) in sid_bytes.as_chunks::<8>().0.iter().enumerate() {
@@ -852,41 +902,109 @@ impl MetricsTab {
                         "resolved batch: point {i}: unknown series id {sid}; batch rejected"
                     )));
                 }
+                if let std::collections::hash_map::Entry::Vacant(e) = dense_of.entry(sid) {
+                    e.insert(uniq.len());
+                    uniq.push(sid);
+                }
             }
         }
+        if uniq.len() > n_points {
+            return Err(module_err(
+                "resolved batch: more distinct series than points".into(),
+            ));
+        }
 
-        let raw_len = n_points.checked_mul(24).ok_or_else(|| {
-            module_err("resolved batch: point count overflows raw batch length".into())
-        })?;
-        let mut raw = Vec::new();
-        raw.try_reserve_exact(raw_len).map_err(|_| {
+        let n_dense = uniq.len();
+        let mut counts: Vec<usize> = Vec::new();
+        counts
+            .try_reserve_exact(n_dense)
+            .map_err(|_| module_err("resolved batch: cannot allocate series counts".into()))?;
+        counts.resize(n_dense, 0);
+        for bytes in sid_bytes.as_chunks::<8>().0 {
+            let sid = i64::from_le_bytes(*bytes);
+            // Validated + interned in the loop above.
+            let d = dense_of
+                .get(&sid)
+                .copied()
+                .ok_or_else(|| module_err(format!("resolved batch: series id {sid} vanished")))?;
+            *counts.get_mut(d).ok_or_else(|| {
+                module_err(format!("resolved batch: series id {sid} out of range"))
+            })? += 1;
+        }
+        let mut starts: Vec<usize> = Vec::new();
+        starts
+            .try_reserve_exact(n_dense.saturating_add(1))
+            .map_err(|_| module_err("resolved batch: cannot allocate series run table".into()))?;
+        let mut acc = 0usize;
+        starts.push(0);
+        for &c in &counts {
+            acc = acc.checked_add(c).ok_or_else(|| {
+                module_err("resolved batch: point count overflows run table".into())
+            })?;
+            starts.push(acc);
+        }
+        let mut flat_ts: Vec<i64> = Vec::new();
+        flat_ts.try_reserve_exact(n_points).map_err(|_| {
             module_err(format!(
-                "resolved batch: cannot allocate raw batch for {n_points} points"
+                "resolved batch: cannot allocate timestamp run for {n_points} points"
             ))
         })?;
+        flat_ts.resize(n_points, 0);
+        let mut flat_val: Vec<f64> = Vec::new();
+        flat_val.try_reserve_exact(n_points).map_err(|_| {
+            module_err(format!(
+                "resolved batch: cannot allocate value run for {n_points} points"
+            ))
+        })?;
+        flat_val.resize(n_points, 0.0);
+        let mut pos: Vec<usize> = Vec::new();
+        pos.try_reserve_exact(n_dense).map_err(|_| {
+            module_err("resolved batch: cannot allocate series write cursors".into())
+        })?;
+        pos.extend_from_slice(
+            starts
+                .get(..n_dense)
+                .ok_or_else(|| module_err("resolved batch: series run table is short".into()))?,
+        );
         for i in 0..n_points {
             let sid = i64::from_le_bytes(BatchReader::fixed::<8>(
                 sid_bytes,
                 i,
                 "resolved batch series id column",
             )?);
+            let d = dense_of.get(&sid).copied().ok_or_else(|| {
+                module_err(format!(
+                    "resolved batch: point {i}: unknown series id {sid}"
+                ))
+            })?;
+            let slot = pos.get_mut(d).ok_or_else(|| {
+                module_err(format!("resolved batch: point {i}: run slot out of range"))
+            })?;
             let ts = i64::from_le_bytes(BatchReader::fixed::<8>(
                 ts_bytes,
                 i,
                 "resolved batch timestamp column",
             )?);
-            let val_bits = u64::from_le_bytes(BatchReader::fixed::<8>(
+            let val = f64::from_bits(u64::from_le_bytes(BatchReader::fixed::<8>(
                 val_bytes,
                 i,
                 "resolved batch value column",
-            )?);
-            raw.extend_from_slice(&sid.to_ne_bytes());
-            raw.extend_from_slice(&ts.to_ne_bytes());
-            raw.extend_from_slice(&val_bits.to_ne_bytes());
+            )?));
+            if let (Some(slot_ts), Some(slot_val)) =
+                (flat_ts.get_mut(*slot), flat_val.get_mut(*slot))
+            {
+                *slot_ts = ts;
+                *slot_val = val;
+            } else {
+                return Err(module_err(format!(
+                    "resolved batch: point {i}: run slot out of range"
+                )));
+            }
+            *slot += 1;
         }
         self.shared
             .engine
-            .write_batch_raw(&raw)
+            .write_batch_partitioned(&uniq, &starts, &flat_ts, &flat_val)
             .map_err(module_err)?;
         self.shared.engine.flush_pending().map_err(module_err)?;
         Ok(n_points as i64)

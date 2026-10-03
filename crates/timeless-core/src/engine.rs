@@ -1986,6 +1986,73 @@ impl Engine {
         Ok(())
     }
 
+    /// Bulk append of pre-grouped points: `series_ids[d]` owns
+    /// `timestamps[starts[d]..starts[d + 1]]` and the same range of
+    /// `values`. One partition lookup, one reserve+extend, and one memory
+    /// update per series instead of per point — batch blobs name ~1k
+    /// series per 100k points, so this is ~100x fewer map ops than
+    /// point-at-a-time writes. Threshold queueing keeps the exact
+    /// `write_point_at` semantics (queued once per series).
+    pub fn write_batch_partitioned(
+        &self,
+        series_ids: &[i64],
+        starts: &[usize],
+        timestamps: &[i64],
+        values: &[f64],
+    ) -> EngineResult<()> {
+        if starts.len() != series_ids.len() + 1 {
+            return Err(format!(
+                "partitioned batch: {} starts for {} series",
+                starts.len(),
+                series_ids.len()
+            ));
+        }
+        if timestamps.len() != values.len()
+            || starts.last() != Some(&timestamps.len())
+            || starts.first() != Some(&0)
+        {
+            return Err("partitioned batch: starts do not cover the columns".into());
+        }
+        let now = Instant::now();
+        for (d, series_id) in series_ids.iter().enumerate() {
+            let (a, b) = (starts[d], starts[d + 1]);
+            if a == b {
+                continue;
+            }
+            let key = PartitionKey {
+                series_id: *series_id,
+            };
+            let mut entry = self
+                .partitions
+                .entry(key)
+                .or_insert_with(PartitionBuffer::new);
+            let buf = entry.value_mut();
+            let old_cap = buf.memory_bytes();
+            buf.timestamps.extend_from_slice(&timestamps[a..b]);
+            buf.values.extend_from_slice(&values[a..b]);
+            buf.last_write = now;
+            let new_cap = buf.memory_bytes();
+            let mem_delta = (new_cap as isize) - (old_cap as isize);
+            let should_queue_flush =
+                buf.timestamps.len() >= self.flush_threshold && !buf.queued_for_flush;
+            if should_queue_flush {
+                buf.queued_for_flush = true;
+            }
+            drop(entry);
+            if mem_delta > 0 {
+                self.buffer_memory
+                    .fetch_add(mem_delta as usize, Ordering::Relaxed);
+            } else if mem_delta < 0 {
+                self.buffer_memory
+                    .fetch_sub((-mem_delta) as usize, Ordering::Relaxed);
+            }
+            if should_queue_flush {
+                self.flush_queue_lock().push(key);
+            }
+        }
+        Ok(())
+    }
+
     /// Binary batch: [series_id: i64, ts: i64, val: f64] = 24 bytes per entry.
     /// Use after pre-resolving series IDs.
     pub fn write_batch_raw(&self, data: &[u8]) -> EngineResult<()> {
