@@ -37,10 +37,10 @@ fn rich_batch(entries: &[RichEntry]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn flat_batch(timestamp: i64) -> Vec<u8> {
+fn flat_batch(timestamp_ms: i64) -> Vec<u8> {
     let mut out = vec![1, 0, 0, 0];
     out.extend_from_slice(&1_u32.to_le_bytes());
-    out.extend_from_slice(&timestamp.to_le_bytes());
+    out.extend_from_slice(&timestamp_ms.to_le_bytes());
     out.push(1);
     framed(&mut out, b"legacy-info");
     framed(&mut out, br#"{"service":"legacy","status":"ok"}"#);
@@ -116,9 +116,13 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     )?;
     let count: i64 = connection.query_row("SELECT COUNT(*) FROM logs", [], |row| row.get(0))?;
     ensure!(count == 3);
+    // flat-v0 carries milliseconds even when the table stores microseconds.
+    // Use the next whole millisecond to keep this row after the rich entries.
+    let legacy_timestamp_ms = timestamp / 1_000 + 1;
+    let legacy_timestamp_us = legacy_timestamp_ms * 1_000;
     connection.execute(
         "INSERT INTO logs(logs) VALUES (?1)",
-        params![flat_batch(timestamp + 2)],
+        params![flat_batch(legacy_timestamp_ms)],
     )?;
     let count: i64 = connection.query_row("SELECT COUNT(*) FROM logs", [], |row| row.get(0))?;
     ensure!(count == 4);
@@ -145,6 +149,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
     ensure!(rows[0].1 == "critical" && rows[1].1 == "notice");
     ensure!(rows[2].1 == "emergency" && rows[3].1 == "info");
     ensure!(rows[1].0 == timestamp);
+    ensure!(rows[3].0 == legacy_timestamp_us);
     let decoded: Value = serde_json::from_str(&rows[1].3)?;
     ensure!(decoded == Value::Object(first_metadata.clone()));
     ensure!(rows[1].3 == serde_json::to_string(&Value::Object(first_metadata))?);
@@ -159,7 +164,7 @@ pub(super) fn run(extension: &Path, database: &Path) -> Result<()> {
 
     let groups = connection
         .prepare("SELECT group_key,n FROM timeless_log_buckets('logs','level',NULL,?1,?2,10)")?
-        .query_map(params![timestamp, timestamp + 9], |row| {
+        .query_map(params![timestamp, legacy_timestamp_us + 9], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
