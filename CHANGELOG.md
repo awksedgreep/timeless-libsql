@@ -10,9 +10,29 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.8 -->
+<!-- release-target: 0.8.9 -->
 
 ## [Unreleased]
+
+## [0.8.9] — 2026-10-03
+
+### Fixed
+
+- **Selective metrics reads skip unrelated chunk-index gaps (#116).** The
+  batch reader introduced in 0.8.8 scanned every chunk between its first and
+  last selected series. Exact-name PromQL queries could therefore slow down
+  as unrelated series accumulated. The reader now seeks past long gaps while
+  scanning short gaps sequentially. Paired local SQL benchmarks with 161
+  matching series in a 152,000-series catalog are 8.2–8.4× faster; broad and
+  half-catalog queries remain within −2.4% to +3.2% of the previous reader.
+  Results, ordering, and work-limit behavior are preserved. See the
+  [baseline and comparison](tools/bench/results/2026-10-03_catalog_growth.md).
+
+### Added
+
+- Reproducible catalog-growth benchmarks with dense, sparse, and
+  single-series controls, plus alternating reads through two extensions on
+  the same database to check performance without fixture or load-order bias.
 
 ## [0.8.8] — 2026-10-03
 
@@ -1306,7 +1326,8 @@ Hardened statement atomicity, savepoints, multi-process series identity,
 attached schemas, transactional drop, filesystem compaction, deadlock
 avoidance, extreme timestamps, and performance parity.
 
-[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/awksedgreep/timeless-libsql/compare/v0.8.5...v0.8.6
