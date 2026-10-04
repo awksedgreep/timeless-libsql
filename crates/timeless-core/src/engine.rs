@@ -3365,11 +3365,13 @@ impl Engine {
         }
 
         let _transition = self.transition_read();
-        // One ordered sweep over the chunk index instead of a B-tree
-        // walk per series: sort input positions by series id, then scan
-        // once from the first key. Output order still follows the input
-        // (including duplicate ids), so downstream loc/payload alignment
-        // and work accounting are unchanged.
+        // Sweep dense selections sequentially, but seek past long gaps so
+        // sparse selectors do not walk unrelated series' chunk histories.
+        // A small, fixed allowance keeps short gaps cheaper than another
+        // B-tree seek without making work proportional to the whole span.
+        // Output order follows the input (including duplicate ids), keeping
+        // downstream loc/payload alignment and work accounting unchanged.
+        const MAX_GAP_SCAN: usize = 8;
         let mut order: Vec<usize> = (0..series_ids.len()).collect();
         order.sort_unstable_by_key(|&i| series_ids[i]);
         let mut matching: Vec<Vec<ChunkMeta>> = Vec::with_capacity(series_ids.len());
@@ -3382,13 +3384,26 @@ impl Engine {
                 };
                 let mut range = index.range((first_pk, i64::MIN, u64::MIN)..);
                 let mut o = 0;
-                for ((key, _, _), meta) in range.by_ref() {
+                let mut gap_scanned = 0;
+                while let Some(((key, _, _), meta)) = range.next() {
                     while o < order.len() && series_ids[order[o]] < key.series_id {
                         o += 1;
                     }
                     if o >= order.len() {
                         break;
                     }
+                    if key.series_id < series_ids[order[o]] {
+                        gap_scanned += 1;
+                        if gap_scanned == MAX_GAP_SCAN {
+                            let next_pk = PartitionKey {
+                                series_id: series_ids[order[o]],
+                            };
+                            range = index.range((next_pk, i64::MIN, u64::MIN)..);
+                            gap_scanned = 0;
+                        }
+                        continue;
+                    }
+                    gap_scanned = 0;
                     let mut p = o;
                     while p < order.len() && series_ids[order[p]] == key.series_id {
                         if meta.min_ts <= t_end && meta.max_ts >= t_start {

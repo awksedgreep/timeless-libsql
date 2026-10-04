@@ -20,6 +20,105 @@ fn new_engine(dir: &std::path::Path) -> Engine {
 }
 
 #[test]
+fn batch_range_matches_single_reads_across_dense_and_sparse_series() {
+    let dir = temp_dir("batch_range_gaps");
+    let engine = new_engine(&dir);
+    let ids: Vec<_> = (0..128)
+        .map(|i| {
+            engine
+                .resolve_cached("metric", &HashMap::from([("item".into(), i.to_string())]))
+                .unwrap()
+        })
+        .collect();
+
+    // Multiple chunks per series, including identical minimum timestamps.
+    // Some catalog entries have no chunks; one will have only buffered data.
+    for wave in 0..3 {
+        for (i, &id) in ids.iter().enumerate() {
+            if i.is_multiple_of(17) || i == 93 {
+                continue;
+            }
+            engine.write_point(id, 10, (i * 10 + wave) as f64);
+            engine.write_point(id, 20 + wave as i64, i as f64 + 0.5);
+        }
+        engine.flush_all().unwrap();
+    }
+    engine.write_point(ids[93], 15, -0.0);
+    engine.write_point(ids[1], 10, -1.0);
+
+    let selections = [
+        ids.clone(),
+        ids.iter().step_by(2).copied().collect(),
+        vec![
+            i64::MAX,
+            ids[127],
+            ids[1],
+            ids[17],
+            ids[93],
+            ids[64],
+            ids[1],
+            -1,
+        ],
+        vec![ids[17], ids[93]],
+        Vec::new(),
+    ];
+    for selected in &selections {
+        for (start, stop) in [(i64::MIN, i64::MAX), (10, 10), (11, 21), (30, 40), (21, 10)] {
+            let expected: Vec<_> = selected
+                .iter()
+                .map(|&id| (id, engine.query_range_by_id(id, start, stop).unwrap()))
+                .collect();
+            let actual = engine
+                .query_range_batch_by_id(selected, start, stop)
+                .unwrap();
+            let bits = |batch: Vec<(i64, Vec<(i64, f64)>)>| {
+                batch
+                    .into_iter()
+                    .map(|(id, points)| {
+                        (
+                            id,
+                            points
+                                .into_iter()
+                                .map(|(ts, value)| (ts, value.to_bits()))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                bits(actual),
+                bits(expected),
+                "selection {selected:?}, range {start}..={stop}"
+            );
+        }
+
+        // With an all-time range, each candidate point counts exactly once
+        // per requested ID, including repeated IDs and buffered-only series.
+        let expected = engine
+            .query_range_batch_by_id(selected, i64::MIN, i64::MAX)
+            .unwrap();
+        let work = expected
+            .iter()
+            .map(|(_, points)| points.len() as u64)
+            .sum::<u64>();
+        assert_eq!(
+            engine
+                .query_range_batch_by_id_limited(selected, i64::MIN, i64::MAX, work)
+                .unwrap(),
+            expected
+        );
+        if work > 0 {
+            assert!(engine
+                .query_range_batch_by_id_limited(selected, i64::MIN, i64::MAX, work - 1)
+                .unwrap_err()
+                .contains("raw batch work point limit"));
+        }
+    }
+    drop(engine);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn write_flush_query_recover() {
     let dir = temp_dir("roundtrip");
 
