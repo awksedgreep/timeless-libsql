@@ -14,6 +14,13 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Changed
+
+- Native release bundles now target Linux x86-64, Linux AArch64, and macOS
+  Apple Silicon. Intel macOS users can build the extension and servers from
+  source; future releases no longer wait for an Intel macOS package job.
+  Existing release assets, including `v0.8.9`, are unchanged.
+
 ## [0.8.9] — 2026-10-03
 
 ### Fixed

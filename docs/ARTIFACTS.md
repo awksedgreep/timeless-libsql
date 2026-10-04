@@ -56,10 +56,15 @@ The standalone dbhealth extension is intentionally not in this bundle. Build
 |---|---|---|
 | `x86_64-unknown-linux-gnu` | Linux x86-64 GNU | `lib/libtimeless_ext.so` |
 | `aarch64-unknown-linux-gnu` | Linux AArch64 GNU | `lib/libtimeless_ext.so` |
-| `x86_64-apple-darwin` | macOS Intel | `lib/libtimeless_ext.dylib` |
 | `aarch64-apple-darwin` | macOS Apple Silicon | `lib/libtimeless_ext.dylib` |
 
 <!-- public-artifact-targets:end -->
+
+Starting with releases after `v0.8.9`, Intel macOS is source-only. Build the
+[extension](../README.md#quick-start) and
+[servers](../README.md#standalone-rust-signal-apis) from source on Intel Macs;
+published bundles cover Linux x86-64, Linux AArch64, and macOS Apple Silicon.
+Earlier releases retain their published Intel macOS archives.
 
 Each target must be built and identity-checked natively before the matrix is
 published. The table is the packager contract, not the current publication
@@ -163,7 +168,6 @@ timeless_tag="${timeless_release_url##*/}"
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64) timeless_target=x86_64-unknown-linux-gnu ;;
   Linux:aarch64|Linux:arm64) timeless_target=aarch64-unknown-linux-gnu ;;
-  Darwin:x86_64) timeless_target=x86_64-apple-darwin ;;
   Darwin:arm64) timeless_target=aarch64-apple-darwin ;;
   *) echo 'No published archive for this host; build from source.' >&2; exit 1 ;;
 esac

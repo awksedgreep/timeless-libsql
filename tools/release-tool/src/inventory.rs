@@ -93,7 +93,7 @@ mod tests {
     fn checked_inventory_is_valid_and_complete() {
         let inventory = Inventory::load().unwrap();
         assert_eq!(inventory.schema, 1);
-        assert_eq!(inventory.targets.len(), 4);
+        assert_eq!(inventory.targets.len(), 3);
         assert_eq!(inventory.binaries.len(), 4);
         assert_eq!(
             inventory

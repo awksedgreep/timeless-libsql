@@ -23,7 +23,9 @@ cargo run --release --manifest-path tools/release-tool/Cargo.toml \
 ```
 
 `artifact-inventory.json` is the machine-readable source of truth for native
-targets, binaries, and fixed archive paths. The documentation-contract gate
+targets, binaries, and fixed archive paths. Release bundles cover Linux
+x86-64, Linux AArch64, and macOS Apple Silicon; Intel macOS users build the
+extension and servers directly from source. The documentation-contract gate
 compares it with `docs/ARTIFACTS.md`. The packager refuses dirty source and a
 non-native target by default, builds both locked workspaces, verifies all
 identities and checksums, and performs an isolated install/remove preservation

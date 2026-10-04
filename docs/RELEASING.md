@@ -43,12 +43,12 @@ than the exact tree being tagged verifies nothing.
    slower shared runners and have produced false failures from timing
    flakes; they earn their keep on changes that skipped the local stack,
    not as a ritual after ones that ran it. CI's unique job is the
-   four-platform artifact build, and the tag triggers that automatically.
+   three-platform artifact build, and the tag triggers that automatically.
 9. **Changelog**: a dated section for the release under the versioning
    policy at the top of `CHANGELOG.md`; update the `release-target` comment.
 
 Only then: tag from `main`, push the tag, watch `Release artifacts` to
-completion, and verify the GitHub release carries all four native archives
+completion, and verify the GitHub release carries all three native archives
 plus `SHA256SUMS` (see [ARTIFACTS.md](ARTIFACTS.md)).
 
 ## If a tagged release fails its artifact run
