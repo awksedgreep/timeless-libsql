@@ -377,6 +377,27 @@ cargo run --release --manifest-path tools/bench/Cargo.toml \
   --bin query-read -- "$timeless_ext"
 ```
 
+For the metrics catalog-growth regression (#116), use the same reader's
+dedicated mode. It holds 161 target series and their samples constant while
+varying unrelated series, tests both interleaved and adjacent IDs, and includes
+broad, half-catalog, single-series, and catalog-only controls:
+
+```sh
+for total in 50000 152000; do
+  cargo run --release --locked --manifest-path tools/bench/Cargo.toml \
+    --bin query-read -- "$timeless_ext" --catalog-growth \
+    --series "$total" --points 1 --runs 60
+done
+```
+
+Each shape verifies every returned ID, timestamp, and value against the
+deterministic fixture before five warmups and the measured runs. CSV includes
+median/p95, result sizes, and checksums. Run twice before and after changing
+the reader, on the same host without competing builds or tests; also run the
+default `query-read` fixture to retain its 12,000-series × 60-point comparison.
+Scratch databases are removed automatically. These timings exclude HTTP,
+concurrent ingestion, and initial catalog recovery.
+
 ### Trace duration-pruning evidence
 
 The Rust query harness can measure a copied pre-extrema trace database before

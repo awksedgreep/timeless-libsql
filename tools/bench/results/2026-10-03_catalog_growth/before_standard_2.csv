@@ -1,0 +1,34 @@
+# benchmark=query-read
+# extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-baseline.so
+# sqlite=3.53.2
+# series=12000
+# points_per_series=60
+# total_points=720000
+# runs=20
+# ingest_us=78975
+# flush_us=242646
+# database_bytes=39149176
+metric,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes
+first_exact_after_flush,155,155,155,155,1,1,60,1041
+catalog_generation_select,0,0,0,1,100,0,24000,8
+warm_refresh_noop,19,22,17,33,100,0,0,8
+exact_raw_batches,29,32,28,35,100,1,60,1041
+selective_regex_raw_batches,975,1753,707,1798,20,1,60,1041
+selective_negative_raw_batches,20313,22437,19444,24124,20,6000,360000,6269505
+selective_series_discovery,597,1281,465,1990,100,0,1,8
+selective_label_values,490,559,451,627,100,0,1,8
+narrow_raw_batches,581,714,491,794,20,188,11280,196284
+wide_raw_batches,39743,40827,38016,41646,20,12000,720000,12539015
+wide_raw_frame,36667,37691,35021,38028,20,12000,720000,11664016
+scalar_aggregate_raw_fallback,39900,42359,37896,42844,20,12000,720000,12539015
+scalar_aggregate_native,14494,15058,13261,15206,20,12000,12000,1067015
+scalar_aggregate_frame,3709,4457,3019,4561,20,12000,12000,193512
+latest_raw_fallback,39272,40626,37919,41043,20,12000,12000,12539015
+latest_native,15444,17307,14339,18386,20,12000,12000,1163015
+latest_frame,3964,4516,3534,5070,20,12000,12000,289508
+grid_count,36998,39072,35787,39378,20,0,72000,8
+window_avg_count,38308,39343,37678,39539,20,0,72000,8
+window_avg_batches,37103,39581,35913,40274,20,12000,72000,1356000
+rollup_avg_count,138059,141733,133379,146676,20,0,60000,8
+rollup_six_row_aggregates,908666,952787,850178,985647,20,0,60000,32010450
+rollup_all_batches,87179,92829,81902,96550,20,12000,60000,4032000

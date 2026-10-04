@@ -6,6 +6,9 @@
 //! uses only the public loadable-extension SQL surface so every measurement is
 //! representative of a direct SQLite/libSQL user, not an internal Rust call.
 
+#[path = "query_read/catalog_growth.rs"]
+mod catalog_growth;
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -21,6 +24,7 @@ struct Config {
     series: usize,
     points: usize,
     runs: usize,
+    catalog_growth: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +50,11 @@ fn main() {
     assert!(config.series > 0, "--series must be positive");
     assert!(config.points > 0, "--points must be positive");
     assert!(config.runs > 0, "--runs must be positive");
+
+    if config.catalog_growth {
+        catalog_growth::run(&ext, config);
+        return;
+    }
 
     let total_points = config
         .series
@@ -527,16 +536,21 @@ fn main() {
 fn parse_args() -> (String, Config) {
     let mut args = env::args().skip(1);
     let ext = args.next().unwrap_or_else(|| {
-        eprintln!("usage: query-read EXT [--series N] [--points N] [--runs N]");
+        eprintln!("usage: query-read EXT [--series N] [--points N] [--runs N] [--catalog-growth]");
         std::process::exit(2);
     });
     let mut config = Config {
         series: 12_000,
         points: 60,
         runs: 20,
+        catalog_growth: false,
     };
 
     while let Some(flag) = args.next() {
+        if flag == "--catalog-growth" {
+            config.catalog_growth = true;
+            continue;
+        }
         let value = args
             .next()
             .unwrap_or_else(|| panic!("{flag} requires an integer value"));
@@ -876,6 +890,10 @@ fn consume_raw_frame(stmt: &mut Statement<'_>, filter: &str, start: i64, stop: i
     let blob: Vec<u8> = stmt
         .query_row(params![METRIC, filter, start, stop], |row| row.get(0))
         .expect("query raw frame");
+    raw_frame_outcome(&blob)
+}
+
+fn raw_frame_outcome(blob: &[u8]) -> Outcome {
     assert!(blob.len() >= 16, "truncated raw frame");
     assert_eq!(&blob[..4], b"TRF1", "unknown raw frame version");
     let series = u32::from_le_bytes(blob[4..8].try_into().unwrap()) as usize;

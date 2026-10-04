@@ -1,0 +1,13 @@
+# catalog-growth: selected=161, points_per_series=1, warmup=5, runs=60
+# extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-baseline.so, sqlite=3.53.2
+catalog_series,layout,query,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes,checksum
+50000,interleaved,fixed_161_raw,525,626,473,680,60,161,161,4524,b9ca9219a22fcdef
+50000,interleaved,broad_raw,64947,72791,57771,83315,60,49839,49839,1395508,e1051451b980f25a
+50000,interleaved,half_raw,33792,36391,32646,36875,60,24919,24919,697748,3dd891a7d5636696
+50000,interleaved,single_raw,25,26,25,33,60,1,1,44,6553f10171265257
+50000,interleaved,fixed_161_catalog,117,151,114,158,60,161,0,8825,f707054d2f1480bc
+50000,adjacent,fixed_161_raw,173,185,164,192,60,161,161,4524,b9ca9219a1f29637
+50000,adjacent,broad_raw,60401,69042,54064,75670,60,49839,49839,1395508,e10514520c54a192
+50000,adjacent,half_raw,36760,38121,31510,40660,60,24919,24919,697748,3dd891a7fe7a2676
+50000,adjacent,single_raw,29,33,28,37,60,1,1,44,6553f10171265257
+50000,adjacent,fixed_161_catalog,127,134,123,136,60,161,0,8825,2158afaeb7d0b04a
