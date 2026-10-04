@@ -398,6 +398,21 @@ default `query-read` fixture to retain its 12,000-series × 60-point comparison.
 Scratch databases are removed automatically. These timings exclude HTTP,
 concurrent ingestion, and initial catalog recovery.
 
+To separate reader performance from differences between fresh fixtures and
+host load, retain the old extension before rebuilding and pass it as a
+comparison:
+
+```sh
+tools/bench/target/release/query-read "$timeless_ext" --catalog-growth \
+  --compare-extension "$PWD/target/issue116-baseline.so" \
+  --series 152000 --points 1 --runs 30
+```
+
+The primary and comparison extensions open separate readers on the same
+persisted database, verify identical frames, and alternate which reader goes
+first on each iteration. CSV query names identify each reader. Repeat with
+the two extension paths swapped to check library-load order effects.
+
 ### Trace duration-pruning evidence
 
 The Rust query harness can measure a copied pre-extrema trace database before

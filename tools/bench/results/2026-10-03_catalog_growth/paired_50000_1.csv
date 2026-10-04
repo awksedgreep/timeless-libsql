@@ -1,0 +1,24 @@
+# catalog-growth: selected=161, points_per_series=1, warmup=5, runs=30
+# extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-gap-seek.so, sqlite=3.53.2
+# comparison_extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-baseline.so; paired reads alternate first reader on each iteration
+catalog_series,layout,query,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes,checksum
+50000,interleaved,primary_fixed_161_raw,228,353,195,404,30,161,161,4524,b9ca9219a22fcdef
+50000,interleaved,comparison_fixed_161_raw,542,891,498,900,30,161,161,4524,b9ca9219a22fcdef
+50000,interleaved,primary_broad_raw,62319,68043,59461,69651,30,49839,49839,1395508,e1051451b980f25a
+50000,interleaved,comparison_broad_raw,62060,73612,57533,73815,30,49839,49839,1395508,e1051451b980f25a
+50000,interleaved,primary_half_raw,40825,44130,33848,46589,30,24919,24919,697748,3dd891a7d5636696
+50000,interleaved,comparison_half_raw,39561,44023,34235,45334,30,24919,24919,697748,3dd891a7d5636696
+50000,interleaved,primary_single_raw,34,41,31,42,30,1,1,44,6553f10171265257
+50000,interleaved,comparison_single_raw,40,44,36,47,30,1,1,44,6553f10171265257
+50000,interleaved,primary_fixed_161_catalog,152,253,142,262,30,161,0,8825,f707054d2f1480bc
+50000,interleaved,comparison_fixed_161_catalog,159,170,142,171,30,161,0,8825,f707054d2f1480bc
+50000,adjacent,primary_fixed_161_raw,191,213,173,228,30,161,161,4524,b9ca9219a1f29637
+50000,adjacent,comparison_fixed_161_raw,187,290,169,321,30,161,161,4524,b9ca9219a1f29637
+50000,adjacent,primary_broad_raw,63039,67817,60575,71037,30,49839,49839,1395508,e10514520c54a192
+50000,adjacent,comparison_broad_raw,62042,70781,59732,70794,30,49839,49839,1395508,e10514520c54a192
+50000,adjacent,primary_half_raw,40192,46757,34748,50613,30,24919,24919,697748,3dd891a7fe7a2676
+50000,adjacent,comparison_half_raw,40025,44107,34588,48552,30,24919,24919,697748,3dd891a7fe7a2676
+50000,adjacent,primary_single_raw,25,27,23,28,30,1,1,44,6553f10171265257
+50000,adjacent,comparison_single_raw,29,32,26,35,30,1,1,44,6553f10171265257
+50000,adjacent,primary_fixed_161_catalog,124,147,111,153,30,161,0,8825,2158afaeb7d0b04a
+50000,adjacent,comparison_fixed_161_catalog,124,150,115,167,30,161,0,8825,2158afaeb7d0b04a

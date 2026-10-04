@@ -2,8 +2,11 @@
 //! Uses the same public SQL path as PromQL raw reads, with no concurrent
 //! writer or catalog refresh in the timed region.
 
-use super::{measure, open_with_ext, raw_frame_outcome, Config, Outcome, BASE_TS, METRIC};
-use rusqlite::{params, Connection};
+use super::{
+    measure, open_with_ext, raw_frame_outcome, summarize, Config, Outcome, Stats, BASE_TS, METRIC,
+};
+use rusqlite::{params, Connection, Statement};
+use std::time::Instant;
 
 const SELECTED: usize = 161;
 const BACKGROUND: &str = "unrelated_metric";
@@ -16,7 +19,7 @@ struct Series {
     half: bool,
 }
 
-pub(super) fn run(ext: &str, config: Config) {
+pub(super) fn run(ext: &str, compare_ext: Option<&str>, config: Config) {
     assert!(
         config.series > SELECTED,
         "catalog must exceed {SELECTED} series"
@@ -28,6 +31,9 @@ pub(super) fn run(ext: &str, config: Config) {
         config.points, config.runs
     );
     println!("# extension={ext}, sqlite={}", rusqlite::version());
+    if let Some(compare_ext) = compare_ext {
+        println!("# comparison_extension={compare_ext}; paired reads alternate first reader on each iteration");
+    }
     println!("catalog_series,layout,query,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes,checksum");
 
     for interleaved in [true, false] {
@@ -86,6 +92,7 @@ pub(super) fn run(ext: &str, config: Config) {
         // Close the writer and warm an independent reader before measuring.
         drop(conn);
         let conn = open_with_ext(db.to_str().unwrap(), ext);
+        let comparison = compare_ext.map(|ext| open_with_ext(db.to_str().unwrap(), ext));
         let background: Vec<usize> = (0..config.series)
             .filter(|&i| fixture[i].metric == BACKGROUND)
             .collect();
@@ -115,21 +122,33 @@ pub(super) fn run(ext: &str, config: Config) {
             let mut stmt = conn
                 .prepare("SELECT frame FROM timeless_raw_frame('metrics',?1,?2,?3,?4,?5)")
                 .unwrap();
-            let mut query = || {
-                stmt.query_row(
-                    params![
-                        metric,
-                        filter,
-                        BASE_TS - 30,
-                        BASE_TS + config.points as i64 - 1,
-                        i64::MAX
-                    ],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .unwrap()
-            };
+            let mut query = || raw_query(&mut stmt, metric, filter, config.points);
             let expected = query();
             validate(&expected, positions, &fixture, config.points);
+            if let Some(comparison) = &comparison {
+                let mut other_stmt = comparison
+                    .prepare("SELECT frame FROM timeless_raw_frame('metrics',?1,?2,?3,?4,?5)")
+                    .unwrap();
+                let mut other_query = || raw_query(&mut other_stmt, metric, filter, config.points);
+                assert_eq!(
+                    other_query(),
+                    expected,
+                    "extensions returned different frames"
+                );
+                let stats = measure_pair(
+                    config.runs,
+                    || raw_frame_outcome(&query()),
+                    || raw_frame_outcome(&other_query()),
+                );
+                print(config.series, layout, &format!("primary_{name}"), &stats[0]);
+                print(
+                    config.series,
+                    layout,
+                    &format!("comparison_{name}"),
+                    &stats[1],
+                );
+                continue;
+            }
             for _ in 0..5 {
                 assert_eq!(query(), expected);
             }
@@ -144,13 +163,66 @@ pub(super) fn run(ext: &str, config: Config) {
         for _ in 0..5 {
             assert_eq!(catalog().series, SELECTED);
         }
-        print(
-            config.series,
-            layout,
-            "fixed_161_catalog",
-            &measure(config.runs, catalog),
-        );
+        if let Some(comparison) = &comparison {
+            let stats = measure_pair(config.runs, catalog, || catalog_outcome(comparison));
+            print(
+                config.series,
+                layout,
+                "primary_fixed_161_catalog",
+                &stats[0],
+            );
+            print(
+                config.series,
+                layout,
+                "comparison_fixed_161_catalog",
+                &stats[1],
+            );
+        } else {
+            print(
+                config.series,
+                layout,
+                "fixed_161_catalog",
+                &measure(config.runs, catalog),
+            );
+        }
     }
+}
+
+fn raw_query(stmt: &mut Statement<'_>, metric: &str, filter: &str, points: usize) -> Vec<u8> {
+    stmt.query_row(
+        params![
+            metric,
+            filter,
+            BASE_TS - 30,
+            BASE_TS + points as i64 - 1,
+            i64::MAX
+        ],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn measure_pair(
+    runs: usize,
+    mut primary: impl FnMut() -> Outcome,
+    mut comparison: impl FnMut() -> Outcome,
+) -> [Stats; 2] {
+    let expected = primary();
+    let mut samples = [Vec::with_capacity(runs), Vec::with_capacity(runs)];
+    for iteration in 0..runs + 5 {
+        // Both readers use the exact same persisted fixture. Alternating
+        // first reader distributes cache and frequency effects between them.
+        for reader in [iteration % 2, (iteration + 1) % 2] {
+            let started = Instant::now();
+            let outcome = if reader == 0 { primary() } else { comparison() };
+            let elapsed = started.elapsed().as_micros();
+            assert_eq!(outcome, expected, "paired query result mismatch");
+            if iteration >= 5 {
+                samples[reader].push(elapsed);
+            }
+        }
+    }
+    samples.map(|samples| summarize(samples, expected))
 }
 
 fn print(total: usize, layout: &str, query: &str, stats: &super::Stats) {

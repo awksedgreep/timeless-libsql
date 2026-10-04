@@ -45,16 +45,20 @@ struct Stats {
 }
 
 fn main() {
-    let (ext, config) = parse_args();
+    let (ext, config, compare_ext) = parse_args();
     assert!(Path::new(&ext).is_file(), "extension not found at {ext}");
     assert!(config.series > 0, "--series must be positive");
     assert!(config.points > 0, "--points must be positive");
     assert!(config.runs > 0, "--runs must be positive");
 
     if config.catalog_growth {
-        catalog_growth::run(&ext, config);
+        catalog_growth::run(&ext, compare_ext.as_deref(), config);
         return;
     }
+    assert!(
+        compare_ext.is_none(),
+        "--compare-extension requires --catalog-growth"
+    );
 
     let total_points = config
         .series
@@ -533,10 +537,10 @@ fn main() {
     scrub(&db_path);
 }
 
-fn parse_args() -> (String, Config) {
+fn parse_args() -> (String, Config, Option<String>) {
     let mut args = env::args().skip(1);
     let ext = args.next().unwrap_or_else(|| {
-        eprintln!("usage: query-read EXT [--series N] [--points N] [--runs N] [--catalog-growth]");
+        eprintln!("usage: query-read EXT [--series N] [--points N] [--runs N] [--catalog-growth [--compare-extension EXT]]");
         std::process::exit(2);
     });
     let mut config = Config {
@@ -545,6 +549,7 @@ fn parse_args() -> (String, Config) {
         runs: 20,
         catalog_growth: false,
     };
+    let mut compare_ext = None;
 
     while let Some(flag) = args.next() {
         if flag == "--catalog-growth" {
@@ -553,7 +558,11 @@ fn parse_args() -> (String, Config) {
         }
         let value = args
             .next()
-            .unwrap_or_else(|| panic!("{flag} requires an integer value"));
+            .unwrap_or_else(|| panic!("{flag} requires a value"));
+        if flag == "--compare-extension" {
+            compare_ext = Some(value);
+            continue;
+        }
         let parsed: usize = value
             .parse()
             .unwrap_or_else(|_| panic!("{flag} expects an integer, got {value:?}"));
@@ -564,7 +573,7 @@ fn parse_args() -> (String, Config) {
             _ => panic!("unknown argument {flag:?}"),
         }
     }
-    (ext, config)
+    (ext, config, compare_ext)
 }
 
 fn open_with_ext(path: &str, ext: &str) -> Connection {
@@ -680,8 +689,8 @@ fn consume_raw(
         if aggregate_values {
             let values = &blob[4 + count * 8..];
             let mut sum = 0.0;
-            for value in values.chunks_exact(8) {
-                sum += f64::from_bits(u64::from_le_bytes(value.try_into().unwrap()));
+            for value in values.as_chunks::<8>().0 {
+                sum += f64::from_bits(u64::from_le_bytes(*value));
             }
             let average = if count == 0 { 0.0 } else { sum / count as f64 };
             checksum = checksum.wrapping_add(average.to_bits());
@@ -910,8 +919,10 @@ fn raw_frame_outcome(blob: &[u8]) -> Outcome {
     assert_eq!(blob.len(), expected, "malformed raw frame");
     let counts_start = 16 + ids_bytes;
     let counted_points: usize = blob[counts_start..counts_start + counts_bytes]
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes) as usize)
         .sum();
     assert_eq!(counted_points, points, "raw frame point counts differ");
     let checksum = blob.chunks(8).fold(0u64, |sum, bytes| {
@@ -1035,8 +1046,8 @@ fn consume_rollup_batches(
         points += count;
         bytes += 8 + blob.len();
         checksum = checksum.wrapping_add(series_id as u64);
-        for word in blob[8..].chunks_exact(8) {
-            checksum = checksum.wrapping_add(u64::from_le_bytes(word.try_into().unwrap()));
+        for word in blob[8..].as_chunks::<8>().0 {
+            checksum = checksum.wrapping_add(u64::from_le_bytes(*word));
         }
     }
     Outcome {
@@ -1088,6 +1099,10 @@ fn measure(mut runs: usize, mut operation: impl FnMut() -> Outcome) -> Stats {
         }
         samples.push(elapsed);
     }
+    summarize(samples, expected.unwrap())
+}
+
+fn summarize(mut samples: Vec<u128>, outcome: Outcome) -> Stats {
     samples.sort_unstable();
     let p95_index = ((samples.len() * 95).div_ceil(100)).saturating_sub(1);
     Stats {
@@ -1095,8 +1110,8 @@ fn measure(mut runs: usize, mut operation: impl FnMut() -> Outcome) -> Stats {
         p95_us: samples[p95_index],
         min_us: samples[0],
         max_us: *samples.last().unwrap(),
-        runs,
-        outcome: expected.unwrap(),
+        runs: samples.len(),
+        outcome,
     }
 }
 

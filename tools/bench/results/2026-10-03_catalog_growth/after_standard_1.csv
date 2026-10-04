@@ -1,0 +1,34 @@
+# benchmark=query-read
+# extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-gap-seek.so
+# sqlite=3.53.2
+# series=12000
+# points_per_series=60
+# total_points=720000
+# runs=20
+# ingest_us=87662
+# flush_us=243363
+# database_bytes=39149176
+metric,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes
+first_exact_after_flush,178,178,178,178,1,1,60,1041
+catalog_generation_select,0,0,0,1,100,0,24000,8
+warm_refresh_noop,19,21,17,33,100,0,0,8
+exact_raw_batches,29,32,28,36,100,1,60,1041
+selective_regex_raw_batches,638,867,508,1381,20,1,60,1041
+selective_negative_raw_batches,19721,20753,18567,22827,20,6000,360000,6269505
+selective_series_discovery,541,862,432,1529,100,0,1,8
+selective_label_values,491,563,425,793,100,0,1,8
+narrow_raw_batches,497,577,473,591,20,188,11280,196284
+wide_raw_batches,40070,43538,36903,44275,20,12000,720000,12539015
+wide_raw_frame,35744,38808,34386,39811,20,12000,720000,11664016
+scalar_aggregate_raw_fallback,39241,40058,36710,40468,20,12000,720000,12539015
+scalar_aggregate_native,15046,18015,13276,18595,20,12000,12000,1067015
+scalar_aggregate_frame,3803,4335,3313,4380,20,12000,12000,193512
+latest_raw_fallback,43033,46993,39103,48380,20,12000,12000,12539015
+latest_native,16393,18328,15278,19271,20,12000,12000,1163015
+latest_frame,5576,7310,5401,10107,20,12000,12000,289508
+grid_count,39204,45874,34849,47998,20,0,72000,8
+window_avg_count,39497,43884,36316,46940,20,0,72000,8
+window_avg_batches,36584,38338,34844,38497,20,12000,72000,1356000
+rollup_avg_count,152721,155359,134363,157183,20,0,60000,8
+rollup_six_row_aggregates,885001,916359,847075,924950,20,0,60000,32010450
+rollup_all_batches,85701,95046,80673,99618,20,12000,60000,4032000

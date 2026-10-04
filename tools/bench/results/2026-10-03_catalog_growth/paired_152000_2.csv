@@ -1,0 +1,24 @@
+# catalog-growth: selected=161, points_per_series=1, warmup=5, runs=30
+# extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-baseline.so, sqlite=3.53.2
+# comparison_extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-gap-seek.so; paired reads alternate first reader on each iteration
+catalog_series,layout,query,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes,checksum
+152000,interleaved,primary_fixed_161_raw,2960,3390,2527,3556,30,161,161,4524,b9ca9219a2ad1827
+152000,interleaved,comparison_fixed_161_raw,359,501,241,542,30,161,161,4524,b9ca9219a2ad1827
+152000,interleaved,primary_broad_raw,245335,272212,226952,300043,30,151839,151839,4251508,b66f3f1a36352496
+152000,interleaved,comparison_broad_raw,241055,250809,225833,268356,30,151839,151839,4251508,b66f3f1a36352496
+152000,interleaved,primary_half_raw,136859,148453,118564,153345,30,75999,75999,2127988,52c8f7985d9c5022
+152000,interleaved,comparison_half_raw,140510,162785,116675,172317,30,75999,75999,2127988,52c8f7985d9c5022
+152000,interleaved,primary_single_raw,29,31,26,31,30,1,1,44,6553f10171265257
+152000,interleaved,comparison_single_raw,34,37,31,37,30,1,1,44,6553f10171265257
+152000,interleaved,primary_fixed_161_catalog,170,268,121,273,30,161,0,8825,c4a8045d822d0d07
+152000,interleaved,comparison_fixed_161_catalog,174,272,126,282,30,161,0,8825,c4a8045d822d0d07
+152000,adjacent,primary_fixed_161_raw,209,230,192,335,30,161,161,4524,b9ca9219a1f29637
+152000,adjacent,comparison_fixed_161_raw,209,222,189,241,30,161,161,4524,b9ca9219a1f29637
+152000,adjacent,primary_broad_raw,245009,261751,225196,267953,30,151839,151839,4251508,b66f3f1a99a079f2
+152000,adjacent,comparison_broad_raw,245555,261348,228174,264897,30,151839,151839,4251508,b66f3f1a99a079f2
+152000,adjacent,primary_half_raw,137960,150928,121533,152170,30,75919,75919,2125748,a88da70c4519260a
+152000,adjacent,comparison_half_raw,135529,151998,112362,157517,30,75919,75919,2125748,a88da70c4519260a
+152000,adjacent,primary_single_raw,29,32,26,35,30,1,1,44,6553f10171265257
+152000,adjacent,comparison_single_raw,34,35,31,36,30,1,1,44,6553f10171265257
+152000,adjacent,primary_fixed_161_catalog,136,145,125,148,30,161,0,8825,2158afaeb7d0b04a
+152000,adjacent,comparison_fixed_161_catalog,144,152,131,153,30,161,0,8825,2158afaeb7d0b04a

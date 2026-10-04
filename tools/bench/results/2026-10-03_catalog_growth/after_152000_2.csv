@@ -1,0 +1,13 @@
+# catalog-growth: selected=161, points_per_series=1, warmup=5, runs=60
+# extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/issue116-gap-seek.so, sqlite=3.53.2
+catalog_series,layout,query,median_us,p95_us,min_us,max_us,runs,result_series,result_points,result_bytes,checksum
+152000,interleaved,fixed_161_raw,226,236,203,300,60,161,161,4524,b9ca9219a2ad1827
+152000,interleaved,broad_raw,254185,282774,237653,291081,60,151839,151839,4251508,b66f3f1a36352496
+152000,interleaved,half_raw,120187,134916,112972,141279,60,75999,75999,2127988,52c8f7985d9c5022
+152000,interleaved,single_raw,24,26,23,30,60,1,1,44,6553f10171265257
+152000,interleaved,fixed_161_catalog,121,129,115,185,60,161,0,8825,c4a8045d822d0d07
+152000,adjacent,fixed_161_raw,152,172,139,282,60,161,161,4524,b9ca9219a1f29637
+152000,adjacent,broad_raw,236302,265410,215028,276317,60,151839,151839,4251508,b66f3f1a99a079f2
+152000,adjacent,half_raw,116928,125183,112704,131453,60,75919,75919,2125748,a88da70c4519260a
+152000,adjacent,single_raw,24,25,23,30,60,1,1,44,6553f10171265257
+152000,adjacent,fixed_161_catalog,117,125,108,134,60,161,0,8825,2158afaeb7d0b04a
