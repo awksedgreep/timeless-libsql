@@ -9,24 +9,26 @@ reachable from `main`.
 
 ## Current publication status
 
-[`v0.8.7`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.7)
-was published on 2026-10-03 at 20:18:50 UTC from `main` commit
-`0b8d4ab5b426aa543d9b9ea701fbfca20e1b3fdb`. It contains the metrics
-compaction sweep that ends, is planned once, and merges small chunks; series
-and rollup retention and merging; series discovery time windows; and the
-log scan fixes described in the [changelog](../CHANGELOG.md).
+[`v0.8.9`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.9)
+was published on 2026-10-04 at 02:15:43 UTC from `main` commit
+`7126f899acdb53e4429c1bf3b7533b9fac9d75f8`. It fixes selective metrics reads
+that slowed down as unrelated series accumulated, while preserving broad
+query throughput. See the [changelog](../CHANGELOG.md) and
+[benchmark evidence](../tools/bench/results/2026-10-03_catalog_growth.md).
 
-The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/37150289021)
+The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/37169792903)
 built, identity-checked, and install/remove-drilled all four native Linux/macOS
 archives, verified the complete outer `SHA256SUMS`, and published the four
 archives plus that checksum file as permanent release assets. All assets were
-downloaded and independently verified after publication; every archive passed
-`sha256sum -c` against the published checksum file. See the
-[release validation record](RELEASE_0_8_7.md)
-for the complete post-bump local checklist and archive hashes.
+downloaded and independently verified after publication, including outer and
+inner checksums, exact inventory, and source identities. The downloaded Linux
+x86-64 bundle also passed local binary, extension, and install/remove checks.
+See the [release validation record](RELEASE_0_8_9.md) for the complete
+post-bump local checklist, both dispatched CI gates, and archive hashes.
 
 This is the current download channel. Complete published releases also exist
-for `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`, `v0.8.1`, `v0.8.0`,
+for `v0.8.8`, `v0.8.7`, `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`,
+`v0.8.1`, `v0.8.0`,
 `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`,
 `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
 
