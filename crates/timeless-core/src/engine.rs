@@ -219,6 +219,9 @@ impl RollupIndexEntry {
 /// chunks with duplicate first-bucket timestamps across restart/rollback.
 type RollupKey = (RollupGroupKey, i64, i64);
 
+/// One planned rollup merge: a run of a group's chunks to put together.
+type RollupMergeGroup = (RollupGroupKey, Vec<RollupIndexEntry>);
+
 #[derive(Default)]
 struct RollupIndex {
     groups: HashMap<RollupGroupKey, Vec<RollupIndexEntry>>,
@@ -1010,6 +1013,10 @@ pub struct Engine {
     /// (tier, series) group, and a rollup merge — for data that has not
     /// changed (#123). Process-local, like the cursor.
     rollup_cycle_done_sweep: AtomicU64,
+    /// Rollup merges planned when a sweep's cycle completed, taken a
+    /// bounded number of groups per step by `rollup_bounded_for_sweep`
+    /// (#123). Process-local; a restart plans again at its first cycle.
+    rollup_merge_plan: Mutex<VecDeque<RollupMergeGroup>>,
     /// F2 retention window in NATIVE ts units; 0 = disabled. Set from
     /// the persisted table argument after construction (idempotent —
     /// every connection loads the same _meta value).
@@ -1809,6 +1816,7 @@ impl Engine {
             rollup_maintenance_cursor: AtomicUsize::new(0),
             raw_compress_min_chunks: AtomicUsize::new(1),
             rollup_cycle_done_sweep: AtomicU64::new(0),
+            rollup_merge_plan: Mutex::new(VecDeque::new()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
         };
@@ -5188,66 +5196,101 @@ impl Engine {
     ///
     /// Returns (chunks removed, chunks written).
     pub fn merge_rollups(&self) -> EngineResult<(usize, usize)> {
-        // Plan from a read snapshot; nothing here needs the writer's view.
-        let plans: Vec<(RollupGroupKey, Vec<RollupIndexEntry>)> = {
-            let rollups = self.rollup_read();
-            // A series with no raw chunk left has nothing more to roll up:
-            // its pieces are put together once, however few they are.
-            let with_raw: HashSet<i64> = self
-                .index_read()
-                .keys()
-                .map(|(pk, _, _)| pk.series_id)
-                .collect();
-            let mut plans = Vec::new();
-            for (group, entries) in &rollups.groups {
-                let live = with_raw.contains(&group.series_id);
-                let at_least = if live { ROLLUP_MERGE_MIN_CHUNKS } else { 2 };
-                let mut run: Vec<RollupIndexEntry> = Vec::new();
-                let mut buckets = 0usize;
-                let close = |run: &mut Vec<RollupIndexEntry>, plans: &mut Vec<_>| {
-                    let largest = run
-                        .iter()
-                        .map(|e| e.point_count as usize)
-                        .max()
-                        .unwrap_or(0);
-                    let total: usize = run.iter().map(|e| e.point_count as usize).sum();
-                    if run.len() >= at_least && (!live || total >= largest.saturating_mul(2)) {
-                        plans.push((*group, std::mem::take(run)));
-                    } else {
-                        run.clear();
-                    }
-                };
-                for entry in entries {
-                    let count = entry.point_count as usize;
-                    if count >= ROLLUP_MERGE_TARGET_BUCKETS {
-                        // Full already: a boundary, not a member.
-                        close(&mut run, &mut plans);
-                        buckets = 0;
-                        continue;
-                    }
-                    if !run.is_empty() && buckets + count > ROLLUP_MERGE_TARGET_BUCKETS {
-                        close(&mut run, &mut plans);
-                        buckets = 0;
-                    }
-                    run.push(*entry);
-                    buckets += count;
+        let plans = self.plan_rollup_merges();
+        self.apply_rollup_merges(plans)
+    }
+
+    /// Every rollup merge there is to do, from a read snapshot.
+    fn plan_rollup_merges(&self) -> Vec<RollupMergeGroup> {
+        let rollups = self.rollup_read();
+        // A series with no raw chunk left has nothing more to roll up:
+        // its pieces are put together once, however few they are.
+        let with_raw: HashSet<i64> = self
+            .index_read()
+            .keys()
+            .map(|(pk, _, _)| pk.series_id)
+            .collect();
+        let mut plans = Vec::new();
+        for (group, entries) in &rollups.groups {
+            let live = with_raw.contains(&group.series_id);
+            let at_least = if live { ROLLUP_MERGE_MIN_CHUNKS } else { 2 };
+            let mut run: Vec<RollupIndexEntry> = Vec::new();
+            let mut buckets = 0usize;
+            let close = |run: &mut Vec<RollupIndexEntry>, plans: &mut Vec<_>| {
+                let largest = run
+                    .iter()
+                    .map(|e| e.point_count as usize)
+                    .max()
+                    .unwrap_or(0);
+                let total: usize = run.iter().map(|e| e.point_count as usize).sum();
+                if run.len() >= at_least && (!live || total >= largest.saturating_mul(2)) {
+                    plans.push((*group, std::mem::take(run)));
+                } else {
+                    run.clear();
                 }
-                close(&mut run, &mut plans);
+            };
+            for entry in entries {
+                let count = entry.point_count as usize;
+                if count >= ROLLUP_MERGE_TARGET_BUCKETS {
+                    // Full already: a boundary, not a member.
+                    close(&mut run, &mut plans);
+                    buckets = 0;
+                    continue;
+                }
+                if !run.is_empty() && buckets + count > ROLLUP_MERGE_TARGET_BUCKETS {
+                    close(&mut run, &mut plans);
+                    buckets = 0;
+                }
+                run.push(*entry);
+                buckets += count;
             }
+            close(&mut run, &mut plans);
+        }
+        // Series order, so a merge step's deletes and inserts share pages.
+        plans.sort_unstable_by_key(|(group, _)| (group.series_id, group.resolution));
+        plans
+    }
+
+    /// Put together the planned runs. A run any of whose chunks has gone
+    /// since it was planned (retention, an earlier merge) is passed over.
+    fn apply_rollup_merges(&self, plans: Vec<RollupMergeGroup>) -> EngineResult<(usize, usize)> {
+        let plans: Vec<RollupMergeGroup> = {
+            let rollups = self.rollup_read();
             plans
+                .into_iter()
+                .filter(|(group, entries)| {
+                    entries
+                        .iter()
+                        .all(|entry| rollups.contains_rowid(group, entry.rowid))
+                })
+                .collect()
         };
         if plans.is_empty() {
             return Ok((0, 0));
         }
 
-        // Phase 1: read and re-encode, with no engine locks held.
+        // Phase 1: read and re-encode, with no engine locks held. Every
+        // source in one store read, rather than a statement per group.
+        let locs: Vec<ChunkLoc> = plans
+            .iter()
+            .flat_map(|(_, entries)| entries.iter().map(|entry| entry.loc()))
+            .collect();
+        let mut payloads = self.store.read_chunks(&locs)?.into_iter();
+        if payloads.len() != locs.len() {
+            return Err(format!(
+                "rollup merge read returned {} payloads for {} chunks",
+                payloads.len(),
+                locs.len()
+            ));
+        }
         let mut batch: Vec<EncodedRollupChunk> = Vec::new();
         let mut merged: Vec<(RollupGroupKey, Vec<RollupIndexEntry>, usize)> = Vec::new();
         for (group, entries) in plans {
-            let locs: Vec<ChunkLoc> = entries.iter().map(|entry| entry.loc()).collect();
-            let payloads = self.store.read_chunks(&locs)?;
             let mut buckets = Vec::new();
-            for payload in &payloads {
+            for _ in &entries {
+                let payload = payloads
+                    .next()
+                    .expect("one payload per source, counted above");
                 buckets.extend(decode_rollup_payload(payload.ts())?);
             }
             // Passes append in coverage order and never overlap; a group
@@ -5376,14 +5419,41 @@ impl Engine {
         if sweep == 0 {
             return Err("rollup sweep identifier must be positive".into());
         }
+        if max_groups == 0 {
+            return Err("bounded rollup requires a positive group budget".into());
+        }
         if self.rollup_cycle_done_sweep.load(Ordering::Relaxed) == sweep {
-            return Ok((0, 0, false));
+            // The cycle is done; what remains of this sweep's rollup work is
+            // the merges planned at its end, a bounded batch per step. They
+            // were one transaction over every group, which at 550k series
+            // rewrote ~2M hourly chunks in one step every four hours.
+            let step: Vec<RollupMergeGroup> = {
+                let mut plan = self.rollup_merge_plan_lock();
+                let take = max_groups.min(plan.len());
+                plan.drain(..take).collect()
+            };
+            if step.is_empty() {
+                return Ok((0, 0, false));
+            }
+            let (_, written) = self.apply_rollup_merges(step)?;
+            let more = !self.rollup_merge_plan_lock().is_empty();
+            return Ok((written, 0, more));
         }
-        let out = self.rollup_bounded(max_groups)?;
-        if !out.2 {
-            self.rollup_cycle_done_sweep.store(sweep, Ordering::Relaxed);
+        let (chunks, buckets, more) = self.rollup_inner(Some(max_groups))?;
+        if more {
+            return Ok((chunks, buckets, true));
         }
-        Ok(out)
+        self.rollup_cycle_done_sweep.store(sweep, Ordering::Relaxed);
+        let plan = self.plan_rollup_merges();
+        let more = !plan.is_empty();
+        *self.rollup_merge_plan_lock() = plan.into();
+        Ok((chunks, buckets, more))
+    }
+
+    fn rollup_merge_plan_lock(&self) -> MutexGuard<'_, VecDeque<RollupMergeGroup>> {
+        self.rollup_merge_plan
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     fn rollup_inner(&self, max_groups: Option<usize>) -> EngineResult<(usize, usize, bool)> {

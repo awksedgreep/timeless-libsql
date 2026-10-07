@@ -1193,3 +1193,67 @@ fn raw_chunks_wait_for_a_run_before_they_are_compressed() {
         vec![(0, 0.0), (300, 1.0), (600, 2.0), (900, 3.0)]
     );
 }
+
+/// The rollup merges a sweep's cycle finds are done a bounded batch of
+/// groups per step, not all in the step that completed the cycle (#123),
+/// and what they put together still reads back whole.
+#[test]
+fn rollup_merges_are_stepped_through_within_a_sweep() {
+    const SERIES: usize = 3;
+    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let series_ids: Vec<i64> = (0..SERIES)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("merge_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    engine.set_rollups(vec![RollupTier {
+        resolution: 60,
+        retention: 0,
+    }]);
+
+    // Each sweep settles one more minute of every series, so each group
+    // gains one rollup chunk per sweep until a run is worth merging.
+    let mut merge_steps = 0;
+    let mut merging_sweeps = 0;
+    for sweep in 1..=6u64 {
+        for &series_id in &series_ids {
+            for offset in 0..6 {
+                engine.write_point(series_id, sweep as i64 * 60 + offset * 10, 1.0);
+            }
+        }
+        engine.flush_all().unwrap();
+        let removed_before = engine.info().rollup_merge_chunks_removed;
+        let mut steps_merging = 0;
+        loop {
+            let before = engine.info().rollup_merge_chunks_written;
+            let (_, _, more) = engine.rollup_bounded_for_sweep(1, sweep).unwrap();
+            let written = engine.info().rollup_merge_chunks_written - before;
+            assert!(written <= 1, "a merge step exceeded its group budget");
+            steps_merging += written as usize;
+            if !more {
+                break;
+            }
+        }
+        if engine.info().rollup_merge_chunks_removed > removed_before {
+            merging_sweeps += 1;
+            assert_eq!(steps_merging, SERIES, "one merge step per group");
+        }
+        merge_steps += steps_merging;
+    }
+    assert!(merging_sweeps >= 1, "a run became worth merging");
+    assert_eq!(
+        engine.info().rollup_merge_chunks_written,
+        merge_steps as u64
+    );
+    for &series_id in &series_ids {
+        let buckets = engine
+            .query_rollup_by_id(series_id, 60, i64::MIN, i64::MAX)
+            .unwrap();
+        let minutes: Vec<i64> = buckets.iter().map(|bucket| bucket.bucket_ts).collect();
+        // Settled minutes only: the newest is one bucket short of the last
+        // sample, as rollup eligibility has it.
+        assert_eq!(minutes, (60..=240).step_by(60).collect::<Vec<_>>());
+    }
+}
