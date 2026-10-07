@@ -2,18 +2,28 @@
 //!
 //! `metrics_compaction_bench` measures 320 series × 1,024 points: few
 //! series, dense arrivals. The fleet workload behind #118 is the opposite
-//! shape — hundreds of thousands of series, one sample per series per
-//! five-minute slot — and it is that shape whose per-transaction and
+//! shape — hundreds of thousands of series, at most one sample per series
+//! per five-minute slot — and it is that shape whose per-transaction and
 //! per-series costs dominate. This harness replays it through `Storage`, so
 //! every compaction step pays what it pays in the server: the writer queue,
 //! the autocommit `compact-step` insert, `xBegin`, the commit, and the pause.
 //!
-//! Each round is one scrape slot: SERIES points at one aligned timestamp,
-//! submitted in IMPORT_BATCH_POINTS batches like the fleet importer, then a
-//! flush and one compaction sweep. The rollup ladder is the stack's, and the
-//! data starts on an hour boundary, so a run of ROUNDS >= 24 closes an hour
-//! and rollup steps do real work. Series identity, labels, and values are
-//! synthetic and deterministic.
+//! The catalog is a synthetic copy of the live fleet measured on 2026-10-07
+//! (5,659 gateways, ~550k series): per gateway, interface counters and
+//! status, an `if_info` series with descriptive labels, Wi-Fi radio counters,
+//! and device gauges, plus rare radio-error and fleet-wide series. A series
+//! reports in a slot with its family's measured probability (interface
+//! series ~82%, so ~445k points per slot), and a slice of the interface
+//! counters retires after the first few slots the way a label change left
+//! ~39k dead series in the live store. Values follow each family's kind:
+//! advancing counters, near-constant status gauges, and noisy levels.
+//!
+//! Each round is one scrape slot, sent gateway by gateway in
+//! IMPORT_BATCH_POINTS batches like the fleet importer, then a flush and one
+//! compaction sweep. The rollup ladder is the stack's, and the data starts on
+//! an hour boundary, so round 24 onward closes an hour and rollup steps do
+//! real work; the 1h tier first has four chunks to merge at round 60.
+//! Everything is deterministic for a given gateway count.
 
 use std::env;
 use std::fs;
@@ -24,32 +34,51 @@ use std::time::Instant;
 use serde::Serialize;
 use timeless_metrics_api::{Storage, DEFAULT_RAW_RETENTION};
 
-const DEFAULT_SERIES: usize = 550_000;
+/// Gateways in the live fleet; the catalog scales with this.
+const DEFAULT_DEVICES: usize = 5_659;
 const DEFAULT_ROUNDS: usize = 26;
 const SLOT_SECS: i64 = 300;
 const IMPORT_BATCH_POINTS: usize = 20_000;
 /// The rollup ladder `timeless_stack` configures (`config/runtime.exs`).
 const STACK_ROLLUPS: &str = "1h@30d,1d@365d,30d@forever";
-/// Fleet metric names: interface and Wi-Fi counters dominate the catalog.
-const METRICS: [&str; 10] = [
-    "fleet_if_in_octets",
-    "fleet_if_out_octets",
-    "fleet_if_in_errors",
-    "fleet_if_out_errors",
-    "fleet_if_info",
-    "fleet_if_admin_status",
-    "fleet_if_oper_status",
-    "fleet_wifi_radio_packets_sent",
-    "fleet_wifi_radio_packets_received",
-    "fleet_device_reachable",
-];
-/// Interfaces per device; with METRICS.len() names this sets device count.
-const INTERFACES: usize = 8;
+/// Interfaces per gateway that carry counters and an `if_info` series, and
+/// the extra info-only interfaces (live: ~16.0 counter and ~18.2 info series
+/// per gateway).
+const COUNTER_INTERFACES: usize = 16;
+const INFO_ONLY_INTERFACES: usize = 2;
+/// Counter series that stop reporting after RETIRE_AFTER_ROUNDS slots, in
+/// per mille of interface counters (live: ~38.7k dead of ~511k+).
+const RETIRED_PER_MILLE: u64 = 70;
+const RETIRE_AFTER_ROUNDS: usize = 4;
+
+#[derive(Clone, Copy)]
+enum Value {
+    /// Monotonic counter advancing by a series-specific rate per slot.
+    Counter { rate: f64 },
+    /// Mostly-zero counter with occasional increments.
+    Sparse,
+    /// A status gauge that rarely changes.
+    Status,
+    /// Constant 1 (info series, reachability).
+    One,
+    /// A noisy level around a base.
+    Level { base: f64 },
+}
+
+struct Series {
+    name: &'static str,
+    labels: String,
+    /// Probability of reporting in a slot, per mille.
+    report_per_mille: u64,
+    retires: bool,
+    value: Value,
+}
 
 #[derive(Serialize)]
 struct RoundSample {
     round: usize,
     slot_ts: i64,
+    points: usize,
     ingest_ms: f64,
     ingest_cpu_ms: f64,
     flush_ms: f64,
@@ -78,6 +107,7 @@ struct RoundSample {
 #[derive(Serialize)]
 struct Report {
     schema: &'static str,
+    devices: usize,
     series: usize,
     rounds: usize,
     slot_seconds: i64,
@@ -87,39 +117,219 @@ struct Report {
     samples: Vec<RoundSample>,
 }
 
-fn series_identity(series: usize) -> (&'static str, String) {
-    let metric = METRICS[series % METRICS.len()];
-    let interface = (series / METRICS.len()) % INTERFACES;
-    let device = series / (METRICS.len() * INTERFACES);
-    // A locally administered MAC derived from the device ordinal.
-    let mac = format!(
-        "02:00:{:02x}:{:02x}:{:02x}:{:02x}",
-        (device >> 24) & 0xff,
-        (device >> 16) & 0xff,
-        (device >> 8) & 0xff,
+/// SplitMix64: a deterministic, well-mixed hash for per-series choices.
+fn mix(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+fn mac(device: usize) -> String {
+    let d = mix(device as u64 ^ 0x6d61_6373);
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        (d & 0xfe) | 0x02,
+        (d >> 8) & 0xff,
+        (d >> 16) & 0xff,
+        device >> 16 & 0xff,
+        device >> 8 & 0xff,
         device & 0xff
-    );
-    (
-        metric,
-        format!("{{\"cm_mac\":\"{mac}\",\"interface_id\":\"{interface}\"}}"),
     )
 }
 
-/// One named batch: series `start..end`, one point each at `slot_ts`.
-fn encode_batch(start: usize, end: usize, round: usize, slot_ts: i64) -> Vec<u8> {
-    let count = end - start;
-    let mut blob = Vec::with_capacity(12 + count * (96 + 20));
+/// The catalog in send order: gateway by gateway, then fleet-wide series.
+fn fleet_catalog(devices: usize) -> Vec<Series> {
+    const IF_COUNTERS: [&str; 4] = [
+        "majordomo_if_in_octets",
+        "majordomo_if_out_octets",
+        "majordomo_if_in_errors",
+        "majordomo_if_out_errors",
+    ];
+    const DEVICE_GAUGES: [&str; 3] = [
+        "majordomo_device_reachable",
+        "majordomo_wifi_contention_available",
+        "majordomo_wifi_health_available",
+    ];
+    const RADIO_ERRORS: [&str; 3] = [
+        "majordomo_wifi_radio_fcs_errors",
+        "majordomo_wifi_radio_frames_retransmitted",
+        "majordomo_wifi_radio_noise_dbm",
+    ];
+    const DEVICE_DETAIL: [&str; 9] = [
+        "majordomo_device_inform_age_seconds",
+        "majordomo_device_informing",
+        "majordomo_device_max_rssi",
+        "majordomo_device_neighbors",
+        "majordomo_device_scanned",
+        "majordomo_docsis_down_power_dbmv",
+        "majordomo_docsis_down_snr_db",
+        "majordomo_docsis_uncorrectables",
+        "majordomo_docsis_up_power_dbmv",
+    ];
+    const FLEET: [&str; 6] = [
+        "majordomo_fleet_adjacencies",
+        "majordomo_fleet_changes",
+        "majordomo_fleet_congested",
+        "majordomo_fleet_cwmp_reachable",
+        "majordomo_fleet_managed",
+        "majordomo_fleet_scanned",
+    ];
+    const IF_TYPES: [&str; 4] = ["ethernetCsmacd", "ieee80211", "docsCableMaclayer", "bridge"];
+    const ROLES: [&str; 4] = ["lan", "wan", "wifi", "management"];
+
+    let mut catalog = Vec::with_capacity(devices * 100);
+    for device in 0..devices {
+        let cm = mac(device);
+        for name in DEVICE_GAUGES {
+            catalog.push(Series {
+                name,
+                labels: format!("{{\"cm_mac\":\"{cm}\"}}"),
+                report_per_mille: 1000,
+                retires: false,
+                value: Value::One,
+            });
+        }
+        for interface in 0..COUNTER_INTERFACES + INFO_ONLY_INTERFACES {
+            let interface_id = format!("if:{}", 10_000 + interface);
+            let if_type = IF_TYPES[interface % IF_TYPES.len()];
+            let role = ROLES[(device + interface) % ROLES.len()];
+            catalog.push(Series {
+                name: "majordomo_if_info",
+                labels: format!(
+                    "{{\"alias\":\"{role}-port-{interface}\",\"cm_mac\":\"{cm}\",\
+                     \"display_name\":\"{if_type} {interface} on {cm}\",\
+                     \"if_type\":\"{if_type}\",\"interface_id\":\"{interface_id}\",\
+                     \"mtu\":\"1500\",\"role\":\"{role}\",\"speed\":\"1000000000\"}}"
+                ),
+                report_per_mille: 830,
+                retires: false,
+                value: Value::One,
+            });
+            if interface >= COUNTER_INTERFACES {
+                continue;
+            }
+            for (index, name) in IF_COUNTERS.into_iter().enumerate() {
+                let key = mix((device * 64 + interface) as u64 * 4 + index as u64);
+                catalog.push(Series {
+                    name,
+                    labels: format!("{{\"cm_mac\":\"{cm}\",\"interface_id\":\"{interface_id}\"}}"),
+                    report_per_mille: 820,
+                    retires: key % 1000 < RETIRED_PER_MILLE,
+                    value: if index < 2 {
+                        Value::Counter {
+                            rate: 1.0e5 + (key % 50_000_000) as f64,
+                        }
+                    } else {
+                        Value::Sparse
+                    },
+                });
+            }
+        }
+        let radios = if device % 10 == 0 { 2 } else { 3 };
+        for radio in 0..radios {
+            let labels = format!("{{\"cm_mac\":\"{cm}\",\"interface_id\":\"radio:{radio}\"}}");
+            for (name, value) in [
+                (
+                    "majordomo_wifi_radio_packets_sent",
+                    Value::Counter { rate: 9_000.0 },
+                ),
+                (
+                    "majordomo_wifi_radio_packets_received",
+                    Value::Counter { rate: 12_000.0 },
+                ),
+                ("majordomo_if_admin_status", Value::Status),
+                ("majordomo_if_oper_status", Value::Status),
+            ] {
+                catalog.push(Series {
+                    name,
+                    labels: labels.clone(),
+                    report_per_mille: 640,
+                    retires: false,
+                    value,
+                });
+            }
+            if device % 16 == 0 && radio == 0 {
+                for name in RADIO_ERRORS {
+                    catalog.push(Series {
+                        name,
+                        labels: labels.clone(),
+                        report_per_mille: 950,
+                        retires: false,
+                        value: if name.ends_with("noise_dbm") {
+                            Value::Level { base: -91.0 }
+                        } else {
+                            Value::Sparse
+                        },
+                    });
+                }
+            }
+        }
+        if device < 4 {
+            for name in DEVICE_DETAIL {
+                catalog.push(Series {
+                    name,
+                    labels: format!("{{\"cm_mac\":\"{cm}\"}}"),
+                    report_per_mille: 1000,
+                    retires: false,
+                    value: Value::Level { base: 40.0 },
+                });
+            }
+        }
+    }
+    for name in FLEET {
+        catalog.push(Series {
+            name,
+            labels: "{}".into(),
+            report_per_mille: 1000,
+            retires: false,
+            value: Value::Level { base: 4.0 },
+        });
+    }
+    catalog
+}
+
+fn reports(ordinal: usize, series: &Series, round: usize) -> bool {
+    if series.retires && round >= RETIRE_AFTER_ROUNDS {
+        return false;
+    }
+    mix(((ordinal as u64) << 20) ^ round as u64) % 1000 < series.report_per_mille
+}
+
+fn value(ordinal: usize, series: &Series, round: usize) -> f64 {
+    let noise = mix(((ordinal as u64) << 24) ^ (round as u64) ^ 0x7661_6c75);
+    match series.value {
+        Value::Counter { rate } => {
+            (rate * round as f64 * (0.9 + (noise % 200) as f64 / 1000.0)).floor()
+        }
+        Value::Sparse => (round as u64 * (noise % 3) / 2) as f64,
+        Value::Status => {
+            if noise.is_multiple_of(500) {
+                2.0
+            } else {
+                1.0
+            }
+        }
+        Value::One => 1.0,
+        Value::Level { base } => base + (noise % 41) as f64 / 10.0 - 2.0,
+    }
+}
+
+/// One named batch: one point each for the catalog ordinals in `members`.
+fn encode_batch(catalog: &[Series], members: &[usize], round: usize, slot_ts: i64) -> Vec<u8> {
+    let count = members.len();
+    let mut blob = Vec::with_capacity(12 + count * (128 + 20));
     blob.push(0x01);
     blob.push(0);
     blob.extend_from_slice(&0u16.to_le_bytes());
     blob.extend_from_slice(&(count as u32).to_le_bytes());
     blob.extend_from_slice(&(count as u32).to_le_bytes());
-    for series in start..end {
-        let (name, labels) = series_identity(series);
-        blob.extend_from_slice(&(name.len() as u32).to_le_bytes());
-        blob.extend_from_slice(name.as_bytes());
-        blob.extend_from_slice(&(labels.len() as u32).to_le_bytes());
-        blob.extend_from_slice(labels.as_bytes());
+    for &ordinal in members {
+        let series = &catalog[ordinal];
+        blob.extend_from_slice(&(series.name.len() as u32).to_le_bytes());
+        blob.extend_from_slice(series.name.as_bytes());
+        blob.extend_from_slice(&(series.labels.len() as u32).to_le_bytes());
+        blob.extend_from_slice(series.labels.as_bytes());
     }
     for index in 0..count {
         blob.extend_from_slice(&(index as u32).to_le_bytes());
@@ -127,11 +337,9 @@ fn encode_batch(start: usize, end: usize, round: usize, slot_ts: i64) -> Vec<u8>
     for _ in 0..count {
         blob.extend_from_slice(&slot_ts.to_le_bytes());
     }
-    for series in start..end {
-        // Counters that advance by a series-specific rate, with small noise.
-        let rate = 1_000.0 + (series % 997) as f64;
-        let value = rate * round as f64 + ((series * 31 + round * 7) % 13) as f64;
-        blob.extend_from_slice(&value.to_bits().to_le_bytes());
+    for &ordinal in members {
+        let v = value(ordinal, &catalog[ordinal], round);
+        blob.extend_from_slice(&v.to_bits().to_le_bytes());
     }
     blob
 }
@@ -189,7 +397,7 @@ fn delta(after: i64, before: i64) -> i64 {
 async fn run(
     extension: PathBuf,
     database: PathBuf,
-    series: usize,
+    devices: usize,
     rounds: usize,
 ) -> Result<(), String> {
     if database.exists() {
@@ -206,6 +414,12 @@ async fn run(
         .as_secs() as i64;
     let span = rounds as i64 * SLOT_SECS;
     let base_ts = (now - span - 3_600).div_euclid(3_600) * 3_600;
+    let catalog = fleet_catalog(devices);
+    eprintln!(
+        "fleet: {devices} gateways, {} series, {rounds} rounds of {SLOT_SECS} s",
+        catalog.len()
+    );
+    let mut total_points = 0_usize;
 
     let storage = Storage::start_with_queue_bytes_and_rollups(
         database,
@@ -220,12 +434,17 @@ async fn run(
 
     for round in 0..rounds {
         let slot_ts = base_ts + round as i64 * SLOT_SECS;
-        let batches: Vec<(Vec<u8>, usize)> = (0..series)
-            .step_by(IMPORT_BATCH_POINTS)
-            .map(|start| {
-                let end = (start + IMPORT_BATCH_POINTS).min(series);
-                (encode_batch(start, end, round, slot_ts), end - start)
-            })
+        let members: Vec<usize> = catalog
+            .iter()
+            .enumerate()
+            .filter(|(ordinal, series)| reports(*ordinal, series, round))
+            .map(|(ordinal, _)| ordinal)
+            .collect();
+        let points = members.len();
+        total_points += points;
+        let batches: Vec<(Vec<u8>, usize)> = members
+            .chunks(IMPORT_BATCH_POINTS)
+            .map(|chunk| (encode_batch(&catalog, chunk, round, slot_ts), chunk.len()))
             .collect();
 
         let cpu = process_cpu_ms();
@@ -264,6 +483,7 @@ async fn run(
         let sample = RoundSample {
             round,
             slot_ts,
+            points,
             ingest_ms,
             ingest_cpu_ms,
             flush_ms,
@@ -314,7 +534,7 @@ async fn run(
             rss_kib: memory_kib(),
         };
         eprintln!(
-            "round {round:>3}: sweep {:>9.1} ms ({:>9.1} ms cpu, {:>6} steps, {:>7.2} ms/step), \
+            "round {round:>3}: {points:>6} pts, sweep {:>9.1} ms ({:>9.1} ms cpu, {:>6} steps, {:>7.2} ms/step), \
              flush {:>7.1} ms, raw chunks {:>9}, rollup chunks {:>8}, wrote {:>6.1} MiB",
             sample.sweep_ms,
             sample.sweep_cpu_ms,
@@ -328,7 +548,6 @@ async fn run(
         samples.push(sample);
     }
 
-    let total_points = series.saturating_mul(rounds);
     let final_stats = storage.stats().await?;
     if final_stats.disk_points != total_points as i64
         || final_stats.buffered_points != 0
@@ -344,7 +563,8 @@ async fn run(
         "{}",
         serde_json::to_string_pretty(&Report {
             schema: "timeless.metrics.sparse-compaction-benchmark.v1",
-            series,
+            devices,
+            series: catalog.len(),
             rounds,
             slot_seconds: SLOT_SECS,
             import_batch_points: IMPORT_BATCH_POINTS,
@@ -376,15 +596,15 @@ async fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let extension = args.next().map(PathBuf::from);
     let database = args.next().map(PathBuf::from);
-    let series = parse_positive(args.next(), DEFAULT_SERIES, "SERIES");
+    let devices = parse_positive(args.next(), DEFAULT_DEVICES, "DEVICES");
     let rounds = parse_positive(args.next(), DEFAULT_ROUNDS, "ROUNDS");
-    let result = match (extension, database, series, rounds) {
-        (Some(extension), Some(database), Ok(series), Ok(rounds)) if args.next().is_none() => {
-            run(extension, database, series, rounds).await
+    let result = match (extension, database, devices, rounds) {
+        (Some(extension), Some(database), Ok(devices), Ok(rounds)) if args.next().is_none() => {
+            run(extension, database, devices, rounds).await
         }
         (_, _, Err(error), _) | (_, _, _, Err(error)) => Err(error),
         _ => Err(
-            "usage: metrics_sparse_compaction_bench EXTENSION DATABASE [SERIES] [ROUNDS]".into(),
+            "usage: metrics_sparse_compaction_bench EXTENSION DATABASE [DEVICES] [ROUNDS]".into(),
         ),
     };
     match result {
