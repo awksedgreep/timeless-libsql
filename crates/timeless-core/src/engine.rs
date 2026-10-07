@@ -137,6 +137,17 @@ struct MetricsCompactionGroup {
     kind: MetricsCompactionKind,
 }
 
+/// A chunk the planner is considering, borrowed from the index.
+type MetricsCandidate<'a> = (&'a ChunkKey, &'a ChunkMeta);
+
+/// Copy a planned group's sources out of the index.
+fn owned_sources(sources: &[MetricsCandidate<'_>]) -> Vec<(ChunkKey, ChunkMeta)> {
+    sources
+        .iter()
+        .map(|(key, meta)| (**key, (*meta).clone()))
+        .collect()
+}
+
 /// The groups one sweep is to do, planned once from the index and stepped
 /// through from the front by every bounded call that passes the same cutoff.
 /// Planning walks the whole index; a store of millions of chunks cannot
@@ -3119,12 +3130,8 @@ impl Engine {
     /// was walked for it.
     fn plan_metrics_sweep(&self, cutoff_ts: i64) -> MetricsCompactionPlan {
         self.compaction_plans.fetch_add(1, Ordering::Relaxed);
-        let groups: VecDeque<MetricsCompactionGroup> = Self::plan_metrics_compaction(
-            self.metrics_compaction_candidates(cutoff_ts),
-            &self.series_written_lately(),
-            self.raw_compress_min_chunks.load(Ordering::Relaxed),
-        )
-        .into();
+        let groups: VecDeque<MetricsCompactionGroup> =
+            self.plan_metrics_compaction(cutoff_ts).into();
         let drained_at_seq = groups
             .is_empty()
             .then(|| self.chunk_seq.load(Ordering::Relaxed));
@@ -3135,18 +3142,13 @@ impl Engine {
         }
     }
 
-    /// The series written in the last hour. A series that has ended, as a
-    /// process's does, is not among them: its few small chunks are worth
+    /// Whether a series was written in the last hour. A series that has
+    /// ended, as a process's does, was not: its few small chunks are worth
     /// putting together once, however few they are.
-    fn series_written_lately(&self) -> HashSet<PartitionKey> {
-        let now = Instant::now();
-        self.partitions
-            .iter()
-            .filter(|entry| {
-                now.duration_since(entry.value().last_write).as_secs() < COMPACT_MIN_AGE_SECS as u64
-            })
-            .map(|entry| *entry.key())
-            .collect()
+    fn series_written_lately(&self, key: &PartitionKey, now: Instant) -> bool {
+        self.partitions.get(key).is_some_and(|entry| {
+            now.duration_since(entry.value().last_write).as_secs() < COMPACT_MIN_AGE_SECS as u64
+        })
     }
 
     /// Plan the sweep again from the index as it now is, and say whether
@@ -3165,85 +3167,40 @@ impl Engine {
         group.sources.iter().all(|(key, _)| index.contains_key(key))
     }
 
-    fn metrics_compaction_candidates(
-        &self,
-        cutoff_ts: i64,
-    ) -> BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> {
+    /// Every actionable group for the cutoff. The index is ordered by
+    /// series, so it is planned a series at a time from references into it,
+    /// and only the chunks that make a group are copied out: a plan walks
+    /// every chunk, and copying each into a per-series map first made a
+    /// plan at a few million chunks a step of its own (#125).
+    fn plan_metrics_compaction(&self, cutoff_ts: i64) -> Vec<MetricsCompactionGroup> {
+        let raw_min_chunks = self.raw_compress_min_chunks.load(Ordering::Relaxed);
+        let now = Instant::now();
         let index = self.index_read();
-        let mut candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>> = BTreeMap::new();
+        let mut groups = Vec::new();
+        let mut series: Vec<MetricsCandidate<'_>> = Vec::new();
+        let mut current: Option<PartitionKey> = None;
         for (chunk_key, meta) in index.iter() {
             let eligible = meta.max_ts < cutoff_ts
                 && (meta.encoding == ENC_RAW
                     || meta.point_count < METRICS_COMPACTION_TARGET_POINTS as u32);
-            if eligible {
-                candidates
-                    .entry(chunk_key.0)
-                    .or_default()
-                    .push((*chunk_key, meta.clone()));
+            if !eligible {
+                continue;
             }
-        }
-        candidates
-    }
-
-    fn plan_metrics_compaction(
-        candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>>,
-        written_lately: &HashSet<PartitionKey>,
-        raw_min_chunks: usize,
-    ) -> Vec<MetricsCompactionGroup> {
-        let mut groups = Vec::new();
-        for (key, chunks) in candidates {
-            let (mut raw, compressed): (Vec<_>, Vec<_>) = chunks
-                .into_iter()
-                .partition(|(_, meta)| meta.encoding == ENC_RAW);
-
-            let at_least = if written_lately.contains(&key) {
-                METRICS_MERGE_MIN_CHUNKS
-            } else {
-                2
-            };
-
-            // Raw conversion is oldest-first, once a series has enough raw
-            // chunks or points to be worth it, or has stopped being written.
-            // Pack only raw peers up to the normal output target; an
-            // oversized source gets its own progress group and is split
-            // during encoding.
-            let raw_points = raw.iter().fold(0usize, |total, (_, meta)| {
-                total.saturating_add(meta.point_count as usize)
-            });
-            if written_lately.contains(&key)
-                && raw.len() < raw_min_chunks
-                && raw_points < METRICS_RAW_COMPRESS_MIN_POINTS
-            {
-                raw.clear();
-            }
-            raw.sort_by_key(|(_, meta)| (meta.min_ts, meta.max_ts));
-            let mut current = Vec::new();
-            let mut current_points = 0usize;
-            for source in raw {
-                let points = source.1.point_count as usize;
-                if !current.is_empty()
-                    && current_points.saturating_add(points) > METRICS_COMPACTION_TARGET_POINTS
-                {
-                    groups.push(MetricsCompactionGroup {
-                        key,
-                        sources: std::mem::take(&mut current),
-                        kind: MetricsCompactionKind::RawCompression,
-                    });
-                    current_points = 0;
+            if current != Some(chunk_key.0) {
+                if let Some(key) = current {
+                    let lately = self.series_written_lately(&key, now);
+                    Self::plan_metrics_series(key, &series, lately, raw_min_chunks, &mut groups);
                 }
-                current_points = current_points.saturating_add(points);
-                current.push(source);
+                series.clear();
+                current = Some(chunk_key.0);
             }
-            if !current.is_empty() {
-                groups.push(MetricsCompactionGroup {
-                    key,
-                    sources: current,
-                    kind: MetricsCompactionKind::RawCompression,
-                });
-            }
-
-            Self::plan_metrics_compressed_groups(key, compressed, &mut groups, at_least);
+            series.push((chunk_key, meta));
         }
+        if let Some(key) = current {
+            let lately = self.series_written_lately(&key, now);
+            Self::plan_metrics_series(key, &series, lately, raw_min_chunks, &mut groups);
+        }
+        drop(index);
         // First compression always wins over optional merges. Within each
         // phase, groups go in series order, oldest first within a series: a
         // sweep's plan is fixed by its cutoff and is worked to the end, so
@@ -3267,6 +3224,68 @@ impl Engine {
         groups
     }
 
+    /// One series' groups, from its eligible chunks in index order.
+    fn plan_metrics_series(
+        key: PartitionKey,
+        chunks: &[MetricsCandidate<'_>],
+        written_lately: bool,
+        raw_min_chunks: usize,
+        groups: &mut Vec<MetricsCompactionGroup>,
+    ) {
+        let (mut raw, compressed): (Vec<_>, Vec<_>) = chunks
+            .iter()
+            .copied()
+            .partition(|(_, meta)| meta.encoding == ENC_RAW);
+
+        let at_least = if written_lately {
+            METRICS_MERGE_MIN_CHUNKS
+        } else {
+            2
+        };
+
+        // Raw conversion is oldest-first, once a series has enough raw
+        // chunks or points to be worth it, or has stopped being written.
+        // Pack only raw peers up to the normal output target; an oversized
+        // source gets its own progress group and is split during encoding.
+        let raw_points = raw.iter().fold(0usize, |total, (_, meta)| {
+            total.saturating_add(meta.point_count as usize)
+        });
+        if written_lately
+            && raw.len() < raw_min_chunks
+            && raw_points < METRICS_RAW_COMPRESS_MIN_POINTS
+        {
+            raw.clear();
+        }
+        raw.sort_by_key(|(_, meta)| (meta.min_ts, meta.max_ts));
+        let mut current: Vec<MetricsCandidate<'_>> = Vec::new();
+        let mut current_points = 0usize;
+        for source in raw {
+            let points = source.1.point_count as usize;
+            if !current.is_empty()
+                && current_points.saturating_add(points) > METRICS_COMPACTION_TARGET_POINTS
+            {
+                groups.push(MetricsCompactionGroup {
+                    key,
+                    sources: owned_sources(&current),
+                    kind: MetricsCompactionKind::RawCompression,
+                });
+                current.clear();
+                current_points = 0;
+            }
+            current_points = current_points.saturating_add(points);
+            current.push(source);
+        }
+        if !current.is_empty() {
+            groups.push(MetricsCompactionGroup {
+                key,
+                sources: owned_sources(&current),
+                kind: MetricsCompactionKind::RawCompression,
+            });
+        }
+
+        Self::plan_metrics_compressed_groups(key, compressed, groups, at_least);
+    }
+
     /// Size-tiered: smallest first, and a chunk joins a run only while it is
     /// no larger than what the run already holds, so that a run is always at
     /// least twice its largest member and a small arrival never rewrites a
@@ -3277,7 +3296,7 @@ impl Engine {
     /// converge.
     fn plan_metrics_compressed_groups(
         key: PartitionKey,
-        mut chunks: Vec<(ChunkKey, ChunkMeta)>,
+        mut chunks: Vec<MetricsCandidate<'_>>,
         groups: &mut Vec<MetricsCompactionGroup>,
         at_least: usize,
     ) {
@@ -3307,7 +3326,7 @@ impl Engine {
 
     fn push_metrics_compressed_group(
         key: PartitionKey,
-        sources: Vec<(ChunkKey, ChunkMeta)>,
+        sources: Vec<MetricsCandidate<'_>>,
         groups: &mut Vec<MetricsCompactionGroup>,
         at_least: usize,
     ) {
@@ -3331,7 +3350,7 @@ impl Engine {
         }
         groups.push(MetricsCompactionGroup {
             key,
-            sources,
+            sources: owned_sources(&sources),
             kind: MetricsCompactionKind::CompressedMerge,
         });
     }
