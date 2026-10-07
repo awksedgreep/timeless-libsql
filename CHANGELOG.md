@@ -10,9 +10,24 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.9 -->
+<!-- release-target: 0.8.10 -->
 
 ## [Unreleased]
+
+## [0.8.10] — 2026-10-07
+
+### Fixed
+
+- **A metrics compaction step no longer costs more as the store grows
+  (#118).** To decide which replaced chunks could be deleted, every bounded
+  step walked the entire chunk index and hashed every surviving chunk, so a
+  64-series step took about a second at 6.7 million raw chunks. A fleet
+  writing ~390,000 points every five minutes across ~1 million series built a
+  backlog compaction could never clear and held a core between imports. A
+  chunk stored as its own row is now deleted directly; the index is consulted
+  only for chunks packed into a shared file, and only for those files. One
+  64-series step over 4.8 million chunks fell from 1,142 ms to 1.3 ms and no
+  longer depends on index size.
 
 ### Changed
 
