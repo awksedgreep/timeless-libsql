@@ -186,6 +186,15 @@ pub trait ChunkStore: Send + Sync {
     /// them into one file. Returns one ChunkLoc per chunk, same order.
     fn put_chunks(&self, chunks: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String>;
 
+    /// Whether every chunk is its own storage unit however it was put, so
+    /// that putting chunks together shares nothing among them. A flush
+    /// then persists every partition in one batched call instead of one
+    /// call per partition. False keeps a backend that packs a batch into
+    /// one unit (FsStore files) on its individual-or-packed split.
+    fn chunks_are_rows(&self) -> bool {
+        false
+    }
+
     /// Atomic swap for compaction: persist `add`, remove `remove` (unit
     /// locs, see ChunkLoc::unit), such that a crash never loses both.
     /// `on_committed` fires once the new chunks are durable and readable

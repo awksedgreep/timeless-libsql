@@ -2549,6 +2549,14 @@ impl Engine {
             .filter(|e| !e.value().timestamps.is_empty())
             .map(|e| (*e.key(), e.value().timestamps.len()))
             .collect();
+        // Persist in series order. Rows land in insertion order, and a
+        // compaction step takes its raw groups in series order, so a step
+        // then deletes neighbouring rows from a few pages instead of one
+        // row from each of hundreds — at 550k series per flush that was
+        // most of the bytes a sweep wrote (#124).
+        let mut keys = keys;
+        keys.sort_unstable_by_key(|(key, _)| key.series_id);
+        let rows = self.store.chunks_are_rows();
 
         let mut small_compressed: Vec<EncodedChunk> = Vec::new();
         let mut new_individual: Vec<(PartitionKey, ChunkMeta)> = Vec::new();
@@ -2558,7 +2566,10 @@ impl Engine {
                 self.drain_partition_if(&key, |buf| !buf.timestamps.is_empty())
             {
                 let cp = self.compress_partition(&key, &timestamps, &values)?;
-                if len >= self.min_flush_size {
+                // A store whose chunks are rows gains nothing from a call
+                // per partition, and pays a stats update and generation bump
+                // for each: batch them all.
+                if !rows && len >= self.min_flush_size {
                     new_individual.push((key, self.put_single_chunk(&cp)?));
                 } else {
                     small_compressed.push(cp);

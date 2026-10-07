@@ -1040,6 +1040,10 @@ impl ChunkStore for ShadowTableStore {
         true
     }
 
+    fn chunks_are_rows(&self) -> bool {
+        true
+    }
+
     /// (max series id, chunk generation). The series half needs no
     /// write-side bump because committed `_series` rows are append-only;
     /// the chunk half is the `_meta` counter the mutating methods bump.
