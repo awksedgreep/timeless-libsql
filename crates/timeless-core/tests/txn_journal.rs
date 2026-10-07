@@ -177,3 +177,105 @@ fn released_flush_frame_still_rolls_back_with_outer_transaction() {
     assert_eq!(e.info().buffered_points, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Buffer marks are recorded on a partition's first mutation inside a
+// frame, not for every partition at begin (#120). These cases pin the
+// places where a lazily recorded mark could be missing or stale.
+
+#[test]
+fn mark_from_previous_transaction_is_not_reused() {
+    let dir = temp_dir("lazy_stale_epoch");
+    let e = engine(&dir);
+    let sid = e.resolve_cached("cpu", &Default::default()).unwrap();
+
+    e.txn_begin();
+    e.write_point(sid, 100, 1.0);
+    e.txn_commit();
+
+    // The buffer still carries the committed transaction's mark stamp;
+    // this transaction must record its own mark at length 1.
+    e.txn_begin();
+    e.write_point(sid, 200, 2.0);
+    e.write_point(sid, 300, 3.0);
+    e.txn_rollback();
+
+    assert_eq!(count(&e, sid), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn partition_first_touched_in_released_savepoint_rolls_back_with_outer() {
+    let dir = temp_dir("lazy_release");
+    let e = engine(&dir);
+    let sid = e.resolve_cached("cpu", &Default::default()).unwrap();
+    let other = e.resolve_cached("mem", &Default::default()).unwrap();
+    e.write_point(sid, 100, 1.0);
+    e.write_point(other, 100, 5.0);
+
+    e.txn_begin();
+    e.write_point(other, 200, 6.0);
+    // `sid` is untouched by the outer frame until inside the savepoint:
+    // its first mark must land in the outer frame too.
+    e.txn_savepoint(0);
+    e.write_point(sid, 200, 2.0);
+    e.txn_release(0);
+    e.write_point(sid, 300, 3.0);
+    e.txn_rollback();
+
+    assert_eq!(count(&e, sid), 1);
+    assert_eq!(count(&e, other), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rollback_to_savepoint_remarks_partitions_written_again() {
+    let dir = temp_dir("lazy_rollback_to");
+    let e = engine(&dir);
+    let sid = e.resolve_cached("cpu", &Default::default()).unwrap();
+    e.write_point(sid, 100, 1.0);
+
+    e.txn_begin();
+    e.write_point(sid, 200, 2.0);
+    e.txn_savepoint(0);
+    e.write_point(sid, 300, 3.0);
+    e.txn_rollback_to(0);
+    assert_eq!(count(&e, sid), 2);
+
+    // The savepoint's frame was reset: writing again must re-mark, or a
+    // second rollback to it would keep this point.
+    e.write_point(sid, 400, 4.0);
+    e.txn_rollback_to(0);
+    assert_eq!(count(&e, sid), 2);
+
+    e.txn_rollback();
+    assert_eq!(count(&e, sid), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn drain_of_partition_untouched_in_frame_saves_all_its_points() {
+    let dir = temp_dir("lazy_drain_untouched");
+    let e = engine(&dir);
+    let sid = e.resolve_cached("cpu", &Default::default()).unwrap();
+    let other = e.resolve_cached("mem", &Default::default()).unwrap();
+    e.write_point(sid, 100, 1.0);
+    e.write_point(sid, 200, 2.0);
+    e.write_point(other, 100, 5.0);
+
+    e.txn_begin();
+    e.write_point(other, 200, 6.0);
+    e.txn_savepoint(0);
+    // `sid` has no mark in either frame when the flush drains it: every
+    // point in it predates both, and all of them must come back.
+    e.flush_all().unwrap();
+    e.txn_rollback_to(0);
+
+    assert_eq!(e.info().chunk_count, 0);
+    assert_eq!(count(&e, sid), 2);
+    assert_eq!(count(&e, other), 2);
+
+    e.txn_rollback();
+    assert_eq!(count(&e, sid), 2);
+    assert_eq!(count(&e, other), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

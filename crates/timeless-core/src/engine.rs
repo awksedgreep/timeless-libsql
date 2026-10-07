@@ -298,6 +298,11 @@ struct PartitionBuffer {
     values: Vec<f64>,
     last_write: Instant,
     queued_for_flush: bool,
+    /// Epoch of the innermost undo frame that holds this partition's
+    /// buffer mark. Equal to the engine's current frame epoch exactly
+    /// when every open frame already has a mark for it, so a write can
+    /// skip the journal. Frame epochs are never reused; 0 matches none.
+    mark_epoch: u64,
 }
 
 impl PartitionBuffer {
@@ -307,6 +312,7 @@ impl PartitionBuffer {
             values: Vec::new(),
             last_write: Instant::now(),
             queued_for_flush: false,
+            mark_epoch: 0,
         }
     }
     fn memory_bytes(&self) -> usize {
@@ -950,6 +956,13 @@ pub struct Engine {
     /// skip journal work with a single relaxed-ish load when no
     /// transaction is active (the overwhelmingly common case).
     txn_active: AtomicBool,
+    /// Epoch of the innermost open undo frame (0 when none is open).
+    /// Written only under the journal lock; read by the write path to
+    /// skip the journal for partitions this frame has already marked.
+    txn_frame_epoch: AtomicU64,
+    /// Source of frame epochs. Starts at 1 so no frame matches a fresh
+    /// partition's mark_epoch of 0.
+    txn_next_epoch: AtomicU64,
     /// The transaction journal itself (PLAN.md risk R5). See txn_begin
     /// for the full design story.
     txn: Mutex<TxnJournal>,
@@ -1007,13 +1020,16 @@ pub struct Engine {
 // records enough to undo itself. SQLite calls xBegin before the FIRST
 // write of ANY transaction — including the implicit per-statement
 // transaction wrapping a bare INSERT in autocommit mode (verified
-// empirically, see metrics_vtab.rs) — so txn_begin must be CHEAP:
-// O(active partitions) usize marks into reused (capacity-retaining)
-// collections, zero steady-state allocations.
+// empirically, see metrics_vtab.rs) — so txn_begin must be CHEAP: O(1),
+// into reused (capacity-retaining) collections. It once took a mark for
+// every partition up front, which at 550k series was most of a
+// maintenance step's CPU (#120); marks are now taken on first touch.
 //
 // WHAT IS JOURNALED:
-//   - buffer_marks: each partition's buffered length at begin. Rollback
-//     truncates back to the mark (points pushed during the txn vanish).
+//   - buffer_marks: a partition's buffered length when the frame began,
+//     recorded by the frame's first mutation of that partition. Rollback
+//     truncates back to the mark (points pushed during the txn vanish);
+//     partitions without a mark were not changed.
 //   - saved: pre-txn buffered points that an intra-txn flush DRAINED
 //     into chunks. Those chunk rows roll back with the host txn, so the
 //     points must return to the buffer or they would be silently lost
@@ -1058,10 +1074,16 @@ pub struct Engine {
 #[derive(Default)]
 struct TxnFrame {
     savepoint: Option<i32>,
-    /// Partition buffer lengths at txn_begin (or 0 after an intra-txn
-    /// flush drained a partition — its pre-txn points moved to `saved`).
-    /// Partitions absent from the map were created during the txn:
-    /// their mark is implicitly 0.
+    /// Unique per frame push; see PartitionBuffer::mark_epoch.
+    epoch: u64,
+    /// Partition buffer lengths at the frame's start (or 0 after an
+    /// intra-txn flush drained a partition — its pre-txn points moved
+    /// to `saved`). Recorded lazily, by the first mutation of each
+    /// partition inside the frame, so begin is O(1) however many
+    /// partitions exist (#120). A partition absent from the map has not
+    /// changed since the frame began. Every mark recorded in a frame is
+    /// recorded in each enclosing frame at the same moment, so an outer
+    /// frame's keys always include an inner frame's.
     buffer_marks: HashMap<PartitionKey, usize>,
     /// Pre-txn buffered points drained by intra-txn flushes; restored
     /// into the buffers on rollback.
@@ -1209,7 +1231,7 @@ impl Engine {
     /// fires before the first write of EVERY transaction, including the
     /// implicit one wrapping each bare INSERT statement in autocommit
     /// mode, so this is on the per-statement path and must stay cheap:
-    /// O(active partitions) marks into capacity-retaining collections.
+    /// O(1) — buffer marks are recorded on first touch, not here.
     ///
     /// Nested begins are impossible from SQLite; savepoints add frames
     /// through txn_savepoint instead.
@@ -1224,6 +1246,7 @@ impl Engine {
         }
         let frame = j.spares.pop().unwrap_or_default();
         j.frames.push(self.reset_txn_frame(frame, None));
+        self.publish_frame_epoch(&j);
         self.txn_active.store(true, Ordering::SeqCst);
     }
 
@@ -1254,6 +1277,7 @@ impl Engine {
         if let Some(generation) = generation {
             *self.catalog_gen_lock() = Some(generation);
         }
+        self.publish_frame_epoch(&j);
         self.txn_active.store(false, Ordering::SeqCst);
     }
 
@@ -1284,6 +1308,7 @@ impl Engine {
         if !self.authoritative_series {
             self.series_write().dirty = true;
         }
+        self.publish_frame_epoch(&j);
         self.txn_active.store(false, Ordering::SeqCst);
     }
 
@@ -1299,6 +1324,7 @@ impl Engine {
         );
         let frame = j.spares.pop().unwrap_or_default();
         j.frames.push(self.reset_txn_frame(frame, Some(id)));
+        self.publish_frame_epoch(&j);
     }
 
     /// Release `id` and every nested frame, merging their undo records
@@ -1326,6 +1352,7 @@ impl Engine {
             }
             j.spares.push(child);
         }
+        self.publish_frame_epoch(&j);
     }
 
     /// Restore the state captured by `id`, discard nested frames, and
@@ -1347,6 +1374,7 @@ impl Engine {
         }
         let frame = j.spares.pop().unwrap_or_default();
         j.frames.push(self.reset_txn_frame(frame, Some(id)));
+        self.publish_frame_epoch(&j);
         self.rebuild_flush_queue();
         if !self.authoritative_series {
             self.series_write().dirty = true;
@@ -1355,6 +1383,7 @@ impl Engine {
 
     fn reset_txn_frame(&self, mut frame: TxnFrame, savepoint: Option<i32>) -> TxnFrame {
         frame.savepoint = savepoint;
+        frame.epoch = self.txn_next_epoch.fetch_add(1, Ordering::Relaxed);
         frame.buffer_marks.clear();
         frame.saved.clear();
         frame.added.clear();
@@ -1364,20 +1393,68 @@ impl Engine {
         frame.rollup_added.clear();
         frame.rollup_removed.clear();
         frame.rollup_tiers_before = None;
-        for entry in self.partitions.iter() {
-            frame
-                .buffer_marks
-                .insert(*entry.key(), entry.value().timestamps.len());
-        }
         frame
     }
 
+    /// Mirror the innermost open frame's epoch for the write path's
+    /// lock-free check. Called under the journal lock after every change
+    /// to the frame stack.
+    fn publish_frame_epoch(&self, j: &TxnJournal) {
+        let epoch = j.frames.last().map_or(0, |frame| frame.epoch);
+        self.txn_frame_epoch.store(epoch, Ordering::SeqCst);
+    }
+
+    /// Record `len` as `key`'s mark in every open frame that has none,
+    /// innermost first; then stamp the buffer so later writes in this
+    /// frame skip the journal. `len` must be the buffer's length before
+    /// the mutation about to happen. A frame without a mark has seen no
+    /// mutation of the partition, so that length is also its length when
+    /// the frame began. Stopping at the first frame that has a mark is
+    /// sound because enclosing frames' marks are a superset.
+    fn record_buffer_mark(j: &mut TxnJournal, key: PartitionKey, buf: &mut PartitionBuffer) {
+        let len = buf.timestamps.len();
+        for frame in j.frames.iter_mut().rev() {
+            if frame.buffer_marks.contains_key(&key) {
+                break;
+            }
+            frame.buffer_marks.insert(key, len);
+        }
+        buf.mark_epoch = j.frames.last().map_or(0, |frame| frame.epoch);
+    }
+
+    /// The write path's journal step: whether a buffer must be marked
+    /// before it is appended to. A single pair of atomic loads when no
+    /// transaction is open or this frame has already marked it.
+    #[inline]
+    fn needs_buffer_mark(&self, buf: &PartitionBuffer) -> bool {
+        self.txn_active.load(Ordering::SeqCst)
+            && buf.mark_epoch != self.txn_frame_epoch.load(Ordering::SeqCst)
+    }
+
+    /// Slow path of needs_buffer_mark: take the journal before the
+    /// partition (lock order), and mark the partition, creating it if it
+    /// does not exist yet (its mark is then 0).
+    #[cold]
+    fn mark_partition(&self, key: PartitionKey) {
+        let Some(mut j) = self.txn_guard() else {
+            return;
+        };
+        let mut entry = self
+            .partitions
+            .entry(key)
+            .or_insert_with(PartitionBuffer::new);
+        Self::record_buffer_mark(&mut j, key, entry.value_mut());
+    }
+
     fn rollback_txn_frame(&self, frame: &mut TxnFrame) {
-        // 1. Truncate buffers. Partitions with no mark were created
-        //    during the frame → truncate to 0 (the empty PartitionBuffer
-        //    entry itself is harmless and stays).
-        for mut e in self.partitions.iter_mut() {
-            let mark = frame.buffer_marks.get(e.key()).copied().unwrap_or(0);
+        // 1. Truncate buffers to their marks. Partitions without a mark
+        //    were not mutated in this frame and are already as they were;
+        //    one created during the frame was marked at 0 (the empty
+        //    PartitionBuffer entry itself is harmless and stays).
+        for (key, mark) in frame.buffer_marks.drain() {
+            let Some(mut e) = self.partitions.get_mut(&key) else {
+                continue;
+            };
             let buf = e.value_mut();
             if buf.timestamps.len() > mark {
                 let before = buf.memory_bytes();
@@ -1706,6 +1783,8 @@ impl Engine {
             window_batch_query_buffered_points_considered: AtomicU64::new(0),
             window_batch_query_returned_points: AtomicU64::new(0),
             txn_active: AtomicBool::new(false),
+            txn_frame_epoch: AtomicU64::new(0),
+            txn_next_epoch: AtomicU64::new(1),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(primed_gen),
             append_wm: Mutex::new(primed_wm),
@@ -1883,6 +1962,14 @@ impl Engine {
                 .partitions
                 .entry(key)
                 .or_insert_with(PartitionBuffer::new);
+            if self.needs_buffer_mark(entry.value()) {
+                drop(entry);
+                self.mark_partition(key);
+                entry = self
+                    .partitions
+                    .entry(key)
+                    .or_insert_with(PartitionBuffer::new);
+            }
             let buf = entry.value_mut();
             let old_cap = buf.memory_bytes();
             buf.timestamps.push(ts);
@@ -2026,6 +2113,14 @@ impl Engine {
                 .partitions
                 .entry(key)
                 .or_insert_with(PartitionBuffer::new);
+            if self.needs_buffer_mark(entry.value()) {
+                drop(entry);
+                self.mark_partition(key);
+                entry = self
+                    .partitions
+                    .entry(key)
+                    .or_insert_with(PartitionBuffer::new);
+            }
             let buf = entry.value_mut();
             let old_cap = buf.memory_bytes();
             buf.timestamps.extend_from_slice(&timestamps[a..b]);
@@ -3213,6 +3308,7 @@ impl Engine {
             return None;
         }
         if let Some(j) = j.as_deref_mut() {
+            Self::record_buffer_mark(j, *key, entry.value_mut());
             let mark = j.buffer_marks.get(key).copied().unwrap_or(0);
             if mark > 0 {
                 j.saved.push((
