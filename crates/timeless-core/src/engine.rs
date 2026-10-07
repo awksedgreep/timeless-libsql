@@ -2870,18 +2870,38 @@ impl Engine {
             .iter()
             .flat_map(|(group, _)| group.sources.iter().map(|(key, _)| *key))
             .collect();
+        // A row holds one chunk, so a replaced row is always deletable; only
+        // a file unit can be shared, and only the index can say whether a
+        // survivor still references it. The index is walked only then, and
+        // only for those units: a walk of every chunk at every step made a
+        // step's cost grow with the whole store (#118).
         let deletable: Vec<ChunkLoc> = {
-            let index = self.index_read();
-            let survivors: HashSet<ChunkLoc> = index
-                .iter()
-                .filter(|(entry_key, _)| !removed.contains(entry_key))
-                .map(|(_, m)| m.loc.unit())
-                .collect();
             let mut seen: HashSet<ChunkLoc> = HashSet::new();
-            plans
+            let candidates: Vec<ChunkLoc> = plans
                 .iter()
                 .flat_map(|(group, _)| group.sources.iter().map(|(_, meta)| meta.loc.unit()))
-                .filter(|u| !survivors.contains(u) && seen.insert(u.clone()))
+                .filter(|u| seen.insert(u.clone()))
+                .collect();
+            let shared: HashSet<&ChunkLoc> = candidates
+                .iter()
+                .filter(|u| matches!(u, ChunkLoc::File { .. }))
+                .collect();
+            let survivors: HashSet<ChunkLoc> = if shared.is_empty() {
+                HashSet::new()
+            } else {
+                let index = self.index_read();
+                index
+                    .iter()
+                    .filter(|(entry_key, m)| {
+                        matches!(m.loc, ChunkLoc::File { .. }) && !removed.contains(entry_key)
+                    })
+                    .map(|(_, m)| m.loc.unit())
+                    .filter(|u| shared.contains(u))
+                    .collect()
+            };
+            candidates
+                .into_iter()
+                .filter(|u| !survivors.contains(u))
                 .collect()
         };
 

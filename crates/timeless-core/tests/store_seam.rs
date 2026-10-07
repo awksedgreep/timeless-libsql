@@ -348,3 +348,64 @@ fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
     engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_bounded_step_keeps_a_batch_file_its_other_chunks_still_use() {
+    // One flush packs every series' chunk into one batch file. A step that
+    // compacts one series must leave that file for the series it did not
+    // reach (#118: only file units are shared, so only they are checked).
+    const SERIES: usize = 50;
+    let dir = temp_dir("bounded_step_shared_batch");
+    let labels = HashMap::new();
+    let engine = Engine::with_store(
+        Box::new(FsStore::new(dir.clone()).unwrap()),
+        100_000,
+        10,
+        8,
+        64 * 1024 * 1024,
+        true,
+    )
+    .unwrap();
+    let ids: Vec<i64> = (0..SERIES)
+        .map(|n| {
+            engine
+                .resolve_cached(&format!("shared_{n}"), &labels)
+                .unwrap()
+        })
+        .collect();
+    for epoch in 0..2i64 {
+        for &id in &ids {
+            engine.write_point(id, 1_000 + epoch, epoch as f64);
+        }
+        engine.flush_all().unwrap();
+    }
+    let shared = |engine: &Engine| {
+        let mut files = std::collections::HashSet::new();
+        for &id in &ids {
+            assert_eq!(
+                engine.query_range_by_id(id, i64::MIN, i64::MAX).unwrap(),
+                vec![(1_000, 0.0), (1_001, 1.0)],
+                "series {id}"
+            );
+        }
+        for entry in std::fs::read_dir(dir.join("batches")).into_iter().flatten() {
+            files.insert(entry.unwrap().path());
+        }
+        files.len()
+    };
+    let files = shared(&engine);
+    assert!(files > 0, "the flushes wrote batch files");
+
+    let (series, _, more) = engine.compact_partitions_bounded(i64::MAX, 1).unwrap();
+    assert_eq!(series, 1);
+    assert!(more);
+    assert_eq!(
+        shared(&engine),
+        files,
+        "no batch file a survivor uses is gone"
+    );
+    engine.compact_partitions(i64::MAX).unwrap();
+    shared(&engine);
+    drop(engine);
+    let _ = std::fs::remove_dir_all(dir);
+}
