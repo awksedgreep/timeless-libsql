@@ -9,25 +9,24 @@ reachable from `main`.
 
 ## Current publication status
 
-[`v0.8.9`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.9)
-was published on 2026-10-04 at 02:15:43 UTC from `main` commit
-`7126f899acdb53e4429c1bf3b7533b9fac9d75f8`. It fixes selective metrics reads
-that slowed down as unrelated series accumulated, while preserving broad
-query throughput. See the [changelog](../CHANGELOG.md) and
-[benchmark evidence](../tools/bench/results/2026-10-03_catalog_growth.md).
+[`v0.8.10`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.10)
+was published on 2026-10-07 at 19:24:48 UTC from `main` commit
+`01630961e1a80a48c640ea3eacbe39780f72f4cb`. It fixes a metrics compaction
+step whose cost grew with the whole store, so large fleets could build a
+backlog the sweep never cleared (#118). See the [changelog](../CHANGELOG.md).
 
-The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/37169792903)
-built, identity-checked, and install/remove-drilled all four native Linux/macOS
-archives, verified the complete outer `SHA256SUMS`, and published the four
-archives plus that checksum file as permanent release assets. All assets were
-downloaded and independently verified after publication, including outer and
-inner checksums, exact inventory, and source identities. The downloaded Linux
-x86-64 bundle also passed local binary, extension, and install/remove checks.
-See the [release validation record](RELEASE_0_8_9.md) for the complete
-post-bump local checklist, both dispatched CI gates, and archive hashes.
+The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/37673216054)
+built, identity-checked, and install/remove-drilled the three native
+Linux/macOS archives (Linux x86-64, Linux AArch64, macOS Apple Silicon),
+verified the complete outer `SHA256SUMS`, and published the three archives
+plus that checksum file as permanent release assets. All assets were
+downloaded and verified after publication, including outer and inner
+checksums and manifest source identities. See the
+[release validation record](RELEASE_0_8_10.md) for the complete post-bump
+local checklist and archive hashes.
 
 This is the current download channel. Complete published releases also exist
-for `v0.8.8`, `v0.8.7`, `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`,
+for `v0.8.9`, `v0.8.8`, `v0.8.7`, `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`,
 `v0.8.1`, `v0.8.0`,
 `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`,
 `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
