@@ -26,7 +26,16 @@ use timeless_api_common::otel::{ExporterHealth, OtelTracesStats};
 /// maintenance transaction. Production-scale compact/rollup sweeps are
 /// resumed across many commits so reads and ingestion never wait behind one
 /// full sweep.
-const COMPACT_STEP_WORK_ITEMS: usize = 64;
+///
+/// The point and byte budgets bound a step's work when chunks are large;
+/// when they hold a handful of points each — a fleet scraped every few
+/// minutes — only this cap binds, and it sets the number of transactions.
+/// At 64, a 550k-series sweep was ~8,900 steps, each paying a commit, a
+/// rollup step, the pause, and a WAL rewrite of every page it touched for
+/// a few KB of change. At 1,024 the same sweep is ~550 steps of tens of
+/// milliseconds each; 4,096 halved the steps again for little more, at
+/// three to four times the hold per step (#121).
+const COMPACT_STEP_WORK_ITEMS: usize = 1024;
 const COMPACT_STEP_INPUT_POINTS: usize = 256 * 1024;
 const COMPACT_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
 /// Leave a deliberate reader-admission window between maintenance writes.

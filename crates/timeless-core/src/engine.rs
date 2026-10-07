@@ -3187,18 +3187,23 @@ impl Engine {
             Self::plan_metrics_compressed_groups(key, compressed, &mut groups, at_least);
         }
         // First compression always wins over optional merges. Within each
-        // phase, oldest data advances first so old/backfilled series cannot be
-        // starved by a hot tail that keeps appending.
+        // phase, groups go in series order, oldest first within a series: a
+        // sweep's plan is fixed by its cutoff and is worked to the end, so
+        // order cannot starve a series, but it decides which rows a step
+        // touches. Flushes persist in series order, so series-major steps
+        // delete neighbouring rows; oldest-first across series interleaved
+        // series whose merge ladders had drifted apart (as sparse reporters'
+        // do) and touched a page per row (#121).
         groups.sort_by_key(|group| {
             (
                 group.kind,
+                group.key,
                 group
                     .sources
                     .iter()
                     .map(|(_, meta)| meta.min_ts)
                     .min()
                     .unwrap_or(i64::MAX),
-                group.key,
             )
         });
         groups

@@ -236,6 +236,10 @@ async fn default_retention_keeps_extension_data_time_expiry_active() {
     );
 }
 
+/// More series than the production compaction step takes (1,024), so a
+/// sweep over one small chunk per series needs at least two transactions.
+const OVER_STEP_SERIES: usize = 1_100;
+
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
 async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_available() {
@@ -252,10 +256,10 @@ async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_avail
     )
     .unwrap();
 
-    // Two durable small chunks for each of 70 series exceed the production
-    // 64-series step budget and force at least two SQLite transactions.
+    // Two durable small chunks for each of more series than the production
+    // step budget force at least two SQLite transactions.
     for epoch in 0..2 {
-        for series in 0..70 {
+        for series in 0..OVER_STEP_SERIES {
             let batch = named_series_batch(
                 &format!("bounded_compact_{series}"),
                 &[(1_700_000_000 + epoch * 120, series as f64)],
@@ -286,10 +290,11 @@ async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_avail
     assert!(stats.compact_step_count >= 2, "{stats:?}");
     assert!(stats.compact_step_max_ns > 0);
     assert!(stats.compact_step_max_ns <= stats.compact_total_ns);
-    assert_eq!(stats.extension_compaction_raw_steps, 70);
-    assert_eq!(stats.extension_compaction_raw_chunks, 140);
-    assert_eq!(stats.extension_compaction_raw_points, 140);
-    assert_eq!(stats.extension_compaction_raw_input_bytes, 140 * 16);
+    let series = OVER_STEP_SERIES as i64;
+    assert_eq!(stats.extension_compaction_raw_steps, series);
+    assert_eq!(stats.extension_compaction_raw_chunks, 2 * series);
+    assert_eq!(stats.extension_compaction_raw_points, 2 * series);
+    assert_eq!(stats.extension_compaction_raw_input_bytes, 2 * series * 16);
     assert!(stats.extension_compaction_raw_output_bytes > 0);
     assert!(stats.extension_compaction_raw_total_ns > 0);
     assert_eq!(stats.extension_compaction_merge_steps, 0);
@@ -322,15 +327,16 @@ async fn a_scheduled_sweep_is_planned_once_and_leaves_what_is_newer_than_its_cut
     )
     .unwrap();
 
-    // Seventy series with a sample in the past, and one stamped an hour
-    // ahead of the sweep: a chunk whose newest sample is past the sweep's
-    // cutoff is the next sweep's, as a chunk flushed during the sweep is.
+    // More series than one step takes, each with a sample in the past, and
+    // one stamped an hour ahead of the sweep: a chunk whose newest sample is
+    // past the sweep's cutoff is the next sweep's, as a chunk flushed during
+    // the sweep is.
     let ahead = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
         + 3_600;
-    for series in 0..70 {
+    for series in 0..OVER_STEP_SERIES {
         let batch = named_series_batch(
             &format!("sweep_cutoff_{series}"),
             &[(1_700_000_000, series as f64)],
@@ -348,12 +354,15 @@ async fn a_scheduled_sweep_is_planned_once_and_leaves_what_is_newer_than_its_cut
     let stats = storage.stats().await.unwrap();
     assert_eq!(stats.compact_count, 1);
     assert!(stats.compact_step_count >= 2, "{stats:?}");
-    assert_eq!(stats.extension_compaction_raw_chunks, 70);
+    assert_eq!(
+        stats.extension_compaction_raw_chunks,
+        OVER_STEP_SERIES as i64
+    );
     // Planned once for the sweep, and once more at its end to see that
     // nothing was left; not at every step.
     assert_eq!(stats.extension_compaction_plans, 2);
     assert_eq!(stats.extension_compaction_planned_groups, 0);
-    assert_eq!(stats.raw_chunk_index_entries, 71);
+    assert_eq!(stats.raw_chunk_index_entries, OVER_STEP_SERIES as i64 + 1);
 
     // The chunk ahead of the cutoff is still raw, and still read.
     let app = router(storage.clone());
