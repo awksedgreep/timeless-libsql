@@ -202,3 +202,23 @@ synthesis cannot inflate compaction timing or RSS. The
 JSON records each completed append/flush/compact round's active-sweep and mean
 step latency, cumulative step high-water, phase input/output bytes and points,
 chunk footprint, RSS, and HWM. The worker refuses to overwrite its database.
+
+For the issue #119 high-cardinality sparse curve — hundreds of thousands of
+series, one point each per five-minute slot, with the stack's rollup ladder —
+put the database on a real disk (write bytes come from `/proc/self/io`, which
+does not count tmpfs):
+
+```sh
+cargo run --release --manifest-path servers/Cargo.toml \
+  --bin metrics_sparse_compaction_bench -- \
+  target/release/libtimeless_ext.so target/sparse-compaction.db 550000 26 \
+  > target/sparse-compaction.json
+```
+
+Each round imports one slot in 20,000-point batches, flushes, and runs one
+compaction sweep through `Storage`, so every step pays the server's
+per-transaction cost. Progress goes to stderr; the JSON records per round the
+sweep's wall and CPU time, steps, mean and high-water step latency, bytes
+written by flush and sweep, raw/merge work, raw and rollup chunk counts, and
+points per raw chunk. Round 24 onward closes an hour, so rollups do real work
+from there. A sweep longer than the 300-second slot cannot keep up.
