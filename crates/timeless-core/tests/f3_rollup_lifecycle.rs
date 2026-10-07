@@ -1085,3 +1085,56 @@ fn rollup_configuration_rollback_restores_the_previous_ladder() {
 
     assert_eq!(engine.rollup_tiers(), original);
 }
+
+/// One rollup cycle per maintenance sweep (#123): once a sweep's cycle
+/// has wrapped, its later steps do no rollup work, even when there is new
+/// data; the next sweep's first step begins a cycle that rolls it.
+#[test]
+fn bounded_rollup_runs_one_cycle_per_sweep() {
+    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let series_ids: Vec<i64> = (0..3)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("sweep_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    let write_epoch = |epoch: i64| {
+        for &series_id in &series_ids {
+            for offset in 0..10 {
+                engine.write_point(series_id, epoch * 1_000 + offset * 10, offset as f64);
+            }
+        }
+        engine.flush_all().unwrap();
+    };
+    write_epoch(0);
+    write_epoch(1);
+    engine.set_rollups(vec![RollupTier {
+        resolution: 60,
+        retention: 0,
+    }]);
+    assert!(engine.rollup_bounded_for_sweep(1, 0).is_err());
+
+    let drain = |sweep: u64| {
+        let mut rolled = 0;
+        loop {
+            let (chunks, _buckets, more) = engine.rollup_bounded_for_sweep(1, sweep).unwrap();
+            rolled += chunks;
+            if !more {
+                return rolled;
+            }
+        }
+    };
+    assert_eq!(drain(1), 3, "the first sweep's cycle rolls every series");
+
+    // New settled data arrives while sweep 1 is still stepping.
+    write_epoch(5);
+    for _ in 0..4 {
+        assert_eq!(
+            engine.rollup_bounded_for_sweep(1, 1).unwrap(),
+            (0, 0, false),
+            "a sweep whose cycle completed starts no other"
+        );
+    }
+    assert_eq!(drain(2), 3, "the next sweep rolls the new data");
+}

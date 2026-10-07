@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
@@ -356,6 +356,9 @@ enum WriteCommand {
     },
     CompactStep {
         cutoff_ts: i64,
+        /// The sweep this step belongs to: the extension runs at most one
+        /// rollup cycle per sweep (#123).
+        sweep: u64,
         /// Whether to say what the step did: reading the extension's
         /// counters walks its whole index, twice a step, and only a traced
         /// sweep has a use for the answer.
@@ -837,6 +840,10 @@ impl Storage {
         // The sweep's cutoff: what is flushed while it runs is the next
         // sweep's, so that a sweep over a store being written to ends.
         let cutoff_ts = unix_seconds_now();
+        // Unique per sweep in this process; the cutoff alone is not, since
+        // two sweeps can start within one second.
+        static NEXT_SWEEP: AtomicU64 = AtomicU64::new(1);
+        let sweep = NEXT_SWEEP.fetch_add(1, Ordering::Relaxed);
         let result = loop {
             let (reply_tx, reply_rx) = oneshot::channel();
             if self
@@ -844,6 +851,7 @@ impl Storage {
                 .writer
                 .send(WriteCommand::CompactStep {
                     cutoff_ts,
+                    sweep,
                     with_work: telemetry.is_some(),
                     reply: reply_tx,
                 })
@@ -1277,21 +1285,21 @@ fn writer_main(
             }
             WriteCommand::CompactStep {
                 cutoff_ts,
+                sweep,
                 with_work,
                 reply,
             } => {
                 let started = Instant::now();
                 let step = |conn: &Connection| {
-                    run_compact_step(conn, table, COMPACT_STEP_WORK_ITEMS, cutoff_ts).and_then(
-                        |more| {
+                    run_compact_step(conn, table, COMPACT_STEP_WORK_ITEMS, cutoff_ts, sweep)
+                        .and_then(|more| {
                             if cleanup_rollups {
                                 run_clear_rollup_step(conn, table, COMPACT_STEP_WORK_ITEMS)
                                     .map(|clear_more| more || clear_more)
                             } else {
                                 Ok(more)
                             }
-                        },
-                    )
+                        })
                 };
                 let result = if with_work {
                     compaction_work(&conn, table).and_then(|before| {
@@ -1731,9 +1739,10 @@ fn run_compact_step(
     table: MetricsTable,
     work_items: usize,
     cutoff_ts: i64,
+    sweep: u64,
 ) -> Result<bool, String> {
     let command = format!(
-        "compact-step:{work_items}:{COMPACT_STEP_INPUT_POINTS}:{COMPACT_STEP_INPUT_BYTES}:{cutoff_ts}"
+        "compact-step:{work_items}:{COMPACT_STEP_INPUT_POINTS}:{COMPACT_STEP_INPUT_BYTES}:{cutoff_ts}:{sweep}"
     );
     run_continuation_command(conn, table, &command, "run bounded metrics compaction")
 }

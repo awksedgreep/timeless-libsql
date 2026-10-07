@@ -15,7 +15,8 @@
 //! SQLite TYPE and then (for blobs) by the first byte:
 //!
 //!   TEXT  → maintenance/configuration command: `flush` | `compact` |
-//!           `compact-step:<series>[:<points>:<bytes>][:<cutoff>]` | `prune:<unix_ts>` |
+//!           `compact-step:<series>[:<points>:<bytes>][:<cutoff>[:<sweep>]]` |
+//!           `prune:<unix_ts>` |
 //!           `prune-after:<unix_ts>` (repair chunks stored under a mistaken
 //!           timestamp unit) | `rollups:none|<ladder>` | `clear-rollups` |
 //!           `clear-rollups-step:<chunks>`
@@ -473,11 +474,11 @@ impl MetricsTab {
         } else if let Some(raw_budget) = cmd.strip_prefix("compact-step:") {
             let invalid = || {
                 module_err(format!(
-                    "compact-step: expected 'compact-step:<positive series>[:<positive points>:<positive bytes>][:<cutoff unix seconds>]', got {cmd:?}"
+                    "compact-step: expected 'compact-step:<positive series>[:<positive points>:<positive bytes>][:<cutoff unix seconds>[:<positive sweep>]]', got {cmd:?}"
                 ))
             };
             let parts: Vec<_> = raw_budget.trim().split(':').collect();
-            if !matches!(parts.len(), 1..=4) {
+            if !matches!(parts.len(), 1..=5) {
                 return Err(invalid());
             }
             let series: usize = parts[0].parse().map_err(|_| invalid())?;
@@ -499,8 +500,20 @@ impl MetricsTab {
             // chunk is eligible, as the unbounded command has it.
             let cutoff_ts: i64 = match parts.len() {
                 2 => parts[1].parse().map_err(|_| invalid())?,
-                4 => parts[3].parse().map_err(|_| invalid())?,
+                4 | 5 => parts[3].parse().map_err(|_| invalid())?,
                 _ => i64::MAX,
+            };
+            // A host that names its sweep gets one rollup cycle per sweep
+            // (#123); without a name, every step may begin a cycle.
+            let sweep: Option<u64> = match parts.len() {
+                5 => Some(
+                    parts[4]
+                        .parse()
+                        .ok()
+                        .filter(|sweep| *sweep > 0)
+                        .ok_or_else(invalid)?,
+                ),
+                _ => None,
             };
             if series == 0 || points == 0 || bytes == 0 {
                 return Err(invalid());
@@ -521,11 +534,11 @@ impl MetricsTab {
                     },
                 )
                 .map_err(module_err)?;
-            let (_, _, rollup_more) = self
-                .shared
-                .engine
-                .rollup_bounded(series)
-                .map_err(module_err)?;
+            let (_, _, rollup_more) = match sweep {
+                Some(sweep) => self.shared.engine.rollup_bounded_for_sweep(series, sweep),
+                None => self.shared.engine.rollup_bounded(series),
+            }
+            .map_err(module_err)?;
             return Ok(i64::from(raw_more || rollup_more));
         } else if cmd == "rollup" {
             // F3: produce settled buckets for every declared tier. A
@@ -631,7 +644,7 @@ impl MetricsTab {
         } else {
             return Err(module_err(format!(
                 "unknown command {cmd:?}; supported: 'schema', 'flush', 'compact', \
-                 'compact-step:<series>[:<points>:<bytes>][:<cutoff>]', 'rollup', \
+                 'compact-step:<series>[:<points>:<bytes>][:<cutoff>[:<sweep>]]', 'rollup', \
                  'rollups:none|<ladder>', \
                  'clear-rollups', 'clear-rollups-step:<chunks>', \
                  'prune:<unix_ts>', 'prune-after:<unix_ts>'"

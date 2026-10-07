@@ -994,6 +994,13 @@ pub struct Engine {
     /// one full cycle resets it to zero, and a restart simply begins a fresh
     /// idempotent cycle.
     rollup_maintenance_cursor: AtomicUsize,
+    /// The maintenance sweep whose rollup cycle has completed, if any
+    /// (`rollup_bounded_for_sweep`). Each step of a sweep runs a bounded
+    /// rollup; once the cycle wraps, later steps of the same sweep would
+    /// start another full cycle — an index walk, a pass over every
+    /// (tier, series) group, and a rollup merge — for data that has not
+    /// changed (#123). Process-local, like the cursor.
+    rollup_cycle_done_sweep: AtomicU64,
     /// F2 retention window in NATIVE ts units; 0 = disabled. Set from
     /// the persisted table argument after construction (idempotent —
     /// every connection loads the same _meta value).
@@ -1791,6 +1798,7 @@ impl Engine {
             rollup_index: RwLock::new(rollup_index),
             rollup_tiers: Mutex::new(Vec::new()),
             rollup_maintenance_cursor: AtomicUsize::new(0),
+            rollup_cycle_done_sweep: AtomicU64::new(0),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
         };
@@ -5308,6 +5316,30 @@ impl Engine {
             // A cycle is complete: what it and the cycles before it wrote
             // in pieces is put together.
             self.merge_rollups()?;
+        }
+        Ok(out)
+    }
+
+    /// `rollup_bounded` for one step of maintenance sweep `sweep`: at most
+    /// one complete rollup cycle per sweep. A sweep keeps stepping while
+    /// compaction has work; without this, every step after the rollup
+    /// cycle wrapped began a new cycle over unchanged data, so a sweep of
+    /// a few hundred steps ran tens of cycles (#123). `sweep` identifies
+    /// the sweep (the host's sweep counter); 0 is reserved for "none".
+    pub fn rollup_bounded_for_sweep(
+        &self,
+        max_groups: usize,
+        sweep: u64,
+    ) -> EngineResult<(usize, usize, bool)> {
+        if sweep == 0 {
+            return Err("rollup sweep identifier must be positive".into());
+        }
+        if self.rollup_cycle_done_sweep.load(Ordering::Relaxed) == sweep {
+            return Ok((0, 0, false));
+        }
+        let out = self.rollup_bounded(max_groups)?;
+        if !out.2 {
+            self.rollup_cycle_done_sweep.store(sweep, Ordering::Relaxed);
         }
         Ok(out)
     }
