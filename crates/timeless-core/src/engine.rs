@@ -52,6 +52,11 @@ pub const METRICS_COMPACTION_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
 /// point is rewritten about log(n) times over its life.
 const METRICS_MERGE_MIN_CHUNKS: usize = 4;
 
+/// Raw points of one series that are worth compressing whatever their chunk
+/// count; see `Engine::set_raw_compress_min_chunks`. Keeps a dense series
+/// from sitting uncompressed while it waits for chunks.
+const METRICS_RAW_COMPRESS_MIN_POINTS: usize = 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MetricsCompactionBudget {
     pub max_series: usize,
@@ -994,6 +999,10 @@ pub struct Engine {
     /// one full cycle resets it to zero, and a restart simply begins a fresh
     /// idempotent cycle.
     rollup_maintenance_cursor: AtomicUsize,
+    /// Raw chunks a series still being written needs before they are
+    /// compressed (`set_raw_compress_min_chunks`); 1 compresses every raw
+    /// chunk at the next sweep.
+    raw_compress_min_chunks: AtomicUsize,
     /// The maintenance sweep whose rollup cycle has completed, if any
     /// (`rollup_bounded_for_sweep`). Each step of a sweep runs a bounded
     /// rollup; once the cycle wraps, later steps of the same sweep would
@@ -1798,6 +1807,7 @@ impl Engine {
             rollup_index: RwLock::new(rollup_index),
             rollup_tiers: Mutex::new(Vec::new()),
             rollup_maintenance_cursor: AtomicUsize::new(0),
+            raw_compress_min_chunks: AtomicUsize::new(1),
             rollup_cycle_done_sweep: AtomicU64::new(0),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
@@ -3104,6 +3114,7 @@ impl Engine {
         let groups: VecDeque<MetricsCompactionGroup> = Self::plan_metrics_compaction(
             self.metrics_compaction_candidates(cutoff_ts),
             &self.series_written_lately(),
+            self.raw_compress_min_chunks.load(Ordering::Relaxed),
         )
         .into();
         let drained_at_seq = groups
@@ -3169,6 +3180,7 @@ impl Engine {
     fn plan_metrics_compaction(
         candidates: BTreeMap<PartitionKey, Vec<(ChunkKey, ChunkMeta)>>,
         written_lately: &HashSet<PartitionKey>,
+        raw_min_chunks: usize,
     ) -> Vec<MetricsCompactionGroup> {
         let mut groups = Vec::new();
         for (key, chunks) in candidates {
@@ -3176,9 +3188,26 @@ impl Engine {
                 .into_iter()
                 .partition(|(_, meta)| meta.encoding == ENC_RAW);
 
-            // Raw conversion is unconditional and oldest-first. Pack only raw
-            // peers up to the normal output target; an oversized source gets
-            // its own progress group and is split during encoding.
+            let at_least = if written_lately.contains(&key) {
+                METRICS_MERGE_MIN_CHUNKS
+            } else {
+                2
+            };
+
+            // Raw conversion is oldest-first, once a series has enough raw
+            // chunks or points to be worth it, or has stopped being written.
+            // Pack only raw peers up to the normal output target; an
+            // oversized source gets its own progress group and is split
+            // during encoding.
+            let raw_points = raw.iter().fold(0usize, |total, (_, meta)| {
+                total.saturating_add(meta.point_count as usize)
+            });
+            if written_lately.contains(&key)
+                && raw.len() < raw_min_chunks
+                && raw_points < METRICS_RAW_COMPRESS_MIN_POINTS
+            {
+                raw.clear();
+            }
             raw.sort_by_key(|(_, meta)| (meta.min_ts, meta.max_ts));
             let mut current = Vec::new();
             let mut current_points = 0usize;
@@ -3205,11 +3234,6 @@ impl Engine {
                 });
             }
 
-            let at_least = if written_lately.contains(&key) {
-                METRICS_MERGE_MIN_CHUNKS
-            } else {
-                2
-            };
             Self::plan_metrics_compressed_groups(key, compressed, &mut groups, at_least);
         }
         // First compression always wins over optional merges. Within each
@@ -5872,6 +5896,21 @@ impl Engine {
     /// F2: configure the automatic retention window (NATIVE ts units;
     /// None disables). Idempotent — called at every connect with the
     /// persisted table setting.
+    /// Leave the raw chunks of a series still being written (written in
+    /// the last COMPACT_MIN_AGE_SECS) until there are `chunks` of them or
+    /// METRICS_RAW_COMPRESS_MIN_POINTS points between them, then compress
+    /// them together into one chunk. The default, 1, compresses each raw
+    /// chunk at the next sweep. A series written a point per flush — a
+    /// fleet scraped every few minutes — makes one-point raw chunks, which
+    /// compression cannot shrink; compressing each as it came rewrote every
+    /// sample once for nothing and fed the merge ladder its smallest rung
+    /// (#122). A series that has stopped being written is compressed as
+    /// before. Values below 1 are treated as 1.
+    pub fn set_raw_compress_min_chunks(&self, chunks: usize) {
+        self.raw_compress_min_chunks
+            .store(chunks.max(1), Ordering::Relaxed);
+    }
+
     pub fn set_retention(&self, native: Option<i64>) {
         let native = native.unwrap_or(0).max(0);
         if self.retention_native.swap(native, Ordering::Relaxed) != native {

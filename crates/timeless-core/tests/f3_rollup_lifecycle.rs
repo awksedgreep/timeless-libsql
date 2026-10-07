@@ -1138,3 +1138,58 @@ fn bounded_rollup_runs_one_cycle_per_sweep() {
     }
     assert_eq!(drain(2), 3, "the next sweep rolls the new data");
 }
+
+/// With a raw-compression minimum (#122), a series still being written
+/// keeps its one-point raw chunks until there are enough of them, then
+/// compresses them together in one rewrite; a dense raw chunk does not wait.
+#[test]
+fn raw_chunks_wait_for_a_run_before_they_are_compressed() {
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    engine.set_raw_compress_min_chunks(4);
+    let sparse = engine.resolve_cached("sparse", &labels()).unwrap();
+    let dense = engine.resolve_cached("dense", &labels()).unwrap();
+    let sweep = |engine: &Engine| loop {
+        let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+        if !more {
+            break;
+        }
+    };
+
+    // A dense series' single raw chunk is worth compressing at once.
+    for offset in 0..2_000 {
+        engine.write_point(dense, offset, offset as f64);
+    }
+    for slot in 0..3 {
+        engine.write_point(sparse, slot * 300, slot as f64);
+        engine.flush_all().unwrap();
+        sweep(&engine);
+    }
+    let info = engine.info();
+    assert_eq!(info.compaction_raw_steps, 1, "only the dense series");
+    assert_eq!(info.compaction_raw_points, 2_000);
+    assert_eq!(info.chunk_count, 4, "three sparse raw chunks wait");
+
+    // The fourth makes a run: one rewrite into one chunk, no merge.
+    engine.write_point(sparse, 900, 3.0);
+    engine.flush_all().unwrap();
+    sweep(&engine);
+    let info = engine.info();
+    assert_eq!(info.compaction_raw_steps, 2);
+    assert_eq!(info.compaction_raw_chunks, 5);
+    assert_eq!(info.compaction_merge_steps, 0);
+    assert_eq!(info.chunk_count, 2);
+    assert_eq!(
+        engine
+            .query_range_by_id(sparse, i64::MIN, i64::MAX)
+            .unwrap(),
+        vec![(0, 0.0), (300, 1.0), (600, 2.0), (900, 3.0)]
+    );
+}

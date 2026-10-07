@@ -107,6 +107,11 @@ const MEMORY_BUDGET: usize = 256 * 1024 * 1024; // 256 MiB of buffers
                                                 // maintenance phase. The size-tiered planner never mixes these raw arrivals
                                                 // directly into an existing compressed tail.
 const DEFER_COMPRESSION: bool = true;
+/// Raw chunks a series still being written collects before they are
+/// compressed together (Engine::set_raw_compress_min_chunks, #122). Matches
+/// the merge ladder's own run length: four one-point raw chunks become one
+/// four-point chunk, the ladder's first rung, in one rewrite instead of two.
+const RAW_COMPRESS_MIN_CHUNKS: usize = 4;
 /// F2 retention unit conversion: metrics ts is epoch SECONDS.
 const NATIVE_PER_SECOND: i64 = 1;
 const PLAN_LIMIT: &str = "limit";
@@ -345,6 +350,9 @@ impl MetricsTab {
         shared_engine
             .engine
             .set_rollups(rollups.unwrap_or_default());
+        shared_engine
+            .engine
+            .set_raw_compress_min_chunks(RAW_COMPRESS_MIN_CHUNKS);
 
         // Declared schema. `series_id` is an embedding fast path: callers
         // may resolve once and write by durable catalog id. The final hidden
@@ -418,6 +426,9 @@ impl MetricsTab {
                 .map_err(module_err)?
                 .unwrap_or_default(),
         );
+        shared
+            .engine
+            .set_raw_compress_min_chunks(RAW_COMPRESS_MIN_CHUNKS);
         Ok(shared)
     }
 
