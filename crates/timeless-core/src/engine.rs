@@ -2917,6 +2917,22 @@ impl Engine {
             ..MetricsCompactionOutcome::default()
         };
 
+        // Every source of the step in one store read: one statement for the
+        // step instead of one per chunk. The step's input bytes are already
+        // bounded by its budget.
+        let source_locs: Vec<ChunkLoc> = selected
+            .iter()
+            .flat_map(|group| group.sources.iter().map(|(_, meta)| meta.loc.clone()))
+            .collect();
+        let mut source_payloads = self.store.read_chunks(&source_locs)?.into_iter();
+        if source_payloads.len() != source_locs.len() {
+            return Err(format!(
+                "compaction read returned {} payloads for {} chunks",
+                source_payloads.len(),
+                source_locs.len()
+            ));
+        }
+
         for group in selected {
             let phase_started = Instant::now();
             let expected_points = group.sources.iter().fold(0usize, |total, (_, meta)| {
@@ -2925,7 +2941,9 @@ impl Engine {
             let mut points: Vec<(i64, f64)> = Vec::with_capacity(expected_points);
             let mut input_bytes = 0u64;
             for (_, meta) in &group.sources {
-                let bytes = self.store.read_chunk(&meta.loc)?;
+                let bytes = source_payloads
+                    .next()
+                    .expect("one payload per source, counted above");
                 input_bytes = input_bytes
                     .saturating_add(bytes.ts().len() as u64)
                     .saturating_add(bytes.val().len() as u64);
