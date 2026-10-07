@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use timeless_core::{
     ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, Engine,
-    RollupTier, StoredChunk, StoredRollupChunk,
+    MetricsCompactionBudget, RollupTier, StoredChunk, StoredRollupChunk,
 };
 
 type StoredTestChunk = (i64, i64, i64, ChunkMeta, Vec<u8>);
@@ -1255,5 +1255,64 @@ fn rollup_merges_are_stepped_through_within_a_sweep() {
         // Settled minutes only: the newest is one bucket short of the last
         // sample, as rollup eligibility has it.
         assert_eq!(minutes, (60..=240).step_by(60).collect::<Vec<_>>());
+    }
+}
+
+/// A step that runs out of time leaves the groups it selected but did not
+/// begin at the front of the plan, and the next step takes them up, with
+/// no new plan between (#121).
+#[test]
+fn a_step_out_of_time_leaves_its_remaining_groups_for_the_next() {
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_ids: Vec<i64> = (0..5)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("timed_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    for epoch in 0..2i64 {
+        for &series_id in &series_ids {
+            engine.write_point(series_id, 1_000 + epoch, epoch as f64);
+        }
+        engine.flush_all().unwrap();
+    }
+
+    let budget = MetricsCompactionBudget {
+        max_duration: Some(std::time::Duration::ZERO),
+        ..MetricsCompactionBudget::for_series(usize::MAX)
+    };
+    let mut steps = 0;
+    loop {
+        let (series, _, more) = engine
+            .compact_partitions_budgeted(i64::MAX, budget)
+            .unwrap();
+        assert_eq!(
+            series, 1,
+            "a step always does one group, and no more past its time"
+        );
+        steps += 1;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(steps, series_ids.len());
+    // Planned once for the sweep, and once at its end.
+    assert_eq!(engine.info().compaction_plans, 2);
+    for &series_id in &series_ids {
+        assert_eq!(
+            engine
+                .query_range_by_id(series_id, i64::MIN, i64::MAX)
+                .unwrap(),
+            vec![(1_000, 0.0), (1_001, 1.0)]
+        );
     }
 }

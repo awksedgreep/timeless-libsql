@@ -112,6 +112,11 @@ const DEFER_COMPRESSION: bool = true;
 /// the merge ladder's own run length: four one-point raw chunks become one
 /// four-point chunk, the ladder's first rung, in one rewrite instead of two.
 const RAW_COMPRESS_MIN_CHUNKS: usize = 4;
+/// Wall time a `compact-step` spends taking up its selected compaction
+/// groups before it leaves the rest for the next step (#121). A step holds
+/// the writer and the engine's transition lock, so this bounds how long a
+/// query or an ingest batch waits behind one.
+const COMPACT_STEP_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
 /// F2 retention unit conversion: metrics ts is epoch SECONDS.
 const NATIVE_PER_SECOND: i64 = 1;
 const PLAN_LIMIT: &str = "limit";
@@ -542,6 +547,7 @@ impl MetricsTab {
                         max_series: series,
                         max_input_points: points,
                         max_input_bytes: bytes,
+                        max_duration: Some(COMPACT_STEP_TIME_BUDGET),
                     },
                 )
                 .map_err(module_err)?;

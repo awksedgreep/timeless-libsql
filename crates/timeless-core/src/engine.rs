@@ -14,7 +14,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Helpers that lived below the NIF boundary in the original tms_engine file.
 fn partition_vec_memory(timestamps: &[i64], values: &[f64]) -> usize {
@@ -62,6 +62,13 @@ pub struct MetricsCompactionBudget {
     pub max_series: usize,
     pub max_input_points: usize,
     pub max_input_bytes: u64,
+    /// Wall time after which a step stops taking up its selected groups and
+    /// leaves the rest at the front of the plan for the next step. At least
+    /// one group is always done. The series, point, and byte budgets bound
+    /// what a step selects; how long those groups take depends on how much
+    /// each holds, which a fleet's merge ladder varies by orders of
+    /// magnitude (#121). None: no time bound.
+    pub max_duration: Option<Duration>,
 }
 
 impl MetricsCompactionBudget {
@@ -70,6 +77,7 @@ impl MetricsCompactionBudget {
             max_series,
             max_input_points: METRICS_COMPACTION_STEP_INPUT_POINTS,
             max_input_bytes: METRICS_COMPACTION_STEP_INPUT_BYTES,
+            max_duration: None,
         }
     }
 }
@@ -2880,6 +2888,7 @@ impl Engine {
         let _guard = ColdFlushGuard {
             flag: &self.compaction_running,
         };
+        let step_started = Instant::now();
         let _transition = self.transition_write();
 
         // The sweep's plan: made once from the index for the cutoff the
@@ -2962,7 +2971,24 @@ impl Engine {
             ));
         }
 
-        for group in selected {
+        let mut selected = selected.into_iter();
+        while let Some(group) = selected.next() {
+            if budget
+                .max_duration
+                .is_some_and(|limit| !plans.is_empty() && step_started.elapsed() >= limit)
+            {
+                // Out of time: what this step has not begun goes back to the
+                // front of the plan, in order, for the next step.
+                let mut plan_guard = self.compaction_plan_lock();
+                if let Some(plan) = plan_guard.as_mut() {
+                    let rest: Vec<_> = std::iter::once(group).chain(selected).collect();
+                    for group in rest.into_iter().rev() {
+                        plan.groups.push_front(group);
+                    }
+                }
+                outcome.more = true;
+                break;
+            }
             let phase_started = Instant::now();
             let expected_points = group.sources.iter().fold(0usize, |total, (_, meta)| {
                 total.saturating_add(meta.point_count as usize)
