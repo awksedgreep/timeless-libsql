@@ -10,9 +10,62 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.10 -->
+<!-- release-target: 0.8.11 -->
 
 ## [Unreleased]
+
+## [0.8.11] — 2026-10-07
+
+Metrics maintenance at fleet scale: hundreds of thousands of series, at most
+one sample each per scrape (#118, #126). On a synthetic copy of a live
+547,763-series fleet scraped every five minutes with the 1h/1d/30d rollup
+ladder (`metrics_sparse_compaction_bench`, #119), compared with 0.8.10 and
+#120 alone, over 37 five-minute slots: sweep CPU 2,712 s → 236 s, sweep wall
+time 6,870 s → 309 s, bytes written 523 GB → 24 GB, transactions 310,580 →
+5,244, worst sweep 234 s → 29 s. #120 alone was already ~10× below 0.8.10 in
+sweep CPU. Over 72 slots the longest single maintenance step is 0.63 s, where
+the 4-hourly rollup merge used to hold the writer for 50 s.
+
+### Fixed
+
+- **Beginning a transaction no longer walks every series (#120).** Each
+  SQLite transaction took a buffer mark for every partition, so every
+  compaction step and ingest batch paid O(series); at 558k series that was
+  ~72% of the writer's CPU. Marks are now recorded on a partition's first
+  change in the transaction, and rollback restores only those.
+- **A rollup merge no longer runs as one transaction (#123).** Every four
+  hours the 1h tier merged a chunk per series in a single step (50.6 s at
+  547k series). Merges are now planned when a sweep's rollup cycle completes
+  and taken a bounded batch per step.
+
+### Changed
+
+- **Rollup maintenance runs at most one cycle per sweep (#123).** A sweep
+  restarted the cycle — an index walk, a pass over every (tier, series) group,
+  and a merge — each time it wrapped. `compact-step` accepts an optional fifth
+  field, the sweep number, and the metrics server sends it. **Servers now
+  require extension 0.8.11 or newer** (`server_minimum_extension`).
+- **Compaction steps take up to 1,024 series and stop after 100 ms (#121).**
+  The 64-series cap set the transaction count (~8,900 per sweep at 550k
+  series). Steps now go in series order and read their sources in one
+  statement; a step past its time budget leaves the rest of its selection at
+  the front of the plan.
+- **Flushes persist in series order, in batched store calls (#124).** Rows
+  were inserted in hash order, so each compaction step rewrote hundreds of
+  scattered pages, nearly all of a sweep's ~12–15 GB of writes at 550k series.
+  Flush time at that scale fell from 11–14 s to ~1 s.
+- **Scheduled compaction collects one-point raw chunks into runs (#122).**
+  `compact-step` leaves the raw chunks of a series still being written until
+  it has four of them or 1,024 points, then compresses them together in one
+  rewrite. An explicit `compact` and the embedded engine still compress every
+  raw chunk (`MetricsCompactionBudget::raw_min_chunks`, default 1).
+- **A sweep is planned a series at a time (#125),** copying out only the
+  chunks that form a group, instead of copying every eligible chunk first.
+
+### Added
+
+- `metrics_sparse_compaction_bench`: a high-cardinality, sparse compaction
+  benchmark through the server write path (#119).
 
 ## [0.8.10] — 2026-10-07
 

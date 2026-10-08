@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DATA_SCHEMA_VERSION: i64 = 1;
 pub const REQUIRED_EXTENSION_DATA_ABI: u64 = 1;
-pub const MINIMUM_EXTENSION_VERSION: &str = "0.8.0";
+pub const MINIMUM_EXTENSION_VERSION: &str = "0.8.11";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -648,8 +648,8 @@ mod tests {
             "the current servers must remain on the documented 0.8 compatibility line"
         );
         assert_eq!(
-            MINIMUM_EXTENSION_VERSION, "0.8.0",
-            "the 0.8 line moved the extension floor with the workspace bump"
+            MINIMUM_EXTENSION_VERSION, "0.8.11",
+            "0.8.11 servers send compact-step's sweep field, which older extensions reject"
         );
     }
 
