@@ -129,6 +129,12 @@ fn document() -> &'static str {
                     "max_work_points": true,
                     "max_catalog_bytes": true
                 },
+                "timeless_label_values": {
+                    "all_series": true
+                },
+                "timeless_label_names": {
+                    "all_series": true
+                },
                 "timeless_logs": {
                     "max_work_entries": true,
                     "streaming_projection_v1": true
@@ -157,6 +163,7 @@ fn document() -> &'static str {
                     "timeless_aggregate",
                     "timeless_aggregate_frame",
                     "timeless_grid",
+                    "timeless_label_names",
                     "timeless_label_values",
                     "timeless_latest",
                     "timeless_latest_frame",
@@ -321,7 +328,10 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            23
+            24
         );
+        for surface in ["timeless_label_names", "timeless_label_values"] {
+            assert_eq!(value["query_surfaces"][surface]["all_series"], true);
+        }
     }
 }

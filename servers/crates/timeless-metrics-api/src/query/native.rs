@@ -457,6 +457,30 @@ impl Context<'_> {
         })
     }
 
+    /// Selector-less discovery from the extension's label index: the
+    /// distinct names or values, without streaming the series catalog.
+    fn label_index_rows(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<BTreeSet<String>, String> {
+        let mut statement = self
+            .conn
+            .prepare(sql)
+            .map_err(|error| super::catalog_error("prepare label discovery", error))?;
+        let rows = statement
+            .query_map(params, |row| row.get::<_, String>(0))
+            .map_err(|error| super::catalog_error("read label discovery", error))?;
+        let mut values = BTreeSet::new();
+        for row in rows {
+            self.check()?;
+            values
+                .insert(row.map_err(|error| super::catalog_error("read label discovery", error))?);
+            self.result_points(values.len() as u128)?;
+        }
+        Ok(values)
+    }
+
     fn strings(&self, values: BTreeSet<String>, series: usize) -> Result<ReadOutput, String> {
         self.result_points(values.len() as u128)?;
         let mut body = Body::new(self.limits.max_response_bytes);
@@ -513,6 +537,18 @@ pub(super) fn execute(
             step,
             aggregate,
         } => range(&context, &metric, &filter, start, stop, step, aggregate),
+        NativeRequest::Labels { selectors }
+            if selectors.is_empty() && context.features.label_index =>
+        {
+            let names = context.label_index_rows(
+                &format!(
+                    "SELECT name FROM timeless_label_names('{}')",
+                    context.features.table.name()
+                ),
+                rusqlite::params![],
+            )?;
+            context.strings(names, 0)
+        }
         NativeRequest::Labels { selectors } => {
             let mut names = BTreeSet::from(["__name__".to_string()]);
             let count = context.for_each_selected(None, &selectors, |meta| {
@@ -523,6 +559,20 @@ pub(super) fn execute(
                 Ok(())
             })?;
             context.strings(names, count)
+        }
+        NativeRequest::LabelValues {
+            name,
+            metric,
+            selectors,
+        } if selectors.is_empty() && context.features.label_index => {
+            let values = context.label_index_rows(
+                &format!(
+                    "SELECT value FROM timeless_label_values('{}', ?1, ?2)",
+                    context.features.table.name()
+                ),
+                rusqlite::params![metric, name],
+            )?;
+            context.strings(values, 0)
         }
         NativeRequest::LabelValues {
             name,

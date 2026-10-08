@@ -3719,6 +3719,10 @@ pub(crate) struct QueryFeatures {
     latest_frame_work_limit: bool,
     latest_work_limit: bool,
     catalog_work_limit: bool,
+    /// The extension answers selector-less label discovery from its label
+    /// index (`timeless_label_names`, and `timeless_label_values` without a
+    /// metric) instead of a pass over the catalog.
+    label_index: bool,
 }
 
 impl QueryFeatures {
@@ -3753,6 +3757,9 @@ impl QueryFeatures {
             latest_work_limit: has_work_limit("timeless_latest"),
             catalog_work_limit: has_work_limit("timeless_series")
                 && capabilities["query_surfaces"]["timeless_series"]["max_catalog_bytes"] == true,
+            label_index: capabilities["query_surfaces"]["timeless_label_names"]["all_series"]
+                == true
+                && capabilities["query_surfaces"]["timeless_label_values"]["all_series"] == true,
         })
     }
 }

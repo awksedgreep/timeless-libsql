@@ -337,7 +337,7 @@ LogsQL syntax:
 
 | signal | public query surfaces |
 |---|---|
-| metrics | `timeless_raw`, `timeless_raw_batches`, `timeless_raw_frame`, `timeless_latest`, `timeless_latest_frame`, `timeless_aggregate`, `timeless_aggregate_frame`, `timeless_grid`, `timeless_window`, `timeless_window_batches`, `timeless_rollup`, `timeless_rollup_batches`, `timeless_series`, `timeless_label_values` |
+| metrics | `timeless_raw`, `timeless_raw_batches`, `timeless_raw_frame`, `timeless_latest`, `timeless_latest_frame`, `timeless_aggregate`, `timeless_aggregate_frame`, `timeless_grid`, `timeless_window`, `timeless_window_batches`, `timeless_rollup`, `timeless_rollup_batches`, `timeless_series`, `timeless_label_values`, `timeless_label_names` |
 | logs | bounded base-table scans, `timeless_log_count`, `timeless_log_buckets`, `timeless_log_values`, `timeless_log_query_stats` |
 | traces | indexed base-table scans, `timeless_trace_services`, `timeless_trace_operations`, `timeless_trace_buckets` |
 | all | `timeless_stats` and `timeless_capabilities()` |

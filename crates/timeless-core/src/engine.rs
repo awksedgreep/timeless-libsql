@@ -681,6 +681,13 @@ impl SeriesRegistry {
     }
 
     pub fn label_values(&self, metric_name: &str, label_key: &str) -> Vec<String> {
+        if label_key == "__name__" {
+            return if self.metric_index.contains_key(metric_name) {
+                vec![metric_name.to_string()]
+            } else {
+                Vec::new()
+            };
+        }
         let series_ids = match self.metric_index.get(metric_name) {
             Some(ids) => ids,
             None => return Vec::new(),
@@ -696,6 +703,40 @@ impl SeriesRegistry {
         }
 
         let mut result: Vec<String> = values.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Every value `label_key` takes across all series, sorted; for
+    /// `__name__`, every metric name. Read from the label index, so the cost
+    /// is the number of distinct label pairs, not the number of series.
+    pub fn all_label_values(&self, label_key: &str) -> Vec<String> {
+        if label_key == "__name__" {
+            return self.list_metrics();
+        }
+        let mut values: Vec<String> = self
+            .label_index
+            .keys()
+            .filter(|(key, _)| key == label_key)
+            .map(|(_, value)| value.clone())
+            .collect();
+        values.sort();
+        values
+    }
+
+    /// The label names `metric_name`'s series carry, with `__name__`,
+    /// sorted; empty for an unknown metric.
+    pub fn label_names_for(&self, metric_name: &str) -> Vec<String> {
+        let Some(series_ids) = self.metric_index.get(metric_name) else {
+            return Vec::new();
+        };
+        let mut names: HashSet<&str> = HashSet::from(["__name__"]);
+        for id in series_ids {
+            if let Some(info) = self.series_info.get(id) {
+                names.extend(info.labels.keys().map(String::as_str));
+            }
+        }
+        let mut result: Vec<String> = names.into_iter().map(str::to_string).collect();
         result.sort();
         result
     }

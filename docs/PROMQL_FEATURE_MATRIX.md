@@ -31,7 +31,7 @@ The foundation column uses these public extension surfaces:
 
 | name | public primitive |
 |---|---|
-| `CAT` | `timeless_series`, `timeless_label_values` |
+| `CAT` | `timeless_series`, `timeless_label_values`, `timeless_label_names` |
 | `LATEST` | `timeless_latest`, `timeless_latest_frame` |
 | `RAW` | `timeless_raw`, `timeless_raw_batches`, `timeless_raw_frame` |
 | `GRID` | `timeless_grid` |

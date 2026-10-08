@@ -171,7 +171,7 @@ metric_sample_types|["float64"]
 native_histograms|0
 sql_surface_version|1
 storage_modules|["timeless_metrics","timeless_logs","timeless_traces"]
-query_module_count|23
+query_module_count|24
 sql_module_inventory|0|0
 raw_batches_versioned|0
 packed_formats|TRF1|TWB1|TRB1|TAF1|TLF1'
@@ -2022,6 +2022,14 @@ SELECT 'mix', value FROM timeless_grid('m','cpu','{"env":"prod","host":{"nre":"d
 SELECT 'lv', value FROM timeless_label_values('m','cpu','host');
 SELECT 'lv_env', value FROM timeless_label_values('m','cpu','env');
 SELECT 'lv_none', COUNT(*) FROM timeless_label_values('m','cpu','rack');
+INSERT INTO m(name, labels, ts, value) VALUES ('mem', '{"host":"cache-1","rack":"r1"}', 10, 5.0);
+SELECT 'all_host', value FROM timeless_label_values('m', NULL, 'host');
+SELECT 'all_name', value FROM timeless_label_values('m', NULL, '__name__');
+SELECT 'cpu_name', value FROM timeless_label_values('m', 'cpu', '__name__');
+SELECT 'cpu_name_f', value FROM timeless_label_values('m', 'cpu', '__name__', '{"env":"prod"}');
+SELECT 'names', name FROM timeless_label_names('m');
+SELECT 'names_cpu', name FROM timeless_label_names('m', 'cpu');
+SELECT 'names_none', COUNT(*) FROM timeless_label_names('m', 'disk');
 SQL
 )
 check_eq "anchored re selects exactly the web hosts" \
@@ -2045,6 +2053,29 @@ lv|web-2
 lv_env|dev
 lv_env|prod
 lv_none|0'
+check_eq "label discovery without a metric reads every series" \
+  "$(grep -E '^(all_|cpu_name|names)' <<<"$got")" \
+'all_host|api-1
+all_host|cache-1
+all_host|db-1
+all_host|web-1
+all_host|web-2
+all_name|cpu
+all_name|mem
+cpu_name|cpu
+cpu_name_f|cpu
+names|__name__
+names|env
+names|host
+names|rack
+names_cpu|__name__
+names_cpu|env
+names_cpu|host
+names_none|0'
+err=$(sqlite3 "$F8DB" ".load $EXT" \
+  "SELECT * FROM timeless_label_values('m', NULL, 'host', '{\"env\":\"prod\"}');" 2>&1 || true)
+check_eq "label_values filter without metric is a loud error" \
+  "$(grep -c 'filter requires metric' <<<"$err")" "1"
 err=$(sqlite3 "$F8DB" ".load $EXT" \
   "SELECT * FROM timeless_grid('m','cpu','{\"host\":{\"re\":\"[\"}}',0,1,1,1);" 2>&1 || true)
 check_eq "invalid regex is a loud error naming pattern and label" \

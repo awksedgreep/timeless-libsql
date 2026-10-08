@@ -109,6 +109,7 @@ The following table is machine-checked against the Rust registration source.
 | `timeless_aggregate` | eponymous TVF | telemetry | One scalar aggregate row per non-empty metric series. |
 | `timeless_aggregate_frame` | eponymous TVF | telemetry | All scalar aggregate results in one `TAF1` frame. |
 | `timeless_grid` | eponymous TVF | telemetry | Last sample on an evaluation grid. |
+| `timeless_label_names` | eponymous TVF | telemetry | Label names a metrics table's series carry, from the in-memory label index. |
 | `timeless_label_values` | eponymous TVF | telemetry | Distinct metric-label values. |
 | `timeless_latest` | eponymous TVF | telemetry | Newest metric point per series. |
 | `timeless_latest_frame` | eponymous TVF | telemetry | All newest points in one `TLF1` frame. |
@@ -556,7 +557,8 @@ constraint on row-oriented per-series modules where listed.
 | `timeless_rollup` | `labels, ts, value`; hidden `series_id` | `tbl` R, `metric` R, `filter` O, `resolution` R, `start` R, `stop` R, `agg` R. |
 | `timeless_rollup_batches` | `series_id, labels, buckets` | `tbl` R, `metric` R, `filter` O, `resolution` R, `start` R, `stop` R. |
 | `timeless_series` | `name, labels, series_id, min_ts, max_ts, points, chunks, buffered` | `tbl` R, `metric` O, `filter` O, `max_work_points` O, `max_catalog_bytes` O. |
-| `timeless_label_values` | `value` | `tbl` R, `metric` R, `key` R, `filter` O. |
+| `timeless_label_values` | `value` | `tbl` R, `metric` O, `key` R, `filter` O (requires `metric`). Without `metric`, values across every series; `key` `__name__` yields metric names. |
+| `timeless_label_names` | `name` | `tbl` R, `metric` O. Includes `__name__`; without `metric`, across every series. |
 | `timeless_stats` | `key, value` | `tbl` R. |
 
 Raw/aggregate/latest bounds are inclusive. Empty series emit no row.

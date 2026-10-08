@@ -409,6 +409,8 @@ pub(crate) fn register(db: &Connection, query_reports: Arc<LogQueryReportState>)
     db.create_module(c"timeless_trace_buckets", &TRACE_BUCKETS, None::<()>)?;
     const LABEL_VALUES: Module<LabelValuesTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_label_values", &LABEL_VALUES, None::<()>)?;
+    const LABEL_NAMES: Module<LabelNamesTab> = Module::eponymous_only_module();
+    db.create_module(c"timeless_label_names", &LABEL_NAMES, None::<()>)?;
     const RAW: Module<RawTab> = Module::eponymous_only_module();
     db.create_module(c"timeless_raw", &RAW, None::<()>)?;
     const RAW_BATCHES: Module<RawBatchTab> = Module::eponymous_only_module();
@@ -4610,7 +4612,9 @@ pub(crate) struct LabelValuesTab {
 
 const LABEL_VALUES_FIRST_ARG: c_int = 1;
 const LABEL_VALUES_ARGS: &[&str] = &["tbl", "metric", "key", "filter"];
-const LABEL_VALUES_REQUIRED: c_int = 0b0111;
+/// `tbl` and `key`. Without `metric`, values come from every series; a
+/// `filter` still needs one.
+const LABEL_VALUES_REQUIRED: c_int = 0b0101;
 
 unsafe impl<'vtab> VTab<'vtab> for LabelValuesTab {
     type Aux = ();
@@ -4675,9 +4679,161 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
             v.ok_or_else(|| module_err(format!("{M}: {what} must not be NULL")))
         };
         let (database, table) = split_spec(&get(argv(&slots, 0)?, "tbl")?);
-        let metric = get(argv(&slots, 1)?, "metric")?;
+        let metric: Option<String> = match slots[1] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
         let key = get(argv(&slots, 2)?, "key")?;
         let filter_text: Option<String> = match slots[3] {
+            Some(slot) => args.get(slot)?,
+            None => None,
+        };
+        if metric.is_none() && filter_text.as_deref().is_some_and(|text| !text.is_empty()) {
+            return Err(module_err(format!(
+                "{M}: filter requires metric — call as {M}(tbl, metric, key, filter)"
+            )));
+        }
+
+        let _bind = DbGuard::bind(self.db);
+        let module = detect_module(&database, &table)?;
+        if module != TimelessModule::Metrics {
+            return Err(module_err(format!(
+                "{M}: {table} is a {} table; label discovery exists for \
+                 timeless_metrics only",
+                module.name()
+            )));
+        }
+        let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
+        let _read = read_permit(&shared, self.db, &table)?;
+        shared
+            .engine
+            .refresh_authoritative_state()
+            .map_err(module_err)?;
+        // Without a filter the answer comes from the label index, not a pass
+        // over every series: at 600k series the catalog stream it replaces
+        // took seconds per discovery request.
+        self.rows = match (metric, filter_text.as_deref()) {
+            (None, _) => shared.engine.series_read().all_label_values(&key),
+            (Some(metric), None | Some("")) => {
+                shared.engine.series_read().label_values(&metric, &key)
+            }
+            (Some(metric), Some(text)) => {
+                let (eq, matchers) = compile_filter(M, text)?;
+                let reg = shared.engine.series_read();
+                let mut values = HashSet::new();
+                for series_id in reg.find_series(&metric, &eq) {
+                    let Some(info) = reg.info_for(series_id) else {
+                        continue;
+                    };
+                    if matchers_pass(&info.labels, &matchers) {
+                        let value = if key == "__name__" {
+                            Some(&info.metric_name)
+                        } else {
+                            info.labels.get(&key)
+                        };
+                        if let Some(value) = value {
+                            values.insert(value.clone());
+                        }
+                    }
+                }
+                let mut values: Vec<String> = values.into_iter().collect();
+                values.sort();
+                values
+            }
+        };
+        self.pos = 0;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.pos += 1;
+        Ok(())
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.rows.len()
+    }
+
+    fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {
+        match col {
+            0 => ctx.set_result(cursor_row(&self.rows, self.pos)?),
+            _ => ctx.set_result(&rusqlite::types::Null),
+        }
+    }
+
+    fn rowid(&self) -> Result<i64> {
+        Ok(self.pos as i64)
+    }
+}
+
+/// timeless_label_names('t' [, metric]) — the label names a metrics table's
+/// series carry, with `__name__`, sorted; with `metric`, only that metric's.
+/// Read from the in-memory label index rather than a pass over the catalog.
+#[repr(C)]
+pub(crate) struct LabelNamesTab {
+    base: ffi::sqlite3_vtab,
+    db: *mut ffi::sqlite3,
+}
+
+const LABEL_NAMES_FIRST_ARG: c_int = 1;
+const LABEL_NAMES_ARGS: &[&str] = &["tbl", "metric"];
+const LABEL_NAMES_REQUIRED: c_int = 0b01;
+
+unsafe impl<'vtab> VTab<'vtab> for LabelNamesTab {
+    type Aux = ();
+    type Cursor = LabelNamesCursor<'vtab>;
+
+    fn connect(
+        db: &mut VTabConnection,
+        _aux: Option<&()>,
+        _module_name: &[u8],
+        _database_name: &[u8],
+        _table_name: &[u8],
+        _args: &[&[u8]],
+    ) -> Result<(Cow<'static, CStr>, Self)> {
+        let handle = unsafe { db.handle() };
+        db.config(VTabConfig::Innocuous)?;
+        Ok((
+            Cow::Borrowed(c"CREATE TABLE x(name TEXT, tbl HIDDEN, metric HIDDEN)"),
+            LabelNamesTab {
+                base: ffi::sqlite3_vtab::default(),
+                db: handle,
+            },
+        ))
+    }
+
+    fn best_index(&self, info: &mut IndexInfo) -> Result<bool> {
+        best_index_args(info, LABEL_NAMES_FIRST_ARG, LABEL_NAMES_ARGS.len() as c_int)
+    }
+
+    fn open(&mut self) -> Result<LabelNamesCursor<'vtab>> {
+        Ok(LabelNamesCursor {
+            base: ffi::sqlite3_vtab_cursor::default(),
+            db: self.db,
+            rows: Vec::new(),
+            pos: 0,
+            phantom: PhantomData,
+        })
+    }
+}
+
+#[repr(C)]
+pub(crate) struct LabelNamesCursor<'vtab> {
+    base: ffi::sqlite3_vtab_cursor,
+    db: *mut ffi::sqlite3,
+    rows: Vec<String>,
+    pos: usize,
+    phantom: PhantomData<&'vtab LabelNamesTab>,
+}
+
+unsafe impl VTabCursor for LabelNamesCursor<'_> {
+    fn filter(&mut self, idx_num: c_int, _idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
+        const M: &str = "timeless_label_names";
+        let slots = named_slots(M, LABEL_NAMES_ARGS, LABEL_NAMES_REQUIRED, idx_num)?;
+        let tbl: Option<String> = args.get(argv(&slots, 0)?)?;
+        let tbl = tbl.ok_or_else(|| module_err(format!("{M}: tbl must not be NULL")))?;
+        let (database, table) = split_spec(&tbl);
+        let metric: Option<String> = match slots[1] {
             Some(slot) => args.get(slot)?,
             None => None,
         };
@@ -4697,26 +4853,10 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        self.rows = match filter_text.as_deref() {
-            None | Some("") => shared.engine.series_read().label_values(&metric, &key),
-            Some(text) => {
-                let (eq, matchers) = compile_filter(M, text)?;
-                let reg = shared.engine.series_read();
-                let mut values = HashSet::new();
-                for series_id in reg.find_series(&metric, &eq) {
-                    let Some(info) = reg.info_for(series_id) else {
-                        continue;
-                    };
-                    if matchers_pass(&info.labels, &matchers) {
-                        if let Some(value) = info.labels.get(&key) {
-                            values.insert(value.clone());
-                        }
-                    }
-                }
-                let mut values: Vec<String> = values.into_iter().collect();
-                values.sort();
-                values
-            }
+        let reg = shared.engine.series_read();
+        self.rows = match metric {
+            None => reg.all_label_names(),
+            Some(metric) => reg.label_names_for(&metric),
         };
         self.pos = 0;
         Ok(())

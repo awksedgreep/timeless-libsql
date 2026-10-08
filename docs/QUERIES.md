@@ -96,6 +96,10 @@ SELECT labels, ts, value FROM timeless_grid('metrics', 'cpu_usage',
 -- discovery: what metrics/series/labels exist? (no chunk reads)
 SELECT * FROM timeless_series('metrics');
 SELECT value FROM timeless_label_values('metrics', 'cpu_usage', 'host');
+-- without a metric: every series, from the label index (no catalog pass);
+-- key '__name__' lists metric names
+SELECT name FROM timeless_label_names('metrics');
+SELECT value FROM timeless_label_values('metrics', NULL, '__name__');
 -- optional metric/matcher arguments filter before catalog rows cross SQLite
 SELECT labels FROM timeless_series('metrics', 'cpu_usage',
   '{"host": {"re": "web-.*"}, "env": {"neq": "dev"}}');
