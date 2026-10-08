@@ -1053,6 +1053,13 @@ pub struct Engine {
     /// per-maintenance application skips until the cutoff has moved by
     /// a meaningful slice (retention/16). i64::MIN = never applied.
     retention_floor: AtomicI64,
+    /// At least the newest raw timestamp the engine holds: the maximum of
+    /// every timestamp buffered or loaded into the index, never lowered.
+    /// Deletes and rollbacks can leave it above the true high water, which
+    /// is the safe side for its one use: telling `apply_retention` that the
+    /// high water cannot have advanced far enough to act on, without the
+    /// walk over every chunk and buffer that computing it takes (#125).
+    raw_ts_upper_bound: AtomicI64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1634,6 +1641,15 @@ impl Engine {
     /// when a transaction is active. THE single index-insertion path
     /// for all flush routes — centralizing it here is what makes the
     /// journal complete by construction.
+    /// Raise `raw_ts_upper_bound` to `ts`. A load first: the bound moves
+    /// once per newer timestamp, not once per point.
+    #[inline]
+    fn raise_raw_ts_upper_bound(&self, ts: i64) {
+        if ts > self.raw_ts_upper_bound.load(Ordering::Relaxed) {
+            self.raw_ts_upper_bound.fetch_max(ts, Ordering::Relaxed);
+        }
+    }
+
     fn index_insert_new(&self, items: Vec<(PartitionKey, ChunkMeta)>) {
         if items.is_empty() {
             return;
@@ -1650,6 +1666,7 @@ impl Engine {
             if let Some(j) = j.as_deref_mut() {
                 j.added.insert(k);
             }
+            self.raise_raw_ts_upper_bound(meta.max_ts);
             index.insert(k, meta);
         }
     }
@@ -1846,6 +1863,7 @@ impl Engine {
             rollup_merge_plan: Mutex::new(VecDeque::new()),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
+            raw_ts_upper_bound: AtomicI64::new(i64::MIN),
         };
         engine.replace_index(stored_chunks);
         Ok(engine)
@@ -2025,6 +2043,7 @@ impl Engine {
             }
             let buf = entry.value_mut();
             let old_cap = buf.memory_bytes();
+            self.raise_raw_ts_upper_bound(ts);
             buf.timestamps.push(ts);
             buf.values.push(val);
             buf.last_write = now;
@@ -2176,6 +2195,9 @@ impl Engine {
             }
             let buf = entry.value_mut();
             let old_cap = buf.memory_bytes();
+            if let Some(&newest) = timestamps[a..b].iter().max() {
+                self.raise_raw_ts_upper_bound(newest);
+            }
             buf.timestamps.extend_from_slice(&timestamps[a..b]);
             buf.values.extend_from_slice(&values[a..b]);
             buf.last_write = now;
@@ -2596,6 +2618,13 @@ impl Engine {
 
     fn flush_all_inner(&self) -> EngineResult<()> {
         let _transition = self.transition_write();
+        // buffer_memory counts every buffered point (by length, at every
+        // append, drain, truncate, and restore), so zero means every buffer
+        // is empty: a timed flush between scrapes need not walk a partition
+        // per series to find that out (#125).
+        if self.buffer_memory.load(Ordering::Relaxed) == 0 {
+            return self.save_series();
+        }
         let keys: Vec<(PartitionKey, usize)> = self
             .partitions
             .iter()
@@ -6052,9 +6081,6 @@ impl Engine {
         if retention == 0 && tiers.is_empty() {
             return Ok(0);
         }
-        let Some(high_water) = self.raw_high_water() else {
-            return Ok(0); // empty table
-        };
         // One advance guard for raw + all tiers, tracking the high-water
         // mark itself; the slice is 1/16 of the SMALLEST active window.
         let window_min = std::iter::once(retention)
@@ -6064,6 +6090,17 @@ impl Engine {
             .expect("at least one active window");
         let slice = (window_min / 16).max(1);
         let floor = self.retention_floor.load(Ordering::Relaxed);
+        // The guard on an upper bound first: if even that has not advanced
+        // a slice, neither has the high water, and the walk that computes
+        // it — every chunk and buffer, on every 10 s flush — is skipped.
+        if floor != i64::MIN
+            && self.raw_ts_upper_bound.load(Ordering::Relaxed) < floor.saturating_add(slice)
+        {
+            return Ok(0);
+        }
+        let Some(high_water) = self.raw_high_water() else {
+            return Ok(0); // empty table
+        };
         if floor != i64::MIN && high_water < floor.saturating_add(slice) {
             return Ok(0); // hasn't advanced meaningfully since last time
         }
@@ -6334,6 +6371,7 @@ impl Engine {
             // same as the donor fix (the seq is in-memory only, never
             // persisted), so duplicate-min_ts chunks on disk can never
             // shadow each other after a restart either.
+            self.raise_raw_ts_upper_bound(chunk.meta.max_ts);
             index.insert((key, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
         }
     }
@@ -6413,6 +6451,7 @@ impl Engine {
             let key = PartitionKey {
                 series_id: chunk.series_id,
             };
+            self.raise_raw_ts_upper_bound(chunk.meta.max_ts);
             new_index.insert((key, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
         }
 
@@ -6493,6 +6532,7 @@ impl Engine {
             if known {
                 continue;
             }
+            self.raise_raw_ts_upper_bound(chunk.meta.max_ts);
             index.insert((pk, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
         }
         for chunk in rollup_chunks {

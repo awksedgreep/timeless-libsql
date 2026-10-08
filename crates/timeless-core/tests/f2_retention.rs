@@ -330,3 +330,45 @@ fn rollback_restores_a_series_retention_removed() {
     engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Retention skips its high-water walk on a cheap upper bound (#125); the
+/// bound is never lowered, so after a rollback it can sit above the real
+/// high water. A cutoff must still come from the real one.
+#[test]
+fn a_rolled_back_write_does_not_move_the_cutoff() {
+    let dir = temp_dir("bound_rollback");
+    let labels: HashMap<String, String> = HashMap::new();
+    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    engine.set_retention(Some(1_600));
+    let sid = engine.resolve_cached("cpu", &labels).unwrap();
+    let timestamps = |engine: &Engine| {
+        engine
+            .query_range_by_id(sid, i64::MIN, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|(ts, _)| ts)
+            .collect::<Vec<_>>()
+    };
+    for ts in [3_000, 4_000, 5_000] {
+        engine.write_point(sid, ts, 1.0);
+        engine.flush_all().unwrap();
+    }
+    assert_eq!(timestamps(&engine), vec![4_000, 5_000], "cutoff 5000-1600");
+
+    // A write far ahead that never happened raises the bound only.
+    engine.txn_begin();
+    engine.write_point(sid, 9_000, 9.0);
+    engine.txn_rollback();
+    engine.flush_all().unwrap();
+    assert_eq!(
+        timestamps(&engine),
+        vec![4_000, 5_000],
+        "the cutoff is not 9000-1600"
+    );
+
+    engine.write_point(sid, 6_000, 1.0);
+    engine.flush_all().unwrap();
+    assert_eq!(timestamps(&engine), vec![5_000, 6_000], "cutoff 6000-1600");
+    drop(engine);
+    let _ = std::fs::remove_dir_all(dir);
+}
