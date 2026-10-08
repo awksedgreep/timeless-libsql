@@ -14,6 +14,19 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Victoria-compatible request forms are accepted (#129).**
+  `GET /api/v1/export` takes Prometheus/VictoriaMetrics `match[]` selectors
+  as well as `metric=`; several selectors are a union, each series exported
+  once, and label parameters still narrow the result.
+  `/select/logsql/query` takes LogsQL by `GET` (`query=`) as well as `POST`,
+  and both take VictoriaLogs' `start`, `end`, and `limit` arguments: the
+  range intersects the query's own `_time` filter and accepts unix, RFC 3339,
+  `now`, or a duration such as `15m`; a positive `limit` caps the result as a
+  final `| limit` would. A `GET` without `query` is the native parameter API,
+  unchanged.
+
 ## [0.8.11] — 2026-10-07
 
 Metrics maintenance at fleet scale: hundreds of thousands of series, at most

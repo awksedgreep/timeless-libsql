@@ -74,7 +74,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `metrics` | `POST` | `/api/v1/import/prometheus` | `metrics:write` | Prometheus text exposition import through the public extension parser. |
 | `metrics` | `GET, PUT` | `/api/v1/scrape/targets` | `metrics:read` for GET; `metrics:write` for PUT | Read or atomically replace the process-local scrape target set. |
 | `metrics` | `GET, POST` | `/api/v1/query` | `metrics:read` | Native exact-latest query with `metric=`, or PromQL instant query with `query=`. |
-| `metrics` | `GET` | `/api/v1/export` | `metrics:read` | VictoriaMetrics JSON-line raw export. |
+| `metrics` | `GET` | `/api/v1/export` | `metrics:read` | VictoriaMetrics JSON-line raw export by `metric=` or `match[]`. |
 | `metrics` | `GET, POST` | `/api/v1/query_range` | `metrics:read` | Native range query with `metric=`, or PromQL range query with `query=`. |
 | `metrics` | `GET` | `/api/v1/labels` | `metrics:read` | Native label-name discovery. |
 | `metrics` | `GET` | `/api/v1/label/{name}/values` | `metrics:read` | Native label-value discovery. |
@@ -91,7 +91,7 @@ The "Required scope" column applies **only when auth is enabled**
 | `logs` | `GET` | `/health` | `logs:stats` | Readiness plus storage and queue accounting. |
 | `logs` | `GET` | `/metrics` | none | Prometheus text exposition of the plane's own operational stats plus `timeless_build_info`; unauthenticated like the probe endpoints. |
 | `logs` | `POST` | `/insert/jsonline` | `logs:write` | NDJSON ingestion into one public rich-log batch per request. |
-| `logs` | `GET, POST` | `/select/logsql/query` | `logs:read` | Native parameter query on GET; LogsQL compatibility grammar on POST. |
+| `logs` | `GET, POST` | `/select/logsql/query` | `logs:read` | LogsQL compatibility grammar by GET (`query=`) or POST; native parameter query on GET otherwise. |
 | `logs` | `GET` | `/select/logsql/field_values` | `logs:read` | Bounded discovery for `service`, `host`, `path`, or `status`. |
 | `logs` | `GET` | `/select/logsql/stats` | `logs:stats` | Complete serialized `StorageStats`. |
 | `logs` | `GET, POST` | `/select/logsql/tail` | `logs:read` | Live tail: streams admitted entries matching one LogsQL filter expression as NDJSON; pipelines are rejected; slow consumers drop (counted in stats). |
@@ -339,7 +339,9 @@ A fully valid request returns 204; a partially valid request returns 200 with
 accepted/error counts. That response means admission to the bounded writer
 queue, not durability; call the flush route for the ordered barrier.
 
-Native `GET /select/logsql/query` rejects unknown parameters and accepts
+A `GET /select/logsql/query` that carries `query` is LogsQL, exactly as the
+`POST` form below. Any other native `GET /select/logsql/query` rejects unknown
+parameters and accepts
 `level`, `message`, `service`, `host`, `path`, `status`, `start`, `end`,
 `limit`, `offset`, and `order`. `order` is `asc` or `desc`; bounds accept the
 documented native time forms. An invalid/overflowing bound or unsupported
@@ -351,11 +353,16 @@ and defaults to 1,000 values, clamped to the deployment's
 rejected rather than silently clamped.
 
 `POST /select/logsql/query` uses an URL-encoded form with required `query` and
-optional `allow_partial_response`. `false` is the complete fail-closed mode.
-`true` fails explicitly because one authoritative SQLite owner cannot produce
-an honest distributed partial result. Other form fields, including `_time`,
-`time`, `start`, and `end`, fail with `unsupported_query_parameters`; time
-bounds belong inside the LogsQL expression. Query syntax errors return
+optional `allow_partial_response`, `start`, `end`, and `limit`, as VictoriaLogs
+documents them. `start` and `end` bound the outer selection and intersect any
+`_time` filter in the query; they take unix timestamps, RFC 3339, `now`, or a
+duration such as `15m` meaning that long before now, and cannot be combined
+with a query `time_offset`. A positive `limit` caps the result as a final
+`| limit` would (`0` is no limit). `allow_partial_response=false` is the
+complete fail-closed mode; `true` fails explicitly because one authoritative
+SQLite owner cannot produce an honest distributed partial result. Other form
+fields, including `_time` and `time`, fail with
+`unsupported_query_parameters`. Query syntax errors return
 `invalid_query`, bounded work exhaustion returns `query_limit`, retryable
 storage contention returns HTTP 503 plus `Retry-After`, and an unexpected
 executor fault returns `internal` with reason `query_execution` while retaining

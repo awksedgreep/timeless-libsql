@@ -1510,7 +1510,11 @@ pub(crate) fn latest_request(params: &Params) -> Result<ReadRequest, String> {
 }
 
 pub(crate) fn export_request(params: &Params) -> Result<ReadRequest, String> {
-    let metric = required_metric(params)?;
+    let selectors = parse_selectors(params)?;
+    let metric = params.get("metric").map(ToOwned::to_owned);
+    if selectors.is_empty() && metric.is_none() {
+        return Err("missing required parameter: metric or match[]".into());
+    }
     let now = now_seconds();
     let start = parse_time(
         params.get("start"),
@@ -1520,6 +1524,7 @@ pub(crate) fn export_request(params: &Params) -> Result<ReadRequest, String> {
     Ok(ReadRequest::native(NativeRequest::Export {
         metric,
         filter: FilterPlan::new(params.label_matchers(false)?),
+        selectors,
         start,
         stop,
     }))

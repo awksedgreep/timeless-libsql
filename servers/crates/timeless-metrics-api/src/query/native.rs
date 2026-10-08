@@ -8,8 +8,9 @@ pub(crate) enum NativeRequest {
         stop: i64,
     },
     Export {
-        metric: String,
+        metric: Option<String>,
         filter: FilterPlan,
+        selectors: Vec<Selector>,
         start: i64,
         stop: i64,
     },
@@ -493,9 +494,17 @@ pub(super) fn execute(
         NativeRequest::Export {
             metric,
             filter,
+            selectors,
             start,
             stop,
-        } => export(&context, &metric, &filter, start, stop),
+        } => export(
+            &context,
+            metric.as_deref(),
+            &filter,
+            &selectors,
+            start,
+            stop,
+        ),
         NativeRequest::Range {
             metric,
             filter,
@@ -618,61 +627,98 @@ fn latest(
     context.output(body, rows.len(), rows.len(), rows.len(), frame_bytes)
 }
 
+/// Export raw samples as VictoriaMetrics JSON lines. `metric=` reads one
+/// metric; `match[]` selectors (the Prometheus and VictoriaMetrics form) are
+/// resolved against the bounded catalog first and read one metric at a time,
+/// every selected series once however many selectors match it. Label
+/// parameters narrow either form.
 fn export(
     context: &Context<'_>,
-    metric: &str,
+    metric: Option<&str>,
     filter: &FilterPlan,
+    selectors: &[Selector],
     start: i64,
     stop: i64,
 ) -> Result<ReadOutput, String> {
-    let catalog = context.catalog(Some(metric), Some(filter))?;
-    let raw = raw_query(
-        context.conn,
-        context.features,
-        metric,
-        filter,
-        start,
-        stop,
-        Some(context.limits.max_storage_points),
-    )?;
-    let by_id: HashMap<_, _> = raw
-        .series
-        .iter()
-        .map(|series| (series.id, series))
-        .collect();
+    let groups: Vec<(String, &FilterPlan, Vec<SeriesMeta>)> = if selectors.is_empty() {
+        let metric = metric.ok_or_else(|| "missing required parameter: metric".to_string())?;
+        vec![(
+            metric.to_owned(),
+            filter,
+            context.catalog(Some(metric), Some(filter))?,
+        )]
+    } else {
+        let mut by_metric: BTreeMap<String, Vec<SeriesMeta>> = BTreeMap::new();
+        for meta in context.selected(None, selectors)? {
+            if metric.is_some_and(|metric| metric != meta.metric) || !filter.matches(&meta.labels) {
+                continue;
+            }
+            by_metric.entry(meta.metric.clone()).or_default().push(meta);
+        }
+        // One selector's own matchers narrow each read; with several, only
+        // what they all share (the label parameters) can be pushed down.
+        let pushdown = match selectors {
+            [selector] => &selector.filter,
+            _ => filter,
+        };
+        by_metric
+            .into_iter()
+            .map(|(metric, metas)| (metric, pushdown, metas))
+            .collect()
+    };
     let mut body = Body::new(context.limits.max_response_bytes);
     let mut points = 0;
     let mut emitted = 0;
-    for meta in &catalog {
-        context.check()?;
-        let Some(series) = by_id.get(&meta.id) else {
-            continue;
-        };
-        points += series.len();
-        context.result_points(points as u128)?;
-        if emitted > 0 {
-            body.text(b"\n")?;
-        }
-        body.text(br#"{"metric":"#)?;
-        let mut labels = meta.labels.clone();
-        labels.insert("__name__".into(), metric.to_owned());
-        body.json(&labels)?;
-        body.text(br#","timestamps":["#)?;
-        for index in 0..series.len() {
+    let mut frame_bytes = 0;
+    for (metric, pushdown, catalog) in groups {
+        // The storage-point allowance is the request's, not each metric's.
+        let remaining = context.limits.max_storage_points.saturating_sub(points);
+        let raw = raw_query(
+            context.conn,
+            context.features,
+            &metric,
+            pushdown,
+            start,
+            stop,
+            Some(remaining),
+        )?;
+        frame_bytes += raw.frame_bytes;
+        let by_id: HashMap<_, _> = raw
+            .series
+            .iter()
+            .map(|series| (series.id, series))
+            .collect();
+        for meta in &catalog {
             context.check()?;
-            body.comma(index)?;
-            body.json(&(i128::from(series.timestamp(raw.frame.as_deref(), index)?) * 1_000))?;
+            let Some(series) = by_id.get(&meta.id) else {
+                continue;
+            };
+            points += series.len();
+            context.result_points(points as u128)?;
+            if emitted > 0 {
+                body.text(b"\n")?;
+            }
+            body.text(br#"{"metric":"#)?;
+            let mut labels = meta.labels.clone();
+            labels.insert("__name__".into(), metric.clone());
+            body.json(&labels)?;
+            body.text(br#","timestamps":["#)?;
+            for index in 0..series.len() {
+                context.check()?;
+                body.comma(index)?;
+                body.json(&(i128::from(series.timestamp(raw.frame.as_deref(), index)?) * 1_000))?;
+            }
+            body.text(br#"],"values":["#)?;
+            for index in 0..series.len() {
+                context.check()?;
+                body.comma(index)?;
+                body.json(&series.value(raw.frame.as_deref(), index)?)?;
+            }
+            body.text(b"]}")?;
+            emitted += 1;
         }
-        body.text(br#"],"values":["#)?;
-        for index in 0..series.len() {
-            context.check()?;
-            body.comma(index)?;
-            body.json(&series.value(raw.frame.as_deref(), index)?)?;
-        }
-        body.text(b"]}")?;
-        emitted += 1;
     }
-    context.output(body, emitted, points, points, raw.frame_bytes)
+    context.output(body, emitted, points, points, frame_bytes)
 }
 
 fn range(

@@ -329,11 +329,20 @@ struct GetQuery {
 async fn query_get(
     State(storage): State<Storage>,
     Extension(limits): Extension<LogsQueryLimits>,
-    query: Result<Query<GetQuery>, QueryRejection>,
+    uri: axum::http::Uri,
 ) -> Response<Body> {
-    let Query(query) = match query {
+    // A `query` parameter is LogsQL, as VictoriaLogs serves it by GET; any
+    // other request is the native field API.
+    let Query(query) = match Query::<GetQuery>::try_from_uri(&uri) {
         Ok(query) => query,
-        Err(_) => return client_error("unsupported_query_parameters"),
+        Err(_) => {
+            return match Query::<LogsqlQueryForm>::try_from_uri(&uri) {
+                Ok(Query(form)) if form.query.is_some() => {
+                    logsql_query(storage, limits, form).await.into_response()
+                }
+                _ => client_error("unsupported_query_parameters"),
+            };
+        }
     };
     let limit_explicit = query.limit.is_some();
     let mut spec = match get_query_spec(query, storage.timestamp_unit()) {
@@ -432,7 +441,23 @@ async fn field_values(
 #[serde(deny_unknown_fields)]
 struct QueryForm {
     query: Option<String>,
+    /// Accepted as upstream accepts it; a live tail has no partial response.
+    #[allow(dead_code)]
     allow_partial_response: Option<String>,
+}
+
+/// `/select/logsql/query` by GET or POST: the LogsQL text, plus the
+/// VictoriaLogs request arguments that narrow it. `start`/`end` bound the
+/// outer selection's time range and a positive `limit` caps what the query
+/// returns, as a final `| limit` would.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogsqlQueryForm {
+    query: Option<String>,
+    allow_partial_response: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    limit: Option<String>,
 }
 
 // -- Live tail (VictoriaLogs-compatible /select/logsql/tail) ----------------
@@ -958,12 +983,20 @@ fn query_backed_values_state_bytes(values: &[String]) -> Result<usize, String> {
 async fn query_post(
     State(storage): State<Storage>,
     Extension(limits): Extension<LogsQueryLimits>,
-    form: Result<Form<QueryForm>, FormRejection>,
+    form: Result<Form<LogsqlQueryForm>, FormRejection>,
 ) -> impl IntoResponse {
     let Form(form) = match form {
         Ok(form) => form,
         Err(_) => return client_error("unsupported_query_parameters"),
     };
+    logsql_query(storage, limits, form).await
+}
+
+async fn logsql_query(
+    storage: Storage,
+    limits: LogsQueryLimits,
+    form: LogsqlQueryForm,
+) -> Response<Body> {
     let Some(query) = form.query.as_deref() else {
         return logsql_error(LogsqlError {
             kind: LogsqlErrorKind::Malformed,
@@ -982,6 +1015,9 @@ async fn query_post(
         Ok(parsed) => parsed,
         Err(error) => return logsql_error(error),
     };
+    if let Err(response) = apply_request_arguments(&mut plan, &form, storage.timestamp_unit()) {
+        return *response;
+    }
     if let Some(allow_partial_response) = http_allow_partial_response {
         if allow_partial_response && plan.allow_partial_response.is_none() {
             return logsql_error(logsql::partial_response_deferred_error());
@@ -1394,6 +1430,53 @@ fn field_values_limit(
         Some(limit) => Ok(limit),
         None => Ok(DEFAULT_FIELD_VALUES_LIMIT.min(max_result_rows)),
     }
+}
+
+/// Apply the VictoriaLogs `start`, `end`, and `limit` request arguments to a
+/// parsed plan. The range intersects whatever `_time` filter the query has;
+/// a positive limit is the final pipe (`limit=0` is no limit, as upstream).
+fn apply_request_arguments(
+    plan: &mut LogsqlPlan,
+    form: &LogsqlQueryForm,
+    timestamp_unit: TimestampUnit,
+) -> Result<(), Box<Response<Body>>> {
+    let query_now = now(timestamp_unit);
+    let start = request_time(form.start.as_deref(), timestamp_unit, query_now)
+        .map_err(|()| Box::new(invalid_query_parameter("start")))?;
+    let end = request_time(form.end.as_deref(), timestamp_unit, query_now)
+        .map_err(|()| Box::new(invalid_query_parameter("end")))?;
+    if (start.is_some() || end.is_some()) && plan.time_offset_ns != 0 {
+        return Err(Box::new(logsql_error(LogsqlError {
+            kind: LogsqlErrorKind::Unsupported,
+            message: "start/end request arguments cannot be combined with a LogsQL time_offset"
+                .into(),
+        })));
+    }
+    if let Some(start) = start {
+        plan.spec.ts_min = Some(plan.spec.ts_min.map_or(start, |ts| ts.max(start)));
+    }
+    if let Some(end) = end {
+        plan.spec.ts_max = Some(plan.spec.ts_max.map_or(end, |ts| ts.min(end)));
+    }
+    let limit = match form.limit.as_deref().map(str::parse::<usize>) {
+        None | Some(Ok(0)) => return Ok(()),
+        Some(Ok(limit)) => limit,
+        Some(Err(_)) => return Err(Box::new(invalid_query_parameter("limit"))),
+    };
+    match plan.output {
+        LogsqlOutput::Rows => {
+            plan.spec.limit = if plan.limit_explicit {
+                plan.spec.limit.min(limit)
+            } else {
+                limit
+            };
+            plan.limit_explicit = true;
+        }
+        LogsqlOutput::Pipeline => plan.pipeline.push(logsql::PipelineOp::Limit(limit)),
+        // One aggregate row: any positive limit leaves it as it is.
+        LogsqlOutput::Count => {}
+    }
+    Ok(())
 }
 
 fn apply_plan_limits(plan: &mut LogsqlPlan, limits: LogsQueryLimits) -> Result<(), QueryLimit> {
@@ -1820,6 +1903,30 @@ fn parse_query_time(value: &str, timestamp_unit: TimestampUnit) -> Option<i64> {
                 .ok()
                 .map(|dt| micros_to_native(dt.timestamp_micros(), timestamp_unit))
         })
+}
+
+/// A VictoriaLogs request-argument time: what [`parse_query_time`] takes,
+/// `now`, or a duration such as `15m` meaning that long before now.
+fn request_time(
+    value: Option<&str>,
+    timestamp_unit: TimestampUnit,
+    query_now: i64,
+) -> Result<Option<i64>, ()> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value == "now" {
+        return Ok(Some(query_now));
+    }
+    if let Some(time) = parse_query_time(value, timestamp_unit) {
+        return Ok(Some(time));
+    }
+    let ago_ns = logsql::parse_victorialogs_human_duration(value).ok_or(())?;
+    let ago = match timestamp_unit {
+        TimestampUnit::Milliseconds => ago_ns / 1_000_000,
+        TimestampUnit::Microseconds => ago_ns / 1_000,
+    };
+    Ok(Some(query_now.saturating_sub(ago)))
 }
 
 fn optional_query_time(

@@ -16790,3 +16790,80 @@ async fn instant_sum_profiles_and_bounds_cover_competitive_cardinalities() {
         storage.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn export_accepts_match_selectors_like_prometheus_and_victoria() {
+    let directory = TempDir::new().unwrap();
+    let storage = Storage::start(
+        directory.path().join("export-match.db"),
+        extension_path(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let base = 1_700_000_000_i64;
+    let mut input = String::new();
+    for (metric, host) in [("m", "a"), ("m", "b"), ("other", "a")] {
+        input.push_str(&format!(
+            "{{\"metric\":{{\"__name__\":\"{metric}\",\"host\":\"{host}\"}},\"timestamps\":[{}],\"values\":[1]}}\n",
+            base * 1000
+        ));
+    }
+    assert_no_content(post_body(&app, "/api/v1/import", input.as_bytes()).await);
+    storage.flush().await.unwrap();
+
+    let exported = |query: &'static str| {
+        let app = app.clone();
+        async move {
+            let (status, body) = get_body(
+                &app,
+                &format!("/api/v1/export?{query}&start={base}&end={base}"),
+            )
+            .await;
+            let body = String::from_utf8(body).unwrap();
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            let mut series: Vec<String> = body
+                .lines()
+                .map(|line| {
+                    let line: Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(line["values"], serde_json::json!([1.0]), "{query}");
+                    format!(
+                        "{}/{}",
+                        line["metric"]["__name__"].as_str().unwrap(),
+                        line["metric"]["host"].as_str().unwrap()
+                    )
+                })
+                .collect();
+            series.sort();
+            series
+        }
+    };
+    // The issue's own request shape: one exact selector with a matcher.
+    assert_eq!(exported("match[]=m%7Bhost%3D%22a%22%7D").await, ["m/a"]);
+    // Several selectors are a union, and a series both select comes once.
+    assert_eq!(
+        exported("match[]=m&match[]=%7Bhost%3D%22a%22%7D").await,
+        ["m/a", "m/b", "other/a"]
+    );
+    assert_eq!(
+        exported("match[]=%7B__name__%3D~%22m%7Cother%22%7D").await,
+        ["m/a", "m/b", "other/a"]
+    );
+    // Label parameters and metric= still narrow a selector, as they narrow metric=.
+    assert_eq!(
+        exported("match[]=%7Bhost%3D~%22.%2B%22%7D&host=b").await,
+        ["m/b"]
+    );
+    assert_eq!(
+        exported("match[]=%7Bhost%3D%22a%22%7D&metric=other").await,
+        ["other/a"]
+    );
+    assert_eq!(exported("metric=m").await, ["m/a", "m/b"]);
+
+    let (status, body) = get_json(&app, "/api/v1/export?start=0").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("metric or match[]"), "{body}");
+}

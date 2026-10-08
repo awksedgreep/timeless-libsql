@@ -14031,11 +14031,18 @@ async fn issue_51_logsql_query_errors_are_actionable_and_valid_filters_execute()
     assert_eq!(work_limited_body["error"], "query_limit");
     assert_eq!(work_limited_body["reason"], "max_work_rows");
 
-    for body in [
-        "query=bootfile&_time=15m",
-        "query=bootfile&time=15m",
-        "query=bootfile&start=15m&end=now",
-    ] {
+    // VictoriaLogs' start/end request arguments narrow the query (#129).
+    let response = app
+        .clone()
+        .oneshot(logsql_form_request("query=bootfile&start=15m&end=now"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rows = ndjson_values(&to_bytes(response.into_body(), usize::MAX).await.unwrap());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["case"], "bootfile");
+
+    for body in ["query=bootfile&_time=15m", "query=bootfile&time=15m"] {
         let response = app
             .clone()
             .oneshot(logsql_form_request(body))
@@ -21160,4 +21167,145 @@ async fn exact_message_search_pushes_candidates_without_weakening_equality() {
         }
     }
     storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn issue_129_logsql_query_takes_victorialogs_request_arguments_by_get_and_post() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start_with_timestamp_unit(
+        temp.path().join("issue-129-logsql.db"),
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    // Five records a second apart, oldest first; two are errors.
+    let base = chrono::Utc::now().timestamp_micros() - 60_000_000;
+    let at = |n: i64| base + n * 1_000_000;
+    let body = (1..=5)
+        .map(|n| {
+            serde_json::json!({
+                "_time": at(n),
+                "_msg": format!("record {n}"),
+                "level": if n % 2 == 0 { "error" } else { "info" },
+                "case": format!("c{n}")
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn send(app: &axum::Router, request: Request<Body>) -> (StatusCode, Vec<u8>) {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        (
+            status,
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+    }
+    fn get(query: &str) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/select/logsql/query?{query}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+    let cases = |body: &[u8]| {
+        let mut cases: Vec<String> = ndjson_values(body)
+            .iter()
+            .map(|row| row["case"].as_str().unwrap().to_owned())
+            .collect();
+        cases.sort();
+        cases
+    };
+    let form = |query: &str| logsql_form_request(query);
+    let (start, end) = (at(2), at(4));
+
+    // The issue's requests: LogsQL by GET, and start/end/limit by either method.
+    for request in [
+        get("query=level:%3Derror&limit=2"),
+        form("query=level:%3Derror&limit=2"),
+    ] {
+        let (status, body) = send(&app, request).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(cases(&body), ["c2", "c4"]);
+    }
+    for request in [
+        get(&format!("query=*&start={start}&end={end}")),
+        form(&format!("query=*&start={start}&end={end}")),
+    ] {
+        let (status, body) = send(&app, request).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(cases(&body), ["c2", "c3", "c4"]);
+    }
+    // The range intersects the query's own _time filter.
+    let (_, body) = send(
+        &app,
+        form(&format!(
+            "query=_time:%3E%3D{}&start={start}&end={end}",
+            at(3)
+        )),
+    )
+    .await;
+    assert_eq!(cases(&body), ["c3", "c4"]);
+    // limit is a final pipe: the newest rows, never more than the query's own limit.
+    let (_, body) = send(&app, form("query=*&limit=2")).await;
+    assert_eq!(cases(&body), ["c4", "c5"]);
+    let (_, body) = send(&app, form("query=*+%7C+limit+3&limit=2")).await;
+    assert_eq!(cases(&body), ["c4", "c5"]);
+    let (_, body) = send(&app, form("query=*+%7C+limit+1&limit=5")).await;
+    assert_eq!(cases(&body), ["c5"]);
+    let (_, body) = send(&app, form("query=*&limit=0")).await;
+    assert_eq!(cases(&body).len(), 5, "limit=0 is no limit");
+    let (_, body) = send(&app, form("query=*+%7C+fields+case&limit=2")).await;
+    assert_eq!(
+        ndjson_values(&body).len(),
+        2,
+        "a pipeline gets a final limit"
+    );
+    let (status, body) = send(
+        &app,
+        form(&format!(
+            "query=*+%7C+stats+count%28%29+n&start={start}&end={end}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let rows = ndjson_values(&body);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["n"], 3, "stats over the narrowed range");
+
+    // Malformed arguments are named; the native GET API is unchanged.
+    for request in [
+        form("query=*&limit=many"),
+        form("query=*&start=yesterday-ish"),
+    ] {
+        let (status, body) = send(&app, request).await;
+        assert!(
+            status.is_client_error(),
+            "{status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let (status, body) = send(&app, get("level=error")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cases(&body), ["c2", "c4"]);
+    let (status, _) = send(&app, get("query=*&service=api")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
