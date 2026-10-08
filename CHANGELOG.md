@@ -26,6 +26,19 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
   `now`, or a duration such as `15m`; a positive `limit` caps the result as a
   final `| limit` would. A `GET` without `query` is the native parameter API,
   unchanged.
+- **LogsQL exact filters on fields other than `level` no longer read the
+  whole time range (#130).** A filter the API rechecks itself (`kind:="exit"`,
+  `service:="..."`) asked the extension for every row the work limit allowed,
+  so the window was ordered and decoded to return the first page. Candidates
+  are now read in pages that grow from the requested limit and stop when it
+  is met, bounded by timestamp so ingest between pages cannot repeat or skip
+  a row. On a local 86,828-entry plane (in-process, median of 10),
+  `kind:="exit" | limit 100` fell from 54 ms to 7 ms and a common
+  `service:=` from 136 ms to 7 ms.
+- An exact string match on any key in `TIMELESS_LOGS_INDEX_KEYS`, not only
+  `service`, `host`, `path`, and `status`, now prunes blocks by posting list:
+  a rare value (`kind:="recording"`) fell from 209 ms to 11 ms with `kind`
+  indexed. A rare value on an unindexed key still reads the window.
 
 ## [0.8.11] — 2026-10-07
 

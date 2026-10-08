@@ -1073,6 +1073,10 @@ struct StorageInner {
     queue_capacity: usize,
     gate: BytesGate,
     tail: Arc<crate::tail::TailHub>,
+    /// The table's indexed metadata keys, read once the writer has opened it.
+    /// An exact string match on any of them is pushed to the extension's
+    /// posting lists as a candidate prefilter (#130).
+    index_keys: Vec<String>,
     /// Set once by the server after the exporter starts; stats read it.
     otel_health: OnceLock<Arc<ExporterHealth>>,
 }
@@ -1239,7 +1243,9 @@ impl Storage {
             joins.push(join);
         }
 
+        let index_keys = read_index_keys(&database_path, &extension_path)?;
         Ok(Storage(Arc::new(StorageInner {
+            index_keys,
             otel_health: OnceLock::new(),
             writer: writer_tx,
             readers,
@@ -1260,6 +1266,25 @@ impl Storage {
 
     pub fn timestamp_unit(&self) -> TimestampUnit {
         self.0.timestamp_unit
+    }
+
+    /// Add a posting-list prefilter for every exact string match on an
+    /// indexed metadata key. The typed exact check stays, so this only
+    /// narrows the candidates the extension decodes: a rare value on an
+    /// indexed key costs the blocks that hold it, not the whole window.
+    fn with_index_prefilters(&self, mut spec: QuerySpec) -> QuerySpec {
+        for exact in &spec.metadata_exact {
+            let ([key], JsonValue::String(value)) = (exact.path.as_slice(), &exact.expected) else {
+                continue;
+            };
+            if key == "service" || !self.0.index_keys.iter().any(|indexed| indexed == key) {
+                continue;
+            }
+            spec.metadata_eq
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        spec
     }
 
     pub fn is_ready(&self) -> bool {
@@ -1451,6 +1476,7 @@ impl Storage {
 
     pub async fn query(&self, spec: QuerySpec) -> Result<Vec<QueryRow>, String> {
         validate_query_spec(&spec)?;
+        let spec = self.with_index_prefilters(spec);
         let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -1536,6 +1562,7 @@ impl Storage {
         capture_query_report: bool,
     ) -> Result<(Vec<JsonValue>, LogQueryExecutionReport), String> {
         validate_work_limit(&spec)?;
+        let spec = self.with_index_prefilters(spec);
         let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -1573,6 +1600,7 @@ impl Storage {
 
     pub async fn count(&self, spec: QuerySpec) -> Result<i64, String> {
         validate_work_limit(&spec)?;
+        let spec = self.with_index_prefilters(spec);
         let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -1609,6 +1637,7 @@ impl Storage {
         limit: usize,
     ) -> Result<Vec<String>, String> {
         validate_work_limit(&spec)?;
+        let spec = self.with_index_prefilters(spec);
         let (cancelled, mut cancellation) = self.begin_read();
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -2330,6 +2359,38 @@ fn apply_store_policy(
     Ok(())
 }
 
+/// The logs table's persisted indexed-metadata keys, excluding names that
+/// are fixed columns of the table.
+fn read_index_keys(path: &Path, extension: &Path) -> Result<Vec<String>, String> {
+    let conn = open_bare_connection(path, extension)?;
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM timeless_stats('logs') WHERE key = 'index_keys'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read logs index_keys: {e}"))?;
+    Ok(stored
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty() && !FIXED_LOG_COLUMNS.contains(key))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Column names of the logs table that are not index keys.
+const FIXED_LOG_COLUMNS: &[&str] = &[
+    "ts",
+    "level",
+    "message",
+    "metadata",
+    "message_contains",
+    "max_work_entries",
+    "logs",
+];
+
 fn open_bare_connection(path: &Path, extension: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     unsafe {
@@ -2643,19 +2704,25 @@ fn query_parts(spec: &QuerySpec) -> Result<(String, Vec<SqlValue>), String> {
         clauses.push("service = ?");
         values.push(SqlValue::Text(service.clone()));
     }
-    for (key, value) in &spec.metadata_eq {
-        if !matches!(key.as_str(), "service" | "host" | "path" | "status") {
-            return Err(format!("unsupported indexed log metadata field {key:?}"));
-        }
-        clauses.push(match key.as_str() {
-            "service" => "service = ?",
-            "host" => "host = ?",
-            "path" => "path = ?",
-            "status" => "status = ?",
-            _ => unreachable!("metadata field validated above"),
-        });
-        values.push(SqlValue::Text(value.clone()));
-    }
+    // Index keys are the table's HIDDEN columns. Callers put only declared
+    // keys here (the parser's four defaults, native GET's three, and
+    // `with_index_prefilters`' table keys); the name is quoted either way.
+    let indexed: Vec<String> = spec
+        .metadata_eq
+        .keys()
+        .map(|key| {
+            if key.is_empty() || FIXED_LOG_COLUMNS.contains(&key.as_str()) {
+                return Err(format!("unsupported indexed log metadata field {key:?}"));
+            }
+            Ok(format!("\"{}\" = ?", key.replace('"', "\"\"")))
+        })
+        .collect::<Result<_, String>>()?;
+    clauses.extend(indexed.iter().map(String::as_str));
+    values.extend(
+        spec.metadata_eq
+            .values()
+            .map(|value| SqlValue::Text(value.clone())),
+    );
     if let Some(message) = &spec.message {
         clauses.push("message_contains = ?");
         values.push(SqlValue::Text(message.clone()));
@@ -2741,86 +2808,149 @@ fn query_rows(
         .map_err(|e| format!("read log row: {e}"))
 }
 
+/// Rows for a query the API must filter itself, read from the extension in
+/// pages that grow from the result size. Asking for every row the work limit
+/// allows made the extension order and hand over the whole time window to
+/// find the first `limit` matches (#130). A common value now costs a page or
+/// two; a value the first page never matched reads the rest of the window at
+/// once, as the single read did.
+///
+/// Each page is bounded by the timestamp where the last ended, not by
+/// OFFSET, so ingest between pages cannot shift it: rows sharing a full
+/// page's last timestamp are left for the next page, which starts at that
+/// timestamp, and no row is seen twice.
 fn query_rows_with_postfilters(
     conn: &Connection,
     spec: &QuerySpec,
     cancelled: &AtomicBool,
     timestamp_unit: TimestampUnit,
 ) -> Result<Vec<QueryRow>, String> {
+    const FIRST_PAGE_MIN: usize = 256;
+    const PAGE_GROWTH: usize = 4;
     if spec.limit == 0 {
         return Ok(Vec::new());
     }
-    let (where_sql, mut values) = query_parts(spec)?;
     let order = if spec.descending { "DESC" } else { "ASC" };
-    let sql = format!(
-        "SELECT ts, level, message, metadata FROM logs{where_sql} \
-         ORDER BY ts {order} LIMIT ?"
-    );
-    values.push(SqlValue::Integer(
-        i64::try_from(spec.max_work_rows.saturating_add(1)).unwrap_or(i64::MAX),
-    ));
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|error| format!("prepare LogsQL post-filter query: {error}"))?;
-    let mut rows = statement
-        .query(params_from_iter(values))
-        .map_err(|error| format!("query LogsQL post-filter candidates: {error}"))?;
+    let cap = spec.max_work_rows.saturating_add(1);
+    let mut page = spec
+        .limit
+        .saturating_add(spec.offset)
+        .saturating_mul(2)
+        .max(FIRST_PAGE_MIN)
+        .min(cap);
+    let mut bounded = spec.clone();
     let limit = spec.limit;
     let mut considered = 0usize;
     let mut matched = 0usize;
     let mut output = Vec::new();
     loop {
-        ensure_query_active(cancelled)?;
-        let Some(row) = rows
+        let (where_sql, mut values) = query_parts(&bounded)?;
+        let sql = format!(
+            "SELECT ts, level, message, metadata FROM logs{where_sql} \
+             ORDER BY ts {order} LIMIT ?"
+        );
+        values.push(SqlValue::Integer(i64::try_from(page).unwrap_or(i64::MAX)));
+        let mut statement = conn
+            .prepare_cached(&sql)
+            .map_err(|error| format!("prepare LogsQL post-filter query: {error}"))?;
+        let mut rows = statement
+            .query(params_from_iter(values))
+            .map_err(|error| format!("query LogsQL post-filter candidates: {error}"))?;
+        let mut candidates = Vec::with_capacity(page.min(4096));
+        while let Some(row) = rows
             .next()
             .map_err(|error| format!("read LogsQL post-filter candidate: {error}"))?
-        else {
-            break;
-        };
-        considered = considered.saturating_add(1);
-        if considered > spec.max_work_rows {
-            return Err(format!(
-                "LogsQL post-filter exceeded max_work_rows={}",
-                spec.max_work_rows
-            ));
-        }
-        let level: String = row
-            .get(1)
-            .map_err(|error| format!("read post-filtered log level: {error}"))?;
-        let message: String = row
-            .get(2)
-            .map_err(|error| format!("read post-filtered log message: {error}"))?;
-        let metadata_json: String = row
-            .get(3)
-            .map_err(|error| format!("read post-filtered log metadata JSON: {error}"))?;
-        let timestamp: i64 = row
-            .get(0)
-            .map_err(|error| format!("read post-filtered log timestamp: {error}"))?;
-        if api_postfilters_match(
-            timestamp,
-            &message,
-            &level,
-            &metadata_json,
-            spec,
-            cancelled,
-            timestamp_unit,
-        )? {
-            if matched < spec.offset {
-                matched += 1;
-                continue;
-            }
-            output.push(QueryRow {
+        {
+            ensure_query_active(cancelled)?;
+            let timestamp: i64 = row
+                .get(0)
+                .map_err(|error| format!("read post-filtered log timestamp: {error}"))?;
+            let level: String = row
+                .get(1)
+                .map_err(|error| format!("read post-filtered log level: {error}"))?;
+            let message: String = row
+                .get(2)
+                .map_err(|error| format!("read post-filtered log message: {error}"))?;
+            let metadata_json: String = row
+                .get(3)
+                .map_err(|error| format!("read post-filtered log metadata JSON: {error}"))?;
+            candidates.push(QueryRow {
                 ts: timestamp,
                 level,
                 message,
                 metadata_json,
             });
-            if output.len() == limit {
-                return Ok(output);
+        }
+        let full = candidates.len() == page;
+        // A full page may have cut a run of equal timestamps short: leave
+        // that run for the next page, unless it is the whole page.
+        let boundary = candidates.last().map(|row| row.ts);
+        let keep = match boundary {
+            Some(last) if full => candidates
+                .iter()
+                .position(|row| row.ts == last)
+                .unwrap_or(candidates.len()),
+            _ => candidates.len(),
+        };
+        if full && keep == 0 {
+            if page == cap {
+                return Err(format!(
+                    "LogsQL post-filter exceeded max_work_rows={}",
+                    spec.max_work_rows
+                ));
+            }
+            page = page.saturating_mul(PAGE_GROWTH).min(cap);
+            continue;
+        }
+        for row in candidates.into_iter().take(keep) {
+            considered = considered.saturating_add(1);
+            if considered > spec.max_work_rows {
+                return Err(format!(
+                    "LogsQL post-filter exceeded max_work_rows={}",
+                    spec.max_work_rows
+                ));
+            }
+            if api_postfilters_match(
+                row.ts,
+                &row.message,
+                &row.level,
+                &row.metadata_json,
+                spec,
+                cancelled,
+                timestamp_unit,
+            )? {
+                if matched < spec.offset {
+                    matched += 1;
+                    continue;
+                }
+                output.push(row);
+                if output.len() == limit {
+                    return Ok(output);
+                }
             }
         }
+        let (true, Some(last)) = (full, boundary) else {
+            return Ok(output);
+        };
+        if spec.descending {
+            bounded.ts_max = Some(last);
+        } else {
+            bounded.ts_min = Some(last);
+        }
+        // Matches so far make a few more pages likely enough; none means a
+        // rare value, which only the rest of the window can answer, so it is
+        // read at once rather than again and again in growing pages.
+        let remaining = spec
+            .max_work_rows
+            .saturating_sub(considered)
+            .saturating_add(1);
+        page = if matched == 0 && output.is_empty() {
+            remaining
+        } else {
+            page.saturating_mul(PAGE_GROWTH).min(remaining)
+        }
+        .max(1);
     }
-    Ok(output)
 }
 
 /// Ordering and query-time presentation cannot change count(*). Every other

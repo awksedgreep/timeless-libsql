@@ -21309,3 +21309,161 @@ async fn issue_129_logsql_query_takes_victorialogs_request_arguments_by_get_and_
     let (status, _) = send(&app, get("query=*&service=api")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn issue_130_paged_post_filters_match_the_single_read_across_equal_timestamps() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start_with_timestamp_unit(
+        temp.path().join("issue-130-paging.db"),
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    // 3,000 records whose timestamps come in runs (one of 900, so a run
+    // spans several pages), every third one a match.
+    let base = chrono::Utc::now().timestamp_micros() - 3_600_000_000;
+    let ts = |n: i64| {
+        base + if (1_000..1_900).contains(&n) {
+            1_000
+        } else {
+            n
+        } * 1_000
+    };
+    let body = (0..3_000i64)
+        .map(|n| {
+            serde_json::json!({
+                "_time": ts(n),
+                "_msg": format!("record {n}"),
+                "kind": if n % 3 == 0 { "hit" } else { "miss" },
+                "n": n
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        app.clone()
+            .oneshot(ingest_request(body))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    storage.barrier().await.unwrap();
+
+    async fn numbers(app: &axum::Router, query: &str) -> Vec<i64> {
+        pipeline_rows(app, query)
+            .await
+            .iter()
+            .map(|row| row["n"].as_i64().unwrap())
+            .collect()
+    }
+    for order in ["desc", "asc"] {
+        // The single-read path (no API post-filter) is the oracle order.
+        let oracle: Vec<i64> = numbers(&app, &format!("* | sort by (_time {order}) | limit 3000"))
+            .await
+            .into_iter()
+            .filter(|n| n % 3 == 0)
+            .collect();
+        assert_eq!(oracle.len(), 1_000);
+        for (offset, limit) in [
+            (0, 1),
+            (0, 100),
+            (50, 700),
+            (290, 400),
+            (0, 1000),
+            (990, 50),
+        ] {
+            let got = numbers(
+                &app,
+                &format!(
+                    "kind:=\"hit\" | sort by (_time {order}) | offset {offset} | limit {limit}"
+                ),
+            )
+            .await;
+            let want: Vec<i64> = oracle.iter().copied().skip(offset).take(limit).collect();
+            assert_eq!(got, want, "{order} offset {offset} limit {limit}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn issue_130_exact_match_on_a_configured_index_key_decodes_only_its_blocks() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Storage::start_with_policy(
+        temp.path().join("issue-130-index.db"),
+        extension.into(),
+        1,
+        8,
+        TimestampUnit::Microseconds,
+        timeless_logs_api::StorePolicy {
+            index_keys: Some("service,path,status,host,kind".into()),
+            retention: None,
+        },
+    )
+    .unwrap();
+    let app = router(storage.clone());
+    let base = chrono::Utc::now().timestamp_micros() - 3_600_000_000;
+    // Four flushed batches of 2,000; one record in the third is the rare
+    // value, and one carries the number 5 where another carries "5".
+    for batch in 0..4i64 {
+        let body = (0..2_000i64)
+            .map(|i| {
+                let n = batch * 2_000 + i;
+                let kind = match n {
+                    5_000 => serde_json::json!("recording"),
+                    5_001 => serde_json::json!(5),
+                    5_002 => serde_json::json!("5"),
+                    _ => serde_json::json!("exit"),
+                };
+                serde_json::json!({"_time": base + n * 1_000, "_msg": format!("r{n}"), "kind": kind, "n": n})
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            app.clone()
+                .oneshot(ingest_request(body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        storage.barrier().await.unwrap();
+        storage.flush().await.unwrap();
+    }
+
+    let decoded = || async { storage.stats().await.unwrap().query_decoded_entries };
+    let before = decoded().await;
+    let rows = pipeline_rows(
+        &app,
+        "kind:=\"recording\" | sort by (_time desc) | limit 1000",
+    )
+    .await;
+    let read = decoded().await - before;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["n"], 5000);
+    assert!(
+        read <= 2_000,
+        "decoded {read} entries; only one block holds the value"
+    );
+
+    // The prefilter is textual; the typed check still keeps 5 and "5" apart.
+    let rows = pipeline_rows(&app, "kind:=\"5\" | limit 10").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["n"], 5002);
+    let rows = pipeline_rows(&app, "kind:=5 | limit 10").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["n"], 5001);
+    let rows = pipeline_rows(&app, "kind:=\"exit\" | stats count() n").await;
+    assert_eq!(rows[0]["n"], 7_997);
+}
