@@ -10,11 +10,36 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.11 -->
+<!-- release-target: 0.8.12 -->
 
 ## [Unreleased]
 
+## [0.8.12] — 2026-10-08
+
+### Added
+
+- **Selector-less label discovery answers from the label index.**
+  `timeless_label_values` takes `metric` as optional: without it, it returns
+  the values a key takes across every series, and key `__name__` returns
+  metric names. A filter still requires a metric. A new
+  `timeless_label_names(tbl [, metric])` lists label names. Both are
+  advertised as `all_series` in the capability document. Metrics servers use
+  them for `/api/v1/labels` and `/api/v1/label/<name>/values` without
+  selectors, falling back to the catalog pass against an extension that does
+  not advertise them. On a 628k-series live store these requests fell from
+  2.7–3.6 s to 5–10 ms, with byte-identical responses.
+
 ### Fixed
+
+- **The 10-second metrics flush no longer walks the whole store (#125).** Each
+  scheduled flush computed the retention high water by walking every chunk and
+  partition buffer, and walked every partition to find buffered points, even
+  when nothing had arrived. At 628k series that averaged 238 ms per tick, about
+  a third of the writer's time. Retention now checks its advance guard against
+  a never-lowered upper bound on the newest timestamp first, so the walk runs
+  only when the high water may have moved a slice. A flush with nothing
+  buffered returns at once. An idle flush at that scale fell from 110 ms to
+  5 ms.
 
 - **Victoria-compatible request forms are accepted (#129).**
   `GET /api/v1/export` takes Prometheus/VictoriaMetrics `match[]` selectors
