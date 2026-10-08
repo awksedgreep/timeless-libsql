@@ -1153,11 +1153,16 @@ fn raw_chunks_wait_for_a_run_before_they_are_compressed() {
         true,
     )
     .unwrap();
-    engine.set_raw_compress_min_chunks(4);
     let sparse = engine.resolve_cached("sparse", &labels()).unwrap();
     let dense = engine.resolve_cached("dense", &labels()).unwrap();
+    let budget = MetricsCompactionBudget {
+        raw_min_chunks: 4,
+        ..MetricsCompactionBudget::for_series(64)
+    };
     let sweep = |engine: &Engine| loop {
-        let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+        let (_, _, more) = engine
+            .compact_partitions_budgeted(i64::MAX, budget)
+            .unwrap();
         if !more {
             break;
         }

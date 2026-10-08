@@ -53,7 +53,7 @@ pub const METRICS_COMPACTION_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
 const METRICS_MERGE_MIN_CHUNKS: usize = 4;
 
 /// Raw points of one series that are worth compressing whatever their chunk
-/// count; see `Engine::set_raw_compress_min_chunks`. Keeps a dense series
+/// count; see `MetricsCompactionBudget::raw_min_chunks`. Keeps a dense series
 /// from sitting uncompressed while it waits for chunks.
 const METRICS_RAW_COMPRESS_MIN_POINTS: usize = 1024;
 
@@ -69,6 +69,17 @@ pub struct MetricsCompactionBudget {
     /// each holds, which a fleet's merge ladder varies by orders of
     /// magnitude (#121). None: no time bound.
     pub max_duration: Option<Duration>,
+    /// Raw chunks a series still being written (written in the last
+    /// COMPACT_MIN_AGE_SECS) needs before they are compressed, together,
+    /// into one chunk; METRICS_RAW_COMPRESS_MIN_POINTS points between them
+    /// will also do. 1 compresses every raw chunk at once. A series written
+    /// a point per flush — a fleet scraped every few minutes — makes
+    /// one-point raw chunks, which compression cannot shrink; compressing
+    /// each as it came rewrote every sample once for nothing and fed the
+    /// merge ladder its smallest rung (#122). A series that has stopped
+    /// being written is compressed whatever its count. A sweep's plan is
+    /// made for one value; values below 1 are treated as 1.
+    pub raw_min_chunks: usize,
 }
 
 impl MetricsCompactionBudget {
@@ -78,6 +89,7 @@ impl MetricsCompactionBudget {
             max_input_points: METRICS_COMPACTION_STEP_INPUT_POINTS,
             max_input_bytes: METRICS_COMPACTION_STEP_INPUT_BYTES,
             max_duration: None,
+            raw_min_chunks: 1,
         }
     }
 }
@@ -162,6 +174,7 @@ fn owned_sources(sources: &[MetricsCandidate<'_>]) -> Vec<(ChunkKey, ChunkMeta)>
 /// afford that at each of hundreds of steps.
 struct MetricsCompactionPlan {
     cutoff_ts: i64,
+    raw_min_chunks: usize,
     groups: VecDeque<MetricsCompactionGroup>,
     /// The chunk sequence at which the plan was found empty, when it was:
     /// until a chunk is added, there is nothing for it to find again.
@@ -1021,10 +1034,6 @@ pub struct Engine {
     /// one full cycle resets it to zero, and a restart simply begins a fresh
     /// idempotent cycle.
     rollup_maintenance_cursor: AtomicUsize,
-    /// Raw chunks a series still being written needs before they are
-    /// compressed (`set_raw_compress_min_chunks`); 1 compresses every raw
-    /// chunk at the next sweep.
-    raw_compress_min_chunks: AtomicUsize,
     /// The maintenance sweep whose rollup cycle has completed, if any
     /// (`rollup_bounded_for_sweep`). Each step of a sweep runs a bounded
     /// rollup; once the cycle wraps, later steps of the same sweep would
@@ -1833,7 +1842,6 @@ impl Engine {
             rollup_index: RwLock::new(rollup_index),
             rollup_tiers: Mutex::new(Vec::new()),
             rollup_maintenance_cursor: AtomicUsize::new(0),
-            raw_compress_min_chunks: AtomicUsize::new(1),
             rollup_cycle_done_sweep: AtomicU64::new(0),
             rollup_merge_plan: Mutex::new(VecDeque::new()),
             retention_native: AtomicI64::new(0),
@@ -2889,6 +2897,7 @@ impl Engine {
             flag: &self.compaction_running,
         };
         let step_started = Instant::now();
+        let raw_min_chunks = budget.raw_min_chunks.max(1);
         let _transition = self.transition_write();
 
         // The sweep's plan: made once from the index for the cutoff the
@@ -2900,10 +2909,11 @@ impl Engine {
         let kept = matches!(
             plan_guard.as_ref(),
             Some(plan) if plan.cutoff_ts == cutoff_ts
+                && plan.raw_min_chunks == raw_min_chunks
                 && (!plan.groups.is_empty() || plan.drained_at_seq == Some(seq))
         );
         if !kept {
-            *plan_guard = Some(self.plan_metrics_sweep(cutoff_ts));
+            *plan_guard = Some(self.plan_metrics_sweep(cutoff_ts, raw_min_chunks));
         }
         let plan = plan_guard.as_mut().expect("a plan was kept or made");
         if plan.groups.is_empty() {
@@ -3046,7 +3056,7 @@ impl Engine {
 
         if plans.is_empty() {
             if !outcome.more {
-                outcome.more = self.replan_metrics_sweep(cutoff_ts);
+                outcome.more = self.replan_metrics_sweep(cutoff_ts, raw_min_chunks);
             }
             return Ok(outcome);
         }
@@ -3145,7 +3155,7 @@ impl Engine {
             // larger tier. Once a sweep has drained its plan it is planned
             // again, so the next tier is reached without being merged in the
             // same transaction.
-            outcome.more = self.replan_metrics_sweep(cutoff_ts);
+            outcome.more = self.replan_metrics_sweep(cutoff_ts, raw_min_chunks);
         }
         self.record_metrics_compaction(&outcome);
         Ok(outcome)
@@ -3154,15 +3164,17 @@ impl Engine {
     /// Plan a sweep: every actionable group for the cutoff, in the order it
     /// is to be done. Counted, so that a host can see how often the index
     /// was walked for it.
-    fn plan_metrics_sweep(&self, cutoff_ts: i64) -> MetricsCompactionPlan {
+    fn plan_metrics_sweep(&self, cutoff_ts: i64, raw_min_chunks: usize) -> MetricsCompactionPlan {
         self.compaction_plans.fetch_add(1, Ordering::Relaxed);
-        let groups: VecDeque<MetricsCompactionGroup> =
-            self.plan_metrics_compaction(cutoff_ts).into();
+        let groups: VecDeque<MetricsCompactionGroup> = self
+            .plan_metrics_compaction(cutoff_ts, raw_min_chunks)
+            .into();
         let drained_at_seq = groups
             .is_empty()
             .then(|| self.chunk_seq.load(Ordering::Relaxed));
         MetricsCompactionPlan {
             cutoff_ts,
+            raw_min_chunks,
             groups,
             drained_at_seq,
         }
@@ -3179,8 +3191,8 @@ impl Engine {
 
     /// Plan the sweep again from the index as it now is, and say whether
     /// there is anything left to do.
-    fn replan_metrics_sweep(&self, cutoff_ts: i64) -> bool {
-        let plan = self.plan_metrics_sweep(cutoff_ts);
+    fn replan_metrics_sweep(&self, cutoff_ts: i64, raw_min_chunks: usize) -> bool {
+        let plan = self.plan_metrics_sweep(cutoff_ts, raw_min_chunks);
         let more = !plan.groups.is_empty();
         *self.compaction_plan_lock() = Some(plan);
         more
@@ -3198,8 +3210,11 @@ impl Engine {
     /// and only the chunks that make a group are copied out: a plan walks
     /// every chunk, and copying each into a per-series map first made a
     /// plan at a few million chunks a step of its own (#125).
-    fn plan_metrics_compaction(&self, cutoff_ts: i64) -> Vec<MetricsCompactionGroup> {
-        let raw_min_chunks = self.raw_compress_min_chunks.load(Ordering::Relaxed);
+    fn plan_metrics_compaction(
+        &self,
+        cutoff_ts: i64,
+        raw_min_chunks: usize,
+    ) -> Vec<MetricsCompactionGroup> {
         let now = Instant::now();
         let index = self.index_read();
         let mut groups = Vec::new();
@@ -6011,21 +6026,6 @@ impl Engine {
     /// F2: configure the automatic retention window (NATIVE ts units;
     /// None disables). Idempotent — called at every connect with the
     /// persisted table setting.
-    /// Leave the raw chunks of a series still being written (written in
-    /// the last COMPACT_MIN_AGE_SECS) until there are `chunks` of them or
-    /// METRICS_RAW_COMPRESS_MIN_POINTS points between them, then compress
-    /// them together into one chunk. The default, 1, compresses each raw
-    /// chunk at the next sweep. A series written a point per flush — a
-    /// fleet scraped every few minutes — makes one-point raw chunks, which
-    /// compression cannot shrink; compressing each as it came rewrote every
-    /// sample once for nothing and fed the merge ladder its smallest rung
-    /// (#122). A series that has stopped being written is compressed as
-    /// before. Values below 1 are treated as 1.
-    pub fn set_raw_compress_min_chunks(&self, chunks: usize) {
-        self.raw_compress_min_chunks
-            .store(chunks.max(1), Ordering::Relaxed);
-    }
-
     pub fn set_retention(&self, native: Option<i64>) {
         let native = native.unwrap_or(0).max(0);
         if self.retention_native.swap(native, Ordering::Relaxed) != native {
