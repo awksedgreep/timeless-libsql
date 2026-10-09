@@ -538,4 +538,171 @@ pub(super) fn run(path: &str, series: usize, runs: usize) {
         status_kib("VmRSS:").saturating_sub(rss_start)
     );
     println!("memory,process_hwm_kib,{},,", status_kib("VmHWM:"));
+    drop(conn);
+    chunks(path, series, runs);
+}
+
+/// Series ids of `metric` with `cm_mac` (when given), from the disk postings.
+fn selected_ids(conn: &Connection, metric: &str, mac: Option<&str>) -> Vec<i64> {
+    let name = label_id(conn, "__name__", metric).unwrap();
+    let mut sql = String::from("SELECT series_id FROM metrics_postings a WHERE a.label_id = ?1");
+    if mac.is_some() {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM metrics_postings b WHERE b.label_id = ?2 \
+             AND b.series_id = a.series_id)",
+        );
+    }
+    let mut binds = vec![name];
+    if let Some(mac) = mac {
+        binds.push(label_id(conn, "cm_mac", mac).unwrap());
+    }
+    let mut stmt = conn.prepare(&sql).unwrap();
+    stmt.query_map(rusqlite::params_from_iter(binds), |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// The chunk index on disk (phase 3): what the engine's in-memory
+/// `BTreeMap<ChunkKey, ChunkMeta>` answers today, asked of `metrics_chunks`.
+fn chunks(path: &str, series: usize, runs: usize) {
+    let conn = Connection::open(path).unwrap();
+    let chunk_rows: i64 = conn
+        .query_row("SELECT count(*) FROM metrics_chunks", [], |r| r.get(0))
+        .unwrap();
+    println!("chunks,chunk_rows,{chunk_rows},,");
+    println!(
+        "chunks,bytes_metrics_chunks_series_ts,{},,",
+        table_bytes(&conn, "metrics_chunks_series_ts")
+    );
+    let gateways = series / SERIES_PER_GATEWAY_PUB;
+    let one_mac = mac_pub(gateways / 2);
+    let metric = METRICS_PUB[1];
+    let narrow = selected_ids(&conn, metric, Some(&one_mac));
+    let broad = selected_ids(&conn, metric, None);
+    const META: &str = "SELECT id, ts_min, ts_max, point_count, encoding FROM metrics_chunks \
+                        WHERE series_id = ?1 AND resolution = 0 AND ts_min <= ?2 ORDER BY ts_min";
+    const META_COVERED: &str = "SELECT id, ts_min, ts_max, point_count, encoding \
+                        FROM metrics_chunks INDEXED BY metrics_chunks_meta \
+                        WHERE series_id = ?1 AND resolution = 0 AND ts_min <= ?2 ORDER BY ts_min";
+    const STATS: &str = "SELECT min(ts_min), max(ts_max), sum(point_count), count(*) \
+                         FROM metrics_chunks WHERE series_id = ?1 AND resolution = 0";
+    const BLOBS: &str = "SELECT ts_data, val_data FROM metrics_chunks WHERE id = ?1";
+    let stop = i64::MAX;
+    let lookup = |sql: &str, ids: &[i64], fetch: bool| -> usize {
+        let mut meta = conn.prepare_cached(sql).unwrap();
+        let mut blobs = conn.prepare_cached(BLOBS).unwrap();
+        let mut found = 0;
+        for &id in ids {
+            let rows: Vec<i64> = meta
+                .query_map(params![id, stop], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            found += rows.len();
+            if fetch {
+                for chunk in rows {
+                    let (ts, val): (Vec<u8>, Vec<u8>) = blobs
+                        .query_row([chunk], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .unwrap();
+                    std::hint::black_box((ts, val));
+                }
+            }
+        }
+        found
+    };
+    let stats = |ids: &[i64]| -> usize {
+        let mut stmt = conn.prepare_cached(STATS).unwrap();
+        ids.iter()
+            .map(|&id| {
+                stmt.query_row([id], |r| r.get::<_, i64>(3)).unwrap() as usize
+            })
+            .sum()
+    };
+    let emit = |name: &str, rows: usize, read: &dyn Fn() -> usize| {
+        let (first, median, p95, got) = timed(runs, read);
+        assert_eq!(got, rows, "{name}");
+        println!("chunks,{name},{median:.0},{p95:.0},{rows}");
+        println!("chunks,{name}_first_fresh_connection,{first:.0},,{rows}");
+    };
+    let narrow_chunks = lookup(META, &narrow, false);
+    let broad_chunks = lookup(META, &broad, false);
+    emit("narrow_meta", narrow_chunks, &|| lookup(META, &narrow, false));
+    emit("narrow_meta_and_blobs", narrow_chunks, &|| lookup(META, &narrow, true));
+    emit("narrow_stats", narrow_chunks, &|| stats(&narrow));
+    emit("broad_meta", broad_chunks, &|| lookup(META, &broad, false));
+    emit("broad_meta_and_blobs", broad_chunks, &|| lookup(META, &broad, true));
+    emit("broad_stats", broad_chunks, &|| stats(&broad));
+
+    // A covering index: metadata reads never touch the payload rows.
+    let before = page_bytes(&conn);
+    let started = Instant::now();
+    conn.execute_batch(
+        "CREATE INDEX metrics_chunks_meta ON metrics_chunks
+           (series_id, resolution, ts_min, ts_max, point_count, encoding)",
+    )
+    .unwrap();
+    println!(
+        "chunks,covering_index_build_ms,{:.0},,",
+        started.elapsed().as_secs_f64() * 1_000.0
+    );
+    println!("chunks,covering_index_bytes,{},,", page_bytes(&conn) - before);
+    emit("narrow_meta_covered", narrow_chunks, &|| {
+        lookup(META_COVERED, &narrow, false)
+    });
+    emit("broad_meta_covered", broad_chunks, &|| {
+        lookup(META_COVERED, &broad, false)
+    });
+
+    // One statement for a whole selection: postings joined to the covering
+    // index, then to the payload rows, in (series, ts) order, the batched
+    // shape of today's ordered chunk reader.
+    let name_label = label_id(&conn, "__name__", metric).unwrap();
+    let joined = |blobs: bool| -> usize {
+        let sql = if blobs {
+            "SELECT c.ts_data, c.val_data FROM metrics_postings p \
+             JOIN metrics_chunks c INDEXED BY metrics_chunks_meta \
+               ON c.series_id = p.series_id AND c.resolution = 0 \
+             WHERE p.label_id = ?1 ORDER BY p.series_id, c.ts_min"
+        } else {
+            "SELECT c.id, c.ts_min, c.ts_max, c.point_count FROM metrics_postings p \
+             JOIN metrics_chunks c INDEXED BY metrics_chunks_meta \
+               ON c.series_id = p.series_id AND c.resolution = 0 \
+             WHERE p.label_id = ?1 ORDER BY p.series_id, c.ts_min"
+        };
+        let mut stmt = conn.prepare_cached(sql).unwrap();
+        let mut rows = stmt.query([name_label]).unwrap();
+        let mut n = 0;
+        while let Some(row) = rows.next().unwrap() {
+            if blobs {
+                let ts: Vec<u8> = row.get(0).unwrap();
+                let val: Vec<u8> = row.get(1).unwrap();
+                std::hint::black_box((ts, val));
+            }
+            n += 1;
+        }
+        n
+    };
+    emit("broad_meta_joined", broad_chunks, &|| joined(false));
+    emit("broad_meta_and_blobs_joined", broad_chunks, &|| joined(true));
+
+    // Compaction planning: every series with two or more raw chunks, from a
+    // scan of the covering index.
+    let plan = || -> usize {
+        conn.prepare_cached(
+            "SELECT series_id, count(*) FROM metrics_chunks INDEXED BY metrics_chunks_meta \
+             WHERE resolution = 0 AND encoding = 1 GROUP BY series_id HAVING count(*) >= 2",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .count()
+    };
+    let (first, median, p95, groups) = timed(runs.min(3), plan);
+    println!("chunks,compaction_plan_full_scan,{median:.0},{p95:.0},{groups}");
+    println!("chunks,compaction_plan_full_scan_first,{first:.0},,{groups}");
+    println!(
+        "chunks,process_hwm_kib,{},,",
+        status_kib("VmHWM:")
+    );
 }

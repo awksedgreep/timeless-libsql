@@ -227,6 +227,14 @@ fn reads(conn: &Connection, series_count: usize, runs: usize) {
             Box::new(|| count(conn, SERIES_POSTINGS, &[&METRICS[1], &one_mac])),
         ),
         (
+            "raw_frame_name_and_mac",
+            Box::new(|| raw_frame(conn, METRICS[1], &one_mac)),
+        ),
+        (
+            "raw_frame_exact_name",
+            Box::new(|| raw_frame(conn, METRICS[1], "{}")),
+        ),
+        (
             "discover_label_names",
             Box::new(|| count(conn, "SELECT name FROM timeless_label_names('metrics')", &[])),
         ),
@@ -255,6 +263,25 @@ fn reads(conn: &Connection, series_count: usize, runs: usize) {
         let (median, p95, rows) = timed(runs, read);
         println!("{series_count},read,{name},{median:.0},{p95:.0},{rows}");
     }
+}
+
+/// Every point of the selected series across the four cycles, through the
+/// extension's bounded raw reader, as PromQL reads them. Returns frame bytes.
+fn raw_frame(conn: &Connection, metric: &str, filter: &str) -> usize {
+    conn.prepare_cached("SELECT frame FROM timeless_raw_frame('metrics', ?1, ?2, ?3, ?4, ?5)")
+        .unwrap()
+        .query_row(
+            rusqlite::params![
+                metric,
+                filter,
+                BASE_TS - 1,
+                BASE_TS + 4 * CYCLE_SECS,
+                i64::MAX
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .unwrap()
+        .len()
 }
 
 pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
