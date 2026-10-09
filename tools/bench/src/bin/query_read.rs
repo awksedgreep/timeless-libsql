@@ -8,6 +8,8 @@
 
 #[path = "query_read/catalog_growth.rs"]
 mod catalog_growth;
+#[path = "query_read/index_cache.rs"]
+mod index_cache;
 
 use std::env;
 use std::fs;
@@ -25,6 +27,7 @@ struct Config {
     points: usize,
     runs: usize,
     catalog_growth: bool,
+    index_cache: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +48,19 @@ struct Stats {
 }
 
 fn main() {
+    let argv: Vec<String> = env::args().collect();
+    if let (Some(ext), Some(flag), Some(db)) = (argv.get(1), argv.get(2), argv.get(3)) {
+        if flag == "--index-cache-open" {
+            index_cache::open_only(ext, db);
+            return;
+        }
+    }
     let (ext, config, compare_ext) = parse_args();
+    if config.index_cache {
+        assert!(Path::new(&ext).is_file(), "extension not found at {ext}");
+        index_cache::run(&ext, config.series, config.runs);
+        return;
+    }
     assert!(Path::new(&ext).is_file(), "extension not found at {ext}");
     assert!(config.series > 0, "--series must be positive");
     assert!(config.points > 0, "--points must be positive");
@@ -540,7 +555,7 @@ fn main() {
 fn parse_args() -> (String, Config, Option<String>) {
     let mut args = env::args().skip(1);
     let ext = args.next().unwrap_or_else(|| {
-        eprintln!("usage: query-read EXT [--series N] [--points N] [--runs N] [--catalog-growth [--compare-extension EXT]]");
+        eprintln!("usage: query-read EXT [--series N] [--points N] [--runs N] [--catalog-growth [--compare-extension EXT]] [--index-cache]");
         std::process::exit(2);
     });
     let mut config = Config {
@@ -548,12 +563,17 @@ fn parse_args() -> (String, Config, Option<String>) {
         points: 60,
         runs: 20,
         catalog_growth: false,
+        index_cache: false,
     };
     let mut compare_ext = None;
 
     while let Some(flag) = args.next() {
         if flag == "--catalog-growth" {
             config.catalog_growth = true;
+            continue;
+        }
+        if flag == "--index-cache" {
+            config.index_cache = true;
             continue;
         }
         let value = args
