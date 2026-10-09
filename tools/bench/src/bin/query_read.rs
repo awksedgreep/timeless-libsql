@@ -10,6 +10,8 @@
 mod catalog_growth;
 #[path = "query_read/index_cache.rs"]
 mod index_cache;
+#[path = "query_read/index_disk.rs"]
+mod index_disk;
 
 use std::env;
 use std::fs;
@@ -49,6 +51,11 @@ struct Stats {
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("--index-disk") {
+        let number = |at: usize| argv[at].parse::<usize>().expect("--index-disk DB SERIES RUNS");
+        index_disk::run(&argv[2], number(3), number(4));
+        return;
+    }
     if let (Some(ext), Some(flag), Some(db)) = (argv.get(1), argv.get(2), argv.get(3)) {
         if flag == "--index-cache-open" {
             index_cache::open_only(ext, db);

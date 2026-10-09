@@ -39,28 +39,65 @@ fn mac(gateway: usize) -> String {
     )
 }
 
-/// The (metric, labels) of series `index`: eight labels, ~270 bytes, keys in
-/// canonical order, high-cardinality `cm_mac`, low-cardinality the rest.
-fn series(index: usize) -> (&'static str, String) {
+/// The (metric, sorted label pairs) of series `index`: eight labels, ~270
+/// bytes, high-cardinality `cm_mac`, low-cardinality the rest. Keys are in
+/// canonical (sorted) order.
+pub(super) fn series_pairs(index: usize) -> (&'static str, Vec<(&'static str, String)>) {
     let gateway = index / SERIES_PER_GATEWAY;
     let within = index % SERIES_PER_GATEWAY;
     let metric = METRICS[within / INTERFACES];
     let interface = within % INTERFACES;
     let role = ROLES[interface % ROLES.len()];
     let name = format!("if{interface}");
-    let labels = format!(
-        concat!(
-            r#"{{"cm_mac":"{mac}","counter_source":"{source}","display_name":"{role} · {name} (ifIndex {index})","#,
-            r#""if":"{name}","if_index":"{index}","if_type":"{if_type}","interface_id":"if:{index}","role":"{role}"}}"#
+    let if_index = interface + 1;
+    let pairs = vec![
+        ("cm_mac", mac(gateway)),
+        (
+            "counter_source",
+            if interface < 12 { "if_mib" } else { "clab_wifi_radio_stats" }.to_string(),
         ),
-        mac = mac(gateway),
-        source = if interface < 12 { "if_mib" } else { "clab_wifi_radio_stats" },
-        role = role,
-        name = name,
-        index = interface + 1,
-        if_type = [6, 71, 127, 129, 142, 236, 1, 24][interface % 8],
-    );
-    (metric, labels)
+        ("display_name", format!("{role} · {name} (ifIndex {if_index})")),
+        ("if", name),
+        ("if_index", if_index.to_string()),
+        ("if_type", [6, 71, 127, 129, 142, 236, 1, 24][interface % 8].to_string()),
+        ("interface_id", format!("if:{if_index}")),
+        ("role", role.to_string()),
+    ];
+    (metric, pairs)
+}
+
+/// The (metric, labels JSON) of series `index`.
+fn series(index: usize) -> (&'static str, String) {
+    let (metric, pairs) = series_pairs(index);
+    let body: Vec<String> = pairs
+        .iter()
+        .map(|(key, value)| format!("{}:{}", json(key), json(value)))
+        .collect();
+    (metric, format!("{{{}}}", body.join(",")))
+}
+
+fn json(text: &str) -> String {
+    serde_json_escape(text)
+}
+
+fn serde_json_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+pub(super) const SERIES_PER_GATEWAY_PUB: usize = SERIES_PER_GATEWAY;
+pub(super) const METRICS_PUB: [&str; 5] = METRICS;
+pub(super) fn mac_pub(gateway: usize) -> String {
+    mac(gateway)
 }
 
 /// One cycle: a point for every series at `ts`, in import-sized batches,
@@ -291,6 +328,25 @@ pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
     assert!(
         output.status.success(),
         "open child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        println!("{series_count},{line}");
+    }
+
+    // The on-disk design over the same store, in its own fresh process.
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--index-disk",
+            path,
+            &series_count.to_string(),
+            &runs.to_string(),
+        ])
+        .output()
+        .expect("spawn disk-index child");
+    assert!(
+        output.status.success(),
+        "disk-index child failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     for line in String::from_utf8_lossy(&output.stdout).lines() {
