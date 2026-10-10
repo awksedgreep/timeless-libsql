@@ -391,6 +391,21 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not answer chunk index queries".to_string())
     }
 
+    /// The raw chunks [`Self::chunk_metas_for`] finds, each with its
+    /// payload, from one read. `None` when the store has no way to do that
+    /// cheaper than reading the payloads afterwards, or when the chunks
+    /// hold more than `max_points` points: a caller with a work limit must
+    /// be able to refuse a read without its payloads having been loaded.
+    fn chunk_rows_for(
+        &self,
+        _series_ids: &[i64],
+        _t_start: i64,
+        _t_end: i64,
+        _max_points: Option<u64>,
+    ) -> Result<Option<Vec<(StoredChunk, ChunkBytes)>>, String> {
+        Ok(None)
+    }
+
     /// Raw chunks in the store: count, points, oldest and newest timestamp.
     fn chunk_totals(&self) -> Result<(usize, u64, Option<i64>, Option<i64>), String> {
         Err("store does not answer chunk index queries".to_string())

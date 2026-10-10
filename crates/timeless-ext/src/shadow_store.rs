@@ -195,6 +195,8 @@ pub(crate) struct ShadowTableStore {
     chunk_stats_some_sql: String,
     chunk_stats_all_sql: String,
     chunk_totals_sql: String,
+    /// `chunk_metas_one_sql` with the payload columns after `META`'s.
+    chunk_rows_one_sql: String,
     chunk_series_ids_sql: String,
     chunk_locs_before_sql: String,
     chunk_locs_after_sql: String,
@@ -271,6 +273,11 @@ impl ShadowTableStore {
             table: table.to_owned(),
             chunk_metas_one_sql: format!(
                 "SELECT {META} FROM {chunks} \
+                 WHERE series_id = ?1 AND resolution = 0 AND ts_min <= ?2 AND ts_max >= ?3 \
+                 ORDER BY ts_min, id"
+            ),
+            chunk_rows_one_sql: format!(
+                "SELECT {META}, ts_data, val_data FROM {chunks} \
                  WHERE series_id = ?1 AND resolution = 0 AND ts_min <= ?2 AND ts_max >= ?3 \
                  ORDER BY ts_min, id"
             ),
@@ -561,35 +568,40 @@ impl ShadowTableStore {
             .next()
             .map_err(|e| format!("chunk scan row failed: {e}"))?
         {
-            let get_stat = |i: usize, what: &str| -> Result<f64, String> {
-                Self::stat_from_sql(
-                    r.get_ref(i)
-                        .map_err(|e| format!("chunk scan {what}: {e}"))?,
-                    what,
-                )
-            };
-            rows.push(StoredChunk {
-                series_id: r.get(1).map_err(|e| format!("chunk scan series: {e}"))?,
-                meta: ChunkMeta {
-                    min_ts: r.get(2).map_err(|e| e.to_string())?,
-                    max_ts: r.get(3).map_err(|e| e.to_string())?,
-                    max_ts_val: match r.get_ref(4).map_err(|e| e.to_string())? {
-                        rusqlite::types::ValueRef::Null => None,
-                        value => Some(Self::stat_from_sql(value, "max_ts_val")?),
-                    },
-                    point_count: r.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
-                    payload_bytes: r.get::<_, i64>(10).map_err(|e| e.to_string())?.max(0) as u64,
-                    min_val: get_stat(6, "min_val")?,
-                    max_val: get_stat(7, "max_val")?,
-                    sum_val: get_stat(8, "sum_val")?,
-                    loc: ChunkLoc::Row {
-                        rowid: r.get(0).map_err(|e| e.to_string())?,
-                    },
-                    encoding: r.get::<_, i64>(9).map_err(|e| e.to_string())? as u8,
-                },
-            });
+            rows.push(Self::chunk_from_row(r)?);
         }
         Ok(rows)
+    }
+
+    /// A chunk row's metadata, from the columns of `META`.
+    fn chunk_from_row(r: &rusqlite::Row<'_>) -> Result<StoredChunk, String> {
+        let get_stat = |i: usize, what: &str| -> Result<f64, String> {
+            Self::stat_from_sql(
+                r.get_ref(i)
+                    .map_err(|e| format!("chunk scan {what}: {e}"))?,
+                what,
+            )
+        };
+        Ok(StoredChunk {
+            series_id: r.get(1).map_err(|e| format!("chunk scan series: {e}"))?,
+            meta: ChunkMeta {
+                min_ts: r.get(2).map_err(|e| e.to_string())?,
+                max_ts: r.get(3).map_err(|e| e.to_string())?,
+                max_ts_val: match r.get_ref(4).map_err(|e| e.to_string())? {
+                    rusqlite::types::ValueRef::Null => None,
+                    value => Some(Self::stat_from_sql(value, "max_ts_val")?),
+                },
+                point_count: r.get::<_, i64>(5).map_err(|e| e.to_string())? as u32,
+                payload_bytes: r.get::<_, i64>(10).map_err(|e| e.to_string())?.max(0) as u64,
+                min_val: get_stat(6, "min_val")?,
+                max_val: get_stat(7, "max_val")?,
+                sum_val: get_stat(8, "sum_val")?,
+                loc: ChunkLoc::Row {
+                    rowid: r.get(0).map_err(|e| e.to_string())?,
+                },
+                encoding: r.get::<_, i64>(9).map_err(|e| e.to_string())? as u8,
+            },
+        })
     }
 
     /// Shared rollup row mapping for scan_rollups() and scan_since().
@@ -1384,6 +1396,61 @@ impl ChunkStore for ShadowTableStore {
             &self.chunk_metas_many_sql,
             params![Self::id_list(series_ids), t_end, t_start],
         )
+    }
+
+    fn chunk_rows_for(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+        max_points: Option<u64>,
+    ) -> Result<Option<Vec<(StoredChunk, ChunkBytes)>>, String> {
+        // The selections chunk_metas_for probes a series at a time. A
+        // wider one joins and sorts, and a sort would carry the payloads.
+        if series_ids.len() > Self::PROBE_SERIES_AT_MOST {
+            return Ok(None);
+        }
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.chunk_rows_one_sql)
+            .map_err(|e| format!("prepare chunk row read failed: {e}"))?;
+        let mut chunks = Vec::new();
+        let mut points = 0_u64;
+        for series_id in series_ids {
+            let mut rows = stmt
+                .query(params![series_id, t_end, t_start])
+                .map_err(|e| format!("chunk row read failed: {e}"))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| format!("chunk row read failed: {e}"))?
+            {
+                let chunk = Self::chunk_from_row(row)?;
+                points = points.saturating_add(u64::from(chunk.meta.point_count));
+                if max_points.is_some_and(|limit| points > limit) {
+                    return Ok(None);
+                }
+                let ts = row
+                    .get_ref(11)
+                    .and_then(|value| value.as_blob().map_err(Into::into))
+                    .map_err(|e| format!("chunk row timestamps: {e}"))?;
+                let val = row
+                    .get_ref(12)
+                    .and_then(|value| value.as_blob().map_err(Into::into))
+                    .map_err(|e| format!("chunk row values: {e}"))?;
+                let mut data = Vec::with_capacity(ts.len() + val.len());
+                data.extend_from_slice(ts);
+                data.extend_from_slice(val);
+                chunks.push((
+                    chunk,
+                    ChunkBytes {
+                        data: Arc::new(data),
+                        ts_range: 0..ts.len(),
+                        val_range: ts.len()..ts.len() + val.len(),
+                    },
+                ));
+            }
+        }
+        Ok(Some(chunks))
     }
 
     fn chunk_stats_for(

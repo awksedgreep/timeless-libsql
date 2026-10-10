@@ -401,6 +401,9 @@ impl<T> std::ops::Deref for Buffered<T> {
     }
 }
 
+/// Chunk payloads a store handed over with their metadata, by chunk row.
+type CarriedPayloads = HashMap<i64, ChunkBytes>;
+
 struct PartitionBuffer {
     timestamps: Buffered<i64>,
     values: Buffered<f64>,
@@ -1486,6 +1489,99 @@ impl Engine {
             .collect())
     }
 
+    /// Chunks in series order, as lists for each of `series_ids`
+    /// positionally, duplicates included: the last use of an id takes its
+    /// list, earlier ones a copy.
+    fn chunks_by_position(series_ids: &[i64], chunks: Vec<StoredChunk>) -> Vec<Vec<ChunkMeta>> {
+        let mut by_series: HashMap<i64, Vec<ChunkMeta>> = HashMap::new();
+        for chunk in chunks {
+            by_series
+                .entry(chunk.series_id)
+                .or_default()
+                .push(chunk.meta);
+        }
+        let mut remaining: HashMap<i64, usize> = HashMap::new();
+        for id in series_ids {
+            *remaining.entry(*id).or_default() += 1;
+        }
+        series_ids
+            .iter()
+            .map(|id| {
+                let left = remaining.get_mut(id).expect("counted above");
+                *left -= 1;
+                if *left == 0 {
+                    by_series.remove(id).unwrap_or_default()
+                } else {
+                    by_series.get(id).cloned().unwrap_or_default()
+                }
+            })
+            .collect()
+    }
+
+    /// [`Self::chunk_metas_batch`] for a read that goes on to decode every
+    /// chunk it finds. A disk chunk index has the payload in the row it
+    /// reads the metadata from, and hands both over from the one read:
+    /// the payloads come back by row for [`Self::read_chunks_carried`].
+    /// Empty when there is nothing to carry: an index in memory, a
+    /// selection too wide for the store to probe, or chunks holding more
+    /// than `max_points` points, which the caller is about to refuse.
+    fn chunk_metas_batch_carrying(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+        max_points: Option<u64>,
+    ) -> EngineResult<(Vec<Vec<ChunkMeta>>, CarriedPayloads)> {
+        if self.disk_chunks {
+            let mut distinct: Vec<i64> = series_ids.to_vec();
+            distinct.sort_unstable();
+            distinct.dedup();
+            if let Some(rows) = self
+                .store
+                .chunk_rows_for(&distinct, t_start, t_end, max_points)
+                .map_err(|err| format!("failed to read chunk index: {err}"))?
+            {
+                let mut carried = CarriedPayloads::with_capacity(rows.len());
+                let chunks = rows
+                    .into_iter()
+                    .map(|(chunk, payload)| {
+                        if let ChunkLoc::Row { rowid } = chunk.meta.loc {
+                            carried.insert(rowid, payload);
+                        }
+                        chunk
+                    })
+                    .collect();
+                return Ok((Self::chunks_by_position(series_ids, chunks), carried));
+            }
+        }
+        Ok((
+            self.chunk_metas_batch(series_ids, t_start, t_end)?,
+            CarriedPayloads::new(),
+        ))
+    }
+
+    /// The payloads at `locs`, in order: the carried ones if every one was
+    /// carried, a store read otherwise.
+    fn read_chunks_carried(
+        &self,
+        locs: &[ChunkLoc],
+        carried: &CarriedPayloads,
+    ) -> Result<Vec<ChunkBytes>, String> {
+        if !carried.is_empty() {
+            let payloads: Option<Vec<ChunkBytes>> = locs
+                .iter()
+                .map(|loc| match loc {
+                    ChunkLoc::Row { rowid } => carried.get(rowid).cloned(),
+                    ChunkLoc::File { .. } => None,
+                })
+                .collect();
+            if let Some(payloads) = payloads {
+                return Ok(payloads);
+            }
+        }
+        self.store.read_chunks(locs)
+    }
+
     /// [`Self::chunk_metas`] for each of `series_ids`, positionally
     /// (duplicate ids included).
     ///
@@ -1504,35 +1600,11 @@ impl Engine {
             let mut distinct: Vec<i64> = series_ids.to_vec();
             distinct.sort_unstable();
             distinct.dedup();
-            let mut by_series: HashMap<i64, Vec<ChunkMeta>> = HashMap::new();
-            for chunk in self
+            let chunks = self
                 .store
                 .chunk_metas_for(&distinct, t_start, t_end)
-                .map_err(|err| format!("failed to read chunk index: {err}"))?
-            {
-                by_series
-                    .entry(chunk.series_id)
-                    .or_default()
-                    .push(chunk.meta);
-            }
-            // Positional, duplicates included: the last use of an id takes
-            // its list, earlier ones a copy.
-            let mut remaining: HashMap<i64, usize> = HashMap::new();
-            for id in series_ids {
-                *remaining.entry(*id).or_default() += 1;
-            }
-            return Ok(series_ids
-                .iter()
-                .map(|id| {
-                    let left = remaining.get_mut(id).expect("counted above");
-                    *left -= 1;
-                    if *left == 0 {
-                        by_series.remove(id).unwrap_or_default()
-                    } else {
-                        by_series.get(id).cloned().unwrap_or_default()
-                    }
-                })
-                .collect());
+                .map_err(|err| format!("failed to read chunk index: {err}"))?;
+            return Ok(Self::chunks_by_position(series_ids, chunks));
         }
         const MAX_GAP_SCAN: usize = 8;
         let mut order: Vec<usize> = (0..series_ids.len()).collect();
@@ -4772,7 +4844,8 @@ impl Engine {
         }
 
         let _transition = self.transition_read();
-        let matching = self.chunk_metas_batch(series_ids, t_start, t_end)?;
+        let (matching, carried) =
+            self.chunk_metas_batch_carrying(series_ids, t_start, t_end, max_work_points)?;
         let locs: Vec<ChunkLoc> = matching
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
@@ -4805,7 +4878,7 @@ impl Engine {
                 "raw batch work point limit {limit} exceeded (candidate points: {preflight_work_points})"
             ));
         }
-        let chunk_bytes = self.store.read_chunks(&locs)?;
+        let chunk_bytes = self.read_chunks_carried(&locs, &carried)?;
         if chunk_bytes.len() != locs.len() {
             return Err(format!(
                 "batch chunk read returned {} payloads for {} locations",
@@ -4926,14 +4999,16 @@ impl Engine {
     ) -> EngineResult<Vec<(i64, f64)>> {
         let pk = PartitionKey { series_id };
 
-        let matching: Vec<ChunkMeta> = self.chunk_metas(pk.series_id, t_start, t_end)?;
+        let (mut matching, carried) =
+            self.chunk_metas_batch_carrying(&[pk.series_id], t_start, t_end, None)?;
+        let matching: Vec<ChunkMeta> = matching.pop().unwrap_or_default();
 
         // One batched store read for all chunks: N+1 single-row reads
         // (each its own connection borrow + statement prepare) become a
         // single IN query. Order follows `matching`, so decode order —
         // and the stable sort below — is unchanged.
         let locs: Vec<ChunkLoc> = matching.iter().map(|meta| meta.loc.clone()).collect();
-        let chunk_bytes = self.store.read_chunks(&locs)?;
+        let chunk_bytes = self.read_chunks_carried(&locs, &carried)?;
         if chunk_bytes.len() != locs.len() {
             return Err(format!(
                 "chunk read returned {} payloads for {} locations",
@@ -5885,8 +5960,8 @@ impl Engine {
 
         let _transition = self.transition_read();
         let range_start = start.saturating_sub(window);
-        let matching: Vec<Vec<ChunkMeta>> =
-            self.chunk_metas_batch(series_ids, range_start, stop)?;
+        let (matching, carried) =
+            self.chunk_metas_batch_carrying(series_ids, range_start, stop, max_work_points)?;
         let locs: Vec<ChunkLoc> = matching
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
@@ -5919,7 +5994,7 @@ impl Engine {
                 "window batch work point limit {limit} exceeded (candidate input points: {preflight_work_points})"
             ));
         }
-        let chunk_bytes = self.store.read_chunks(&locs)?;
+        let chunk_bytes = self.read_chunks_carried(&locs, &carried)?;
         if chunk_bytes.len() != locs.len() {
             return Err(format!(
                 "batch chunk read returned {} payloads for {} locations",
