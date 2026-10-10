@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS {series} (
   canonical_labels BLOB NOT NULL,
   UNIQUE(name, canonical_labels)
 );
-"#
+{label_index}
+"#,
+        label_index = crate::shadow_label_index::ddl(database, table)
     )
 }
 
@@ -169,12 +171,21 @@ pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
     format!(
         r#"DROP TABLE IF EXISTS {chunks};
 DROP TABLE IF EXISTS {meta};
-DROP TABLE IF EXISTS {series};"#
+DROP TABLE IF EXISTS {series};
+{label_index}"#,
+        label_index = crate::shadow_label_index::drop_ddl(database, table)
     )
 }
 
 pub(crate) struct ShadowTableStore {
     allow_legacy_migration: bool,
+    database: String,
+    table: String,
+    /// The on-disk label index (#132), and whether its tables exist:
+    /// 0 not yet probed, 1 present, 2 absent (a table created before #132
+    /// and not yet upgraded).
+    label_index: crate::shadow_label_index::LabelIndex,
+    label_index_state: std::sync::atomic::AtomicU8,
     // Pre-formatted SQL, built once in the constructor so the trait
     // methods never allocate query strings on the hot path. (The table
     // name is baked in — SQLite cannot parameterize identifiers.)
@@ -237,6 +248,10 @@ impl ShadowTableStore {
         let series = sql_ident::qualified_shadow(database, table, "series");
         ShadowTableStore {
             allow_legacy_migration,
+            database: database.to_owned(),
+            table: table.to_owned(),
+            label_index: crate::shadow_label_index::LabelIndex::new(database, table),
+            label_index_state: std::sync::atomic::AtomicU8::new(0),
             insert_sql: format!(
                 "INSERT INTO {chunks} (series_id, ts_min, ts_max, max_ts_val, point_count, \
                  min_val, max_val, sum_val, encoding, resolution, ts_data, val_data) \
@@ -336,6 +351,21 @@ impl ShadowTableStore {
                  length(ts_data) + length(val_data) \
                  FROM {chunks} WHERE resolution > 0 AND id > ?1 ORDER BY id"
             ),
+        }
+    }
+
+    /// Whether this table's label index tables exist, probed once.
+    fn label_index_present(&self, conn: &Connection) -> bool {
+        use std::sync::atomic::Ordering;
+        match self.label_index_state.load(Ordering::Relaxed) {
+            1 => true,
+            2 => false,
+            _ => {
+                let present = self.label_index.present(conn);
+                self.label_index_state
+                    .store(if present { 1 } else { 2 }, Ordering::Relaxed);
+                present
+            }
         }
     }
 
@@ -1070,6 +1100,7 @@ impl ChunkStore for ShadowTableStore {
         labels: &[(String, String)],
     ) -> Result<ResolvedSeries, String> {
         let conn = Self::conn()?;
+        let label_pairs = labels;
         let labels = Self::encode_labels(labels)?;
         let created = conn
             .prepare_cached(&self.insert_series_sql)
@@ -1082,6 +1113,10 @@ impl ChunkStore for ShadowTableStore {
             .map_err(|e| format!("prepare series resolution failed: {e}"))?
             .query_row(params![name, &labels], |row| row.get(0))
             .map_err(|e| format!("series resolution failed: {e}"))?;
+        if created && self.label_index_present(&conn) {
+            // Single-row statements only: see LabelIndex::index_one.
+            self.label_index.index_one(&conn, id, name, label_pairs)?;
+        }
         Ok(ResolvedSeries { id, created })
     }
 
@@ -1180,14 +1215,20 @@ impl ChunkStore for ShadowTableStore {
                     rows
                 ));
             }
+            let mut created_rows: Vec<crate::shadow_label_index::NewSeries<'_>> = Vec::new();
             for (ord, id) in resolved {
                 if ord as usize != out.len() - start {
                     return Err(format!("bulk series resolution ordinal {ord} out of order"));
                 }
-                out.push(ResolvedSeries {
-                    id,
-                    created: created_ids.contains(&id),
-                });
+                let created = created_ids.contains(&id);
+                if created {
+                    let (name, labels) = &entries[start + ord as usize];
+                    created_rows.push((id, name, labels.as_slice()));
+                }
+                out.push(ResolvedSeries { id, created });
+            }
+            if !created_rows.is_empty() && self.label_index_present(&conn) {
+                self.label_index.index_series(&conn, &created_rows)?;
             }
             start = end;
         }
@@ -1203,6 +1244,10 @@ impl ChunkStore for ShadowTableStore {
             return Ok(());
         }
         let conn = Self::conn()?;
+        let indexed = self.label_index_present(&conn);
+        if indexed {
+            self.label_index.unindex_series(&conn, ids)?;
+        }
         for batch in ids.chunks(500) {
             let list = batch
                 .iter()
@@ -1216,6 +1261,63 @@ impl ChunkStore for ShadowTableStore {
         self.bump_shape_generation(&conn)?;
         self.bump_chunk_generation(&conn)?;
         Ok(())
+    }
+
+    fn has_label_index(&self) -> bool {
+        Self::conn()
+            .map(|conn| self.label_index_present(&conn))
+            .unwrap_or(false)
+    }
+
+    fn ensure_label_index(&self) -> Result<(), String> {
+        let conn = Self::conn()?;
+        self.label_index
+            .make_current(&conn, &self.database, &self.table)?;
+        self.label_index_state
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn label_index_current(&self) -> Result<bool, String> {
+        let conn = Self::conn()?;
+        if !self.label_index_present(&conn) {
+            return Ok(false);
+        }
+        self.label_index.is_current(&conn)
+    }
+
+    fn find_series_ids(
+        &self,
+        metric: Option<&str>,
+        eq: &[(String, String)],
+    ) -> Result<Vec<i64>, String> {
+        let conn = Self::conn()?;
+        self.label_index.find_series(&conn, metric, eq)
+    }
+
+    fn series_by_ids(&self, ids: &[i64]) -> Result<Vec<StoredSeries>, String> {
+        let conn = Self::conn()?;
+        Ok(self
+            .label_index
+            .series_rows(&conn, ids)?
+            .into_iter()
+            .map(|(id, name, labels)| StoredSeries { id, name, labels })
+            .collect())
+    }
+
+    fn metric_names(&self) -> Result<Vec<String>, String> {
+        let conn = Self::conn()?;
+        self.label_index.metric_names(&conn)
+    }
+
+    fn label_values(&self, metric: Option<&str>, key: &str) -> Result<Vec<String>, String> {
+        let conn = Self::conn()?;
+        self.label_index.label_values(&conn, metric, key)
+    }
+
+    fn label_names(&self, metric: Option<&str>) -> Result<Vec<String>, String> {
+        let conn = Self::conn()?;
+        self.label_index.label_names(&conn, metric)
     }
 
     fn migrate_series(&self, series: &[StoredSeries]) -> Result<(), String> {

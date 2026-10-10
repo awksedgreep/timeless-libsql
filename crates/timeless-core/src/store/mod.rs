@@ -273,6 +273,60 @@ pub trait ChunkStore: Send + Sync {
         Err("this store cannot remove series".to_string())
     }
 
+    // ── On-disk label index (#132) ───────────────────────────────────
+    //
+    // A store that owns series identity may also keep a label index beside
+    // it, so the engine can answer selectors and discovery without holding
+    // every series' labels in memory. The defaults say "no index"; an
+    // engine that needs one over such a store refuses rather than guess.
+
+    /// Whether this store keeps an on-disk label index.
+    fn has_label_index(&self) -> bool {
+        false
+    }
+
+    /// Create the label index if it is missing and bring it up to date with
+    /// the series catalog, in the caller's transaction.
+    fn ensure_label_index(&self) -> Result<(), String> {
+        Err("store does not keep a label index".to_string())
+    }
+
+    /// Whether the label index reflects the series catalog as it now is.
+    fn label_index_current(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// Ids, ascending, of the series of `metric` (when given) that carry
+    /// every `(key, value)` in `eq`. At least one of the two is given.
+    fn find_series_ids(
+        &self,
+        _metric: Option<&str>,
+        _eq: &[(String, String)],
+    ) -> Result<Vec<i64>, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
+    /// The catalog rows of `ids`, in id order; absent ids are skipped.
+    fn series_by_ids(&self, _ids: &[i64]) -> Result<Vec<StoredSeries>, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
+    /// Distinct metric names, sorted.
+    fn metric_names(&self) -> Result<Vec<String>, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
+    /// Values `key` takes, across every series or within `metric`, sorted.
+    fn label_values(&self, _metric: Option<&str>, _key: &str) -> Result<Vec<String>, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
+    /// Label names, across every series or within `metric`, sorted; both
+    /// include `__name__`.
+    fn label_names(&self, _metric: Option<&str>) -> Result<Vec<String>, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
     /// Import legacy registry rows. Implementations must be idempotent so
     /// two processes opening the same legacy database cannot corrupt it.
     fn migrate_series(&self, _series: &[StoredSeries]) -> Result<(), String> {
