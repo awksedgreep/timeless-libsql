@@ -1,0 +1,24 @@
+# index-cache: series=499985, gateways=5263, labels=8, batch_points=20000
+# extension=/home/mcotner/Documents/elixir/timeless/timeless-libsql/target/release/libtimeless_ext.so, sqlite=3.53.2
+series,kind,measure,median_or_value,p95,rows
+499985,config,index_cache_unbounded,0,,
+499985,ingest,create_cycle_ms,13174,,499985
+499985,ingest,steady_cycle_ms,2123,2235,499985
+499985,ingest,steady_ns_per_series,4245,,499985
+499985,read,select_exact_name,242254,248261,99997
+499985,read,select_name_and_mac,126,215,19
+499985,read,select_name_and_regex_role,120821,128369,31578
+499985,read,select_exact_name_unbounded,215251,220562,99997
+499985,read,select_name_and_mac_unbounded,98,127,19
+499985,read,raw_frame_name_and_mac,131,183,1460
+499985,read,raw_frame_exact_name,698254,725187,7599788
+499985,read,discover_label_names,312,417,9
+499985,read,discover_metric_names,33,37,5
+499985,read,discover_mac_values,1460,2094,5263
+499985,memory,writer_rss_delta_kib,1617504,,
+499985,memory,writer_rss_bytes_per_series,3312,,
+499985,disk,database_bytes,475574272,,
+499985,disk,bytes_per_series,951,,
+499985,open,open_to_first_read_ms,3217,,
+499985,open,open_rss_delta_kib,1206376,,
+499985,open,open_hwm_kib,1443364,,
