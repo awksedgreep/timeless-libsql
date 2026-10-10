@@ -1228,7 +1228,7 @@ impl ChunkStore for ShadowTableStore {
                 out.push(ResolvedSeries { id, created });
             }
             if !created_rows.is_empty() && self.label_index_present(&conn) {
-                self.label_index.index_series(&conn, &created_rows)?;
+                self.label_index.index_series(&conn, &created_rows, true)?;
             }
             start = end;
         }

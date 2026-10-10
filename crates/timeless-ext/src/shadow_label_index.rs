@@ -197,12 +197,19 @@ impl LabelIndex {
 
     /// Index series rows just inserted into `<t>_series`, in the caller's
     /// transaction: label rows upserted once per distinct pair, postings in
-    /// multi-row statements, and posting-list lengths moved by the number
-    /// of postings actually added.
+    /// multi-row statements in key order, and posting-list lengths moved by
+    /// the number of postings added.
+    ///
+    /// `fresh` says the series were created by this very call's caller, so
+    /// none of their postings can exist yet: they are inserted without
+    /// reporting back, and the lengths come from the batch itself. Without
+    /// it (a catch-up over series that may be partly indexed) each insert
+    /// reports whether it added a row.
     pub(crate) fn index_series(
         &self,
         conn: &Connection,
         rows: &[NewSeries<'_>],
+        fresh: bool,
     ) -> Result<(), String> {
         if rows.is_empty() {
             return Ok(());
@@ -215,25 +222,46 @@ impl LabelIndex {
             }
         }
         let ids = self.label_ids(conn, &pairs, true)?;
-        let mut postings: Vec<(i64, i64)> = Vec::new();
+        let mut postings: Vec<(i64, i64)> = Vec::with_capacity(rows.len() * 9);
         for (series_id, name, labels) in rows {
             postings.push((ids[&(NAME_KEY, *name)], *series_id));
             for (key, value) in labels.iter() {
                 postings.push((ids[&(key.as_str(), value.as_str())], *series_id));
             }
         }
+        // In primary-key order: each label's postings land as one run at
+        // the end of its range of the tree, not one page per series (#136).
+        postings.sort_unstable();
+        postings.dedup();
         let mut added: HashMap<i64, i64> = HashMap::new();
+        if fresh {
+            for (label, _) in &postings {
+                *added.entry(*label).or_default() += 1;
+            }
+        }
+        let tail = if fresh {
+            ""
+        } else {
+            " ON CONFLICT DO NOTHING RETURNING label_id"
+        };
+        let verb = if fresh { "INSERT OR IGNORE" } else { "INSERT" };
         for batch in postings.chunks(ROWS_PER_STATEMENT) {
             let mut sql = format!(
-                "INSERT INTO {} (label_id, series_id) VALUES ",
+                "{verb} INTO {} (label_id, series_id) VALUES ",
                 self.postings
             );
             sql.push_str(&vec!["(?,?)"; batch.len()].join(","));
-            sql.push_str(" ON CONFLICT DO NOTHING RETURNING label_id");
+            sql.push_str(tail);
+            // Cached: a full chunk's statement is the same every time.
             let mut stmt = conn
-                .prepare(&sql)
+                .prepare_cached(&sql)
                 .map_err(|e| format!("prepare posting insert: {e}"))?;
             let binds = batch.iter().flat_map(|(label, series)| [*label, *series]);
+            if fresh {
+                stmt.execute(params_from_iter(binds))
+                    .map_err(|e| format!("posting insert: {e}"))?;
+                continue;
+            }
             let mut inserted = stmt
                 .query(params_from_iter(binds))
                 .map_err(|e| format!("posting insert: {e}"))?;
@@ -550,7 +578,7 @@ impl LabelIndex {
                 .collect();
             conn.execute_batch("SAVEPOINT timeless_label_index")
                 .map_err(|e| format!("label index backfill: {e}"))?;
-            match self.index_series(conn, &view) {
+            match self.index_series(conn, &view, after == 0) {
                 Ok(()) => conn
                     .execute_batch("RELEASE timeless_label_index")
                     .map_err(|e| format!("label index backfill: {e}"))?,
@@ -841,7 +869,9 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        index.index_series(conn, &[(id, name, &owned)]).unwrap();
+        index
+            .index_series(conn, &[(id, name, &owned)], true)
+            .unwrap();
         id
     }
 
@@ -960,7 +990,7 @@ mod tests {
             .iter()
             .map(|(id, pairs)| (*id, "cpu", pairs.as_slice()))
             .collect();
-        index.index_series(&conn, &view).unwrap();
+        index.index_series(&conn, &view, true).unwrap();
         let counts = index.counts(&conn);
         assert_eq!(counts[&("env".into(), "prod".into())], 5_000);
         assert_eq!(counts[&("host".into(), "h7".into())], 50);
