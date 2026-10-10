@@ -32,7 +32,9 @@ const ROLES: [&str; 8] = [
 ];
 
 fn mac(gateway: usize) -> String {
-    let bytes = (gateway as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).to_be_bytes();
+    let bytes = (gateway as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .to_be_bytes();
     format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
@@ -54,12 +56,23 @@ pub(super) fn series_pairs(index: usize) -> (&'static str, Vec<(&'static str, St
         ("cm_mac", mac(gateway)),
         (
             "counter_source",
-            if interface < 12 { "if_mib" } else { "clab_wifi_radio_stats" }.to_string(),
+            if interface < 12 {
+                "if_mib"
+            } else {
+                "clab_wifi_radio_stats"
+            }
+            .to_string(),
         ),
-        ("display_name", format!("{role} · {name} (ifIndex {if_index})")),
+        (
+            "display_name",
+            format!("{role} · {name} (ifIndex {if_index})"),
+        ),
         ("if", name),
         ("if_index", if_index.to_string()),
-        ("if_type", [6, 71, 127, 129, 142, 236, 1, 24][interface % 8].to_string()),
+        (
+            "if_type",
+            [6, 71, 127, 129, 142, 236, 1, 24][interface % 8].to_string(),
+        ),
         ("interface_id", format!("if:{if_index}")),
         ("role", role.to_string()),
     ];
@@ -236,7 +249,13 @@ fn reads(conn: &Connection, series_count: usize, runs: usize) {
         ),
         (
             "discover_label_names",
-            Box::new(|| count(conn, "SELECT name FROM timeless_label_names('metrics')", &[])),
+            Box::new(|| {
+                count(
+                    conn,
+                    "SELECT name FROM timeless_label_names('metrics')",
+                    &[],
+                )
+            }),
         ),
         (
             "discover_metric_names",
@@ -357,7 +376,8 @@ pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
             "{series_count},memory,writer_rss_bytes_per_series,{},,",
             rss * 1024 / series_count as u64
         );
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
     }
     let disk = super::database_bytes(path);
     println!("{series_count},disk,database_bytes,{disk},,");

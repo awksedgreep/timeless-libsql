@@ -52,7 +52,11 @@ struct Stats {
 fn main() {
     let argv: Vec<String> = env::args().collect();
     if argv.get(1).map(String::as_str) == Some("--index-disk") {
-        let number = |at: usize| argv[at].parse::<usize>().expect("--index-disk DB SERIES RUNS");
+        let number = |at: usize| {
+            argv[at]
+                .parse::<usize>()
+                .expect("--index-disk DB SERIES RUNS")
+        };
         index_disk::run(&argv[2], number(3), number(4));
         return;
     }

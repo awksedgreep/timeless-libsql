@@ -614,9 +614,7 @@ fn chunks(path: &str, series: usize, runs: usize) {
     let stats = |ids: &[i64]| -> usize {
         let mut stmt = conn.prepare_cached(STATS).unwrap();
         ids.iter()
-            .map(|&id| {
-                stmt.query_row([id], |r| r.get::<_, i64>(3)).unwrap() as usize
-            })
+            .map(|&id| stmt.query_row([id], |r| r.get::<_, i64>(3)).unwrap() as usize)
             .sum()
     };
     let emit = |name: &str, rows: usize, read: &dyn Fn() -> usize| {
@@ -627,11 +625,17 @@ fn chunks(path: &str, series: usize, runs: usize) {
     };
     let narrow_chunks = lookup(META, &narrow, false);
     let broad_chunks = lookup(META, &broad, false);
-    emit("narrow_meta", narrow_chunks, &|| lookup(META, &narrow, false));
-    emit("narrow_meta_and_blobs", narrow_chunks, &|| lookup(META, &narrow, true));
+    emit("narrow_meta", narrow_chunks, &|| {
+        lookup(META, &narrow, false)
+    });
+    emit("narrow_meta_and_blobs", narrow_chunks, &|| {
+        lookup(META, &narrow, true)
+    });
     emit("narrow_stats", narrow_chunks, &|| stats(&narrow));
     emit("broad_meta", broad_chunks, &|| lookup(META, &broad, false));
-    emit("broad_meta_and_blobs", broad_chunks, &|| lookup(META, &broad, true));
+    emit("broad_meta_and_blobs", broad_chunks, &|| {
+        lookup(META, &broad, true)
+    });
     emit("broad_stats", broad_chunks, &|| stats(&broad));
 
     // A covering index: metadata reads never touch the payload rows.
@@ -646,7 +650,10 @@ fn chunks(path: &str, series: usize, runs: usize) {
         "chunks,covering_index_build_ms,{:.0},,",
         started.elapsed().as_secs_f64() * 1_000.0
     );
-    println!("chunks,covering_index_bytes,{},,", page_bytes(&conn) - before);
+    println!(
+        "chunks,covering_index_bytes,{},,",
+        page_bytes(&conn) - before
+    );
     emit("narrow_meta_covered", narrow_chunks, &|| {
         lookup(META_COVERED, &narrow, false)
     });
@@ -684,7 +691,9 @@ fn chunks(path: &str, series: usize, runs: usize) {
         n
     };
     emit("broad_meta_joined", broad_chunks, &|| joined(false));
-    emit("broad_meta_and_blobs_joined", broad_chunks, &|| joined(true));
+    emit("broad_meta_and_blobs_joined", broad_chunks, &|| {
+        joined(true)
+    });
 
     // Compaction planning: every series with two or more raw chunks, from a
     // scan of the covering index.
@@ -701,8 +710,5 @@ fn chunks(path: &str, series: usize, runs: usize) {
     let (first, median, p95, groups) = timed(runs.min(3), plan);
     println!("chunks,compaction_plan_full_scan,{median:.0},{p95:.0},{groups}");
     println!("chunks,compaction_plan_full_scan_first,{first:.0},,{groups}");
-    println!(
-        "chunks,process_hwm_kib,{},,",
-        status_kib("VmHWM:")
-    );
+    println!("chunks,process_hwm_kib,{},,", status_kib("VmHWM:"));
 }

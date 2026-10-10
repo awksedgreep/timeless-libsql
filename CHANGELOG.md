@@ -10,9 +10,21 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.12 -->
+<!-- release-target: 0.8.13 -->
 
 ## [Unreleased]
+
+## [0.8.13] — 2026-10-10
+
+Upgrade notes: a 0.8.13 metrics server asks the extension for
+`index_cache='unbounded'`, so a paired upgrade keeps the series catalog in
+memory as before. The first start builds each existing metrics store's label
+index once before serving (about 9 s per million series). A table created
+directly through the 0.8.13 extension, without the argument, reads its
+catalog from disk behind a 64 MB cache; an embedder that wants the previous
+in-memory behaviour for a new table passes `index_cache='unbounded'`. That
+includes a pre-0.8.13 server run against the 0.8.13 extension, which does
+not pass it.
 
 ### Added
 
