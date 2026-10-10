@@ -339,10 +339,73 @@ pub struct SeriesInfo {
     pub labels: Labels,
 }
 
+/// One column of a write buffer. Polled telemetry brings one point for a
+/// series and is flushed before the next arrives, so the first point is
+/// held in place: a buffer allocates only when it holds a second.
+#[derive(Default)]
+enum Buffered<T> {
+    #[default]
+    Empty,
+    One(T),
+    Many(Vec<T>),
+}
+
+impl<T: Copy> Buffered<T> {
+    fn push(&mut self, value: T) {
+        match self {
+            Buffered::Empty => *self = Buffered::One(value),
+            Buffered::One(first) => *self = Buffered::Many(vec![*first, value]),
+            Buffered::Many(values) => values.push(value),
+        }
+    }
+
+    fn extend_from_slice(&mut self, more: &[T]) {
+        match (&mut *self, more) {
+            (_, []) => {}
+            (Buffered::Empty, [only]) => *self = Buffered::One(*only),
+            (Buffered::Many(values), _) => values.extend_from_slice(more),
+            _ => {
+                let mut values = Vec::with_capacity(self.len() + more.len());
+                values.extend_from_slice(self);
+                values.extend_from_slice(more);
+                *self = Buffered::Many(values);
+            }
+        }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        match self {
+            Buffered::Many(values) => values.truncate(len),
+            Buffered::One(_) if len == 0 => *self = Buffered::Empty,
+            _ => {}
+        }
+    }
+
+    fn into_vec(self) -> Vec<T> {
+        match self {
+            Buffered::Empty => Vec::new(),
+            Buffered::One(value) => vec![value],
+            Buffered::Many(values) => values,
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Buffered<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        match self {
+            Buffered::Empty => &[],
+            Buffered::One(value) => std::slice::from_ref(value),
+            Buffered::Many(values) => values,
+        }
+    }
+}
+
 struct PartitionBuffer {
-    timestamps: Vec<i64>,
-    values: Vec<f64>,
-    last_write: Instant,
+    timestamps: Buffered<i64>,
+    values: Buffered<f64>,
+    /// Seconds since the engine started (see `seconds_since_start`).
+    last_write: u32,
     queued_for_flush: bool,
     /// Epoch of the innermost undo frame that holds this partition's
     /// buffer mark. Equal to the engine's current frame epoch exactly
@@ -354,9 +417,9 @@ struct PartitionBuffer {
 impl PartitionBuffer {
     fn new() -> Self {
         PartitionBuffer {
-            timestamps: Vec::new(),
-            values: Vec::new(),
-            last_write: Instant::now(),
+            timestamps: Buffered::Empty,
+            values: Buffered::Empty,
+            last_write: 0,
             queued_for_flush: false,
             mark_epoch: 0,
         }
@@ -2175,8 +2238,9 @@ impl Engine {
                 .entry(key)
                 .or_insert_with(PartitionBuffer::new);
             let buf = entry.value_mut();
-            buf.timestamps.extend(timestamps);
-            buf.values.extend(values);
+            buf.timestamps.extend_from_slice(&timestamps);
+            buf.values.extend_from_slice(&values);
+            buf.last_write = self.seconds_since_start(Instant::now());
             drop(entry);
             if added > 0 {
                 self.buffer_memory.fetch_add(added, Ordering::Relaxed);
@@ -2894,7 +2958,7 @@ impl Engine {
             self.raise_raw_ts_upper_bound(ts);
             buf.timestamps.push(ts);
             buf.values.push(val);
-            buf.last_write = now;
+            buf.last_write = self.seconds_since_start(now);
             let new_cap = buf.memory_bytes();
             mem_delta = (new_cap as isize) - (old_cap as isize);
             should_queue_flush =
@@ -3052,7 +3116,7 @@ impl Engine {
             }
             buf.timestamps.extend_from_slice(&timestamps[a..b]);
             buf.values.extend_from_slice(&values[a..b]);
-            buf.last_write = now;
+            buf.last_write = self.seconds_since_start(now);
             let new_cap = buf.memory_bytes();
             let mem_delta = (new_cap as isize) - (old_cap as isize);
             let should_queue_flush =
@@ -3399,7 +3463,7 @@ impl Engine {
         let cold_keys: Vec<PartitionKey> = self
             .partitions
             .iter()
-            .filter(|e| now.duration_since(e.value().last_write).as_secs() >= max_idle_secs)
+            .filter(|e| self.idle_secs(e.value(), now) >= max_idle_secs)
             .map(|e| *e.key())
             .collect();
 
@@ -3408,8 +3472,7 @@ impl Engine {
 
         for key in &cold_keys {
             if let Some((timestamps, values)) = self.drain_partition_if(key, |buf| {
-                now.duration_since(buf.last_write).as_secs() >= max_idle_secs
-                    && !buf.timestamps.is_empty()
+                self.idle_secs(buf, now) >= max_idle_secs && !buf.timestamps.is_empty()
             }) {
                 compressed.push(self.compress_partition(key, &timestamps, &values)?);
                 evicted += 1;
@@ -4094,14 +4157,20 @@ impl Engine {
     /// putting together once, however few they are.
     fn series_written_lately(&self, key: &PartitionKey, now: Instant) -> bool {
         if let Some(entry) = self.partitions.get(key) {
-            return now.duration_since(entry.value().last_write).as_secs()
-                < COMPACT_MIN_AGE_SECS as u64;
+            return self.idle_secs(entry.value(), now) < COMPACT_MIN_AGE_SECS as u64;
         }
         self.released_writes
             .get(&key.series_id)
             .is_some_and(|written| {
                 self.seconds_since_start(now).saturating_sub(*written) < COMPACT_MIN_AGE_SECS as u32
             })
+    }
+
+    fn idle_secs(&self, buffer: &PartitionBuffer, now: Instant) -> u64 {
+        u64::from(
+            self.seconds_since_start(now)
+                .saturating_sub(buffer.last_write),
+        )
     }
 
     fn seconds_since_start(&self, now: Instant) -> u32 {
@@ -4438,10 +4507,10 @@ impl Engine {
         drop(j);
 
         let freed = entry.memory_bytes();
-        let timestamps = std::mem::take(&mut entry.timestamps);
-        let values = std::mem::take(&mut entry.values);
+        let timestamps = std::mem::take(&mut entry.timestamps).into_vec();
+        let values = std::mem::take(&mut entry.values).into_vec();
         entry.queued_for_flush = false;
-        entry.last_write = Instant::now();
+        entry.last_write = self.seconds_since_start(Instant::now());
         drop(entry);
         // The emptied buffer is released. A write that raced in keeps it
         // (the check is made under the map's lock); a rollback that has
@@ -7906,6 +7975,45 @@ impl AggregateSummary {
 // stream — must be a clean error, never an over-allocation or a
 // silently short read.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod buffered_tests {
+    use super::Buffered;
+
+    #[test]
+    fn one_point_is_held_in_place_and_more_behave_as_a_vector() {
+        // No larger than the vector it replaces.
+        assert!(std::mem::size_of::<Buffered<i64>>() <= std::mem::size_of::<Vec<i64>>());
+
+        let mut column = Buffered::<i64>::default();
+        assert!(column.is_empty());
+        column.push(7);
+        assert!(matches!(column, Buffered::One(7)));
+        assert_eq!(&*column, &[7]);
+        column.push(8);
+        column.extend_from_slice(&[9, 10]);
+        assert_eq!(&*column, &[7, 8, 9, 10]);
+        column.truncate(1);
+        assert_eq!(&*column, &[7]);
+        column.truncate(0);
+        assert!(column.is_empty());
+
+        let mut column = Buffered::<i64>::default();
+        column.extend_from_slice(&[]);
+        assert!(matches!(column, Buffered::Empty));
+        column.extend_from_slice(&[1]);
+        assert!(matches!(column, Buffered::One(1)));
+        column.truncate(5);
+        column.extend_from_slice(&[2, 3]);
+        assert_eq!(column.into_vec(), vec![1, 2, 3]);
+        assert_eq!(Buffered::One(4).into_vec(), vec![4]);
+        assert_eq!(Buffered::<i64>::Empty.into_vec(), Vec::<i64>::new());
+
+        let mut column = Buffered::One(1);
+        column.truncate(0);
+        assert!(column.is_empty());
+    }
+}
 
 #[cfg(test)]
 mod decode_tests {
