@@ -14,6 +14,36 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+Upgrade notes: a metrics table used directly through the extension now
+flushes and compacts for itself. Once the oldest buffered point has waited
+`flush_interval` (60 seconds unless set), the next ingest statement flushes
+every buffer and takes one bounded compaction step. Before, points were
+flushed only when a series had buffered 4,096 of them or on the `flush`
+command, and nothing was compacted unless asked. An embedder that runs its
+own flush and compaction passes `flush_interval='off'` (or issues the
+`flush_interval:off` command) to keep that. The metrics server does so.
+
+### Added
+
+- `timeless_metrics(flush_interval=...)`, the `flush_interval:` command, the
+  `flush_interval` key of `timeless_stats`, and the capability
+  `query_surfaces.timeless_metrics.flush_interval`.
+- `timeless_stats` reports `write_buffers`, `released_series` and
+  `chunks_on_disk`.
+
+### Changed
+
+- A metrics table whose catalog is on disk (`index_cache` a size) also reads
+  its raw chunk index from the store's chunk rows rather than holding it in
+  memory (#132). At two million series such a table opens holding about
+  6 MB.
+- Metrics write buffers no longer hold memory for series that are not being
+  written: a drained buffer is released, a committed transaction's large
+  journal frames are dropped, and a buffer's first point needs no
+  allocation (#132).
+- Metrics buffered points over the 256 MiB buffer budget are flushed,
+  largest buffers first, at the end of an ingest statement.
+
 ## [0.8.13] — 2026-10-10
 
 Upgrade notes: a 0.8.13 metrics server asks the extension for

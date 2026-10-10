@@ -206,6 +206,44 @@ pub struct MetricsTab {
 /// their labels in memory costs (#132).
 const DEFAULT_INDEX_CACHE_BYTES: u64 = 64 << 20;
 
+/// How long a buffered point waits for a flush on a table that has no
+/// `flush_interval` of its own. A flush writes points uncompressed, so this
+/// buys durability and bounded memory, not compression: that is the
+/// compaction ladder's, whatever size the flushed chunks are.
+const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 60;
+/// Least time between compactions a table begins for itself after its own
+/// flushes; one that has work left continues at the next statement.
+const SELF_COMPACT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// Series a table's own compaction step takes up, as a server's does.
+const SELF_COMPACT_SERIES: usize = 1024;
+
+/// A `flush_interval` setting in whole seconds: `<n>[s|m|h]`, or `0` or
+/// `off` to leave flushing to the point threshold and the host.
+fn validate_flush_interval(value: &str) -> std::result::Result<u64, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("off") {
+        return Ok(0);
+    }
+    let (digits, per_unit) = match value.as_bytes().last() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 3600),
+        _ => (value, 1),
+    };
+    digits
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(per_unit))
+        .ok_or_else(|| {
+            format!("flush_interval must be 'off' or a time such as '60s' or '5m', got {value:?}")
+        })
+}
+
+fn flush_interval(seconds: u64) -> Option<std::time::Duration> {
+    (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
+}
+
 /// Normalize an `index_cache` setting: `unbounded` (catalog in memory) or
 /// a byte budget such as `64MB` or `0` (#132).
 fn validate_index_cache(value: &str) -> std::result::Result<String, String> {
@@ -365,9 +403,20 @@ impl MetricsTab {
                     }
                     // Saved before the engine was built (above).
                     "index_cache" => {}
+                    "flush_interval" => {
+                        let seconds = validate_flush_interval(&value).map_err(module_err)?;
+                        shadow_meta::save_meta_text(
+                            &host,
+                            &database,
+                            &table,
+                            "flush_interval",
+                            &seconds.to_string(),
+                        )
+                        .map_err(module_err)?;
+                    }
                     other => {
                         return Err(module_err(format!(
-                            "unrecognized argument {other:?}; timeless_metrics supports: retention, rollups, index_cache"
+                            "unrecognized argument {other:?}; timeless_metrics supports: retention, rollups, index_cache, flush_interval"
                         )));
                     }
                 }
@@ -394,6 +443,17 @@ impl MetricsTab {
             )
         };
         shared_engine.engine.set_retention(retention);
+        // A table with no setting, new or old, flushes on the default.
+        let flush_seconds =
+            match shadow_meta::load_meta_text(&host, &database, &table, "flush_interval")
+                .map_err(module_err)?
+            {
+                Some(saved) => validate_flush_interval(&saved).map_err(module_err)?,
+                None => DEFAULT_FLUSH_INTERVAL_SECS,
+            };
+        shared_engine
+            .engine
+            .set_flush_interval(flush_interval(flush_seconds));
         shared_engine
             .engine
             .set_rollups(rollups.unwrap_or_default());
@@ -499,6 +559,36 @@ impl MetricsTab {
         }
     }
 
+    /// What every ingest statement ends with, so that a table used
+    /// directly looks after itself: flush the series that reached the
+    /// point threshold, flush everything once the oldest buffered point
+    /// has waited the flush interval, and after such a flush take a
+    /// bounded compaction step, as a server's maintenance would.
+    fn after_ingest(&self) -> Result<()> {
+        let engine = &self.shared.engine;
+        engine.flush_pending().map_err(module_err)?;
+        let flushed = engine.flush_due().map_err(module_err)?;
+        if engine.self_compaction_due(flushed, SELF_COMPACT_EVERY) {
+            let (_, _, raw_more) = engine
+                .compact_partitions_budgeted(
+                    i64::MAX,
+                    timeless_core::MetricsCompactionBudget {
+                        max_series: SELF_COMPACT_SERIES,
+                        max_input_points: timeless_core::METRICS_COMPACTION_STEP_INPUT_POINTS,
+                        max_input_bytes: timeless_core::METRICS_COMPACTION_STEP_INPUT_BYTES,
+                        max_duration: Some(COMPACT_STEP_TIME_BUDGET),
+                        raw_min_chunks: RAW_COMPRESS_MIN_CHUNKS,
+                    },
+                )
+                .map_err(module_err)?;
+            let (_, _, rollup_more) = engine
+                .rollup_bounded(SELF_COMPACT_SERIES)
+                .map_err(module_err)?;
+            engine.self_compaction_stepped(raw_more || rollup_more);
+        }
+        Ok(())
+    }
+
     /// Handle a hidden-column command insert. Returns the (synthetic,
     /// meaningless) rowid 0 — commands do not create rows.
     pub(crate) fn run_command(&self, cmd: &str) -> Result<i64> {
@@ -599,6 +689,20 @@ impl MetricsTab {
             // F3: produce settled buckets for every declared tier. A
             // no-op (0 chunks) without a rollups= ladder.
             self.shared.engine.rollup().map_err(module_err)?;
+        } else if let Some(value) = cmd.strip_prefix("flush_interval:") {
+            let seconds = validate_flush_interval(value).map_err(module_err)?;
+            let host = unsafe { Connection::from_handle(self.db) }?;
+            shadow_meta::save_meta_text(
+                &host,
+                &self.database_name,
+                &self.table_name,
+                "flush_interval",
+                &seconds.to_string(),
+            )
+            .map_err(module_err)?;
+            self.shared
+                .engine
+                .set_flush_interval(flush_interval(seconds));
         } else if let Some(value) = cmd.strip_prefix("index_cache:") {
             // Recorded for the table; the catalog moves between memory and
             // disk when the engine is next opened, not under a live one.
@@ -716,7 +820,7 @@ impl MetricsTab {
                  'rollups:none|<ladder>', \
                  'clear-rollups', 'clear-rollups-step:<chunks>', \
                  'prune:<unix_ts>', 'prune-after:<unix_ts>', \
-                 'index_cache:unbounded|<size>'"
+                 'index_cache:unbounded|<size>', 'flush_interval:off|<time>'"
             )));
         }
         Ok(0)
@@ -924,7 +1028,7 @@ impl MetricsTab {
             .engine
             .write_batch_partitioned(&sids, &starts, &flat_ts, &flat_val)
             .map_err(module_err)?;
-        self.shared.engine.flush_pending().map_err(module_err)?;
+        self.after_ingest()?;
 
         Ok(n_points as i64)
     }
@@ -1097,7 +1201,7 @@ impl MetricsTab {
             .engine
             .write_batch_partitioned(&uniq, &starts, &flat_ts, &flat_val)
             .map_err(module_err)?;
-        self.shared.engine.flush_pending().map_err(module_err)?;
+        self.after_ingest()?;
         Ok(n_points as i64)
     }
 
@@ -1146,7 +1250,7 @@ impl MetricsTab {
                 "prometheus body: 0 samples ingested, {errors} malformed line(s)"
             )));
         }
-        self.shared.engine.flush_pending().map_err(module_err)?;
+        self.after_ingest()?;
         Ok(count as i64)
     }
 }
@@ -1440,7 +1544,7 @@ impl UpdateVTab<'_> for MetricsTab {
             }
         };
         self.shared.engine.write_point(sid, ts, value);
-        self.shared.engine.flush_pending().map_err(module_err)?;
+        self.after_ingest()?;
 
         // Vtab rowids here are SYNTHETIC: points live in partition
         // buffers/chunks, not addressable rows, so we just hand SQLite a
@@ -2942,6 +3046,84 @@ mod disk_series_tests {
         assert_eq!(stat(&db, "m", "series_on_disk"), 1);
         assert_eq!(setting("big"), "unbounded");
         assert_eq!(stat(&db, "big", "series_on_disk"), 0);
+    }
+
+    /// A table used directly flushes for itself: once the oldest buffered
+    /// point has waited the interval, the next ingest statement flushes
+    /// everything, its own point included.
+    #[test]
+    fn buffered_points_are_flushed_after_the_flush_interval() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE m USING timeless_metrics(flush_interval='1s');
+             CREATE VIRTUAL TABLE unset USING timeless_metrics;",
+        )
+        .unwrap();
+        assert_eq!(stat(&db, "m", "flush_interval"), 1);
+        assert_eq!(stat(&db, "unset", "flush_interval"), 60);
+
+        write(&db, "cpu", r#"{"host":"a"}"#, 1_000);
+        write(&db, "cpu", r#"{"host":"b"}"#, 1_000);
+        assert_eq!(stat(&db, "m", "buffered_points"), 2);
+        assert_eq!(stat(&db, "m", "disk_points"), 0);
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        write(&db, "cpu", r#"{"host":"a"}"#, 1_300);
+        assert_eq!(stat(&db, "m", "buffered_points"), 0);
+        assert_eq!(stat(&db, "m", "disk_points"), 3);
+        // The interval starts again with the next point buffered.
+        write(&db, "cpu", r#"{"host":"a"}"#, 1_600);
+        assert_eq!(stat(&db, "m", "buffered_points"), 1);
+
+        // Off: left to the point threshold and the host, as it was.
+        db.execute("INSERT INTO m(m) VALUES ('flush_interval:off')", [])
+            .unwrap();
+        assert_eq!(stat(&db, "m", "flush_interval"), 0);
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        write(&db, "cpu", r#"{"host":"a"}"#, 1_900);
+        assert_eq!(stat(&db, "m", "buffered_points"), 2);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM m", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+    }
+
+    /// After flushing for itself a table takes a compaction step for
+    /// itself, so that nobody has to ask for its small raw chunks to be
+    /// put together.
+    #[test]
+    fn a_table_that_flushes_for_itself_compacts_for_itself() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(flush_interval='off');")
+            .unwrap();
+        for ts in 0..4 {
+            write(&db, "cpu", r#"{"host":"a"}"#, 1_000 + ts * 300);
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        }
+        assert_eq!(stat(&db, "m", "chunks"), 4);
+
+        db.execute("INSERT INTO m(m) VALUES ('flush_interval:1s')", [])
+            .unwrap();
+        write(&db, "cpu", r#"{"host":"a"}"#, 2_200);
+        assert_eq!(stat(&db, "m", "chunks"), 4);
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        write(&db, "cpu", r#"{"host":"a"}"#, 2_500);
+        assert_eq!(stat(&db, "m", "buffered_points"), 0);
+        assert_eq!(stat(&db, "m", "chunks"), 1);
+        assert_eq!(stat(&db, "m", "disk_points"), 6);
+    }
+
+    #[test]
+    fn flush_interval_rejects_what_is_not_a_time() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        let err = db
+            .execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(flush_interval='soon');")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("flush_interval"), "{err}");
     }
 
     #[test]

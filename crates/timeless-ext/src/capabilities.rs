@@ -130,7 +130,8 @@ fn document() -> &'static str {
                     "max_catalog_bytes": true
                 },
                 "timeless_metrics": {
-                    "index_cache": true
+                    "index_cache": true,
+                    "flush_interval": true
                 },
                 "timeless_label_values": {
                     "all_series": true

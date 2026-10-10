@@ -1118,6 +1118,17 @@ pub struct Engine {
     /// planned.
     released_writes: DashMap<i64, u32>,
     started_at: Instant,
+    /// Longest a buffered point waits for a flush once writes keep
+    /// arriving, in milliseconds; 0 leaves flushing to the point threshold
+    /// and the host. See `flush_due`.
+    flush_interval_ms: AtomicU64,
+    /// When the oldest unflushed point was buffered, in milliseconds since
+    /// `started_at` plus one; 0 when a flush has left nothing older.
+    buffered_since_ms: AtomicU64,
+    /// A compaction the table started for itself has work left.
+    self_compaction_more: AtomicBool,
+    /// When the table last started a compaction for itself (as above).
+    self_compacted_at_ms: AtomicU64,
     index: RwLock<BTreeMap<ChunkKey, ChunkMeta>>,
     /// Source of the ChunkKey sequence field. In-memory only — restart
     /// recovery re-assigns fresh values while scanning.
@@ -2604,6 +2615,10 @@ impl Engine {
             partitions: DashMap::new(),
             released_writes: DashMap::new(),
             started_at: Instant::now(),
+            flush_interval_ms: AtomicU64::new(0),
+            buffered_since_ms: AtomicU64::new(0),
+            self_compaction_more: AtomicBool::new(false),
+            self_compacted_at_ms: AtomicU64::new(0),
             index: RwLock::new(BTreeMap::new()),
             chunk_seq: AtomicU64::new(0),
             series: RwLock::new(registry),
@@ -2959,6 +2974,7 @@ impl Engine {
             buf.timestamps.push(ts);
             buf.values.push(val);
             buf.last_write = self.seconds_since_start(now);
+            self.note_buffered(now);
             let new_cap = buf.memory_bytes();
             mem_delta = (new_cap as isize) - (old_cap as isize);
             should_queue_flush =
@@ -3117,6 +3133,7 @@ impl Engine {
             buf.timestamps.extend_from_slice(&timestamps[a..b]);
             buf.values.extend_from_slice(&values[a..b]);
             buf.last_write = self.seconds_since_start(now);
+            self.note_buffered(now);
             let new_cap = buf.memory_bytes();
             let mem_delta = (new_cap as isize) - (old_cap as isize);
             let should_queue_flush =
@@ -3495,7 +3512,95 @@ impl Engine {
         Ok((flushed, evicted, files_written))
     }
 
+    /// Milliseconds since the engine started, never 0.
+    fn millis_since_start(&self, now: Instant) -> u64 {
+        u64::try_from(now.saturating_duration_since(self.started_at).as_millis())
+            .unwrap_or(u64::MAX - 1)
+            + 1
+    }
+
+    fn note_buffered(&self, now: Instant) {
+        if self.buffered_since_ms.load(Ordering::Relaxed) == 0 {
+            let _ = self.buffered_since_ms.compare_exchange(
+                0,
+                self.millis_since_start(now),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Configure how long a buffered point may wait for a flush (`None`
+    /// leaves it to the point threshold and the host). Idempotent; called
+    /// at every connect with the table's setting.
+    pub fn set_flush_interval(&self, interval: Option<Duration>) {
+        let ms = interval.map_or(0, |interval| {
+            u64::try_from(interval.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1)
+        });
+        self.flush_interval_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Flush what has waited long enough or grown too large; true when
+    /// anything was flushed. A table has no clock of its own: this is
+    /// asked at the end of each ingest statement, so a point waits for the
+    /// first write after its interval, not for the interval alone.
+    ///
+    /// A whole flush when the oldest buffered point is older than the
+    /// flush interval: a host that polls is then flushed a poll at a time,
+    /// as a server's timer has it. The largest buffers, when together they
+    /// are over the memory budget.
+    pub fn flush_due(&self) -> EngineResult<bool> {
+        let interval = self.flush_interval_ms.load(Ordering::Relaxed);
+        let since = self.buffered_since_ms.load(Ordering::Relaxed);
+        if interval != 0
+            && since != 0
+            && self
+                .millis_since_start(Instant::now())
+                .saturating_sub(since)
+                >= interval
+        {
+            self.flush_all()?;
+            return Ok(true);
+        }
+        if self.buffer_memory.load(Ordering::Relaxed) > self.memory_budget {
+            return Ok(self.flush_by_memory()? > 0);
+        }
+        Ok(false)
+    }
+
+    /// Whether the table should take a compaction step for itself now:
+    /// one it began has work left, or it has just flushed for itself and
+    /// has not begun one for `every`. A host that flushes on its own
+    /// timer never has the table flush for it, and so is never compacted
+    /// behind its back.
+    pub fn self_compaction_due(&self, flushed: bool, every: Duration) -> bool {
+        if self.self_compaction_more.load(Ordering::Relaxed) {
+            return true;
+        }
+        if !flushed {
+            return false;
+        }
+        let now = self.millis_since_start(Instant::now());
+        let last = self.self_compacted_at_ms.load(Ordering::Relaxed);
+        if last != 0 && u128::from(now.saturating_sub(last)) < every.as_millis() {
+            return false;
+        }
+        self.self_compacted_at_ms.store(now, Ordering::Relaxed);
+        true
+    }
+
+    /// Record whether a compaction step the table took for itself left
+    /// work for the next.
+    pub fn self_compaction_stepped(&self, more: bool) {
+        self.self_compaction_more.store(more, Ordering::Relaxed);
+    }
+
     pub fn flush_by_memory(&self) -> EngineResult<usize> {
+        if self.buffer_memory.load(Ordering::Relaxed) <= self.memory_budget {
+            return Ok(0);
+        }
         let _transition = self.transition_write();
         let current = self.buffer_memory.load(Ordering::Relaxed);
         if current <= self.memory_budget {
@@ -3548,6 +3653,8 @@ impl Engine {
         // append, drain, truncate, and restore), so zero means every buffer
         // is empty: a timed flush between scrapes need not walk a partition
         // per series to find that out (#125).
+        // Whatever is buffered from here on is the next interval's.
+        self.buffered_since_ms.store(0, Ordering::Relaxed);
         if self.buffer_memory.load(Ordering::Relaxed) == 0 {
             return self.save_series();
         }
@@ -7750,6 +7857,7 @@ impl Engine {
             series_on_disk: self.disk_series.is_some(),
             chunks_on_disk: self.disk_chunks,
             released_series: self.released_writes.len() as u64,
+            flush_interval_secs: self.flush_interval_ms.load(Ordering::Relaxed) / 1000,
             series_resolve_cache_entries: self
                 .disk_series
                 .as_ref()
@@ -7863,6 +7971,9 @@ pub struct EngineInfo {
     /// remembered for the compaction policy. `partition_count` is the
     /// buffers still held.
     pub released_series: u64,
+    /// Seconds a buffered point waits for a flush; 0 when the table leaves
+    /// that to the point threshold and the host.
+    pub flush_interval_secs: u64,
     pub series_resolve_cache_entries: u64,
     pub retention_series_removed: u64,
     pub rollup_merge_chunks_removed: u64,

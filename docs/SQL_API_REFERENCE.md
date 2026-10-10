@@ -204,6 +204,21 @@ projection follows SQLite's NaN behavior.
 Creation arguments:
 
 - `retention=<n>[s|m|h|d]`: raw data-time window; a bare integer is seconds.
+- `flush_interval=off|<n>[s|m|h]`: how long a buffered point waits to be
+  flushed. A table has no clock of its own; each ingest statement ends by
+  asking, so once the oldest buffered point has waited this long the next
+  ingest statement flushes every buffer (its own points included), and the
+  table then takes one bounded compaction step for itself. A point
+  therefore waits for the first write after its interval: a host that
+  writes every five minutes is flushed a poll at a time. A table with no
+  setting uses 60 seconds. `off` (or `0`) leaves flushing to the
+  4,096-point threshold and the `flush` command, and compaction to the
+  host; a host that runs its own flush and compaction timers, as the
+  metrics server does, sets it. A flush writes points uncompressed, so the
+  interval decides durability and buffer memory, not compression, which is
+  compaction's. Independently, when buffered points exceed the buffer
+  budget (256 MiB) the largest buffers are flushed. `timeless_stats`
+  reports `flush_interval` in seconds.
 - `rollups=RESOLUTION@RETENTION,...`: ascending, divisible resolution ladder;
   `0` or `forever` retains a tier indefinitely.
 - `index_cache=<size>|unbounded`: where the series catalog (names, labels and
@@ -245,6 +260,8 @@ previously resolved `series_id`. Use the hidden command column for:
   chunk is eligible, and a store that is flushed between steps keeps a sweep
   going. `timeless_stats` reports `compaction_plans` and
   `compaction_planned_groups`.
+- `flush_interval:off|<n>[s|m|h]` records a new `flush_interval` and
+  applies it at once.
 - `index_cache:<size>|unbounded` records a new `index_cache` setting. It
   takes effect the next time the table is opened by a process, not under
   the engine that is running; no data is rewritten either way, because the

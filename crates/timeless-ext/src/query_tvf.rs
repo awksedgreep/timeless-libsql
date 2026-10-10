@@ -5305,6 +5305,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     ),
                     ("write_buffers", Value::Integer(info.partition_count as i64)),
                     (
+                        "flush_interval",
+                        Value::Integer(info.flush_interval_secs as i64),
+                    ),
+                    (
                         "released_series",
                         Value::Integer(info.released_series as i64),
                     ),

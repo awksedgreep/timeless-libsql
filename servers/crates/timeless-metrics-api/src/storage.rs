@@ -1567,6 +1567,17 @@ fn open_connection(
                 "record the metrics index_cache setting",
             )?;
         }
+        // The server flushes and compacts on its own timers. Left on, the
+        // table's own flush interval would only matter under a server flush
+        // interval longer than it, and would then compact inside ingest.
+        if require_query_surface(&capabilities, "timeless_metrics", "flush_interval").is_ok() {
+            run_command(
+                &conn,
+                table,
+                "flush_interval:off",
+                "leave metrics flushing to the server",
+            )?;
+        }
         if let Some(rollups) = new_database_rollups {
             run_command(
                 &conn,
