@@ -1455,11 +1455,15 @@ impl Engine {
     /// Ids of the series of `metric` carrying every label in `eq`.
     pub fn select_series_ids(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<i64>> {
         if self.disk_series.is_some() {
-            return Ok(self
-                .select_series(metric, eq)?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect());
+            // Ids only, so no rows to recheck: the postings are trusted,
+            // and kept current by every catalog write this engine makes
+            // and by `refresh_authoritative_state` for anyone else's.
+            let pairs: Vec<(String, String)> =
+                eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            return self
+                .store
+                .find_series_ids(Some(metric), &pairs)
+                .map_err(|err| format!("failed to select series: {err}"));
         }
         Ok(self.series_read().find_series(metric, eq))
     }
@@ -6902,6 +6906,13 @@ impl Engine {
         }
 
         let registry = if self.disk_series.is_some() {
+            // Another writer changed the catalog; if it was an older
+            // extension, the label index did not follow.
+            if !self.store.label_index_current().unwrap_or(false) {
+                self.store
+                    .ensure_label_index()
+                    .map_err(|err| format!("failed to refresh label index: {err}"))?;
+            }
             SeriesRegistry::new()
         } else {
             let rows = self
@@ -7181,9 +7192,18 @@ impl Engine {
     }
 
     fn series_overview_by_ids_inner(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
-        let candidates: Vec<(i64, String, Labels)> = self
-            .series_infos(series_ids)
-            .unwrap_or_default()
+        self.series_overview_of(self.series_infos(series_ids).unwrap_or_default())
+    }
+
+    /// Catalog rows for series whose names and labels the caller already
+    /// holds, so a selection that read them once does not read them again.
+    pub fn series_overview_for(&self, infos: Vec<(i64, SeriesInfo)>) -> Vec<SeriesOverview> {
+        let _transition = self.transition_read();
+        self.series_overview_of(infos)
+    }
+
+    fn series_overview_of(&self, infos: Vec<(i64, SeriesInfo)>) -> Vec<SeriesOverview> {
+        let candidates: Vec<(i64, String, Labels)> = infos
             .into_iter()
             .map(|(id, info)| (id, info.metric_name, info.labels))
             .collect();

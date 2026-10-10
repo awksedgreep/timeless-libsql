@@ -16497,7 +16497,9 @@ async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
     // A one-point work budget permits the persisted newest-value fast path,
     // but must reject decoding a three-point chunk or scanning extra buffers.
     // Catalog selection is a separate budget, so both are tightened here: a
-    // second catalog candidate is rejected before filtering.
+    // second catalog candidate is rejected. Candidates come from the label
+    // index (#133), so an equality matcher that selects one series examines
+    // one, and only a selector matching both of `m`'s series examines two.
     let work = router_with_limits(
         storage.clone(),
         PromQueryLimits {
@@ -16508,9 +16510,13 @@ async fn native_read_limits_cover_points_catalogs_work_and_reader_reuse() {
         },
     );
     assert_eq!(
-        get_json(&work, "/api/v1/query?metric=m&host=a").await.0,
+        get_json(&work, "/api/v1/query?metric=m").await.0,
         StatusCode::BAD_REQUEST
-    ); // two candidates are inspected before filtering
+    ); // two candidates are examined
+    assert_eq!(
+        get_json(&work, "/api/v1/query?metric=m&host=a").await.0,
+        StatusCode::OK
+    ); // the index selects the one series; its newest value is one point
     let selector_work = router_with_limits(
         storage.clone(),
         PromQueryLimits {

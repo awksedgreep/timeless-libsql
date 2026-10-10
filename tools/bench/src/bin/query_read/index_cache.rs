@@ -305,11 +305,30 @@ pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
     let rss_start = status_kib("VmRSS:");
     {
         let conn = open_with_ext(path, ext);
-        conn.execute_batch(
+        // #132: TIMELESS_BENCH_INDEX_CACHE selects the catalog's home
+        // ('unbounded' or unset: memory; a size such as '128MB' or '0':
+        // disk behind a resolve cache of that budget).
+        let index_cache = std::env::var("TIMELESS_BENCH_INDEX_CACHE").ok();
+        let args = index_cache
+            .as_deref()
+            .map(|value| format!("(index_cache='{value}')"))
+            .unwrap_or_default();
+        conn.execute_batch(&format!(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
-             CREATE VIRTUAL TABLE metrics USING timeless_metrics;",
-        )
+             CREATE VIRTUAL TABLE metrics USING timeless_metrics{args};"
+        ))
         .unwrap();
+        let on_disk: i64 = conn
+            .query_row(
+                "SELECT value FROM timeless_stats('metrics') WHERE key = 'series_on_disk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        println!(
+            "{series_count},config,index_cache_{},{on_disk},,",
+            index_cache.as_deref().unwrap_or("unset")
+        );
         let create = cycle(&conn, series_count, BASE_TS, 0.0);
         println!("{series_count},ingest,create_cycle_ms,{create:.0},,{series_count}");
         conn.execute_batch("INSERT INTO metrics(metrics) VALUES ('flush')")
@@ -361,7 +380,11 @@ pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
         println!("{series_count},{line}");
     }
 
-    // The on-disk design over the same store, in its own fresh process.
+    // The on-disk prototype over the same store, in its own fresh process
+    // (phase 0 only: the engine now builds these tables itself).
+    if std::env::var_os("TIMELESS_BENCH_PROTOTYPE").is_none() {
+        return;
+    }
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--index-disk",

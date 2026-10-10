@@ -4327,6 +4327,8 @@ unsafe impl<'vtab> VTab<'vtab> for SeriesTab {
             shared: None,
             ids: Vec::new(),
             pos: 0,
+            page: std::collections::VecDeque::new(),
+            page_next: 0,
             current: None,
             phantom: PhantomData,
         })
@@ -4344,6 +4346,9 @@ pub(crate) struct SeriesCursor<'vtab> {
     shared: Option<Arc<SharedEngine<Engine>>>,
     ids: Vec<i64>,
     pos: usize,
+    /// The page of rows being served and where the next page starts.
+    page: std::collections::VecDeque<timeless_core::SeriesOverview>,
+    page_next: usize,
     current: Option<timeless_core::SeriesOverview>,
     phantom: PhantomData<&'vtab SeriesTab>,
 }
@@ -4356,8 +4361,13 @@ impl SeriesCursor<'_> {
         &mut self,
         shared: &Arc<SharedEngine<Engine>>,
         mut ids: Vec<i64>,
+        one_metric: bool,
     ) -> Result<()> {
-        {
+        if one_metric {
+            // Every id is of the one metric asked for: the catalog's
+            // (metric name, id) order is id order, and no name is read.
+            ids.sort_unstable();
+        } else {
             let names: HashMap<i64, String> = shared
                 .engine
                 .series_infos(&ids)
@@ -4374,21 +4384,44 @@ impl SeriesCursor<'_> {
         self.shared = Some(Arc::clone(shared));
         self.ids = ids;
         self.pos = 0;
+        self.page.clear();
+        self.page_next = 0;
         self.load_current();
         Ok(())
     }
+
+    /// Rows are built a page at a time: one catalog and chunk-index read
+    /// per page, not per row, while a full-catalog read still never holds
+    /// more than a page of cloned labels.
+    const PAGE: usize = 512;
+    /// A bounded selection of at most this many series keeps the names and
+    /// labels its budget pass read, instead of reading them again by id.
+    const PRELOAD: usize = 4_096;
 
     fn load_current(&mut self) {
         // A disk-resident catalog (#132) is read through this cursor's own
         // connection, which xNext does not otherwise bind.
         let _bind = DbGuard::bind(self.db);
-        self.current = if self.pos < self.ids.len() {
-            self.shared
-                .as_ref()
-                .and_then(|shared| shared.engine.series_overview_by_id(self.ids[self.pos]))
-        } else {
-            None
-        };
+        loop {
+            if let Some(row) = self.page.pop_front() {
+                self.current = Some(row);
+                return;
+            }
+            if self.page_next >= self.ids.len() {
+                self.current = None;
+                return;
+            }
+            let end = (self.page_next + Self::PAGE).min(self.ids.len());
+            if let Some(shared) = self.shared.as_ref() {
+                // Already in the cursor's (metric name, id) order; a series
+                // removed since xFilter is simply absent.
+                self.page = shared
+                    .engine
+                    .series_overview_by_ids(&self.ids[self.page_next..end])
+                    .into();
+            }
+            self.page_next = end;
+        }
     }
 }
 
@@ -4460,6 +4493,9 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 let mut ids = Vec::new();
                 let mut work = 0_u64;
                 let mut bytes = 0_u64;
+                // What a selective read already fetched is kept for its
+                // rows; a large one streams by id instead.
+                let mut kept: Option<Vec<(i64, timeless_core::SeriesInfo)>> = Some(Vec::new());
                 let mut step = |id: i64,
                                 info: &timeless_core::SeriesInfo|
                  -> std::result::Result<(), String> {
@@ -4493,6 +4529,13 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                         }
                     }
                     ids.push(id);
+                    if let Some(rows) = kept.as_mut() {
+                        if rows.len() < SeriesCursor::PRELOAD {
+                            rows.push((id, info.clone()));
+                        } else {
+                            kept = None;
+                        }
+                    }
                     Ok(())
                 };
                 match selection {
@@ -4502,18 +4545,60 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                             step(id, &info).map_err(module_err)?;
                         }
                     }
-                    SeriesSelection::All => shared
-                        .engine
-                        .visit_series(metric.as_deref(), &mut |id, info| {
-                            step(id, info)?;
-                            Ok(std::ops::ControlFlow::Continue(()))
-                        })
-                        .map_err(module_err)?,
+                    // With a metric, candidates come from the label
+                    // index (the shortest posting list of the metric and
+                    // the equality matchers), so work is the candidates
+                    // examined, not every series of the metric (#133).
+                    SeriesSelection::All => match metric.as_deref() {
+                        // No equality matcher: nothing to select by, so the
+                        // metric's series are visited as they are.
+                        Some(name) if eq.is_empty() => shared
+                            .engine
+                            .visit_series(Some(name), &mut |id, info| {
+                                step(id, info)?;
+                                Ok(std::ops::ControlFlow::Continue(()))
+                            })
+                            .map_err(module_err)?,
+                        Some(name) => {
+                            for (id, labels) in
+                                shared.engine.select_series(name, &eq).map_err(module_err)?
+                            {
+                                let info = timeless_core::SeriesInfo {
+                                    metric_name: name.to_owned(),
+                                    labels,
+                                };
+                                step(id, &info).map_err(module_err)?;
+                            }
+                        }
+                        None => shared
+                            .engine
+                            .visit_series(None, &mut |id, info| {
+                                step(id, info)?;
+                                Ok(std::ops::ControlFlow::Continue(()))
+                            })
+                            .map_err(module_err)?,
+                    },
                 }
-                ids
+                (ids, kept)
             };
-            return self.finish_filter(&shared, ids);
+            let (ids, kept) = ids;
+            if let Some(rows) = kept {
+                let one_metric = metric.is_some();
+                let mut rows = shared.engine.series_overview_for(rows);
+                if !one_metric {
+                    rows.sort_by(|a, b| (&a.name, a.series_id).cmp(&(&b.name, b.series_id)));
+                }
+                self.shared = Some(Arc::clone(&shared));
+                self.page_next = ids.len();
+                self.ids = ids;
+                self.pos = 0;
+                self.page = rows.into();
+                self.load_current();
+                return Ok(());
+            }
+            return self.finish_filter(&shared, ids, metric.is_some());
         }
+        let one_metric = metric.is_some();
         let ids = match (metric, selection) {
             (_, SeriesSelection::Empty) => Vec::new(),
             (metric, SeriesSelection::Id(series_id)) => {
@@ -4550,7 +4635,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 ids
             }
         };
-        self.finish_filter(&shared, ids)
+        self.finish_filter(&shared, ids, one_metric)
     }
 
     fn next(&mut self) -> Result<()> {
@@ -4560,7 +4645,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
     }
 
     fn eof(&self) -> bool {
-        self.pos >= self.ids.len()
+        self.current.is_none()
     }
 
     fn column(&self, ctx: &mut Context, col: c_int) -> Result<()> {

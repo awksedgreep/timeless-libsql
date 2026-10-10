@@ -130,7 +130,7 @@ pub(crate) struct LabelIndex {
     probe_sql: String,
     label_sql: String,
     posting_sql: String,
-    series_rows_prefix: String,
+    series_rows_sql: String,
 }
 
 impl LabelIndex {
@@ -145,8 +145,9 @@ impl LabelIndex {
             posting_sql: format!(
                 "SELECT series_id FROM {postings} WHERE label_id = ?1 ORDER BY series_id"
             ),
-            series_rows_prefix: format!(
-                "SELECT id, name, canonical_labels FROM {series} WHERE id IN ("
+            series_rows_sql: format!(
+                "SELECT id, name, canonical_labels FROM {series} \
+                 WHERE id IN (SELECT value FROM json_each(?1)) ORDER BY id"
             ),
             labels,
             postings,
@@ -425,34 +426,44 @@ impl LabelIndex {
     }
 
     /// `(id, name, labels)` for `ids`, in id order; absent ids are skipped.
+    /// One cached statement serves any batch: the ids travel as a JSON
+    /// array, so nothing is prepared per call.
     pub(crate) fn series_rows(
         &self,
         conn: &Connection,
         ids: &[i64],
     ) -> Result<Vec<SeriesRow>, String> {
-        let mut out = Vec::with_capacity(ids.len());
-        for batch in ids.chunks(ROWS_PER_STATEMENT) {
-            let sql = format!(
-                "{}{}) ORDER BY id",
-                self.series_rows_prefix,
-                vec!["?"; batch.len()].join(",")
-            );
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| format!("prepare series rows: {e}"))?;
-            let mut rows = stmt
-                .query(params_from_iter(batch.iter()))
-                .map_err(|e| format!("series rows: {e}"))?;
-            while let Some(row) = rows.next().map_err(|e| format!("series rows: {e}"))? {
-                let blob: Vec<u8> = row.get(2).map_err(|e| format!("series rows: {e}"))?;
-                out.push((
-                    row.get(0).map_err(|e| format!("series rows: {e}"))?,
-                    row.get(1).map_err(|e| format!("series rows: {e}"))?,
-                    decode_labels(&blob)?,
-                ));
-            }
+        if ids.is_empty() {
+            return Ok(Vec::new());
         }
-        out.sort_unstable_by_key(|(id, ..)| *id);
+        let mut list = String::with_capacity(ids.len() * 8 + 2);
+        list.push('[');
+        for (i, id) in ids.iter().enumerate() {
+            if i > 0 {
+                list.push(',');
+            }
+            list.push_str(&id.to_string());
+        }
+        list.push(']');
+        let mut stmt = conn
+            .prepare_cached(&self.series_rows_sql)
+            .map_err(|e| format!("prepare series rows: {e}"))?;
+        let mut rows = stmt
+            .query([list])
+            .map_err(|e| format!("series rows: {e}"))?;
+        let mut out = Vec::with_capacity(ids.len());
+        while let Some(row) = rows.next().map_err(|e| format!("series rows: {e}"))? {
+            let blob = row
+                .get_ref(2)
+                .map_err(|e| format!("series rows: {e}"))?
+                .as_blob()
+                .map_err(|e| format!("series rows: {e}"))?;
+            out.push((
+                row.get(0).map_err(|e| format!("series rows: {e}"))?,
+                row.get(1).map_err(|e| format!("series rows: {e}"))?,
+                decode_labels(blob)?,
+            ));
+        }
         Ok(out)
     }
 
