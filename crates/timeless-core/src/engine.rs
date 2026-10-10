@@ -2092,19 +2092,19 @@ impl Engine {
         // #132: a table with an index_cache budget keeps its catalog on
         // disk. That needs a current label index; a connection that cannot
         // bring it current (read-only) keeps the catalog in memory.
-        let disk_budget = if authoritative_series {
-            match store
+        // The label index is every table's durable catalog, whichever way
+        // it is read: created and brought current here on the first open
+        // that can write (a table from before #132, or one an older
+        // extension wrote to since). A connection that cannot write leaves
+        // it as it is and keeps the catalog in memory.
+        let index_current = authoritative_series
+            && (store.label_index_current().unwrap_or(false)
+                || (store.ensure_label_index().is_ok()
+                    && store.label_index_current().unwrap_or(false)));
+        let disk_budget = if index_current {
+            store
                 .series_index_budget()
                 .map_err(|err| format!("failed to read index_cache: {err}"))?
-            {
-                Some(budget)
-                    if store.label_index_current().unwrap_or(false)
-                        || store.ensure_label_index().is_ok() =>
-                {
-                    Some(budget)
-                }
-                _ => None,
-            }
         } else {
             None
         };

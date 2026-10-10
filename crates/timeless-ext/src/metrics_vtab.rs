@@ -2506,8 +2506,9 @@ mod disk_series_tests {
         );
     }
 
-    /// An existing in-memory table moves to disk when told to and reopened:
-    /// the label index is built from the catalog on the first open.
+    /// A table from before #132 has no label index. The first open that can
+    /// write builds it from the catalog, whichever way the catalog is read;
+    /// told to, the table then moves its catalog to disk on the next open.
     #[test]
     fn an_existing_table_moves_its_catalog_to_disk_on_reopen() {
         let path = std::env::temp_dir().join(format!(
@@ -2518,16 +2519,39 @@ mod disk_series_tests {
                 .unwrap()
                 .as_nanos()
         ));
+        let tables = |db: &Connection| -> i64 {
+            db.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('m_labels', 'm_postings')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
         {
             let db = Connection::open(&path).unwrap();
             crate::register_telemetry(&db).unwrap();
             db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics;")
                 .unwrap();
-            // Simulate a table from before #132: no label index tables.
+            fleet(&db);
+        }
+        {
+            // With no engine open, make it a table from before #132.
+            let db = Connection::open(&path).unwrap();
             db.execute_batch("DROP TABLE m_postings; DROP TABLE m_labels;")
                 .unwrap();
-            fleet(&db);
+            assert_eq!(tables(&db), 0);
+        }
+        {
+            // Opened as it is: still read from memory, and indexed.
+            let db = Connection::open(&path).unwrap();
+            crate::register_telemetry(&db).unwrap();
             assert_eq!(stat(&db, "m", "series_on_disk"), 0);
+            assert_eq!(stat(&db, "m", "series"), 4);
+            assert_eq!(tables(&db), 2, "the first writable open builds the index");
+            let postings: i64 = db
+                .query_row("SELECT count(*) FROM m_postings", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(postings, 12, "four series, three postings each");
             db.execute("INSERT INTO m(m) VALUES ('index_cache:1MB')", [])
                 .unwrap();
             assert_eq!(

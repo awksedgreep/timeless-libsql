@@ -536,12 +536,31 @@ impl LabelIndex {
             .query([after])
             .map_err(|e| format!("label index backfill: {e}"))?;
         let mut batch: Vec<SeriesRow> = Vec::new();
+        // Each batch is atomic (postings, labels, their counts, and the
+        // watermark together) and, outside a transaction, commits by
+        // itself: a build over millions of series holds no long write
+        // transaction, and a crash resumes from the watermark.
         let flush = |batch: &mut Vec<SeriesRow>| -> Result<(), String> {
+            if batch.is_empty() {
+                return Ok(());
+            }
             let view: Vec<NewSeries<'_>> = batch
                 .iter()
                 .map(|(id, name, labels)| (*id, name.as_str(), labels.as_slice()))
                 .collect();
-            self.index_series(conn, &view)?;
+            conn.execute_batch("SAVEPOINT timeless_label_index")
+                .map_err(|e| format!("label index backfill: {e}"))?;
+            match self.index_series(conn, &view) {
+                Ok(()) => conn
+                    .execute_batch("RELEASE timeless_label_index")
+                    .map_err(|e| format!("label index backfill: {e}"))?,
+                Err(error) => {
+                    let _ = conn.execute_batch(
+                        "ROLLBACK TO timeless_label_index; RELEASE timeless_label_index",
+                    );
+                    return Err(error);
+                }
+            }
             batch.clear();
             Ok(())
         };
@@ -559,7 +578,7 @@ impl LabelIndex {
                     .map_err(|e| format!("label index backfill: {e}"))?,
                 decode_labels(&blob)?,
             ));
-            if batch.len() == 2_000 {
+            if batch.len() == 20_000 {
                 flush(&mut batch)?;
             }
         }
