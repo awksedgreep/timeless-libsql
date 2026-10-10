@@ -14,6 +14,53 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Added
+
+- **The metrics series catalog lives on disk, and how much of it is held in
+  memory is a setting (#132).** Every metrics table now keeps a label index
+  beside its series catalog (`<t>_labels`, `<t>_postings`), maintained in
+  the same transaction as each series created or removed. The new
+  `index_cache` argument and `index_cache:<value>` command choose how the
+  catalog is read: a size (`64MB`, `0`, ...) reads it from disk behind a
+  cache of that size that maps a series' identity to its id, so memory no
+  longer grows with the number of series; `unbounded` also holds the whole
+  catalog in memory for the lowest read latency. **A table created without
+  the argument uses `64MB`**; the bundled metrics server asks for
+  `unbounded`, and records it on existing stores. A table created by an
+  older extension has no setting and behaves as `unbounded`, exactly as
+  before, and its label index is built on its first writable open (in
+  20,000-series batches; about 9 s per million series, once).
+  `timeless_stats` reports `index_cache`, `series_on_disk` and
+  `series_resolve_cache_entries`, and the capability document advertises
+  `query_surfaces.timeless_metrics.index_cache`.
+
+  At 2 million series with the catalog on disk and a full cache, against
+  the catalog in memory: a steady ingest cycle 8.5 s against 9.5 s; a fresh
+  process opens in 4.0 s holding 1.9 GB against 13.8 s and 4.6 GB;
+  selective reads within about 2x of memory, and large catalog reads about
+  2x. With no cache at all, ingest is 5.4% of a five-minute interval.
+  [Measurements](tools/bench/results/2026-10-10_index_cache_engine.md).
+
+### Fixed
+
+- **A selective label selector no longer costs the whole metric (#133).**
+  The bounded `timeless_series` path, the one servers use, examined every
+  series of the metric and tested its labels; it now takes its candidates
+  from the label index, as the unbounded path did, and the in-memory lookup
+  no longer copies the metric's whole posting list first. At 2 million
+  series a 19-series selection fell from 102 ms to under 0.3 ms. **The
+  catalog work budget counts the candidates examined**, so a selector with
+  an equality matcher that selects one series now examines one.
+
+### Changed
+
+- **Creating a series costs more.** Each new series also writes its label
+  index rows (about nine): at 500,000 new series, 8.9 s with the catalog on
+  disk and 10.2 s in memory, against about 6.5 s before. Steady ingest is
+  unaffected. The metrics database grows by about 100 bytes a series.
+  Index bytes are never part of a compression figure: `bytes_on_disk` and
+  `bytes_per_point` remain payload only (#136 tracks the creation cost).
+
 ## [0.8.12] — 2026-10-08
 
 ### Added

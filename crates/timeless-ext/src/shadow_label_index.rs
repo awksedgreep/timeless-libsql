@@ -20,7 +20,7 @@
 //! miss a series but never include a wrong one.
 
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
-#[cfg(test)]
+#[cfg(all(test, feature = "embedded"))]
 use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap};
 
@@ -819,8 +819,8 @@ impl LabelIndex {
         Ok(names.into_iter().collect())
     }
 
-    /// Posting-list lengths by label, for tests and statistics.
-    #[cfg(test)]
+    /// Posting-list lengths by label, for tests.
+    #[cfg(all(test, feature = "embedded"))]
     pub(crate) fn counts(&self, conn: &Connection) -> BTreeMap<(String, String), i64> {
         conn.prepare(&format!("SELECT key, value, series FROM {}", self.labels))
             .unwrap()
@@ -831,7 +831,9 @@ impl LabelIndex {
     }
 }
 
-#[cfg(test)]
+// Opens SQLite, so it runs only where the crate links one (the `embedded`
+// feature), as the crate's other connection-opening tests do.
+#[cfg(all(test, feature = "embedded"))]
 mod tests {
     use super::*;
 

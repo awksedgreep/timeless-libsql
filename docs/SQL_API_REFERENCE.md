@@ -187,7 +187,8 @@ or unknown values fail rather than wrapping or being ignored.
 ```sql
 CREATE VIRTUAL TABLE metrics USING timeless_metrics(
   retention='14d',
-  rollups='5m@90d,1h@0'
+  rollups='5m@90d,1h@0',
+  index_cache='64MB'
 );
 ```
 
@@ -205,6 +206,17 @@ Creation arguments:
 - `retention=<n>[s|m|h|d]`: raw data-time window; a bare integer is seconds.
 - `rollups=RESOLUTION@RETENTION,...`: ascending, divisible resolution ladder;
   `0` or `forever` retains a tier indefinitely.
+- `index_cache=<size>|unbounded`: where the series catalog (names, labels and
+  the label index) is read from. Every table keeps the catalog durably on
+  disk. A size (`64MB`, `16MB`, `0`; `KB`/`MB`/`GB` are powers of 1024)
+  reads it from there, with a cache of at most that size mapping a series'
+  identity to its id for ingest: memory then does not grow with the number
+  of series, and `0` caches nothing. `unbounded` additionally holds the
+  whole catalog in memory, for the lowest read latency, at a few hundred
+  bytes to a kilobyte of memory a series. **A table created without the
+  argument uses `64MB`.** A dedicated server should ask for `unbounded`;
+  the bundled metrics server does. A table created by an extension older
+  than this setting has none and behaves as `unbounded`.
 
 Writes are append-only. Insert rows with `(name,ts,value,labels)` or with a
 previously resolved `series_id`. Use the hidden command column for:
@@ -233,6 +245,10 @@ previously resolved `series_id`. Use the hidden command column for:
   chunk is eligible, and a store that is flushed between steps keeps a sweep
   going. `timeless_stats` reports `compaction_plans` and
   `compaction_planned_groups`.
+- `index_cache:<size>|unbounded` records a new `index_cache` setting. It
+  takes effect the next time the table is opened by a process, not under
+  the engine that is running; no data is rewritten either way, because the
+  on-disk catalog is always maintained.
 - `rollup` builds settled buckets for the declared ladder.
 - `rollups:none` disables future persisted rollup production;
   `rollups:<ladder>` transactionally replaces the declared ladder.
@@ -620,9 +636,14 @@ persists the counters in the same host transaction.
 
 | Signal | Public storage and maintenance keys |
 |---|---|
-| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, `retention_series_removed`, `rollup_merge_chunks_removed`, `rollup_merge_chunks_written`, and the `raw_batch_query_*` / `window_batch_query_*` work counters. |
+| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, `retention_series_removed`, `rollup_merge_chunks_removed`, `rollup_merge_chunks_written`, the `raw_batch_query_*` / `window_batch_query_*` work counters, and the catalog's `index_cache` (the setting, or NULL for a table that predates it), `series_on_disk` (1 when the catalog is read from disk) and `series_resolve_cache_entries`. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `ingest_raw_bytes_total`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
 | traces | `blocks`, `raw_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `ingest_raw_bytes_total`, `duration_bounded_blocks`, `duration_unknown_blocks`, `attribute_index_fields`, `attribute_bloom_rows`, `attribute_bloom_bytes`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
+
+`bytes_on_disk` and `bytes_per_point` are payload only: the encoded chunk or
+block bytes. No index is part of them, in any signal: not the metrics label
+index, not posting lists, trace-id rows or Bloom filters. An index growing
+never changes a compression figure; index size is reported separately.
 
 Both `timeless_logs` and `timeless_traces` accept `auto_optimize='off'` (or a
 positive flush count) at CREATE, and the runtime command

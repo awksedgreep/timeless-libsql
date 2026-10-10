@@ -5285,6 +5285,21 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(info.compaction_planned_groups as i64),
                     ),
                     (
+                        "index_cache",
+                        shared::current_conn()
+                            .map_err(module_err)
+                            .and_then(|conn| {
+                                crate::shadow_meta::load_meta_text(
+                                    &conn,
+                                    &database,
+                                    &table,
+                                    "index_cache",
+                                )
+                                .map_err(module_err)
+                            })?
+                            .map_or(Value::Null, Value::Text),
+                    ),
+                    (
                         "series_on_disk",
                         Value::Integer(i64::from(info.series_on_disk)),
                     ),

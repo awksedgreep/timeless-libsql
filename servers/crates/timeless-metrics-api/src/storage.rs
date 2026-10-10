@@ -1491,6 +1491,10 @@ fn open_connection(
     ] {
         require_query_surface(&capabilities, surface, capability)?;
     }
+    // Additive (#132): an extension that predates index_cache keeps every
+    // catalog in memory and accepts neither the argument nor the command.
+    let index_cache_supported =
+        require_query_surface(&capabilities, "timeless_metrics", "index_cache").is_ok();
     preflight_database(&conn, spec.signal)?;
     let discovered = discover_metrics_table(&conn)?;
     if let (Some(expected), Some(actual)) = (expected_table, discovered) {
@@ -1527,12 +1531,42 @@ fn open_connection(
         let table = match discovered {
             Some(table) => table,
             None => {
-                conn.execute_batch(&new_metrics_table_sql(new_database_rollups)?)
-                    .map_err(|error| format!("create canonical metrics virtual table: {error}"))?;
+                conn.execute_batch(&new_metrics_table_sql(
+                    new_database_rollups,
+                    index_cache_supported,
+                )?)
+                .map_err(|error| format!("create canonical metrics virtual table: {error}"))?;
                 MetricsTable::Canonical
             }
         };
         validate_metrics_table(&conn, table)?;
+        // A store from before the setting existed has none, which already
+        // means the catalog is in memory; record the server's choice so it
+        // does not depend on what an absent setting means.
+        let index_cache: Option<String> = if !index_cache_supported {
+            Some("unbounded".to_owned())
+        } else {
+            match conn.query_row(
+                &format!(
+                    "SELECT value FROM timeless_stats('{}') WHERE key = 'index_cache'",
+                    table.name()
+                ),
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            ) {
+                Ok(value) => value,
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(format!("read metrics index_cache: {error}")),
+            }
+        };
+        if index_cache.is_none() {
+            run_command(
+                &conn,
+                table,
+                "index_cache:unbounded",
+                "record the metrics index_cache setting",
+            )?;
+        }
         if let Some(rollups) = new_database_rollups {
             run_command(
                 &conn,
@@ -1562,12 +1596,35 @@ fn open_connection(
     Ok((conn, table))
 }
 
-fn new_metrics_table_sql(rollups: Option<&str>) -> Result<String, String> {
-    match rollups {
-        None => Ok("CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;".into()),
-        Some(spec) if spec.eq_ignore_ascii_case("none") => {
-            Ok("CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;".into())
+fn new_metrics_table_sql(rollups: Option<&str>, index_cache: bool) -> Result<String, String> {
+    // A dedicated server keeps the series catalog in memory for the lowest
+    // read latency, and says so: the extension's own default for a new
+    // table is embedded-sized.
+    let index_cache = if index_cache {
+        "index_cache='unbounded'"
+    } else {
+        ""
+    };
+    let arguments = |rollups: Option<String>| -> String {
+        let arguments: Vec<String> = rollups
+            .into_iter()
+            .chain((!index_cache.is_empty()).then(|| index_cache.to_owned()))
+            .collect();
+        if arguments.is_empty() {
+            String::new()
+        } else {
+            format!("({})", arguments.join(", "))
         }
+    };
+    match rollups {
+        None => Ok(format!(
+            "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics{};",
+            arguments(None)
+        )),
+        Some(spec) if spec.eq_ignore_ascii_case("none") => Ok(format!(
+            "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics{};",
+            arguments(None)
+        )),
         Some(spec)
             if spec.chars().all(|character| {
                 character.is_ascii_alphanumeric()
@@ -1576,7 +1633,8 @@ fn new_metrics_table_sql(rollups: Option<&str>) -> Result<String, String> {
             }) =>
         {
             Ok(format!(
-                "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(rollups='{spec}');"
+                "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics{};",
+                arguments(Some(format!("rollups='{spec}'")))
             ))
         }
         Some(_) => Err("rollups must be a comma-separated resolution@retention ladder".to_string()),
@@ -2359,19 +2417,39 @@ mod tests {
 
     #[test]
     fn new_metrics_databases_only_persist_explicit_rollups() {
+        // Against an extension that predates index_cache: nothing it would
+        // reject.
         assert_eq!(
-            new_metrics_table_sql(None).unwrap(),
+            new_metrics_table_sql(None, false).unwrap(),
             "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;"
         );
         assert_eq!(
-            new_metrics_table_sql(Some("NONE")).unwrap(),
-            new_metrics_table_sql(None).unwrap()
+            new_metrics_table_sql(Some("NONE"), false).unwrap(),
+            new_metrics_table_sql(None, false).unwrap()
         );
         assert!(
-            new_metrics_table_sql(Some("3600s@2592000s,86400s@31536000s,2592000s@0"))
+            new_metrics_table_sql(Some("3600s@2592000s,86400s@31536000s,2592000s@0"), false)
                 .unwrap()
-                .contains("rollups='3600s@2592000s")
+                .contains("(rollups='3600s@2592000s,86400s@31536000s,2592000s@0')")
         );
-        assert!(new_metrics_table_sql(Some("1h@0'); DROP TABLE metric_samples;--")).is_err());
+        assert!(new_metrics_table_sql(Some("1h@0'); DROP TABLE metric_samples;--"), true).is_err());
+    }
+
+    #[test]
+    fn a_server_asks_for_its_catalog_in_memory_explicitly() {
+        // The extension's default for a new table is embedded-sized; a
+        // dedicated server says 'unbounded' whenever the extension can hear it.
+        assert_eq!(
+            new_metrics_table_sql(None, true).unwrap(),
+            "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(index_cache='unbounded');"
+        );
+        assert_eq!(
+            new_metrics_table_sql(Some("none"), true).unwrap(),
+            new_metrics_table_sql(None, true).unwrap()
+        );
+        assert_eq!(
+            new_metrics_table_sql(Some("1h@30d"), true).unwrap(),
+            "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics(rollups='1h@30d', index_cache='unbounded');"
+        );
     }
 }

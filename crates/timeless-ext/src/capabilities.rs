@@ -129,6 +129,9 @@ fn document() -> &'static str {
                     "max_work_points": true,
                     "max_catalog_bytes": true
                 },
+                "timeless_metrics": {
+                    "index_cache": true
+                },
                 "timeless_label_values": {
                     "all_series": true
                 },

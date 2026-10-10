@@ -201,6 +201,11 @@ pub struct MetricsTab {
     rowid_counter: i64,
 }
 
+/// The `index_cache` budget of a table created without one: 64 MB, enough
+/// to cache the identity of ~1.4 million series, and far below what holding
+/// their labels in memory costs (#132).
+const DEFAULT_INDEX_CACHE_BYTES: u64 = 64 << 20;
+
 /// Normalize an `index_cache` setting: `unbounded` (catalog in memory) or
 /// a byte budget such as `64MB` or `0` (#132).
 fn validate_index_cache(value: &str) -> std::result::Result<String, String> {
@@ -289,13 +294,19 @@ impl MetricsTab {
         // persisted before the engine is built so the first engine already
         // opens it the right way.
         if is_create {
+            // A new table is embedded-sized unless it says otherwise: the
+            // catalog on disk behind a small resolve cache. A dedicated
+            // server asks for 'unbounded' explicitly. Tables created before
+            // this setting existed have none and keep their catalog in
+            // memory, as they always did.
+            let mut index_cache = DEFAULT_INDEX_CACHE_BYTES.to_string();
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 if name == "index_cache" {
-                    let value = validate_index_cache(&value).map_err(module_err)?;
-                    shadow_meta::save_meta_text(&host, &database, &table, "index_cache", &value)
-                        .map_err(module_err)?;
+                    index_cache = validate_index_cache(&value).map_err(module_err)?;
                 }
             }
+            shadow_meta::save_meta_text(&host, &database, &table, "index_cache", &index_cache)
+                .map_err(module_err)?;
         }
         let instance_id = if is_create {
             shadow_meta::ensure_instance_id(&host, &database, &table)
@@ -2411,7 +2422,7 @@ mod disk_series_tests {
             ];
             (on_disk, rows)
         };
-        let (memory_mode, memory) = answers("");
+        let (memory_mode, memory) = answers("index_cache='unbounded'");
         let (disk_mode, disk) = answers("index_cache='1MB'");
         assert_eq!(memory_mode, 0);
         assert_eq!(disk_mode, 1);
@@ -2535,10 +2546,14 @@ mod disk_series_tests {
             fleet(&db);
         }
         {
-            // With no engine open, make it a table from before #132.
+            // With no engine open, make it a table from before #132: no
+            // label index, and no index_cache setting.
             let db = Connection::open(&path).unwrap();
-            db.execute_batch("DROP TABLE m_postings; DROP TABLE m_labels;")
-                .unwrap();
+            db.execute_batch(
+                "DROP TABLE m_postings; DROP TABLE m_labels;
+                 DELETE FROM m_meta WHERE k = 'index_cache';",
+            )
+            .unwrap();
             assert_eq!(tables(&db), 0);
         }
         {
@@ -2637,7 +2652,7 @@ mod disk_series_tests {
             }
             rows
         };
-        let memory = answers("");
+        let memory = answers("index_cache='unbounded'");
         let disk = answers("index_cache='1MB'");
         assert_eq!(disk, memory);
         assert_eq!(memory[0], [r#"{"env":"prod","host":"e","zone":"east"}"#]);
@@ -2826,6 +2841,107 @@ mod disk_series_tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    /// Index bytes are never compression bytes. `bytes_on_disk` and
+    /// `bytes_per_point` are the chunk payload and nothing else: two tables
+    /// holding the same points report the same figures however large their
+    /// label index is, and the figure is exactly the payload stored.
+    #[test]
+    fn the_label_index_is_not_counted_in_compression_figures() {
+        let figures = |index_cache: &str, label_bytes: usize| {
+            let db = Connection::open_in_memory().unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE m USING timeless_metrics({index_cache});"
+            ))
+            .unwrap();
+            let padding = "x".repeat(label_bytes);
+            for series in 0..200 {
+                for point in 0..20 {
+                    write(
+                        &db,
+                        "cpu",
+                        &format!(r#"{{"host":"h{series}","note":"{padding}{series}"}}"#),
+                        1_000 + point,
+                    );
+                }
+            }
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('compact')", [])
+                .unwrap();
+            let payload: i64 = db
+                .query_row(
+                    "SELECT sum(length(ts_data) + length(val_data)) FROM m_chunks",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let index: i64 = db
+                .query_row(
+                    "SELECT (SELECT sum(length(key) + length(value)) FROM m_labels)
+                          + (SELECT count(*) FROM m_postings)",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let per_point: f64 = db
+                .query_row(
+                    "SELECT value FROM timeless_stats('m') WHERE key = 'bytes_per_point'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (stat(&db, "m", "bytes_on_disk"), payload, index, per_point)
+        };
+        for index_cache in ["index_cache='unbounded'", "index_cache='1MB'"] {
+            let (small_bytes, small_payload, small_index, small_per_point) =
+                figures(index_cache, 0);
+            let (large_bytes, large_payload, large_index, large_per_point) =
+                figures(index_cache, 400);
+            assert!(
+                large_index > small_index * 10,
+                "the second table's label index is far larger ({large_index} vs {small_index})"
+            );
+            assert_eq!(
+                small_bytes, small_payload,
+                "bytes_on_disk is the chunk payload"
+            );
+            assert_eq!(
+                large_bytes, large_payload,
+                "bytes_on_disk is the chunk payload"
+            );
+            assert_eq!(
+                large_bytes, small_bytes,
+                "index size does not move bytes_on_disk"
+            );
+            assert_eq!(large_per_point, small_per_point);
+        }
+    }
+
+    /// A table created without `index_cache` is embedded-sized: its catalog
+    /// on disk behind a 64 MB resolve cache. `unbounded` is asked for.
+    #[test]
+    fn a_new_table_defaults_to_the_embedded_budget() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE m USING timeless_metrics;
+             CREATE VIRTUAL TABLE big USING timeless_metrics(index_cache='unbounded');",
+        )
+        .unwrap();
+        let setting = |table: &str| -> String {
+            db.query_row(
+                "SELECT value FROM timeless_stats(?1) WHERE key = 'index_cache'",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(setting("m"), (64u64 << 20).to_string());
+        assert_eq!(stat(&db, "m", "series_on_disk"), 1);
+        assert_eq!(setting("big"), "unbounded");
+        assert_eq!(stat(&db, "big", "series_on_disk"), 0);
     }
 
     #[test]
