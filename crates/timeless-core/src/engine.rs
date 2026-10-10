@@ -148,6 +148,9 @@ type ChunkKey = (PartitionKey, i64, u64);
 /// A series' raw-chunk totals: `(min_ts, max_ts, points, chunks)`.
 type ChunkStats = (i64, i64, u64, usize);
 
+/// Raw chunks in the store: count, points, oldest and newest timestamp.
+type ChunkTotals = (usize, u64, Option<i64>, Option<i64>);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MetricsCompactionKind {
     RawCompression,
@@ -1082,6 +1085,14 @@ pub struct Engine {
     /// stays empty, catalog reads go to the store's label index, and
     /// resolution goes through this bounded cache.
     disk_series: Option<DiskResolveCache>,
+    /// Whether the raw chunk index lives on disk (#132 phase 2): the
+    /// store's chunk rows answer every index question, the in-memory index
+    /// stays empty, and nothing of it is journaled, because the rows are
+    /// restored by the host's own rollback. Goes with `disk_series`.
+    disk_chunks: bool,
+    /// Whole-store raw-chunk totals for a disk index, read once and kept
+    /// until a write could have changed them.
+    disk_chunk_totals: Mutex<Option<ChunkTotals>>,
     /// Fused Prometheus ingest telemetry. These cumulative counters are
     /// exposed through timeless_stats so embedding hosts can observe partial
     /// parse success without parsing the exposition body a second time.
@@ -1373,6 +1384,15 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<ChunkMeta>> {
+        if self.disk_chunks {
+            return Ok(self
+                .store
+                .chunk_metas_for(&[series_id], t_start, t_end)
+                .map_err(|err| format!("failed to read chunk index: {err}"))?
+                .into_iter()
+                .map(|chunk| chunk.meta)
+                .collect());
+        }
         let pk = PartitionKey { series_id };
         let index = self.index_read();
         Ok(index
@@ -1397,6 +1417,40 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<Vec<ChunkMeta>>> {
+        if self.disk_chunks {
+            let mut distinct: Vec<i64> = series_ids.to_vec();
+            distinct.sort_unstable();
+            distinct.dedup();
+            let mut by_series: HashMap<i64, Vec<ChunkMeta>> = HashMap::new();
+            for chunk in self
+                .store
+                .chunk_metas_for(&distinct, t_start, t_end)
+                .map_err(|err| format!("failed to read chunk index: {err}"))?
+            {
+                by_series
+                    .entry(chunk.series_id)
+                    .or_default()
+                    .push(chunk.meta);
+            }
+            // Positional, duplicates included: the last use of an id takes
+            // its list, earlier ones a copy.
+            let mut remaining: HashMap<i64, usize> = HashMap::new();
+            for id in series_ids {
+                *remaining.entry(*id).or_default() += 1;
+            }
+            return Ok(series_ids
+                .iter()
+                .map(|id| {
+                    let left = remaining.get_mut(id).expect("counted above");
+                    *left -= 1;
+                    if *left == 0 {
+                        by_series.remove(id).unwrap_or_default()
+                    } else {
+                        by_series.get(id).cloned().unwrap_or_default()
+                    }
+                })
+                .collect());
+        }
         const MAX_GAP_SCAN: usize = 8;
         let mut order: Vec<usize> = (0..series_ids.len()).collect();
         order.sort_unstable_by_key(|&i| series_ids[i]);
@@ -1444,6 +1498,9 @@ impl Engine {
     /// Per-series totals over raw chunks: `(min_ts, max_ts, points, chunks)`
     /// for each of `series_ids` that has any.
     fn chunk_stats(&self, series_ids: &[i64]) -> HashMap<i64, ChunkStats> {
+        if self.disk_chunks {
+            return self.disk_chunk_stats(Some(series_ids));
+        }
         let index = self.index_read();
         let mut stats: HashMap<i64, ChunkStats> = HashMap::new();
         for &series_id in series_ids {
@@ -1460,6 +1517,9 @@ impl Engine {
 
     /// [`Self::chunk_stats`] for every series that has a raw chunk.
     fn chunk_stats_all(&self) -> HashMap<i64, ChunkStats> {
+        if self.disk_chunks {
+            return self.disk_chunk_stats(None);
+        }
         let index = self.index_read();
         let mut stats: HashMap<i64, ChunkStats> = HashMap::new();
         for ((pk, _, _), meta) in index.iter() {
@@ -1481,7 +1541,25 @@ impl Engine {
 
     /// Raw chunks in the store: how many, their points, and the oldest and
     /// newest timestamps they hold.
-    fn chunk_totals(&self) -> (usize, u64, Option<i64>, Option<i64>) {
+    fn chunk_totals(&self) -> ChunkTotals {
+        if self.disk_chunks {
+            let mut cached = self
+                .disk_chunk_totals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(totals) = *cached {
+                return totals;
+            }
+            // An unreadable store reports nothing rather than failing a
+            // statistics read; it is not cached, so the next read retries.
+            return match self.store.chunk_totals() {
+                Ok(totals) => {
+                    *cached = Some(totals);
+                    totals
+                }
+                Err(_) => (0, 0, None, None),
+            };
+        }
         let index = self.index_read();
         let mut points = 0u64;
         let mut oldest: Option<i64> = None;
@@ -1496,15 +1574,41 @@ impl Engine {
 
     /// The newest timestamp any raw chunk holds.
     fn chunk_high_water(&self) -> Option<i64> {
+        if self.disk_chunks {
+            return self.chunk_totals().3;
+        }
         self.index_read().values().map(|meta| meta.max_ts).max()
     }
 
     /// Ids of the series that have a raw chunk, ascending.
     fn chunk_series_ids(&self) -> Vec<i64> {
+        if self.disk_chunks {
+            return self.store.chunk_series_ids().unwrap_or_default();
+        }
         let index = self.index_read();
         let mut ids: Vec<i64> = index.keys().map(|(pk, _, _)| pk.series_id).collect();
         ids.dedup();
         ids
+    }
+
+    fn disk_chunk_stats(&self, series_ids: Option<&[i64]>) -> HashMap<i64, ChunkStats> {
+        self.store
+            .chunk_stats_for(series_ids)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, min_ts, max_ts, points, chunks)| (id, (min_ts, max_ts, points, chunks)))
+            .collect()
+    }
+
+    /// A write may have changed a disk index's totals: read them again
+    /// when next asked.
+    fn disk_chunks_changed(&self) {
+        if self.disk_chunks {
+            *self
+                .disk_chunk_totals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+        }
     }
 
     // ── Series catalog reads (#132) ──────────────────────────────────
@@ -2009,6 +2113,7 @@ impl Engine {
     }
 
     fn rollback_txn_frame(&self, frame: &mut TxnFrame) {
+        self.disk_chunks_changed();
         // 1. Truncate buffers to their marks. Partitions without a mark
         //    were not mutated in this frame and are already as they were;
         //    one created during the frame was marked at 0 (the empty
@@ -2166,6 +2271,18 @@ impl Engine {
         if items.is_empty() {
             return;
         }
+        if self.disk_chunks {
+            // The rows the store just wrote are the index entries. The
+            // chunk sequence still advances once per chunk: it is how a
+            // drained compaction sweep learns there is something new to
+            // plan.
+            for (_, meta) in &items {
+                self.raise_raw_ts_upper_bound(meta.max_ts);
+                self.next_chunk_seq();
+            }
+            self.disk_chunks_changed();
+            return;
+        }
         let mut j = self.txn_guard();
         let mut index = self.index_write();
         for (key, meta) in items {
@@ -2236,9 +2353,6 @@ impl Engine {
         } else {
             None
         };
-        let stored_chunks = store
-            .scan()
-            .map_err(|err| format!("failed to recover chunk index: {err}"))?;
 
         // #132: a table with an index_cache budget keeps its catalog on
         // disk. That needs a current label index; a connection that cannot
@@ -2260,6 +2374,23 @@ impl Engine {
             None
         };
 
+        // With the catalog on disk, the chunk index is read from the store's
+        // chunk rows too, if the store can answer for them.
+        let disk_chunks = disk_budget.is_some() && store.has_chunk_index();
+        // The series that have chunks: asked of the store for a disk index,
+        // which then never loads a chunk's metadata, or read off the scan.
+        let mut stored_chunks: Vec<StoredChunk> = Vec::new();
+        let chunk_series: Vec<i64> = if disk_chunks {
+            store
+                .chunk_series_ids()
+                .map_err(|err| format!("failed to list chunk series: {err}"))?
+        } else {
+            stored_chunks = store
+                .scan()
+                .map_err(|err| format!("failed to recover chunk index: {err}"))?;
+            Vec::new()
+        };
+
         // A disk catalog is trusted only if it identifies every persisted
         // chunk, the same condition the memory catalog is held to below.
         // One that does not (empty, or a store whose series still live in
@@ -2276,7 +2407,15 @@ impl Engine {
                 && stored_chunks
                     .iter()
                     .all(|chunk| known.contains(&chunk.series_id))
+                && chunk_series.iter().all(|id| known.contains(id))
         };
+        // A catalog that failed that test is checked the memory way, which
+        // needs every chunk's metadata after all.
+        if disk_chunks && !disk_catalog_complete {
+            stored_chunks = store
+                .scan()
+                .map_err(|err| format!("failed to recover chunk index: {err}"))?;
+        }
 
         let registry = if disk_catalog_complete {
             SeriesRegistry::new()
@@ -2396,6 +2535,8 @@ impl Engine {
             rollup_merge_chunks_written: AtomicU64::new(0),
             resolve_cache: DashMap::new(),
             disk_series: disk_budget.map(DiskResolveCache::new),
+            disk_chunks,
+            disk_chunk_totals: Mutex::new(None),
             prometheus_ingest_batches: AtomicU64::new(0),
             prometheus_ingest_points: AtomicU64::new(0),
             prometheus_ingest_errors: AtomicU64::new(0),
@@ -2431,7 +2572,15 @@ impl Engine {
             retention_floor: AtomicI64::new(i64::MIN),
             raw_ts_upper_bound: AtomicI64::new(i64::MIN),
         };
-        engine.replace_index(stored_chunks);
+        if engine.disk_chunks {
+            // Nothing is loaded; only the newest timestamp is primed, for
+            // the retention guard that reads it without the store.
+            if let Some(newest) = engine.chunk_high_water() {
+                engine.raise_raw_ts_upper_bound(newest);
+            }
+        } else {
+            engine.replace_index(stored_chunks);
+        }
         Ok(engine)
     }
 
@@ -3826,6 +3975,15 @@ impl Engine {
         // journal their keys so rollback can drop them.
         let mut j = self.txn_guard();
         self.store.replace_chunks(&add, &deletable, &mut |locs| {
+            if self.disk_chunks {
+                // The swapped rows are the index; the host transaction
+                // undoes them, so there is nothing to journal. Each new
+                // chunk still advances the sequence, as an insert does.
+                for _ in locs {
+                    self.next_chunk_seq();
+                }
+                return;
+            }
             let mut index = self.index_write();
             let mut next = 0;
             for (group, new_count) in &plans {
@@ -3852,6 +4010,7 @@ impl Engine {
             }
         })?;
         drop(j);
+        self.disk_chunks_changed();
 
         outcome.series_compacted = plans
             .iter()
@@ -3911,6 +4070,14 @@ impl Engine {
     /// Whether every chunk a planned group was made of is still in the index.
     /// Chunks are immutable, so one that is there is as it was planned.
     fn sources_present(&self, group: &MetricsCompactionGroup) -> bool {
+        if self.disk_chunks {
+            let locs: Vec<ChunkLoc> = group
+                .sources
+                .iter()
+                .map(|(_, meta)| meta.loc.clone())
+                .collect();
+            return self.store.chunks_present(&locs).unwrap_or(false);
+        }
         let index = self.index_read();
         group.sources.iter().all(|(key, _)| index.contains_key(key))
     }
@@ -3926,32 +4093,43 @@ impl Engine {
         raw_min_chunks: usize,
     ) -> Vec<MetricsCompactionGroup> {
         let now = Instant::now();
-        let index = self.index_read();
         let mut groups = Vec::new();
-        let mut series: Vec<MetricsCandidate<'_>> = Vec::new();
-        let mut current: Option<PartitionKey> = None;
-        for (chunk_key, meta) in index.iter() {
-            let eligible = meta.max_ts < cutoff_ts
-                && (meta.encoding == ENC_RAW
-                    || meta.point_count < METRICS_COMPACTION_TARGET_POINTS as u32);
-            if !eligible {
-                continue;
-            }
-            if current != Some(chunk_key.0) {
-                if let Some(key) = current {
-                    let lately = self.series_written_lately(&key, now);
-                    Self::plan_metrics_series(key, &series, lately, raw_min_chunks, &mut groups);
-                }
-                series.clear();
-                current = Some(chunk_key.0);
-            }
-            series.push((chunk_key, meta));
+        if self.disk_chunks {
+            // The store returns the eligible chunks already, in the index's
+            // order; a chunk's row id stands in for its insertion sequence.
+            let candidates: Vec<(ChunkKey, ChunkMeta)> = self
+                .store
+                .compaction_candidates(cutoff_ts, ENC_RAW, METRICS_COMPACTION_TARGET_POINTS as u32)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|chunk| {
+                    let sequence = match chunk.meta.loc {
+                        ChunkLoc::Row { rowid } => rowid as u64,
+                        ChunkLoc::File { .. } => 0,
+                    };
+                    (
+                        (
+                            PartitionKey {
+                                series_id: chunk.series_id,
+                            },
+                            chunk.meta.min_ts,
+                            sequence,
+                        ),
+                        chunk.meta,
+                    )
+                })
+                .collect();
+            self.plan_metrics_groups(
+                candidates.iter().map(|(key, meta)| (key, meta)),
+                cutoff_ts,
+                raw_min_chunks,
+                now,
+                &mut groups,
+            );
+        } else {
+            let index = self.index_read();
+            self.plan_metrics_groups(index.iter(), cutoff_ts, raw_min_chunks, now, &mut groups);
         }
-        if let Some(key) = current {
-            let lately = self.series_written_lately(&key, now);
-            Self::plan_metrics_series(key, &series, lately, raw_min_chunks, &mut groups);
-        }
-        drop(index);
         // First compression always wins over optional merges. Within each
         // phase, groups go in series order, oldest first within a series: a
         // sweep's plan is fixed by its cutoff and is worked to the end, so
@@ -3973,6 +4151,41 @@ impl Engine {
             )
         });
         groups
+    }
+
+    /// Group eligible chunks a series at a time, from entries in the
+    /// index's order (series, then `min_ts`, then insertion).
+    fn plan_metrics_groups<'a>(
+        &self,
+        entries: impl Iterator<Item = (&'a ChunkKey, &'a ChunkMeta)>,
+        cutoff_ts: i64,
+        raw_min_chunks: usize,
+        now: Instant,
+        groups: &mut Vec<MetricsCompactionGroup>,
+    ) {
+        let mut series: Vec<MetricsCandidate<'a>> = Vec::new();
+        let mut current: Option<PartitionKey> = None;
+        for (chunk_key, meta) in entries {
+            let eligible = meta.max_ts < cutoff_ts
+                && (meta.encoding == ENC_RAW
+                    || meta.point_count < METRICS_COMPACTION_TARGET_POINTS as u32);
+            if !eligible {
+                continue;
+            }
+            if current != Some(chunk_key.0) {
+                if let Some(key) = current {
+                    let lately = self.series_written_lately(&key, now);
+                    Self::plan_metrics_series(key, &series, lately, raw_min_chunks, groups);
+                }
+                series.clear();
+                current = Some(chunk_key.0);
+            }
+            series.push((chunk_key, meta));
+        }
+        if let Some(key) = current {
+            let lately = self.series_written_lately(&key, now);
+            Self::plan_metrics_series(key, &series, lately, raw_min_chunks, groups);
+        }
     }
 
     /// One series' groups, from its eligible chunks in index order.
@@ -5835,11 +6048,7 @@ impl Engine {
         let rollups = self.rollup_read();
         // A series with no raw chunk left has nothing more to roll up:
         // its pieces are put together once, however few they are.
-        let with_raw: HashSet<i64> = self
-            .index_read()
-            .keys()
-            .map(|(pk, _, _)| pk.series_id)
-            .collect();
+        let with_raw: HashSet<i64> = self.chunk_series_ids().into_iter().collect();
         let mut plans = Vec::new();
         for (group, entries) in &rollups.groups {
             let live = with_raw.contains(&group.series_id);
@@ -6769,6 +6978,17 @@ impl Engine {
 
     pub fn delete_before(&self, before_ts: i64) -> (usize, usize, Vec<String>) {
         let _transition = self.transition_write();
+        if self.disk_chunks {
+            // The store finds its own victims; each chunk is a row, so the
+            // rows removed are the storage units removed.
+            let locs = match self.store.chunk_locs_outside(Some(before_ts), None) {
+                Ok(locs) => locs,
+                Err(error) => return (0, 0, vec![error]),
+            };
+            let errors = self.store.delete_chunks(&locs);
+            self.disk_chunks_changed();
+            return (locs.len(), locs.len(), errors);
+        }
         // Transition is already exclusive; journal before index. Pruned rows are
         // DELETEd through the store inside the host transaction, so a
         // rollback restores them — the journal restores the matching
@@ -6823,6 +7043,17 @@ impl Engine {
     /// the cutoff is retained.
     pub fn delete_after(&self, after_ts: i64) -> (usize, usize, Vec<String>) {
         let _transition = self.transition_write();
+        if self.disk_chunks {
+            // The store finds its own victims; each chunk is a row, so the
+            // rows removed are the storage units removed.
+            let locs = match self.store.chunk_locs_outside(None, Some(after_ts)) {
+                Ok(locs) => locs,
+                Err(error) => return (0, 0, vec![error]),
+            };
+            let errors = self.store.delete_chunks(&locs);
+            self.disk_chunks_changed();
+            return (locs.len(), locs.len(), errors);
+        }
         let mut j = self.txn_guard();
         let mut index = self.index_write();
 
@@ -7009,10 +7240,14 @@ impl Engine {
             SeriesRegistry::from_stored(&rows)
                 .map_err(|err| format!("refreshed series catalog is invalid: {err}"))?
         };
-        let chunks = self
-            .store
-            .scan()
-            .map_err(|err| format!("failed to refresh chunk index: {err}"))?;
+        let chunks = if self.disk_chunks {
+            Vec::new()
+        } else {
+            self.store
+                .scan()
+                .map_err(|err| format!("failed to refresh chunk index: {err}"))?
+        };
+        self.disk_chunks_changed();
         if self.disk_series.is_none() {
             Self::validate_chunk_series(&registry, &chunks)?;
         }
@@ -7095,7 +7330,8 @@ impl Engine {
             // series row needs.
             series.insert_known(row.id, &row.name, &labels, false)?;
         }
-        for chunk in raw {
+        self.disk_chunks_changed();
+        for chunk in raw.into_iter().filter(|_| !self.disk_chunks) {
             let pk = PartitionKey {
                 series_id: chunk.series_id,
             };
@@ -7374,6 +7610,7 @@ impl Engine {
             compaction_merge_total_ns: self.compaction_merge_total_ns.load(Ordering::Relaxed),
             compaction_plans: self.compaction_plans.load(Ordering::Relaxed),
             series_on_disk: self.disk_series.is_some(),
+            chunks_on_disk: self.disk_chunks,
             series_resolve_cache_entries: self
                 .disk_series
                 .as_ref()
@@ -7480,6 +7717,9 @@ pub struct EngineInfo {
     /// Whether the series catalog lives on disk behind a bounded resolve
     /// cache (#132), and how many entries that cache holds.
     pub series_on_disk: bool,
+    /// Whether the raw chunk index is read from the store's chunk rows
+    /// rather than held in memory (#132 phase 2).
+    pub chunks_on_disk: bool,
     pub series_resolve_cache_entries: u64,
     pub retention_series_removed: u64,
     pub rollup_merge_chunks_removed: u64,

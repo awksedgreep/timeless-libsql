@@ -177,10 +177,29 @@ DROP TABLE IF EXISTS {series};
     )
 }
 
+/// The chunk columns `scan_chunk_rows` maps to a `StoredChunk`, unqualified
+/// and qualified by the alias `c`.
+const META: &str = "id, series_id, ts_min, ts_max, max_ts_val, point_count, \
+    min_val, max_val, sum_val, encoding, length(ts_data) + length(val_data)";
+const META_C: &str = "c.id, c.series_id, c.ts_min, c.ts_max, c.max_ts_val, c.point_count, \
+    c.min_val, c.max_val, c.sum_val, c.encoding, length(c.ts_data) + length(c.val_data)";
+
 pub(crate) struct ShadowTableStore {
     allow_legacy_migration: bool,
     database: String,
     table: String,
+    // The chunk rows as the chunk index (#132 phase 2). Each selects the
+    // columns scan_chunk_rows maps.
+    chunk_metas_one_sql: String,
+    chunk_metas_many_sql: String,
+    chunk_stats_some_sql: String,
+    chunk_stats_all_sql: String,
+    chunk_totals_sql: String,
+    chunk_series_ids_sql: String,
+    chunk_locs_before_sql: String,
+    chunk_locs_after_sql: String,
+    compaction_candidates_sql: String,
+    chunks_present_sql: String,
     /// The on-disk label index (#132), and whether its tables exist:
     /// 0 not yet probed, 1 present, 2 absent (a table created before #132
     /// and not yet upgraded).
@@ -250,6 +269,48 @@ impl ShadowTableStore {
             allow_legacy_migration,
             database: database.to_owned(),
             table: table.to_owned(),
+            chunk_metas_one_sql: format!(
+                "SELECT {META} FROM {chunks} \
+                 WHERE series_id = ?1 AND resolution = 0 AND ts_min <= ?2 AND ts_max >= ?3 \
+                 ORDER BY ts_min, id"
+            ),
+            chunk_metas_many_sql: format!(
+                "SELECT {META_C} FROM json_each(?1) AS wanted \
+                 JOIN {chunks} AS c ON c.series_id = wanted.value \
+                 WHERE c.resolution = 0 AND c.ts_min <= ?2 AND c.ts_max >= ?3 \
+                 ORDER BY c.series_id, c.ts_min, c.id"
+            ),
+            chunk_stats_some_sql: format!(
+                "SELECT c.series_id, MIN(c.ts_min), MAX(c.ts_max), SUM(c.point_count), COUNT(*) \
+                 FROM json_each(?1) AS wanted \
+                 JOIN {chunks} AS c ON c.series_id = wanted.value \
+                 WHERE c.resolution = 0 GROUP BY c.series_id"
+            ),
+            chunk_stats_all_sql: format!(
+                "SELECT series_id, MIN(ts_min), MAX(ts_max), SUM(point_count), COUNT(*) \
+                 FROM {chunks} WHERE resolution = 0 GROUP BY series_id"
+            ),
+            chunk_totals_sql: format!(
+                "SELECT COUNT(*), COALESCE(SUM(point_count), 0), MIN(ts_min), MAX(ts_max) \
+                 FROM {chunks} WHERE resolution = 0"
+            ),
+            chunk_series_ids_sql: format!(
+                "SELECT DISTINCT series_id FROM {chunks} WHERE resolution = 0 ORDER BY series_id"
+            ),
+            chunk_locs_before_sql: format!(
+                "SELECT id FROM {chunks} WHERE resolution = 0 AND ts_max < ?1"
+            ),
+            chunk_locs_after_sql: format!(
+                "SELECT id FROM {chunks} WHERE resolution = 0 AND ts_min > ?1"
+            ),
+            compaction_candidates_sql: format!(
+                "SELECT {META} FROM {chunks} \
+                 WHERE resolution = 0 AND ts_max < ?1 AND (encoding = ?2 OR point_count < ?3) \
+                 ORDER BY series_id, ts_min, id"
+            ),
+            chunks_present_sql: format!(
+                "SELECT COUNT(*) FROM {chunks} WHERE id IN (SELECT value FROM json_each(?1))"
+            ),
             label_index: crate::shadow_label_index::LabelIndex::new(database, table),
             label_index_state: std::sync::atomic::AtomicU8::new(0),
             insert_sql: format!(
@@ -352,6 +413,21 @@ impl ShadowTableStore {
                  FROM {chunks} WHERE resolution > 0 AND id > ?1 ORDER BY id"
             ),
         }
+    }
+
+    /// Ids as a JSON array, the one bound parameter of a cached statement
+    /// that takes any number of them.
+    fn id_list(ids: &[i64]) -> String {
+        let mut list = String::with_capacity(ids.len() * 8 + 2);
+        list.push('[');
+        for (i, id) in ids.iter().enumerate() {
+            if i > 0 {
+                list.push(',');
+            }
+            list.push_str(&id.to_string());
+        }
+        list.push(']');
+        list
     }
 
     /// Whether this table's label index tables exist, probed once.
@@ -1261,6 +1337,152 @@ impl ChunkStore for ShadowTableStore {
         self.bump_shape_generation(&conn)?;
         self.bump_chunk_generation(&conn)?;
         Ok(())
+    }
+
+    fn has_chunk_index(&self) -> bool {
+        true
+    }
+
+    fn chunk_metas_for(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+    ) -> Result<Vec<StoredChunk>, String> {
+        if series_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = Self::conn()?;
+        // One series is the engine's hottest read: no id list to build.
+        if let [series_id] = series_ids {
+            return Self::scan_chunk_rows(
+                &conn,
+                &self.chunk_metas_one_sql,
+                params![series_id, t_end, t_start],
+            );
+        }
+        Self::scan_chunk_rows(
+            &conn,
+            &self.chunk_metas_many_sql,
+            params![Self::id_list(series_ids), t_end, t_start],
+        )
+    }
+
+    fn chunk_stats_for(
+        &self,
+        series_ids: Option<&[i64]>,
+    ) -> Result<Vec<(i64, i64, i64, u64, usize)>, String> {
+        let conn = Self::conn()?;
+        let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, i64, i64, u64, usize)> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, i64>(3)? as u64,
+                row.get::<_, i64>(4)? as usize,
+            ))
+        };
+        let rows = match series_ids {
+            Some([]) => return Ok(Vec::new()),
+            Some(ids) => conn
+                .prepare_cached(&self.chunk_stats_some_sql)
+                .map_err(|e| format!("prepare chunk stats: {e}"))?
+                .query_map([Self::id_list(ids)], map)
+                .map_err(|e| format!("chunk stats: {e}"))?
+                .collect::<Result<Vec<_>, _>>(),
+            None => conn
+                .prepare_cached(&self.chunk_stats_all_sql)
+                .map_err(|e| format!("prepare chunk stats: {e}"))?
+                .query_map([], map)
+                .map_err(|e| format!("chunk stats: {e}"))?
+                .collect::<Result<Vec<_>, _>>(),
+        };
+        rows.map_err(|e| format!("chunk stats: {e}"))
+    }
+
+    fn chunk_totals(&self) -> Result<(usize, u64, Option<i64>, Option<i64>), String> {
+        let conn = Self::conn()?;
+        conn.query_row(&self.chunk_totals_sql, [], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? as u64,
+                row.get(2)?,
+                row.get(3)?,
+            ))
+        })
+        .map_err(|e| format!("chunk totals: {e}"))
+    }
+
+    fn chunk_series_ids(&self) -> Result<Vec<i64>, String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.chunk_series_ids_sql)
+            .map_err(|e| format!("prepare chunk series ids: {e}"))?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("chunk series ids: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("chunk series ids: {e}"))?;
+        Ok(ids)
+    }
+
+    fn chunk_locs_outside(
+        &self,
+        before: Option<i64>,
+        after: Option<i64>,
+    ) -> Result<Vec<ChunkLoc>, String> {
+        let conn = Self::conn()?;
+        let (sql, bound) = match (before, after) {
+            (Some(before), None) => (&self.chunk_locs_before_sql, before),
+            (None, Some(after)) => (&self.chunk_locs_after_sql, after),
+            _ => return Err("chunk_locs_outside takes exactly one bound".into()),
+        };
+        let mut stmt = conn
+            .prepare_cached(sql)
+            .map_err(|e| format!("prepare chunk locations: {e}"))?;
+        let locs = stmt
+            .query_map([bound], |row| Ok(ChunkLoc::Row { rowid: row.get(0)? }))
+            .map_err(|e| format!("chunk locations: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("chunk locations: {e}"))?;
+        Ok(locs)
+    }
+
+    fn compaction_candidates(
+        &self,
+        cutoff_ts: i64,
+        raw_encoding: u8,
+        target_points: u32,
+    ) -> Result<Vec<StoredChunk>, String> {
+        let conn = Self::conn()?;
+        Self::scan_chunk_rows(
+            &conn,
+            &self.compaction_candidates_sql,
+            params![cutoff_ts, raw_encoding, target_points],
+        )
+    }
+
+    fn chunks_present(&self, locs: &[ChunkLoc]) -> Result<bool, String> {
+        if locs.is_empty() {
+            return Ok(true);
+        }
+        let ids: Vec<i64> = locs
+            .iter()
+            .map(|loc| match loc {
+                ChunkLoc::Row { rowid } => Ok(*rowid),
+                ChunkLoc::File { .. } => Err("shadow store chunks are rows".to_string()),
+            })
+            .collect::<Result<_, _>>()?;
+        let conn = Self::conn()?;
+        let found: i64 = conn
+            .prepare_cached(&self.chunks_present_sql)
+            .map_err(|e| format!("prepare chunk presence: {e}"))?
+            .query_row([Self::id_list(&ids)], |row| row.get(0))
+            .map_err(|e| format!("chunk presence: {e}"))?;
+        let mut distinct = ids;
+        distinct.sort_unstable();
+        distinct.dedup();
+        Ok(found as usize == distinct.len())
     }
 
     fn has_label_index(&self) -> bool {

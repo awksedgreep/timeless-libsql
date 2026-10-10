@@ -356,6 +356,79 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not keep a label index".to_string())
     }
 
+    // ── On-disk chunk index (#132 phase 2) ───────────────────────────
+    //
+    // A store whose chunk rows carry their own metadata can answer the
+    // engine's index questions itself, so the engine need not hold every
+    // chunk's metadata in memory. Raw chunks only (rollups have their own
+    // index). The defaults say the store cannot.
+
+    /// Whether this store can answer the chunk index queries below.
+    fn has_chunk_index(&self) -> bool {
+        false
+    }
+
+    /// Metadata of the raw chunks of `series_ids` overlapping
+    /// `[t_start, t_end]`, ordered by series id, then `min_ts`, then
+    /// insertion.
+    fn chunk_metas_for(
+        &self,
+        _series_ids: &[i64],
+        _t_start: i64,
+        _t_end: i64,
+    ) -> Result<Vec<StoredChunk>, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
+    /// Per-series raw-chunk totals `(series_id, min_ts, max_ts, points,
+    /// chunks)`, for `series_ids` or, with `None`, every series that has a
+    /// raw chunk.
+    #[allow(clippy::type_complexity)]
+    fn chunk_stats_for(
+        &self,
+        _series_ids: Option<&[i64]>,
+    ) -> Result<Vec<(i64, i64, i64, u64, usize)>, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
+    /// Raw chunks in the store: count, points, oldest and newest timestamp.
+    fn chunk_totals(&self) -> Result<(usize, u64, Option<i64>, Option<i64>), String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
+    /// Ids of the series that have a raw chunk, ascending.
+    fn chunk_series_ids(&self) -> Result<Vec<i64>, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
+    /// Raw chunks wholly before `before` (`max_ts < before`) or wholly after
+    /// `after` (`min_ts > after`); exactly one bound is given.
+    fn chunk_locs_outside(
+        &self,
+        _before: Option<i64>,
+        _after: Option<i64>,
+    ) -> Result<Vec<ChunkLoc>, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
+    /// Raw chunks a compaction sweep may act on: newest sample before
+    /// `cutoff_ts`, and either still encoded as `raw_encoding` or smaller
+    /// than `target_points`. Ordered by series id, then `min_ts`, then
+    /// insertion.
+    fn compaction_candidates(
+        &self,
+        _cutoff_ts: i64,
+        _raw_encoding: u8,
+        _target_points: u32,
+    ) -> Result<Vec<StoredChunk>, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
+    /// Whether every one of `locs` is still a stored chunk.
+    fn chunks_present(&self, _locs: &[ChunkLoc]) -> Result<bool, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
     /// Import legacy registry rows. Implementations must be idempotent so
     /// two processes opening the same legacy database cannot corrupt it.
     fn migrate_series(&self, _series: &[StoredSeries]) -> Result<(), String> {

@@ -5304,6 +5304,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(i64::from(info.series_on_disk)),
                     ),
                     (
+                        "chunks_on_disk",
+                        Value::Integer(i64::from(info.chunks_on_disk)),
+                    ),
+                    (
                         "series_resolve_cache_entries",
                         Value::Integer(info.series_resolve_cache_entries as i64),
                     ),
