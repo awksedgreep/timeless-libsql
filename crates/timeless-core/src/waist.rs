@@ -57,7 +57,7 @@ pub fn query_multi(
     from: i64,
     to: i64,
 ) -> Result<Vec<(Labels, Vec<(i64, f64)>)>, String> {
-    let candidates = matching_series(engine, metric, matchers);
+    let candidates = matching_series(engine, metric, matchers)?;
     let mut out = Vec::new();
     for (sid, labels) in candidates {
         let points = engine.query_range_by_id(sid, from, to)?;
@@ -69,19 +69,22 @@ pub fn query_multi(
 }
 
 /// The waist, call two: every metric name known to the engine, sorted.
+///
+/// Infallible for compatibility: a catalog read error (possible only for a
+/// disk-resident catalog, #132) yields an empty list.
 pub fn list_metrics(engine: &Engine) -> Vec<String> {
-    engine.series_read().list_metrics()
+    engine.metric_names().unwrap_or_default()
 }
 
 /// Above-waist matcher support: enumerate `metric`'s series with their
 /// labels so the CALLER can evaluate regex (or any other) matchers,
 /// then fetch the survivors with query_multi_ids.
+///
+/// Infallible for compatibility, as [`list_metrics`].
 pub fn list_series(engine: &Engine, metric: &str) -> Vec<(i64, Labels)> {
-    let reg = engine.series_read();
-    reg.find_series(metric, &Labels::new())
-        .into_iter()
-        .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-        .collect()
+    engine
+        .select_series(metric, &Labels::new())
+        .unwrap_or_default()
 }
 
 /// Fetch specific series (from list_series, post-caller-filtering) with
@@ -97,8 +100,8 @@ pub fn query_multi_ids(
 ) -> Result<Vec<(Labels, Vec<(i64, f64)>)>, String> {
     let mut out = Vec::new();
     for &sid in series_ids {
-        let labels = match engine.series_read().info_for(sid) {
-            Some(info) => info.labels.clone(),
+        let labels = match engine.series_info(sid)? {
+            Some(info) => info.labels,
             None => continue,
         };
         let points = engine.query_range_by_id(sid, from, to)?;
@@ -109,7 +112,11 @@ pub fn query_multi_ids(
     Ok(out)
 }
 
-fn matching_series(engine: &Engine, metric: &str, matchers: &[Matcher]) -> Vec<(i64, Labels)> {
+fn matching_series(
+    engine: &Engine,
+    metric: &str,
+    matchers: &[Matcher],
+) -> Result<Vec<(i64, Labels)>, String> {
     // Eq matchers push down as the registry's equality filter.
     let mut eq = Labels::new();
     for m in matchers {
@@ -117,10 +124,9 @@ fn matching_series(engine: &Engine, metric: &str, matchers: &[Matcher]) -> Vec<(
             eq.insert(key.clone(), value.clone());
         }
     }
-    let reg = engine.series_read();
-    reg.find_series(metric, &eq)
+    Ok(engine
+        .select_series(metric, &eq)?
         .into_iter()
-        .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
         .filter(|(_, labels)| {
             matchers.iter().all(|m| match m {
                 Matcher::Eq { .. } => true, // already applied
@@ -129,5 +135,5 @@ fn matching_series(engine: &Engine, metric: &str, matchers: &[Matcher]) -> Vec<(
                 }
             })
         })
-        .collect()
+        .collect())
 }

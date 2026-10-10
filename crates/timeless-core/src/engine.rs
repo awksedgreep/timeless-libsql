@@ -1280,6 +1280,99 @@ impl Engine {
         self.series.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    // ── Series catalog reads (#132) ──────────────────────────────────
+    //
+    // Every reader outside the resolve path asks these, never the registry
+    // directly, so the catalog can live in memory or on disk behind them.
+    // They return owned values: a disk-resident catalog has nothing to
+    // borrow from.
+
+    /// One series' name and labels.
+    pub fn series_info(&self, id: i64) -> EngineResult<Option<SeriesInfo>> {
+        Ok(self.series_read().info_for(id).cloned())
+    }
+
+    /// Names and labels of `ids`, in `ids` order; absent ids are skipped.
+    pub fn series_infos(&self, ids: &[i64]) -> EngineResult<Vec<(i64, SeriesInfo)>> {
+        let reg = self.series_read();
+        Ok(ids
+            .iter()
+            .filter_map(|&id| reg.info_for(id).map(|info| (id, info.clone())))
+            .collect())
+    }
+
+    /// The first of `ids` that names no live series, if any.
+    pub fn first_missing_series(&self, ids: &[i64]) -> EngineResult<Option<i64>> {
+        let reg = self.series_read();
+        Ok(ids.iter().copied().find(|&id| reg.info_for(id).is_none()))
+    }
+
+    /// Whether `id` names a live series.
+    pub fn series_exists(&self, id: i64) -> EngineResult<bool> {
+        Ok(self.series_read().info_for(id).is_some())
+    }
+
+    /// Series of `metric` carrying every label in `eq`, ascending by id,
+    /// with their labels.
+    pub fn select_series(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<(i64, Labels)>> {
+        let reg = self.series_read();
+        Ok(reg
+            .find_series(metric, eq)
+            .into_iter()
+            .filter_map(|id| reg.info_for(id).map(|info| (id, info.labels.clone())))
+            .collect())
+    }
+
+    /// Ids of the series of `metric` carrying every label in `eq`.
+    pub fn select_series_ids(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<i64>> {
+        Ok(self.series_read().find_series(metric, eq))
+    }
+
+    /// Visit every series, or every series of `metric`, until `visit`
+    /// returns `ControlFlow::Break`. Bounded catalog reads use the break to
+    /// stop at their work or byte budget.
+    pub fn visit_series(
+        &self,
+        metric: Option<&str>,
+        visit: &mut dyn FnMut(i64, &SeriesInfo) -> EngineResult<std::ops::ControlFlow<()>>,
+    ) -> EngineResult<()> {
+        let reg = self.series_read();
+        for (id, info) in reg.iter_series(metric) {
+            if visit(id, info)?.is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// How many series the catalog holds.
+    pub fn series_count(&self) -> usize {
+        self.series_read().series_count()
+    }
+
+    /// Distinct metric names, sorted.
+    pub fn metric_names(&self) -> EngineResult<Vec<String>> {
+        Ok(self.series_read().list_metrics())
+    }
+
+    /// Values `key` takes, across every series or within `metric`, sorted.
+    pub fn label_values(&self, metric: Option<&str>, key: &str) -> EngineResult<Vec<String>> {
+        let reg = self.series_read();
+        Ok(match metric {
+            Some(metric) => reg.label_values(metric, key),
+            None => reg.all_label_values(key),
+        })
+    }
+
+    /// Label names, across every series or within `metric`, sorted.
+    pub fn label_names(&self, metric: Option<&str>) -> EngineResult<Vec<String>> {
+        let reg = self.series_read();
+        Ok(match metric {
+            Some(metric) => reg.label_names_for(metric),
+            None => reg.all_label_names(),
+        })
+    }
+
     fn series_write(&self) -> RwLockWriteGuard<'_, SeriesRegistry> {
         self.series.write().unwrap_or_else(|e| e.into_inner())
     }
@@ -3556,13 +3649,7 @@ impl Engine {
         t_end: i64,
     ) -> EngineResult<Vec<(Labels, Vec<(i64, f64)>)>> {
         let _transition = self.transition_read();
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = self.series_read();
-            reg.find_series(metric_name, label_filter)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .collect()
-        };
+        let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
             .into_par_iter()
@@ -4245,13 +4332,7 @@ impl Engine {
         agg: AggFn,
     ) -> EngineResult<Vec<(Labels, f64)>> {
         let _transition = self.transition_read();
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = self.series_read();
-            reg.find_series(metric_name, label_filter)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .collect()
-        };
+        let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
             .into_par_iter()
@@ -5095,13 +5176,7 @@ impl Engine {
             return Ok(Vec::new());
         }
         let _transition = self.transition_read();
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = self.series_read();
-            reg.find_series(metric_name, label_filter)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .collect()
-        };
+        let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
             .into_par_iter()
@@ -5142,13 +5217,7 @@ impl Engine {
             return Ok(Vec::new());
         }
         let _transition = self.transition_read();
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = self.series_read();
-            reg.find_series(metric_name, label_filter)
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .collect()
-        };
+        let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
             .into_par_iter()
@@ -6622,12 +6691,10 @@ impl Engine {
             buf_agg.insert(entry.key().series_id, (buf.timestamps.len(), mn, mx));
         }
 
-        let reg = self.series_read();
-        let mut out: Vec<SeriesOverview> = reg
-            .series_info
-            .iter()
-            .map(|(&series_id, info)| {
-                let (name, labels) = (&info.metric_name, &info.labels);
+        let mut out: Vec<SeriesOverview> = Vec::new();
+        let _ = self.visit_series(None, &mut |series_id, info| {
+            let (name, labels) = (&info.metric_name, &info.labels);
+            out.push({
                 let chunks = chunk_agg.get(&series_id);
                 let buffered = buf_agg.get(&series_id);
                 let min_ts = match (chunks.map(|c| c.0), buffered.map(|b| b.1)) {
@@ -6648,8 +6715,9 @@ impl Engine {
                     chunks: chunks.map_or(0, |c| c.3),
                     buffered: buffered.map_or(0, |b| b.0),
                 }
-            })
-            .collect();
+            });
+            Ok(std::ops::ControlFlow::Continue(()))
+        });
         out.sort_by(|a, b| (&a.name, a.series_id).cmp(&(&b.name, b.series_id)));
         out
     }
@@ -6666,7 +6734,9 @@ impl Engine {
         label_filter: &Labels,
     ) -> Vec<SeriesOverview> {
         let _transition = self.transition_read();
-        let series_ids = self.series_read().find_series(metric_name, label_filter);
+        let series_ids = self
+            .select_series_ids(metric_name, label_filter)
+            .unwrap_or_default();
         self.series_overview_by_ids_inner(&series_ids)
     }
 
@@ -6685,11 +6755,10 @@ impl Engine {
     /// so it is safe to call between `xFilter` and `xNext`.
     pub fn series_overview_by_id(&self, series_id: i64) -> Option<SeriesOverview> {
         let _transition = self.transition_read();
-        let (name, labels) = {
-            let reg = self.series_read();
-            let info = reg.info_for(series_id)?;
-            (info.metric_name.clone(), info.labels.clone())
-        };
+        let SeriesInfo {
+            metric_name: name,
+            labels,
+        } = self.series_info(series_id).ok().flatten()?;
 
         let mut min_ts: Option<i64> = None;
         let mut max_ts: Option<i64> = None;
@@ -6740,17 +6809,12 @@ impl Engine {
     }
 
     fn series_overview_by_ids_inner(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
-        let candidates: Vec<(i64, String, Labels)> = {
-            let reg = self.series_read();
-            series_ids
-                .iter()
-                .copied()
-                .filter_map(|series_id| {
-                    reg.info_for(series_id)
-                        .map(|info| (series_id, info.metric_name.clone(), info.labels.clone()))
-                })
-                .collect()
-        };
+        let candidates: Vec<(i64, String, Labels)> = self
+            .series_infos(series_ids)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, info)| (id, info.metric_name, info.labels))
+            .collect();
 
         let mut chunk_agg: HashMap<i64, (i64, i64, u64, usize)> = HashMap::new();
         {
@@ -6811,11 +6875,10 @@ impl Engine {
     }
 
     pub fn info(&self) -> EngineInfo {
+        let series_count = self.series_count();
         let index = self.index_read();
-        let series_reg = self.series_read();
         let chunk_count = index.len();
         let partition_count = self.partitions.len();
-        let series_count = series_reg.series_count();
         let rollup_chunk_count = self.rollup_read().len();
         let buffered_points: usize = self
             .partitions

@@ -920,20 +920,29 @@ impl MetricsTab {
         // renumber them dense for the counting-sort scatter below.
         let mut dense_of: HashMap<i64, usize> = HashMap::new();
         let mut uniq: Vec<i64> = Vec::new();
-        {
-            let registry = self.shared.engine.series_read();
-            for (i, bytes) in sid_bytes.as_chunks::<8>().0.iter().enumerate() {
-                let sid = i64::from_le_bytes(*bytes);
-                if registry.info_for(sid).is_none() {
-                    return Err(module_err(format!(
-                        "resolved batch: point {i}: unknown series id {sid}; batch rejected"
-                    )));
-                }
-                if let std::collections::hash_map::Entry::Vacant(e) = dense_of.entry(sid) {
-                    e.insert(uniq.len());
-                    uniq.push(sid);
-                }
+        for bytes in sid_bytes.as_chunks::<8>().0 {
+            let sid = i64::from_le_bytes(*bytes);
+            if let std::collections::hash_map::Entry::Vacant(e) = dense_of.entry(sid) {
+                e.insert(uniq.len());
+                uniq.push(sid);
             }
+        }
+        // One catalog check for the batch's distinct ids, not one a point.
+        if let Some(sid) = self
+            .shared
+            .engine
+            .first_missing_series(&uniq)
+            .map_err(module_err)?
+        {
+            let i = sid_bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .position(|bytes| i64::from_le_bytes(*bytes) == sid)
+                .unwrap_or(0);
+            return Err(module_err(format!(
+                "resolved batch: point {i}: unknown series id {sid}; batch rejected"
+            )));
         }
         if uniq.len() > n_points {
             return Err(module_err(
@@ -1353,7 +1362,7 @@ impl UpdateVTab<'_> for MetricsTab {
         let requested_sid: Option<i64> = args.get(6)?;
         let sid = match requested_sid {
             Some(sid) => {
-                if self.shared.engine.series_read().info_for(sid).is_none() {
+                if !self.shared.engine.series_exists(sid).map_err(module_err)? {
                     return Err(module_err(format!("unknown series_id {sid}")));
                 }
                 sid
@@ -1572,14 +1581,14 @@ impl MetricsCursor<'_> {
         t1: i64,
         capacity: Option<usize>,
     ) -> Result<Vec<OutRow>> {
-        let Some((name, labels)) = ({
-            let reg = self.shared.engine.series_read();
-            reg.info_for(series_id).and_then(|info| {
-                expected_name
-                    .is_none_or(|expected| info.metric_name == expected)
-                    .then(|| (info.metric_name.clone(), info.labels.clone()))
-            })
-        }) else {
+        let Some((name, labels)) = self
+            .shared
+            .engine
+            .series_info(series_id)
+            .map_err(module_err)?
+            .filter(|info| expected_name.is_none_or(|expected| info.metric_name == expected))
+            .map(|info| (info.metric_name, info.labels))
+        else {
             return Ok(Vec::new());
         };
 
@@ -1623,13 +1632,11 @@ impl MetricsCursor<'_> {
     ) -> Result<Vec<OutRow>> {
         // Snapshot (series_id, labels) pairs, then drop the registry lock
         // before querying (queries take their own locks).
-        let candidates: Vec<(i64, Labels)> = {
-            let reg = self.shared.engine.series_read();
-            reg.find_series(metric, &BTreeMap::new())
-                .into_iter()
-                .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info.labels.clone())))
-                .collect()
-        };
+        let candidates: Vec<(i64, Labels)> = self
+            .shared
+            .engine
+            .select_series(metric, &BTreeMap::new())
+            .map_err(module_err)?;
 
         let mut out = Vec::new();
         for (sid, labels) in candidates {
@@ -1761,7 +1768,7 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
                 }
             } else {
                 // Full scan: every metric the registry knows about.
-                let metrics = self.shared.engine.series_read().list_metrics();
+                let metrics = self.shared.engine.metric_names().map_err(module_err)?;
                 for metric in metrics {
                     let remaining = capacity.map(|capacity| capacity.saturating_sub(rows.len()));
                     if remaining == Some(0) {

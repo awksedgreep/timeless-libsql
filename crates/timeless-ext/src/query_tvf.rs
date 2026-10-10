@@ -1041,30 +1041,27 @@ fn metric_candidates(
     eq: &Labels,
     matchers: &[(String, LabelMatcher)],
     selection: SeriesSelection,
-) -> Vec<(i64, Labels)> {
-    let reg = engine.series_read();
-    match selection {
+) -> Result<Vec<(i64, Labels)>> {
+    Ok(match selection {
         SeriesSelection::Empty => Vec::new(),
-        SeriesSelection::Id(sid) => reg
-            .info_for(sid)
+        SeriesSelection::Id(sid) => engine
+            .series_info(sid)
+            .map_err(module_err)?
             .filter(|info| info.metric_name == metric)
             .filter(|info| {
                 eq.iter()
                     .all(|(key, value)| info.labels.get(key) == Some(value))
             })
             .filter(|info| matchers_pass(&info.labels, matchers))
-            .map(|info| vec![(sid, info.labels.clone())])
+            .map(|info| vec![(sid, info.labels)])
             .unwrap_or_default(),
-        SeriesSelection::All => reg
-            .find_series(metric, eq)
+        SeriesSelection::All => engine
+            .select_series(metric, eq)
+            .map_err(module_err)?
             .into_iter()
-            .filter_map(|sid| reg.info_for(sid).map(|info| (sid, info)))
-            // Matchers run on the borrowed registry labels; only
-            // survivors pay the labels clone below.
-            .filter(|(_, info)| matchers_pass(&info.labels, matchers))
-            .map(|(sid, info)| (sid, info.labels.clone()))
+            .filter(|(_, labels)| matchers_pass(labels, matchers))
             .collect(),
-    }
+    })
 }
 
 /// Frame TVFs attach catalog data by ID and therefore need no label clones.
@@ -1073,15 +1070,17 @@ fn metric_candidate_ids(
     metric: &str,
     eq: &Labels,
     matchers: &[(String, LabelMatcher)],
-) -> Vec<i64> {
-    let reg = engine.series_read();
-    reg.find_series(metric, eq)
+) -> Result<Vec<i64>> {
+    if matchers.is_empty() {
+        return engine.select_series_ids(metric, eq).map_err(module_err);
+    }
+    Ok(engine
+        .select_series(metric, eq)
+        .map_err(module_err)?
         .into_iter()
-        .filter(|series_id| {
-            reg.info_for(*series_id)
-                .is_some_and(|info| matchers_pass(&info.labels, matchers))
-        })
-        .collect()
+        .filter(|(_, labels)| matchers_pass(labels, matchers))
+        .map(|(id, _)| id)
+        .collect())
 }
 
 fn validate_batch_series<L, R>(
@@ -1133,7 +1132,7 @@ fn run_kernel(
         &ka.filter,
         &ka.matchers,
         ka.series_selection,
-    );
+    )?;
     let sids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
     let results = kernel(&shared.engine, &sids)?;
     validate_batch_series(&ka.table, "batch kernel", &candidates, &results)?;
@@ -1420,7 +1419,7 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
             &ka.filter,
             &ka.matchers,
             ka.series_selection,
-        );
+        )?;
 
         let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
         let batch = match ka.max_work_points {
@@ -1759,7 +1758,7 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
         let series_ids: Vec<i64> = candidates.iter().map(|(series_id, _)| *series_id).collect();
         let batch = shared
             .engine
@@ -1914,7 +1913,7 @@ unsafe impl VTabCursor for AggregateFrameCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let series_ids = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers);
+        let series_ids = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers)?;
         let batch = shared
             .engine
             .query_aggregate_summary_batch_by_id(&series_ids, start, stop)
@@ -2059,7 +2058,7 @@ unsafe impl VTabCursor for LatestCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
         let series_ids: Vec<i64> = candidates.iter().map(|(series_id, _)| *series_id).collect();
         let batch = match slots[5] {
             Some(slot) => shared.engine.query_latest_batch_by_id_limited(
@@ -2211,7 +2210,7 @@ unsafe impl VTabCursor for LatestFrameCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let series_ids = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers);
+        let series_ids = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers)?;
         let batch = match slots[5] {
             Some(slot) => shared.engine.query_latest_batch_by_id_limited(
                 &series_ids,
@@ -2370,7 +2369,7 @@ unsafe impl VTabCursor for RawCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
 
         let mut rows = Vec::new();
         for (sid, labels) in candidates {
@@ -2519,7 +2518,7 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection);
+        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
 
         let mut rows = Vec::new();
         if let Some(capacity) = capacity {
@@ -2704,16 +2703,7 @@ unsafe impl VTabCursor for RawFrameCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let series_ids: Vec<i64> = {
-            let reg = shared.engine.series_read();
-            reg.find_series(&metric, &eq)
-                .into_iter()
-                .filter(|sid| {
-                    reg.info_for(*sid)
-                        .is_some_and(|info| matchers_pass(&info.labels, &matchers))
-                })
-                .collect()
-        };
+        let series_ids: Vec<i64> = metric_candidate_ids(&shared.engine, &metric, &eq, &matchers)?;
 
         let batch = match max_work_points {
             Some(limit) => {
@@ -3160,7 +3150,7 @@ unsafe impl VTabCursor for RollupBatchCursor<'_> {
             &ka.filter,
             &ka.matchers,
             ka.series_selection,
-        );
+        )?;
         let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
         let batch = shared
             .engine
@@ -4362,12 +4352,22 @@ impl SeriesCursor<'_> {
     /// Sort the selected ids into the catalog's `(metric_name, series_id)`
     /// order and load the first row. Sorting reads registry names under a
     /// short read lock; labels are never cloned for ordering.
-    fn finish_filter(&mut self, shared: &Arc<SharedEngine<Engine>>, mut ids: Vec<i64>) {
+    fn finish_filter(
+        &mut self,
+        shared: &Arc<SharedEngine<Engine>>,
+        mut ids: Vec<i64>,
+    ) -> Result<()> {
         {
-            let reg = shared.engine.series_read();
+            let names: HashMap<i64, String> = shared
+                .engine
+                .series_infos(&ids)
+                .map_err(module_err)?
+                .into_iter()
+                .map(|(id, info)| (id, info.metric_name))
+                .collect();
             ids.sort_by(|a, b| {
-                let a_name = reg.info_for(*a).map(|info| info.metric_name.as_str());
-                let b_name = reg.info_for(*b).map(|info| info.metric_name.as_str());
+                let a_name = names.get(a).map(String::as_str);
+                let b_name = names.get(b).map(String::as_str);
                 (a_name, *a).cmp(&(b_name, *b))
             });
         }
@@ -4375,6 +4375,7 @@ impl SeriesCursor<'_> {
         self.ids = ids;
         self.pos = 0;
         self.load_current();
+        Ok(())
     }
 
     fn load_current(&mut self) {
@@ -4453,27 +4454,16 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
             .transpose()?;
         if max_work.is_some() || max_bytes.is_some() {
             let ids = {
-                let registry = shared.engine.series_read();
-                let candidates: Box<dyn Iterator<Item = _> + '_> = match selection {
-                    SeriesSelection::Empty => Box::new(std::iter::empty()),
-                    SeriesSelection::Id(id) => Box::new(
-                        registry
-                            .info_for(id)
-                            .into_iter()
-                            .map(move |info| (id, info)),
-                    ),
-                    SeriesSelection::All => registry.iter_series(metric.as_deref()),
-                };
                 let mut ids = Vec::new();
                 let mut work = 0_u64;
                 let mut bytes = 0_u64;
-                for (id, info) in candidates {
+                let mut step = |id: i64,
+                                info: &timeless_core::SeriesInfo|
+                 -> std::result::Result<(), String> {
                     work = work.saturating_add(1);
                     if let Some(limit) = max_work {
                         if work > limit {
-                            return Err(module_err(format!(
-                                "catalog work point limit {limit} exceeded"
-                            )));
+                            return Err(format!("catalog work point limit {limit} exceeded"));
                         }
                     }
                     if metric
@@ -4484,7 +4474,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                             .all(|(key, value)| info.labels.get(key) == Some(value))
                         || !matchers_pass(&info.labels, &matchers)
                     {
-                        continue;
+                        return Ok(());
                     }
                     bytes = info.labels.iter().fold(
                         bytes.saturating_add(info.metric_name.len() as u64),
@@ -4496,22 +4486,37 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                     );
                     if let Some(limit) = max_bytes {
                         if bytes > limit {
-                            return Err(module_err(format!("catalog byte limit {limit} exceeded")));
+                            return Err(format!("catalog byte limit {limit} exceeded"));
                         }
                     }
                     ids.push(id);
+                    Ok(())
+                };
+                match selection {
+                    SeriesSelection::Empty => {}
+                    SeriesSelection::Id(id) => {
+                        if let Some(info) = shared.engine.series_info(id).map_err(module_err)? {
+                            step(id, &info).map_err(module_err)?;
+                        }
+                    }
+                    SeriesSelection::All => shared
+                        .engine
+                        .visit_series(metric.as_deref(), &mut |id, info| {
+                            step(id, info)?;
+                            Ok(std::ops::ControlFlow::Continue(()))
+                        })
+                        .map_err(module_err)?,
                 }
                 ids
             };
-            self.finish_filter(&shared, ids);
-            return Ok(());
+            return self.finish_filter(&shared, ids);
         }
         let ids = match (metric, selection) {
             (_, SeriesSelection::Empty) => Vec::new(),
             (metric, SeriesSelection::Id(series_id)) => {
                 let matches = {
-                    let reg = shared.engine.series_read();
-                    reg.info_for(series_id).is_some_and(|info| {
+                    let info = shared.engine.series_info(series_id).map_err(module_err)?;
+                    info.is_some_and(|info| {
                         metric
                             .as_deref()
                             .is_none_or(|metric| info.metric_name == metric)
@@ -4528,24 +4533,21 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 }
             }
             (Some(metric), SeriesSelection::All) => {
-                let reg = shared.engine.series_read();
-                reg.find_series(&metric, &eq)
-                    .into_iter()
-                    .filter(|series_id| {
-                        reg.info_for(*series_id)
-                            .is_some_and(|info| matchers_pass(&info.labels, &matchers))
-                    })
-                    .collect()
+                metric_candidate_ids(&shared.engine, &metric, &eq, &matchers)?
             }
             (None, SeriesSelection::All) => {
-                let reg = shared.engine.series_read();
-                reg.iter_series(None)
-                    .map(|(series_id, _)| series_id)
-                    .collect()
+                let mut ids = Vec::new();
+                shared
+                    .engine
+                    .visit_series(None, &mut |series_id, _| {
+                        ids.push(series_id);
+                        Ok(std::ops::ControlFlow::Continue(()))
+                    })
+                    .map_err(module_err)?;
+                ids
             }
         };
-        self.finish_filter(&shared, ids);
-        Ok(())
+        self.finish_filter(&shared, ids)
     }
 
     fn next(&mut self) -> Result<()> {
@@ -4713,23 +4715,24 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
         // over every series: at 600k series the catalog stream it replaces
         // took seconds per discovery request.
         self.rows = match (metric, filter_text.as_deref()) {
-            (None, _) => shared.engine.series_read().all_label_values(&key),
-            (Some(metric), None | Some("")) => {
-                shared.engine.series_read().label_values(&metric, &key)
-            }
+            (None, _) => shared.engine.label_values(None, &key).map_err(module_err)?,
+            (Some(metric), None | Some("")) => shared
+                .engine
+                .label_values(Some(&metric), &key)
+                .map_err(module_err)?,
             (Some(metric), Some(text)) => {
                 let (eq, matchers) = compile_filter(M, text)?;
-                let reg = shared.engine.series_read();
                 let mut values = HashSet::new();
-                for series_id in reg.find_series(&metric, &eq) {
-                    let Some(info) = reg.info_for(series_id) else {
-                        continue;
-                    };
-                    if matchers_pass(&info.labels, &matchers) {
+                for (_, labels) in shared
+                    .engine
+                    .select_series(&metric, &eq)
+                    .map_err(module_err)?
+                {
+                    if matchers_pass(&labels, &matchers) {
                         let value = if key == "__name__" {
-                            Some(&info.metric_name)
+                            Some(&metric)
                         } else {
-                            info.labels.get(&key)
+                            labels.get(&key)
                         };
                         if let Some(value) = value {
                             values.insert(value.clone());
@@ -4853,11 +4856,10 @@ unsafe impl VTabCursor for LabelNamesCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let reg = shared.engine.series_read();
-        self.rows = match metric {
-            None => reg.all_label_names(),
-            Some(metric) => reg.label_names_for(&metric),
-        };
+        self.rows = shared
+            .engine
+            .label_names(metric.as_deref())
+            .map_err(module_err)?;
         self.pos = 0;
         Ok(())
     }
