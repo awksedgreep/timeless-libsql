@@ -324,6 +324,17 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not keep a label index".to_string())
     }
 
+    /// As [`Self::find_series_ids`], further requiring, for each entry of
+    /// `any_of`, that the series carry that key with one of its values.
+    fn find_series_ids_any(
+        &self,
+        _metric: Option<&str>,
+        _eq: &[(String, String)],
+        _any_of: &[(String, Vec<String>)],
+    ) -> Result<Vec<i64>, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
     /// The catalog rows of `ids`, in id order; absent ids are skipped.
     fn series_by_ids(&self, _ids: &[i64]) -> Result<Vec<StoredSeries>, String> {
         Err("store does not keep a label index".to_string())

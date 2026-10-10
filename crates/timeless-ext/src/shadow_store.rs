@@ -1338,6 +1338,16 @@ impl ChunkStore for ShadowTableStore {
         self.label_index.find_series(&conn, metric, eq)
     }
 
+    fn find_series_ids_any(
+        &self,
+        metric: Option<&str>,
+        eq: &[(String, String)],
+        any_of: &[(String, Vec<String>)],
+    ) -> Result<Vec<i64>, String> {
+        let conn = Self::conn()?;
+        self.label_index.find_series_any(&conn, metric, eq, any_of)
+    }
+
     fn series_by_ids(&self, ids: &[i64]) -> Result<Vec<StoredSeries>, String> {
         let conn = Self::conn()?;
         Ok(self

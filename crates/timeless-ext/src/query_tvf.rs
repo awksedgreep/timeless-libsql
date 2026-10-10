@@ -1032,6 +1032,45 @@ fn decode_series_selection(
     }
 }
 
+/// The most values a regex matcher may resolve to and still select through
+/// the label index; a broader one filters rows instead.
+const MAX_INDEXED_ALTERNATIVES: usize = 512;
+
+/// For a disk-resident catalog (#132), turn each regex matcher that cannot
+/// match the empty string into the values of its key it accepts, so the
+/// selection reads those postings instead of every series of the metric.
+/// An absent label is the empty string, so a regex that matches "" also
+/// matches series without the label and cannot be narrowed this way; nor
+/// can a negative matcher. The result is only a hint: every matcher is
+/// still applied to the rows.
+fn indexed_alternatives(
+    engine: &Engine,
+    matchers: &[(String, LabelMatcher)],
+) -> Result<Vec<(String, Vec<String>)>> {
+    let mut out = Vec::new();
+    if !engine.series_on_disk() {
+        return Ok(out);
+    }
+    for (key, matcher) in matchers {
+        let LabelMatcher::Re(regex) = matcher else {
+            continue;
+        };
+        if regex.is_match("") {
+            continue;
+        }
+        let accepted: Vec<String> = engine
+            .label_values(None, key)
+            .map_err(module_err)?
+            .into_iter()
+            .filter(|value| regex.is_match(value))
+            .collect();
+        if accepted.len() <= MAX_INDEXED_ALTERNATIVES {
+            out.push((key.clone(), accepted));
+        }
+    }
+    Ok(out)
+}
+
 /// Select catalog candidates without enumerating a metric when SQLite has
 /// supplied an exact durable series handle. The ID predicate intersects with
 /// metric and matcher arguments; it never bypasses their public semantics.
@@ -1056,7 +1095,7 @@ fn metric_candidates(
             .map(|info| vec![(sid, info.labels)])
             .unwrap_or_default(),
         SeriesSelection::All => engine
-            .select_series(metric, eq)
+            .select_series_hinted(metric, eq, &indexed_alternatives(engine, matchers)?)
             .map_err(module_err)?
             .into_iter()
             .filter(|(_, labels)| matchers_pass(labels, matchers))
@@ -1075,7 +1114,7 @@ fn metric_candidate_ids(
         return engine.select_series_ids(metric, eq).map_err(module_err);
     }
     Ok(engine
-        .select_series(metric, eq)
+        .select_series_hinted(metric, eq, &indexed_alternatives(engine, matchers)?)
         .map_err(module_err)?
         .into_iter()
         .filter(|(_, labels)| matchers_pass(labels, matchers))
@@ -4493,6 +4532,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                 let mut ids = Vec::new();
                 let mut work = 0_u64;
                 let mut bytes = 0_u64;
+                let alternatives = indexed_alternatives(&shared.engine, &matchers)?;
                 // What a selective read already fetched is kept for its
                 // rows; a large one streams by id instead.
                 let mut kept: Option<Vec<(i64, timeless_core::SeriesInfo)>> = Some(Vec::new());
@@ -4552,7 +4592,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                     SeriesSelection::All => match metric.as_deref() {
                         // No equality matcher: nothing to select by, so the
                         // metric's series are visited as they are.
-                        Some(name) if eq.is_empty() => shared
+                        Some(name) if eq.is_empty() && alternatives.is_empty() => shared
                             .engine
                             .visit_series(Some(name), &mut |id, info| {
                                 step(id, info)?;
@@ -4560,8 +4600,10 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
                             })
                             .map_err(module_err)?,
                         Some(name) => {
-                            for (id, labels) in
-                                shared.engine.select_series(name, &eq).map_err(module_err)?
+                            for (id, labels) in shared
+                                .engine
+                                .select_series_hinted(name, &eq, &alternatives)
+                                .map_err(module_err)?
                             {
                                 let info = timeless_core::SeriesInfo {
                                     metric_name: name.to_owned(),

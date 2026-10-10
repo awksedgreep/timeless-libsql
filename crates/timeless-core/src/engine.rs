@@ -1453,6 +1453,34 @@ impl Engine {
             .collect())
     }
 
+    /// As [`Self::select_series`], with a hint: for each entry of `any_of`
+    /// the series must carry that key with one of its values. A disk
+    /// catalog narrows its candidates by it; a memory catalog ignores it,
+    /// so the caller still applies the matcher it came from to every row.
+    pub fn select_series_hinted(
+        &self,
+        metric: &str,
+        eq: &Labels,
+        any_of: &[(String, Vec<String>)],
+    ) -> EngineResult<Vec<(i64, Labels)>> {
+        if self.disk_series.is_none() || any_of.is_empty() {
+            return self.select_series(metric, eq);
+        }
+        let pairs: Vec<(String, String)> = eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let ids = self
+            .store
+            .find_series_ids_any(Some(metric), &pairs, any_of)
+            .map_err(|err| format!("failed to select series: {err}"))?;
+        Ok(self
+            .series_infos(&ids)?
+            .into_iter()
+            .filter(|(_, info)| {
+                info.metric_name == metric && eq.iter().all(|(k, v)| info.labels.get(k) == Some(v))
+            })
+            .map(|(id, info)| (id, info.labels))
+            .collect())
+    }
+
     /// Ids of the series of `metric` carrying every label in `eq`.
     pub fn select_series_ids(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<i64>> {
         if self.disk_series.is_some() {

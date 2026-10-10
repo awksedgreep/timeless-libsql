@@ -2566,6 +2566,69 @@ mod disk_series_tests {
         }
     }
 
+    /// A regex matcher that cannot match the empty string selects through
+    /// the label index; one that can, and every negative matcher, must not
+    /// be narrowed, because an absent label is the empty string. Either way
+    /// the disk catalog answers what the memory catalog answers.
+    #[test]
+    fn regex_matchers_answer_the_same_narrowed_or_not() {
+        let answers = |index_cache: &str| {
+            let db = Connection::open_in_memory().unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE m USING timeless_metrics({index_cache});"
+            ))
+            .unwrap();
+            fleet(&db);
+            // One series carries a label the others lack.
+            write(
+                &db,
+                "cpu",
+                r#"{"host":"e","env":"prod","zone":"east"}"#,
+                1_000,
+            );
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            let select = |filter: &str, bounded: bool| {
+                let limits = if bounded { ", 1000, 100000" } else { "" };
+                strings(
+                    &db,
+                    &format!(
+                        "SELECT labels FROM timeless_series('m', 'cpu', '{filter}'{limits}) ORDER BY labels"
+                    ),
+                )
+            };
+            let mut rows = Vec::new();
+            for bounded in [false, true] {
+                for filter in [
+                    r#"{"zone":{"re":"e.*"}}"#,               // narrowed: 1 series
+                    r#"{"zone":{"re":"|east"}}"#,             // matches "": all 4
+                    r#"{"host":{"re":"[bc]"}}"#,              // narrowed: 2
+                    r#"{"env":"prod","host":{"re":"[be]"}}"#, // narrowed with an equality
+                    r#"{"host":{"re":"nothing"}}"#,           // narrowed to none
+                    r#"{"host":{"nre":"a|b"}}"#,              // negative: not narrowed
+                    r#"{"zone":{"neq":"east"}}"#,             // negative, absent label
+                ] {
+                    rows.push(select(filter, bounded));
+                }
+            }
+            rows
+        };
+        let memory = answers("");
+        let disk = answers("index_cache='1MB'");
+        assert_eq!(disk, memory);
+        assert_eq!(memory[0], [r#"{"env":"prod","host":"e","zone":"east"}"#]);
+        assert_eq!(
+            memory[1].len(),
+            4,
+            "a regex accepting \"\" keeps series without the label"
+        );
+        assert_eq!(memory[2].len(), 2);
+        assert_eq!(memory[3].len(), 2);
+        assert!(memory[4].is_empty());
+        assert_eq!(memory[5].len(), 2);
+        assert_eq!(memory[6].len(), 3);
+    }
+
     #[test]
     fn index_cache_rejects_what_is_not_a_size() {
         let db = Connection::open_in_memory().unwrap();

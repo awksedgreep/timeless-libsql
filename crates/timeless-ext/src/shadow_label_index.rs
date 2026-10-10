@@ -597,6 +597,19 @@ impl LabelIndex {
         metric: Option<&str>,
         eq: &[(String, String)],
     ) -> Result<Vec<i64>, String> {
+        self.find_series_any(conn, metric, eq, &[])
+    }
+
+    /// As [`Self::find_series`], further requiring, for each entry of
+    /// `any_of`, one of that key's listed values. A regex matcher that
+    /// cannot match the empty string arrives here as the values it accepts.
+    pub(crate) fn find_series_any(
+        &self,
+        conn: &Connection,
+        metric: Option<&str>,
+        eq: &[(String, String)],
+        any_of: &[(String, Vec<String>)],
+    ) -> Result<Vec<i64>, String> {
         let mut required: Vec<(i64, i64)> = Vec::with_capacity(eq.len() + 1);
         for (key, value) in metric
             .map(|m| (NAME_KEY, m))
@@ -608,35 +621,59 @@ impl LabelIndex {
                 None => return Ok(Vec::new()),
             }
         }
+        // Each alternative set becomes the ids of its labels; a set none of
+        // whose values exists selects nothing.
+        let mut alternatives: Vec<Vec<i64>> = Vec::with_capacity(any_of.len());
+        for (key, values) in any_of {
+            let mut ids = Vec::with_capacity(values.len());
+            for value in values {
+                if let Some((id, _)) = self.label(conn, key, value)? {
+                    ids.push(id);
+                }
+            }
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            alternatives.push(ids);
+        }
         if required.is_empty() {
             return Err("find_series needs a metric or at least one label".into());
         }
         required.sort_unstable();
         let (_, driver) = required[0];
-        if required.len() == 1 {
+        if required.len() == 1 && alternatives.is_empty() {
             return self.posting(conn, driver);
         }
         let mut sql = format!(
             "SELECT a.series_id FROM {} a WHERE a.label_id = ?",
             self.postings
         );
-        for _ in &required[1..] {
+        let mut binds: Vec<Value> = vec![Value::Integer(driver)];
+        for (_, id) in &required[1..] {
             sql.push_str(&format!(
                 " AND EXISTS (SELECT 1 FROM {} b WHERE b.label_id = ? AND b.series_id = a.series_id)",
                 self.postings
             ));
+            binds.push(Value::Integer(*id));
+        }
+        for ids in &alternatives {
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM {} c WHERE c.series_id = a.series_id AND c.label_id IN ({}))",
+                self.postings,
+                vec!["?"; ids.len()].join(",")
+            ));
+            binds.extend(ids.iter().map(|id| Value::Integer(*id)));
         }
         sql.push_str(" ORDER BY a.series_id");
-        let binds: Vec<Value> = std::iter::once(driver)
-            .chain(required[1..].iter().map(|(_, id)| *id))
-            .map(Value::Integer)
-            .collect();
-        conn.prepare_cached(&sql)
-            .map_err(|e| format!("prepare series selection: {e}"))?
+        let mut stmt = conn
+            .prepare_cached(&sql)
+            .map_err(|e| format!("prepare series selection: {e}"))?;
+        let ids = stmt
             .query_map(params_from_iter(binds), |r| r.get(0))
             .map_err(|e| format!("series selection: {e}"))?
             .collect::<Result<_, _>>()
-            .map_err(|e| format!("series selection: {e}"))
+            .map_err(|e| format!("series selection: {e}"))?;
+        Ok(ids)
     }
 
     /// Distinct metric names, sorted.
