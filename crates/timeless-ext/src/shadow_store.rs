@@ -415,6 +415,9 @@ impl ShadowTableStore {
         }
     }
 
+    /// Up to this many series, chunk metadata is probed a series at a time.
+    const PROBE_SERIES_AT_MOST: usize = 256;
+
     /// Ids as a JSON array, the one bound parameter of a cached statement
     /// that takes any number of them.
     fn id_list(ids: &[i64]) -> String {
@@ -1360,6 +1363,21 @@ impl ChunkStore for ShadowTableStore {
                 &self.chunk_metas_one_sql,
                 params![series_id, t_end, t_start],
             );
+        }
+        // A selective read asks for a handful of series: one probe each of
+        // the cached single-series statement beats setting up the join.
+        // The ids arrive ascending and distinct, so the results are already
+        // in series order.
+        if series_ids.len() <= Self::PROBE_SERIES_AT_MOST {
+            let mut chunks = Vec::new();
+            for series_id in series_ids {
+                chunks.extend(Self::scan_chunk_rows(
+                    &conn,
+                    &self.chunk_metas_one_sql,
+                    params![series_id, t_end, t_start],
+                )?);
+            }
+            return Ok(chunks);
         }
         Self::scan_chunk_rows(
             &conn,

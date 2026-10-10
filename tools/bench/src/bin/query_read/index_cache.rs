@@ -324,6 +324,14 @@ pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
     let rss_start = status_kib("VmRSS:");
     {
         let conn = open_with_ext(path, ext);
+        // SQLite's own page cache: its default (2 MB) unless
+        // TIMELESS_BENCH_PAGE_CACHE_KIB says otherwise. A disk catalog
+        // reads through it, so it is part of what a profile costs.
+        if let Ok(kib) = std::env::var("TIMELESS_BENCH_PAGE_CACHE_KIB") {
+            conn.execute_batch(&format!("PRAGMA cache_size = -{kib};"))
+                .unwrap();
+            println!("{series_count},config,page_cache_kib,{kib},,");
+        }
         // #132: TIMELESS_BENCH_INDEX_CACHE selects the catalog's home
         // ('unbounded' or unset: memory; a size such as '128MB' or '0':
         // disk behind a resolve cache of that budget).
@@ -430,6 +438,10 @@ pub(super) fn open_only(ext: &str, path: &str) {
     let before = status_kib("VmRSS:");
     let started = Instant::now();
     let conn = open_with_ext(path, ext);
+    if let Ok(kib) = std::env::var("TIMELESS_BENCH_PAGE_CACHE_KIB") {
+        conn.execute_batch(&format!("PRAGMA cache_size = -{kib};"))
+            .unwrap();
+    }
     let names = count(
         &conn,
         "SELECT value FROM timeless_label_values('metrics', NULL, '__name__')",
