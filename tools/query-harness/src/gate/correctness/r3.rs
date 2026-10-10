@@ -160,6 +160,9 @@ fn complete_lifecycle(extension: &Path, temporary: &Path) -> Result<()> {
         ("table".into(), "metrics_chunks".into()),
         ("table".into(), "metrics_meta".into()),
         ("table".into(), "metrics_series".into()),
+        // The series label index (#132).
+        ("table".into(), "metrics_labels".into()),
+        ("table".into(), "metrics_postings".into()),
         ("index".into(), "metrics_chunks_series_ts".into()),
         ("table".into(), "logs".into()),
         ("table".into(), "logs_blocks".into()),

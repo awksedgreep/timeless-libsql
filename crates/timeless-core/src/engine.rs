@@ -2109,7 +2109,25 @@ impl Engine {
             None
         };
 
-        let registry = if disk_budget.is_some() {
+        // A disk catalog is trusted only if it identifies every persisted
+        // chunk, the same condition the memory catalog is held to below.
+        // One that does not (empty, or a store whose series still live in
+        // a legacy registry) goes through that path, which migrates the
+        // legacy registry or refuses to open, and never silently adopts
+        // chunks whose series it cannot name.
+        let disk_catalog_complete = disk_budget.is_some() && {
+            let known: HashSet<i64> = store
+                .series_ids()
+                .map_err(|err| format!("failed to list series catalog: {err}"))?
+                .into_iter()
+                .collect();
+            !known.is_empty()
+                && stored_chunks
+                    .iter()
+                    .all(|chunk| known.contains(&chunk.series_id))
+        };
+
+        let registry = if disk_catalog_complete {
             SeriesRegistry::new()
         } else if authoritative_series {
             let mut rows = store
@@ -2173,9 +2191,20 @@ impl Engine {
                 None => SeriesRegistry::new(),
             }
         };
-        if disk_budget.is_none() {
+        if !disk_catalog_complete {
             Self::validate_chunk_series(&registry, &stored_chunks)?;
         }
+        // The catalog was loaded, and perhaps migrated, the memory way and
+        // is sound; a disk-mode table now reads it from disk, with its
+        // label index brought up to whatever the migration added.
+        let registry = if disk_budget.is_some() && !disk_catalog_complete {
+            store
+                .ensure_label_index()
+                .map_err(|err| format!("failed to index the series catalog: {err}"))?;
+            SeriesRegistry::new()
+        } else {
+            registry
+        };
         let rollup_index = Self::load_rollup_index(store.as_ref())?;
 
         let engine = Engine {
