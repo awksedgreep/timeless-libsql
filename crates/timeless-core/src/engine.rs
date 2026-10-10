@@ -145,6 +145,9 @@ struct PartitionKey {
 /// the chunk-index shadowing fix (2026-07-22, see git history).)
 type ChunkKey = (PartitionKey, i64, u64);
 
+/// A series' raw-chunk totals: `(min_ts, max_ts, points, chunks)`.
+type ChunkStats = (i64, i64, u64, usize);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum MetricsCompactionKind {
     RawCompression,
@@ -1354,6 +1357,154 @@ impl Engine {
 
     pub fn series_read(&self) -> RwLockReadGuard<'_, SeriesRegistry> {
         self.series.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // ── Chunk index reads (#132 phase 2) ─────────────────────────────
+    //
+    // Readers ask these for chunk metadata, never the index map directly,
+    // so the index can be held in memory or read from the store's chunk
+    // rows behind them. Results are owned and in the index's order for a
+    // series: ascending (min_ts, insertion).
+
+    /// Metadata of `series_id`'s raw chunks overlapping `[t_start, t_end]`.
+    fn chunk_metas(
+        &self,
+        series_id: i64,
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<Vec<ChunkMeta>> {
+        let pk = PartitionKey { series_id };
+        let index = self.index_read();
+        Ok(index
+            .range((pk, i64::MIN, u64::MIN)..)
+            .take_while(|((key, _, _), _)| key == &pk)
+            .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
+            .map(|(_, meta)| meta.clone())
+            .collect())
+    }
+
+    /// [`Self::chunk_metas`] for each of `series_ids`, positionally
+    /// (duplicate ids included).
+    ///
+    /// In memory, dense selections are swept sequentially, seeking past
+    /// long gaps so a sparse selection does not walk unrelated series'
+    /// chunk histories. A small, fixed allowance keeps short gaps cheaper
+    /// than another B-tree seek without making work proportional to the
+    /// whole span.
+    fn chunk_metas_batch(
+        &self,
+        series_ids: &[i64],
+        t_start: i64,
+        t_end: i64,
+    ) -> EngineResult<Vec<Vec<ChunkMeta>>> {
+        const MAX_GAP_SCAN: usize = 8;
+        let mut order: Vec<usize> = (0..series_ids.len()).collect();
+        order.sort_unstable_by_key(|&i| series_ids[i]);
+        let mut matching: Vec<Vec<ChunkMeta>> = Vec::with_capacity(series_ids.len());
+        matching.resize_with(series_ids.len(), Vec::new);
+        let index = self.index_read();
+        if let Some(&first) = order.first() {
+            let first_pk = PartitionKey {
+                series_id: series_ids[first],
+            };
+            let mut range = index.range((first_pk, i64::MIN, u64::MIN)..);
+            let mut o = 0;
+            let mut gap_scanned = 0;
+            while let Some(((key, _, _), meta)) = range.next() {
+                while o < order.len() && series_ids[order[o]] < key.series_id {
+                    o += 1;
+                }
+                if o >= order.len() {
+                    break;
+                }
+                if key.series_id < series_ids[order[o]] {
+                    gap_scanned += 1;
+                    if gap_scanned == MAX_GAP_SCAN {
+                        let next_pk = PartitionKey {
+                            series_id: series_ids[order[o]],
+                        };
+                        range = index.range((next_pk, i64::MIN, u64::MIN)..);
+                        gap_scanned = 0;
+                    }
+                    continue;
+                }
+                gap_scanned = 0;
+                let mut p = o;
+                while p < order.len() && series_ids[order[p]] == key.series_id {
+                    if meta.min_ts <= t_end && meta.max_ts >= t_start {
+                        matching[order[p]].push(meta.clone());
+                    }
+                    p += 1;
+                }
+            }
+        }
+        Ok(matching)
+    }
+
+    /// Per-series totals over raw chunks: `(min_ts, max_ts, points, chunks)`
+    /// for each of `series_ids` that has any.
+    fn chunk_stats(&self, series_ids: &[i64]) -> HashMap<i64, ChunkStats> {
+        let index = self.index_read();
+        let mut stats: HashMap<i64, ChunkStats> = HashMap::new();
+        for &series_id in series_ids {
+            let pk = PartitionKey { series_id };
+            for (_, meta) in index
+                .range((pk, i64::MIN, u64::MIN)..)
+                .take_while(|((key, _, _), _)| key == &pk)
+            {
+                Self::fold_chunk_stats(stats.entry(series_id), meta);
+            }
+        }
+        stats
+    }
+
+    /// [`Self::chunk_stats`] for every series that has a raw chunk.
+    fn chunk_stats_all(&self) -> HashMap<i64, ChunkStats> {
+        let index = self.index_read();
+        let mut stats: HashMap<i64, ChunkStats> = HashMap::new();
+        for ((pk, _, _), meta) in index.iter() {
+            Self::fold_chunk_stats(stats.entry(pk.series_id), meta);
+        }
+        stats
+    }
+
+    fn fold_chunk_stats(
+        entry: std::collections::hash_map::Entry<'_, i64, ChunkStats>,
+        meta: &ChunkMeta,
+    ) {
+        let stats = entry.or_insert((meta.min_ts, meta.max_ts, 0, 0));
+        stats.0 = stats.0.min(meta.min_ts);
+        stats.1 = stats.1.max(meta.max_ts);
+        stats.2 += meta.point_count as u64;
+        stats.3 += 1;
+    }
+
+    /// Raw chunks in the store: how many, their points, and the oldest and
+    /// newest timestamps they hold.
+    fn chunk_totals(&self) -> (usize, u64, Option<i64>, Option<i64>) {
+        let index = self.index_read();
+        let mut points = 0u64;
+        let mut oldest: Option<i64> = None;
+        let mut newest: Option<i64> = None;
+        for meta in index.values() {
+            points += meta.point_count as u64;
+            oldest = Some(oldest.map_or(meta.min_ts, |ts| ts.min(meta.min_ts)));
+            newest = Some(newest.map_or(meta.max_ts, |ts| ts.max(meta.max_ts)));
+        }
+        (index.len(), points, oldest, newest)
+    }
+
+    /// The newest timestamp any raw chunk holds.
+    fn chunk_high_water(&self) -> Option<i64> {
+        self.index_read().values().map(|meta| meta.max_ts).max()
+    }
+
+    /// Ids of the series that have a raw chunk, ascending.
+    fn chunk_series_ids(&self) -> Vec<i64> {
+        let index = self.index_read();
+        let mut ids: Vec<i64> = index.keys().map(|(pk, _, _)| pk.series_id).collect();
+        ids.dedup();
+        ids
     }
 
     // ── Series catalog reads (#132) ──────────────────────────────────
@@ -4093,15 +4244,7 @@ impl Engine {
             return Ok(Vec::new());
         }
         let pk = PartitionKey { series_id };
-        let matching: Vec<ChunkMeta> = {
-            let index = self.index_read();
-            index
-                .range((pk, i64::MIN, u64::MIN)..)
-                .take_while(|((key, _, _), _)| key == &pk)
-                .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-                .map(|(_, meta)| meta.clone())
-                .collect()
-        };
+        let matching: Vec<ChunkMeta> = self.chunk_metas(pk.series_id, t_start, t_end)?;
         let mut out = Vec::new();
         for meta in &matching {
             for point in self.read_chunk_data(meta, t_start, t_end)? {
@@ -4168,55 +4311,7 @@ impl Engine {
         }
 
         let _transition = self.transition_read();
-        // Sweep dense selections sequentially, but seek past long gaps so
-        // sparse selectors do not walk unrelated series' chunk histories.
-        // A small, fixed allowance keeps short gaps cheaper than another
-        // B-tree seek without making work proportional to the whole span.
-        // Output order follows the input (including duplicate ids), keeping
-        // downstream loc/payload alignment and work accounting unchanged.
-        const MAX_GAP_SCAN: usize = 8;
-        let mut order: Vec<usize> = (0..series_ids.len()).collect();
-        order.sort_unstable_by_key(|&i| series_ids[i]);
-        let mut matching: Vec<Vec<ChunkMeta>> = Vec::with_capacity(series_ids.len());
-        matching.resize_with(series_ids.len(), Vec::new);
-        {
-            let index = self.index_read();
-            if let Some(&first) = order.first() {
-                let first_pk = PartitionKey {
-                    series_id: series_ids[first],
-                };
-                let mut range = index.range((first_pk, i64::MIN, u64::MIN)..);
-                let mut o = 0;
-                let mut gap_scanned = 0;
-                while let Some(((key, _, _), meta)) = range.next() {
-                    while o < order.len() && series_ids[order[o]] < key.series_id {
-                        o += 1;
-                    }
-                    if o >= order.len() {
-                        break;
-                    }
-                    if key.series_id < series_ids[order[o]] {
-                        gap_scanned += 1;
-                        if gap_scanned == MAX_GAP_SCAN {
-                            let next_pk = PartitionKey {
-                                series_id: series_ids[order[o]],
-                            };
-                            range = index.range((next_pk, i64::MIN, u64::MIN)..);
-                            gap_scanned = 0;
-                        }
-                        continue;
-                    }
-                    gap_scanned = 0;
-                    let mut p = o;
-                    while p < order.len() && series_ids[order[p]] == key.series_id {
-                        if meta.min_ts <= t_end && meta.max_ts >= t_start {
-                            matching[order[p]].push(meta.clone());
-                        }
-                        p += 1;
-                    }
-                }
-            }
-        }
+        let matching = self.chunk_metas_batch(series_ids, t_start, t_end)?;
         let locs: Vec<ChunkLoc> = matching
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
@@ -4370,15 +4465,7 @@ impl Engine {
     ) -> EngineResult<Vec<(i64, f64)>> {
         let pk = PartitionKey { series_id };
 
-        let matching: Vec<ChunkMeta> = {
-            let index = self.index_read();
-            index
-                .range((pk, i64::MIN, u64::MIN)..)
-                .take_while(|((k, _, _), _)| k == &pk)
-                .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-                .map(|(_, meta)| meta.clone())
-                .collect()
-        };
+        let matching: Vec<ChunkMeta> = self.chunk_metas(pk.series_id, t_start, t_end)?;
 
         // One batched store read for all chunks: N+1 single-row reads
         // (each its own connection borrow + statement prepare) become a
@@ -4474,29 +4561,20 @@ impl Engine {
         }
 
         let _transition = self.transition_read();
-        let matching: Vec<Vec<(usize, ChunkMeta)>> = {
-            let index = self.index_read();
-            series_ids
-                .iter()
-                .map(|&series_id| {
-                    let pk = PartitionKey { series_id };
-                    let mut chunks: Vec<_> = index
-                        .range((pk, i64::MIN, u64::MIN)..)
-                        .take_while(|((key, _, _), _)| key == &pk)
-                        .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-                        .enumerate()
-                        .map(|(rank, (_, meta))| (rank, meta.clone()))
-                        .collect();
-                    chunks.sort_by(|(rank_a, a), (rank_b, b)| {
-                        b.max_ts
-                            .min(t_end)
-                            .cmp(&a.max_ts.min(t_end))
-                            .then_with(|| rank_a.cmp(rank_b))
-                    });
-                    chunks
-                })
-                .collect()
-        };
+        let matching: Vec<Vec<(usize, ChunkMeta)>> = self
+            .chunk_metas_batch(series_ids, t_start, t_end)?
+            .into_iter()
+            .map(|metas| {
+                let mut chunks: Vec<_> = metas.into_iter().enumerate().collect();
+                chunks.sort_by(|(rank_a, a), (rank_b, b)| {
+                    b.max_ts
+                        .min(t_end)
+                        .cmp(&a.max_ts.min(t_end))
+                        .then_with(|| rank_a.cmp(rank_b))
+                });
+                chunks
+            })
+            .collect();
 
         // Metadata answers an unbounded latest lookup without bytes. Collect
         // only chunks whose maximum lies beyond the upper bound or whose
@@ -4633,16 +4711,11 @@ impl Engine {
         // Preserve each chunk's position in query_range_by_id's pre-sort
         // stream. We may read chunks newest-first, but this rank resolves an
         // equal-timestamp tie exactly as the stable range sort does.
-        let mut chunks: Vec<(usize, ChunkMeta)> = {
-            let index = self.index_read();
-            index
-                .range((pk, i64::MIN, u64::MIN)..)
-                .take_while(|((k, _, _), _)| k == &pk)
-                .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-                .enumerate()
-                .map(|(rank, (_, meta))| (rank, meta.clone()))
-                .collect()
-        };
+        let mut chunks: Vec<(usize, ChunkMeta)> = self
+            .chunk_metas(pk.series_id, t_start, t_end)?
+            .into_iter()
+            .enumerate()
+            .collect();
 
         // Highest possible in-range timestamp first. The stable secondary rank
         // is not required for correctness, but makes the read order deterministic.
@@ -4773,21 +4846,7 @@ impl Engine {
         t_end: i64,
     ) -> EngineResult<AggregateSummaryBatch> {
         let _transition = self.transition_read();
-        let matching: Vec<Vec<ChunkMeta>> = {
-            let index = self.index_read();
-            series_ids
-                .iter()
-                .map(|&series_id| {
-                    let pk = PartitionKey { series_id };
-                    index
-                        .range((pk, i64::MIN, u64::MIN)..)
-                        .take_while(|((key, _, _), _)| key == &pk)
-                        .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-                        .map(|(_, meta)| meta.clone())
-                        .collect()
-                })
-                .collect()
-        };
+        let matching: Vec<Vec<ChunkMeta>> = self.chunk_metas_batch(series_ids, t_start, t_end)?;
 
         let mut locs = Vec::new();
         let work: Vec<Vec<(ChunkMeta, Option<usize>)>> = matching
@@ -4900,15 +4959,7 @@ impl Engine {
         let mut global_min: Option<f64> = None;
         let mut global_max: Option<f64> = None;
 
-        let chunks: Vec<ChunkMeta> = {
-            let index = self.index_read();
-            index
-                .range((pk, i64::MIN, u64::MIN)..)
-                .take_while(|((k, _, _), _)| k == &pk)
-                .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-                .map(|(_, meta)| meta.clone())
-                .collect()
-        };
+        let chunks: Vec<ChunkMeta> = self.chunk_metas(pk.series_id, t_start, t_end)?;
 
         for meta in &chunks {
             if meta.min_ts >= t_start
@@ -5373,21 +5424,8 @@ impl Engine {
 
         let _transition = self.transition_read();
         let range_start = start.saturating_sub(window);
-        let matching: Vec<Vec<ChunkMeta>> = {
-            let index = self.index_read();
-            series_ids
-                .iter()
-                .map(|&sid| {
-                    let pk = PartitionKey { series_id: sid };
-                    index
-                        .range((pk, i64::MIN, u64::MIN)..)
-                        .take_while(|((key, _, _), _)| key == &pk)
-                        .filter(|(_, meta)| meta.min_ts <= stop && meta.max_ts >= range_start)
-                        .map(|(_, meta)| meta.clone())
-                        .collect()
-                })
-                .collect()
-        };
+        let matching: Vec<Vec<ChunkMeta>> =
+            self.chunk_metas_batch(series_ids, range_start, stop)?;
         let locs: Vec<ChunkLoc> = matching
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
@@ -5739,11 +5777,8 @@ impl Engine {
     /// reference for retention and rollup settling.
     fn raw_high_water(&self) -> Option<i64> {
         let mut high_water = i64::MIN;
-        {
-            let index = self.index_read();
-            for meta in index.values() {
-                high_water = high_water.max(meta.max_ts);
-            }
+        if let Some(newest) = self.chunk_high_water() {
+            high_water = high_water.max(newest);
         }
         for entry in self.partitions.iter() {
             if let Some(&mx) = entry.value().timestamps.iter().max() {
@@ -6215,12 +6250,7 @@ impl Engine {
 
     /// Every series with a chunk in the raw tier, in order.
     fn series_in_index(&self) -> Vec<i64> {
-        let index = self.index_read();
-        let mut ids: Vec<i64> = index.keys().map(|(pk, _, _)| pk.series_id).collect();
-        ids.dedup();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
+        self.chunk_series_ids()
     }
 
     /// Read rolled buckets for one series/tier overlapping [start, stop].
@@ -6657,10 +6687,9 @@ impl Engine {
         let _transition = self.transition_write();
         let doomed: Vec<i64> = {
             let mut journal = self.txn_guard();
-            let index = self.index_read();
             let rollups = self.rollup_read();
             let mut live: HashSet<i64> = HashSet::new();
-            live.extend(index.keys().map(|(pk, _, _)| pk.series_id));
+            live.extend(self.chunk_series_ids());
             live.extend(rollups.groups.keys().map(|group| group.series_id));
             live.extend(
                 self.partitions
@@ -7107,20 +7136,7 @@ impl Engine {
     pub fn series_overview(&self) -> Vec<SeriesOverview> {
         let _transition = self.transition_read();
 
-        let mut chunk_agg: HashMap<i64, (i64, i64, u64, usize)> = HashMap::new();
-        {
-            let index = self.index_read();
-            for ((pk, _, _), meta) in index.iter() {
-                let entry =
-                    chunk_agg
-                        .entry(pk.series_id)
-                        .or_insert((meta.min_ts, meta.max_ts, 0, 0));
-                entry.0 = entry.0.min(meta.min_ts);
-                entry.1 = entry.1.max(meta.max_ts);
-                entry.2 += meta.point_count as u64;
-                entry.3 += 1;
-            }
-        }
+        let chunk_agg = self.chunk_stats_all();
 
         let mut buf_agg: HashMap<i64, (usize, i64, i64)> = HashMap::new();
         for entry in self.partitions.iter() {
@@ -7201,23 +7217,11 @@ impl Engine {
             labels,
         } = self.series_info(series_id).ok().flatten()?;
 
-        let mut min_ts: Option<i64> = None;
-        let mut max_ts: Option<i64> = None;
-        let mut disk_points: u64 = 0;
-        let mut chunks: usize = 0;
-        {
-            let index = self.index_read();
-            let pk = PartitionKey { series_id };
-            for ((_, _, _), meta) in index
-                .range((pk, i64::MIN, u64::MIN)..)
-                .take_while(|((key, _, _), _)| key == &pk)
-            {
-                min_ts = Some(min_ts.map_or(meta.min_ts, |current: i64| current.min(meta.min_ts)));
-                max_ts = Some(max_ts.map_or(meta.max_ts, |current: i64| current.max(meta.max_ts)));
-                disk_points += meta.point_count as u64;
-                chunks += 1;
-            }
-        }
+        let stats = self.chunk_stats(&[series_id]).remove(&series_id);
+        let mut min_ts: Option<i64> = stats.map(|stats| stats.0);
+        let mut max_ts: Option<i64> = stats.map(|stats| stats.1);
+        let disk_points: u64 = stats.map_or(0, |stats| stats.2);
+        let chunks: usize = stats.map_or(0, |stats| stats.3);
 
         let buffered = self.partitions.get(&PartitionKey { series_id });
         let (buffered_count, buffer_min, buffer_max) = match buffered.as_ref() {
@@ -7266,28 +7270,8 @@ impl Engine {
             .map(|(id, info)| (id, info.metric_name, info.labels))
             .collect();
 
-        let mut chunk_agg: HashMap<i64, (i64, i64, u64, usize)> = HashMap::new();
-        {
-            let index = self.index_read();
-            for (series_id, _, _) in &candidates {
-                let pk = PartitionKey {
-                    series_id: *series_id,
-                };
-                for ((_, _, _), meta) in index
-                    .range((pk, i64::MIN, u64::MIN)..)
-                    .take_while(|((key, _, _), _)| key == &pk)
-                {
-                    let entry =
-                        chunk_agg
-                            .entry(*series_id)
-                            .or_insert((meta.min_ts, meta.max_ts, 0, 0));
-                    entry.0 = entry.0.min(meta.min_ts);
-                    entry.1 = entry.1.max(meta.max_ts);
-                    entry.2 += meta.point_count as u64;
-                    entry.3 += 1;
-                }
-            }
-        }
+        let ids: Vec<i64> = candidates.iter().map(|(id, _, _)| *id).collect();
+        let chunk_agg = self.chunk_stats(&ids);
 
         let mut out = Vec::with_capacity(candidates.len());
         for (series_id, name, labels) in candidates {
@@ -7326,8 +7310,7 @@ impl Engine {
 
     pub fn info(&self) -> EngineInfo {
         let series_count = self.series_count();
-        let index = self.index_read();
-        let chunk_count = index.len();
+        let (chunk_count, total_disk_points, mut oldest_ts, mut newest_ts) = self.chunk_totals();
         let partition_count = self.partitions.len();
         let rollup_chunk_count = self.rollup_read().len();
         let buffered_points: usize = self
@@ -7336,21 +7319,6 @@ impl Engine {
             .map(|e| e.value().timestamps.len())
             .sum();
         let buffer_memory = self.buffer_memory.load(Ordering::Relaxed);
-
-        let mut total_disk_points: u64 = 0;
-        let mut oldest_ts: Option<i64> = None;
-        let mut newest_ts: Option<i64> = None;
-        for meta in index.values() {
-            total_disk_points += meta.point_count as u64;
-            oldest_ts = match oldest_ts {
-                Some(existing) => Some(existing.min(meta.min_ts)),
-                None => Some(meta.min_ts),
-            };
-            newest_ts = match newest_ts {
-                Some(existing) => Some(existing.max(meta.max_ts)),
-                None => Some(meta.max_ts),
-            };
-        }
 
         for entry in self.partitions.iter() {
             let buf = entry.value();
