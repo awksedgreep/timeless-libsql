@@ -637,16 +637,17 @@ impl SeriesRegistry {
 
     /// Find all series_ids matching a metric name and optional label filters.
     pub fn find_series(&self, metric_name: &str, label_filter: &Labels) -> Vec<i64> {
-        let metric_ids = match self.metric_index.get(metric_name) {
-            Some(ids) => ids.clone(),
-            None => return Vec::new(),
+        // Borrowed: a selective query must not copy the metric's whole
+        // posting list (400k ids at fleet scale) to read a few of another.
+        let Some(metric_ids) = self.metric_index.get(metric_name) else {
+            return Vec::new();
         };
 
         if label_filter.is_empty() {
-            return metric_ids.into_iter().collect();
+            return metric_ids.clone();
         }
 
-        let mut smallest = &metric_ids;
+        let mut smallest = metric_ids;
 
         for (k, v) in label_filter {
             let matching = match self.label_index.get(&(k.clone(), v.clone())) {
