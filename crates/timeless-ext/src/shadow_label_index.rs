@@ -68,6 +68,28 @@ pub(crate) fn drop_ddl(database: &str, table: &str) -> String {
     format!("DROP TABLE IF EXISTS {postings};\nDROP TABLE IF EXISTS {labels};")
 }
 
+/// Parse an `index_cache` budget: a byte count with an optional `KB`, `MB`
+/// or `GB` suffix (powers of 1024, case-insensitive). `unbounded` is
+/// handled by the caller.
+pub(crate) fn parse_budget(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let upper = text.to_ascii_uppercase();
+    let (number, scale) = [
+        ("GB", 1u64 << 30),
+        ("MB", 1 << 20),
+        ("KB", 1 << 10),
+        ("B", 1),
+    ]
+    .iter()
+    .find_map(|(suffix, scale)| {
+        upper
+            .strip_suffix(suffix)
+            .map(|n| (n.trim().to_owned(), *scale))
+    })
+    .unwrap_or((upper.clone(), 1));
+    number.parse::<u64>().ok()?.checked_mul(scale)
+}
+
 /// Decode `<t>_series.canonical_labels` (count, then length-prefixed key
 /// and value, all big-endian u32).
 pub(crate) fn decode_labels(data: &[u8]) -> Result<Vec<(String, String)>, String> {
@@ -677,16 +699,19 @@ impl LabelIndex {
         metric: Option<&str>,
     ) -> Result<Vec<String>, String> {
         let Some(metric) = metric else {
-            return conn
+            let mut names: BTreeSet<String> = conn
                 .prepare_cached(&format!(
-                    "SELECT DISTINCT key FROM {} WHERE series > 0 ORDER BY key",
+                    "SELECT DISTINCT key FROM {} WHERE series > 0",
                     self.labels
                 ))
                 .map_err(|e| format!("prepare label names: {e}"))?
                 .query_map([], |r| r.get(0))
                 .map_err(|e| format!("label names: {e}"))?
                 .collect::<Result<_, _>>()
-                .map_err(|e| format!("label names: {e}"));
+                .map_err(|e| format!("label names: {e}"))?;
+            // As the in-memory registry answers: `__name__` even when empty.
+            names.insert(NAME_KEY.to_owned());
+            return Ok(names.into_iter().collect());
         };
         let Some((name_label, _)) = self.label(conn, NAME_KEY, metric)? else {
             return Ok(Vec::new());

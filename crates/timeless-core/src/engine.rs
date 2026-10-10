@@ -950,6 +950,77 @@ fn fast_series_hash_pairs(metric: &str, sorted_pairs: &[(&str, &str)]) -> u64 {
     hasher.finish()
 }
 
+/// A second identity hash, independent of [`fast_series_hash_pairs`] by
+/// its salt. Together they key the disk-mode resolve cache by 128 bits,
+/// which needs no labels to verify a hit (#132): a false hit would merge
+/// two series, and at 2^-128 per pair that is not a risk worth labels.
+fn check_series_hash_pairs(metric: &str, sorted_pairs: &[(&str, &str)]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    0x7469_6d65_6c65_7373_u64.hash(&mut hasher);
+    metric.hash(&mut hasher);
+    for &(k, v) in sorted_pairs {
+        k.hash(&mut hasher);
+        v.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn identity_key(metric: &str, sorted_pairs: &[(&str, &str)]) -> u128 {
+    (u128::from(fast_series_hash_pairs(metric, sorted_pairs)) << 64)
+        | u128::from(check_series_hash_pairs(metric, sorted_pairs))
+}
+
+fn identity_key_of(metric: &str, labels: &Labels) -> u128 {
+    let pairs: Vec<(&str, &str)> = labels
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    identity_key(metric, &pairs)
+}
+
+/// The disk-mode resolve cache (#132): 128-bit identity → series id, and
+/// nothing else, so an entry costs ~48 bytes whatever its labels. Ingest
+/// touches every series once a cycle, which defeats recency: a cache
+/// smaller than the working set evicts each entry before its reuse. So
+/// entries are admitted until the budget is full and then kept, which
+/// hits exactly the budget's share of a cycle, the best a cyclic scan
+/// allows.
+pub(crate) struct DiskResolveCache {
+    map: DashMap<u128, i64>,
+    capacity: usize,
+}
+
+impl DiskResolveCache {
+    /// Bytes a cached entry costs, key, value and map overhead.
+    const ENTRY_BYTES: u64 = 48;
+
+    fn new(budget_bytes: u64) -> Self {
+        let capacity = usize::try_from(budget_bytes / Self::ENTRY_BYTES).unwrap_or(usize::MAX);
+        DiskResolveCache {
+            map: DashMap::new(),
+            capacity,
+        }
+    }
+
+    fn get(&self, key: u128) -> Option<i64> {
+        self.map.get(&key).map(|id| *id)
+    }
+
+    fn admit(&self, key: u128, id: i64) {
+        if self.map.len() < self.capacity {
+            self.map.insert(key, id);
+        }
+    }
+
+    fn clear(&self) {
+        self.map.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
 pub struct Engine {
     /// Chunk persistence backend (filesystem today, SQLite shadow
     /// tables later). All bytes-at-rest go through this seam.
@@ -1003,6 +1074,10 @@ pub struct Engine {
     /// Fast resolution cache: hash(metric, labels) → series_id.
     /// Persists across batches — steady-state scraping is pure cache hits.
     resolve_cache: DashMap<u64, i64>,
+    /// `Some` when the series catalog lives on disk (#132): the registry
+    /// stays empty, catalog reads go to the store's label index, and
+    /// resolution goes through this bounded cache.
+    disk_series: Option<DiskResolveCache>,
     /// Fused Prometheus ingest telemetry. These cumulative counters are
     /// exposed through timeless_stats so embedding hosts can observe partial
     /// parse success without parsing the exposition body a second time.
@@ -1289,11 +1364,35 @@ impl Engine {
 
     /// One series' name and labels.
     pub fn series_info(&self, id: i64) -> EngineResult<Option<SeriesInfo>> {
+        if self.disk_series.is_some() {
+            return Ok(self.series_infos(&[id])?.pop().map(|(_, info)| info));
+        }
         Ok(self.series_read().info_for(id).cloned())
     }
 
     /// Names and labels of `ids`, in `ids` order; absent ids are skipped.
     pub fn series_infos(&self, ids: &[i64]) -> EngineResult<Vec<(i64, SeriesInfo)>> {
+        if self.disk_series.is_some() {
+            let mut found: HashMap<i64, SeriesInfo> = self
+                .store
+                .series_by_ids(ids)
+                .map_err(|err| format!("failed to read series catalog: {err}"))?
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.id,
+                        SeriesInfo {
+                            metric_name: row.name,
+                            labels: row.labels.into_iter().collect(),
+                        },
+                    )
+                })
+                .collect();
+            return Ok(ids
+                .iter()
+                .filter_map(|id| found.remove(id).map(|info| (*id, info)))
+                .collect());
+        }
         let reg = self.series_read();
         Ok(ids
             .iter()
@@ -1303,18 +1402,48 @@ impl Engine {
 
     /// The first of `ids` that names no live series, if any.
     pub fn first_missing_series(&self, ids: &[i64]) -> EngineResult<Option<i64>> {
+        if self.disk_series.is_some() {
+            let live: HashSet<i64> = self
+                .series_infos(ids)?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            return Ok(ids.iter().copied().find(|id| !live.contains(id)));
+        }
         let reg = self.series_read();
         Ok(ids.iter().copied().find(|&id| reg.info_for(id).is_none()))
     }
 
     /// Whether `id` names a live series.
     pub fn series_exists(&self, id: i64) -> EngineResult<bool> {
+        if self.disk_series.is_some() {
+            return Ok(self.series_info(id)?.is_some());
+        }
         Ok(self.series_read().info_for(id).is_some())
     }
 
     /// Series of `metric` carrying every label in `eq`, ascending by id,
     /// with their labels.
     pub fn select_series(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<(i64, Labels)>> {
+        if self.disk_series.is_some() {
+            let pairs: Vec<(String, String)> =
+                eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let ids = self
+                .store
+                .find_series_ids(Some(metric), &pairs)
+                .map_err(|err| format!("failed to select series: {err}"))?;
+            // Recheck what the rows say: a stale posting can only make a
+            // selection miss a series, never return a wrong one.
+            return Ok(self
+                .series_infos(&ids)?
+                .into_iter()
+                .filter(|(_, info)| {
+                    info.metric_name == metric
+                        && eq.iter().all(|(k, v)| info.labels.get(k) == Some(v))
+                })
+                .map(|(id, info)| (id, info.labels))
+                .collect());
+        }
         let reg = self.series_read();
         Ok(reg
             .find_series(metric, eq)
@@ -1325,6 +1454,13 @@ impl Engine {
 
     /// Ids of the series of `metric` carrying every label in `eq`.
     pub fn select_series_ids(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<i64>> {
+        if self.disk_series.is_some() {
+            return Ok(self
+                .select_series(metric, eq)?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect());
+        }
         Ok(self.series_read().find_series(metric, eq))
     }
 
@@ -1336,6 +1472,30 @@ impl Engine {
         metric: Option<&str>,
         visit: &mut dyn FnMut(i64, &SeriesInfo) -> EngineResult<std::ops::ControlFlow<()>>,
     ) -> EngineResult<()> {
+        if self.disk_series.is_some() {
+            const PAGE: usize = 4_000;
+            let ids = match metric {
+                Some(metric) => self
+                    .store
+                    .find_series_ids(Some(metric), &[])
+                    .map_err(|err| format!("failed to select series: {err}"))?,
+                None => self
+                    .store
+                    .series_ids()
+                    .map_err(|err| format!("failed to list series: {err}"))?,
+            };
+            for page in ids.chunks(PAGE) {
+                for (id, info) in self.series_infos(page)? {
+                    if metric.is_some_and(|metric| metric != info.metric_name) {
+                        continue;
+                    }
+                    if visit(id, &info)?.is_break() {
+                        return Ok(());
+                    }
+                }
+            }
+            return Ok(());
+        }
         let reg = self.series_read();
         for (id, info) in reg.iter_series(metric) {
             if visit(id, info)?.is_break() {
@@ -1347,16 +1507,31 @@ impl Engine {
 
     /// How many series the catalog holds.
     pub fn series_count(&self) -> usize {
+        if self.disk_series.is_some() {
+            return self.store.series_total().unwrap_or(0);
+        }
         self.series_read().series_count()
     }
 
     /// Distinct metric names, sorted.
     pub fn metric_names(&self) -> EngineResult<Vec<String>> {
+        if self.disk_series.is_some() {
+            return self
+                .store
+                .metric_names()
+                .map_err(|err| format!("failed to list metric names: {err}"));
+        }
         Ok(self.series_read().list_metrics())
     }
 
     /// Values `key` takes, across every series or within `metric`, sorted.
     pub fn label_values(&self, metric: Option<&str>, key: &str) -> EngineResult<Vec<String>> {
+        if self.disk_series.is_some() {
+            return self
+                .store
+                .label_values(metric, key)
+                .map_err(|err| format!("failed to list label values: {err}"));
+        }
         let reg = self.series_read();
         Ok(match metric {
             Some(metric) => reg.label_values(metric, key),
@@ -1366,11 +1541,22 @@ impl Engine {
 
     /// Label names, across every series or within `metric`, sorted.
     pub fn label_names(&self, metric: Option<&str>) -> EngineResult<Vec<String>> {
+        if self.disk_series.is_some() {
+            return self
+                .store
+                .label_names(metric)
+                .map_err(|err| format!("failed to list label names: {err}"));
+        }
         let reg = self.series_read();
         Ok(match metric {
             Some(metric) => reg.label_names_for(metric),
             None => reg.all_label_names(),
         })
+    }
+
+    /// Whether the series catalog lives on disk (#132).
+    pub fn series_on_disk(&self) -> bool {
+        self.disk_series.is_some()
     }
 
     fn series_write(&self) -> RwLockWriteGuard<'_, SeriesRegistry> {
@@ -1707,7 +1893,15 @@ impl Engine {
                 .unwrap_or_else(|error| error.into_inner()) = tiers;
         }
 
-        if !frame.series_added.is_empty() || !frame.series_removed.is_empty() {
+        if let Some(cache) = self.disk_series.as_ref() {
+            // SQLite's rollback restored the catalog rows and the label
+            // index; only the cache may hold ids that no longer exist.
+            if !frame.series_added.is_empty() || !frame.series_removed.is_empty() {
+                frame.series_added.clear();
+                frame.series_removed.clear();
+                cache.clear();
+            }
+        } else if !frame.series_added.is_empty() || !frame.series_removed.is_empty() {
             let mut series = self.series_write();
             for id in frame.series_added.drain() {
                 series.remove_id(id);
@@ -1862,7 +2056,29 @@ impl Engine {
             .scan()
             .map_err(|err| format!("failed to recover chunk index: {err}"))?;
 
-        let registry = if authoritative_series {
+        // #132: a table with an index_cache budget keeps its catalog on
+        // disk. That needs a current label index; a connection that cannot
+        // bring it current (read-only) keeps the catalog in memory.
+        let disk_budget = if authoritative_series {
+            match store
+                .series_index_budget()
+                .map_err(|err| format!("failed to read index_cache: {err}"))?
+            {
+                Some(budget)
+                    if store.label_index_current().unwrap_or(false)
+                        || store.ensure_label_index().is_ok() =>
+                {
+                    Some(budget)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let registry = if disk_budget.is_some() {
+            SeriesRegistry::new()
+        } else if authoritative_series {
             let mut rows = store
                 .load_series()
                 .map_err(|err| format!("failed to load series catalog: {err}"))?;
@@ -1924,7 +2140,9 @@ impl Engine {
                 None => SeriesRegistry::new(),
             }
         };
-        Self::validate_chunk_series(&registry, &stored_chunks)?;
+        if disk_budget.is_none() {
+            Self::validate_chunk_series(&registry, &stored_chunks)?;
+        }
         let rollup_index = Self::load_rollup_index(store.as_ref())?;
 
         let engine = Engine {
@@ -1964,6 +2182,7 @@ impl Engine {
             rollup_merge_chunks_removed: AtomicU64::new(0),
             rollup_merge_chunks_written: AtomicU64::new(0),
             resolve_cache: DashMap::new(),
+            disk_series: disk_budget.map(DiskResolveCache::new),
             prometheus_ingest_batches: AtomicU64::new(0),
             prometheus_ingest_points: AtomicU64::new(0),
             prometheus_ingest_errors: AtomicU64::new(0),
@@ -2005,8 +2224,105 @@ impl Engine {
 
     // ── Series resolution ────────────────────────────────────────────
 
+    /// Disk-mode resolution (#132): the bounded cache, then the store, whose
+    /// single-series path is safe under the journal lock (single-row
+    /// statements only). Created ids are journaled so a rollback clears
+    /// the cache that may hold them.
+    fn resolve_series_on_disk(&self, metric_name: &str, labels: &Labels) -> EngineResult<i64> {
+        let cache = self.disk_series.as_ref().expect("disk mode");
+        let key = identity_key_of(metric_name, labels);
+        if let Some(id) = cache.get(key) {
+            return Ok(id);
+        }
+        let mut journal = self.txn_guard();
+        let label_pairs: Vec<(String, String)> = labels
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let resolved = self
+            .store
+            .resolve_series(metric_name, &label_pairs)
+            .map_err(|err| format!("failed to resolve series {metric_name:?}: {err}"))?;
+        if resolved.created {
+            if let Some(journal) = journal.as_deref_mut() {
+                journal.series_added.insert(resolved.id);
+            }
+        }
+        cache.admit(key, resolved.id);
+        Ok(resolved.id)
+    }
+
+    /// Disk-mode batch resolution: cache hits, then ONE bulk store call for
+    /// the distinct misses with no engine lock held (the lock hazard
+    /// `resolve_series_batch` documents), then journal and admit.
+    fn resolve_series_batch_on_disk(
+        &self,
+        cache: &DiskResolveCache,
+        entries: &[(String, Labels)],
+    ) -> EngineResult<Vec<i64>> {
+        let mut out = vec![0i64; entries.len()];
+        let mut first_slot: HashMap<u128, usize> = HashMap::new();
+        let mut unique: Vec<(usize, u128)> = Vec::new();
+        let mut pending: Vec<(usize, usize)> = Vec::new();
+        for (idx, (metric_name, labels)) in entries.iter().enumerate() {
+            let key = identity_key_of(metric_name, labels);
+            if let Some(id) = cache.get(key) {
+                out[idx] = id;
+                continue;
+            }
+            let slot = *first_slot.entry(key).or_insert_with(|| {
+                unique.push((idx, key));
+                unique.len() - 1
+            });
+            pending.push((idx, slot));
+        }
+        if unique.is_empty() {
+            return Ok(out);
+        }
+        let requests: Vec<(&str, Vec<(String, String)>)> = unique
+            .iter()
+            .map(|&(idx, _)| {
+                let (name, labels) = &entries[idx];
+                (
+                    name.as_str(),
+                    labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                )
+            })
+            .collect();
+        // NO engine locks held here.
+        let resolved = self
+            .store
+            .resolve_series_bulk(&requests)
+            .map_err(|err| format!("failed to bulk-resolve series: {err}"))?;
+        if resolved.len() != unique.len() {
+            return Err(format!(
+                "bulk series resolution returned {} of {} entries",
+                resolved.len(),
+                unique.len()
+            ));
+        }
+        {
+            let mut journal = self.txn_guard();
+            for (res, &(_, key)) in resolved.iter().zip(&unique) {
+                if res.created {
+                    if let Some(journal) = journal.as_deref_mut() {
+                        journal.series_added.insert(res.id);
+                    }
+                }
+                cache.admit(key, res.id);
+            }
+        }
+        for (idx, slot) in pending {
+            out[idx] = resolved[slot].id;
+        }
+        Ok(out)
+    }
+
     /// Resolve (metric, labels) → series_id. Fast read path, slow write path.
     fn resolve_series(&self, metric_name: &str, labels: &Labels) -> EngineResult<i64> {
+        if self.disk_series.is_some() {
+            return self.resolve_series_on_disk(metric_name, labels);
+        }
         let mut journal = self.txn_guard();
         let mut reg = self.series_write();
         if let Some(id) = reg.lookup(metric_name, labels) {
@@ -2051,6 +2367,9 @@ impl Engine {
     pub fn resolve_series_batch(&self, entries: &[(String, Labels)]) -> EngineResult<Vec<i64>> {
         if entries.is_empty() {
             return Ok(Vec::new());
+        }
+        if let Some(cache) = self.disk_series.as_ref() {
+            return self.resolve_series_batch_on_disk(cache, entries);
         }
         let mut out = vec![0i64; entries.len()];
         let mut misses: Vec<usize> = Vec::new();
@@ -2213,6 +2532,10 @@ impl Engine {
         metric: &str,
         labels: &HashMap<String, String>,
     ) -> EngineResult<i64> {
+        if self.disk_series.is_some() {
+            let labels_bt: Labels = labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            return self.resolve_series_on_disk(metric, &labels_bt);
+        }
         let hash = fast_series_hash(metric, labels);
 
         // Fast path: cache hit with verification
@@ -2508,6 +2831,17 @@ impl Engine {
         }
         sorted.truncate(w);
 
+        if let Some(cache) = self.disk_series.as_ref() {
+            // Allocation-free on a hit, as the memory path is.
+            if let Some(id) = cache.get(identity_key(metric, sorted)) {
+                return Ok(id);
+            }
+            let labels_bt: Labels = sorted
+                .iter()
+                .map(|&(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            return self.resolve_series_on_disk(metric, &labels_bt);
+        }
         let hash = fast_series_hash_pairs(metric, sorted);
 
         if let Some(id) = self.resolve_cache.get(&hash) {
@@ -6275,36 +6609,61 @@ impl Engine {
             if let Some(journal) = journal.as_deref() {
                 live.extend(journal.series_added.iter().copied());
             }
-            let mut series = self.series_write();
-            let doomed: Vec<i64> = series
-                .series_info
-                .keys()
-                .filter(|id| !live.contains(id))
-                .copied()
-                .collect();
-            for id in &doomed {
-                if let Some(info) = series.series_info.get(id) {
+            if self.disk_series.is_some() {
+                let doomed: Vec<i64> = self
+                    .store
+                    .series_ids()
+                    .map_err(|err| format!("failed to list series: {err}"))?
+                    .into_iter()
+                    .filter(|id| !live.contains(id))
+                    .collect();
+                for id in &doomed {
+                    // The journal entry only marks the catalog as changed:
+                    // a rollback restores the rows itself and clears the
+                    // cache (see rollback_txn_frame).
                     if let Some(journal) = journal.as_deref_mut() {
-                        journal.series_removed.push((
-                            *id,
-                            info.metric_name.clone(),
-                            info.labels.clone(),
-                        ));
+                        journal
+                            .series_removed
+                            .push((*id, String::new(), Labels::new()));
                     }
+                    self.partitions.remove(&PartitionKey { series_id: *id });
                 }
-                series.remove_id(*id);
-                // An emptied buffer is the last thing left of it.
-                self.partitions.remove(&PartitionKey { series_id: *id });
+                doomed
+            } else {
+                let mut series = self.series_write();
+                let doomed: Vec<i64> = series
+                    .series_info
+                    .keys()
+                    .filter(|id| !live.contains(id))
+                    .copied()
+                    .collect();
+                for id in &doomed {
+                    if let Some(info) = series.series_info.get(id) {
+                        if let Some(journal) = journal.as_deref_mut() {
+                            journal.series_removed.push((
+                                *id,
+                                info.metric_name.clone(),
+                                info.labels.clone(),
+                            ));
+                        }
+                    }
+                    series.remove_id(*id);
+                    // An emptied buffer is the last thing left of it.
+                    self.partitions.remove(&PartitionKey { series_id: *id });
+                }
+                if !doomed.is_empty() {
+                    series.dirty = true;
+                }
+                doomed
             }
-            if !doomed.is_empty() {
-                series.dirty = true;
-            }
-            doomed
         };
         if doomed.is_empty() {
             return Ok(0);
         }
         self.resolve_cache.clear();
+        if let Some(cache) = self.disk_series.as_ref() {
+            cache.clear();
+        }
         // No engine locks here: store DML can re-enter the vtab's
         // savepoint hooks (invariant 1), as with every other store write.
         if self.authoritative_series {
@@ -6542,17 +6901,23 @@ impl Engine {
             // replaces registry and indexes wholesale.
         }
 
-        let rows = self
-            .store
-            .load_series()
-            .map_err(|err| format!("failed to refresh series catalog: {err}"))?;
-        let registry = SeriesRegistry::from_stored(&rows)
-            .map_err(|err| format!("refreshed series catalog is invalid: {err}"))?;
+        let registry = if self.disk_series.is_some() {
+            SeriesRegistry::new()
+        } else {
+            let rows = self
+                .store
+                .load_series()
+                .map_err(|err| format!("failed to refresh series catalog: {err}"))?;
+            SeriesRegistry::from_stored(&rows)
+                .map_err(|err| format!("refreshed series catalog is invalid: {err}"))?
+        };
         let chunks = self
             .store
             .scan()
             .map_err(|err| format!("failed to refresh chunk index: {err}"))?;
-        Self::validate_chunk_series(&registry, &chunks)?;
+        if self.disk_series.is_none() {
+            Self::validate_chunk_series(&registry, &chunks)?;
+        }
         let new_rollups = Self::load_rollup_index(self.store.as_ref())
             .map_err(|err| format!("failed to refresh rollup index: {err}"))?;
 
@@ -6577,6 +6942,10 @@ impl Engine {
         *series = registry;
         *rollups = new_rollups;
         self.resolve_cache.clear();
+        if let Some(cache) = self.disk_series.as_ref() {
+            // Another writer may have deleted series and an id been reused.
+            cache.clear();
+        }
         *self.catalog_gen_lock() = observed;
         *self.append_wm_lock() = self
             .store
@@ -6618,7 +6987,10 @@ impl Engine {
         let mut index = self.index_write();
         let mut series = self.series_write();
         let mut rollups = self.rollup_write();
-        for row in &new_series {
+        // Disk mode (#132): appended series are already in the store's
+        // label index; nothing of them is held in memory.
+        let on_disk = self.disk_series.is_some();
+        for row in new_series.iter().filter(|_| !on_disk) {
             let labels: Labels = row.labels.iter().cloned().collect();
             // insert_known is idempotent for identical rows and loud on
             // identity conflicts — exactly the semantics a re-read
@@ -6629,7 +7001,7 @@ impl Engine {
             let pk = PartitionKey {
                 series_id: chunk.series_id,
             };
-            if series.info_for(chunk.series_id).is_none() {
+            if !on_disk && series.info_for(chunk.series_id).is_none() {
                 return Err(format!(
                     "appended chunk {:?} references unknown series {}",
                     chunk.meta.loc, chunk.series_id
@@ -6955,6 +7327,11 @@ impl Engine {
                 .load(Ordering::Relaxed),
             compaction_merge_total_ns: self.compaction_merge_total_ns.load(Ordering::Relaxed),
             compaction_plans: self.compaction_plans.load(Ordering::Relaxed),
+            series_on_disk: self.disk_series.is_some(),
+            series_resolve_cache_entries: self
+                .disk_series
+                .as_ref()
+                .map_or(0, |cache| cache.len() as u64),
             compaction_planned_groups: self
                 .compaction_plan_lock()
                 .as_ref()
@@ -7054,6 +7431,10 @@ pub struct EngineInfo {
     pub compaction_plans: u64,
     /// Groups the current plan still holds.
     pub compaction_planned_groups: u64,
+    /// Whether the series catalog lives on disk behind a bounded resolve
+    /// cache (#132), and how many entries that cache holds.
+    pub series_on_disk: bool,
+    pub series_resolve_cache_entries: u64,
     pub retention_series_removed: u64,
     pub rollup_merge_chunks_removed: u64,
     pub rollup_merge_chunks_written: u64,

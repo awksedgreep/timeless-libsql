@@ -201,6 +201,22 @@ pub struct MetricsTab {
     rowid_counter: i64,
 }
 
+/// Normalize an `index_cache` setting: `unbounded` (catalog in memory) or
+/// a byte budget such as `64MB` or `0` (#132).
+fn validate_index_cache(value: &str) -> std::result::Result<String, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("unbounded") {
+        return Ok("unbounded".to_owned());
+    }
+    crate::shadow_label_index::parse_budget(value)
+        .map(|bytes| bytes.to_string())
+        .ok_or_else(|| {
+            format!(
+                "index_cache must be 'unbounded' or a size such as '64MB' or '0', got {value:?}"
+            )
+        })
+}
+
 impl MetricsTab {
     pub(crate) fn upgrade_legacy_schema(
         handle: *mut ffi::sqlite3,
@@ -269,6 +285,18 @@ impl MetricsTab {
         } else {
             shadow_store::require_read_schema(&host, &database, &table)?;
         }
+        // #132: where the series catalog lives is a property of the table,
+        // persisted before the engine is built so the first engine already
+        // opens it the right way.
+        if is_create {
+            for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
+                if name == "index_cache" {
+                    let value = validate_index_cache(&value).map_err(module_err)?;
+                    shadow_meta::save_meta_text(&host, &database, &table, "index_cache", &value)
+                        .map_err(module_err)?;
+                }
+            }
+        }
         let instance_id = if is_create {
             shadow_meta::ensure_instance_id(&host, &database, &table)
         } else {
@@ -324,9 +352,11 @@ impl MetricsTab {
                                 .map_err(module_err)?,
                         );
                     }
+                    // Saved before the engine was built (above).
+                    "index_cache" => {}
                     other => {
                         return Err(module_err(format!(
-                            "unrecognized argument {other:?}; timeless_metrics supports: retention, rollups"
+                            "unrecognized argument {other:?}; timeless_metrics supports: retention, rollups, index_cache"
                         )));
                     }
                 }
@@ -558,6 +588,19 @@ impl MetricsTab {
             // F3: produce settled buckets for every declared tier. A
             // no-op (0 chunks) without a rollups= ladder.
             self.shared.engine.rollup().map_err(module_err)?;
+        } else if let Some(value) = cmd.strip_prefix("index_cache:") {
+            // Recorded for the table; the catalog moves between memory and
+            // disk when the engine is next opened, not under a live one.
+            let value = validate_index_cache(value).map_err(module_err)?;
+            let host = unsafe { Connection::from_handle(self.db) }?;
+            shadow_meta::save_meta_text(
+                &host,
+                &self.database_name,
+                &self.table_name,
+                "index_cache",
+                &value,
+            )
+            .map_err(module_err)?;
         } else if let Some(spec) = cmd.strip_prefix("rollups:") {
             let host = unsafe { Connection::from_handle(self.db) }?;
             let spec = spec.trim();
@@ -661,7 +704,8 @@ impl MetricsTab {
                  'compact-step:<series>[:<points>:<bytes>][:<cutoff>[:<sweep>]]', 'rollup', \
                  'rollups:none|<ladder>', \
                  'clear-rollups', 'clear-rollups-step:<chunks>', \
-                 'prune:<unix_ts>', 'prune-after:<unix_ts>'"
+                 'prune:<unix_ts>', 'prune-after:<unix_ts>', \
+                 'index_cache:unbounded|<size>'"
             )));
         }
         Ok(0)
@@ -2276,5 +2320,260 @@ mod schema_tests {
             .unwrap();
         let left = buckets(&db);
         assert!(left < all / 2, "{left} buckets left of {all}");
+    }
+}
+
+/// The series catalog on disk behind a bounded resolve cache (#132).
+#[cfg(all(test, feature = "embedded"))]
+mod disk_series_tests {
+    use rusqlite::{params, Connection};
+
+    fn stat(db: &Connection, table: &str, key: &str) -> i64 {
+        db.query_row(
+            "SELECT value FROM timeless_stats(?1) WHERE key = ?2",
+            params![table, key],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn strings(db: &Connection, sql: &str) -> Vec<String> {
+        db.prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn write(db: &Connection, name: &str, labels: &str, ts: i64) {
+        db.execute(
+            "INSERT INTO m(name, ts, value, labels) VALUES (?1, ?2, 1.0, ?3)",
+            params![name, ts, labels],
+        )
+        .unwrap();
+    }
+
+    fn fleet(db: &Connection) {
+        for (name, host, env) in [
+            ("cpu", "a", "prod"),
+            ("cpu", "b", "prod"),
+            ("cpu", "c", "dev"),
+            ("mem", "a", "prod"),
+        ] {
+            write(
+                db,
+                name,
+                &format!(r#"{{"host":"{host}","env":"{env}"}}"#),
+                1_000,
+            );
+        }
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+    }
+
+    /// Every read surface answers from the disk catalog what the memory
+    /// catalog answers, and a reopened table needs nothing in memory.
+    #[test]
+    fn reads_answer_from_the_disk_catalog_as_from_memory() {
+        let answers = |index_cache: &str| {
+            let db = Connection::open_in_memory().unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE m USING timeless_metrics({index_cache});"
+            ))
+            .unwrap();
+            fleet(&db);
+            let on_disk = stat(&db, "m", "series_on_disk");
+            let rows = vec![
+                strings(&db, "SELECT value FROM timeless_label_values('m', NULL, '__name__')"),
+                strings(&db, "SELECT value FROM timeless_label_values('m', NULL, 'host')"),
+                strings(&db, "SELECT value FROM timeless_label_values('m', 'cpu', 'env')"),
+                strings(&db, "SELECT name FROM timeless_label_names('m')"),
+                strings(&db, "SELECT name FROM timeless_label_names('m', 'mem')"),
+                strings(
+                    &db,
+                    r#"SELECT labels FROM timeless_series('m', 'cpu', '{"env":"prod"}') ORDER BY labels"#,
+                ),
+                strings(
+                    &db,
+                    r#"SELECT labels FROM timeless_series('m', 'cpu', '{"env":"prod"}', 1000, 100000) ORDER BY labels"#,
+                ),
+                strings(
+                    &db,
+                    r#"SELECT labels FROM timeless_series('m', 'cpu', '{"host":{"re":"a|c"}}') ORDER BY labels"#,
+                ),
+                strings(&db, "SELECT name FROM timeless_series('m') ORDER BY name, labels"),
+                strings(
+                    &db,
+                    "SELECT name || ' ' || labels || ' ' || ts FROM m WHERE name = 'cpu' ORDER BY labels",
+                ),
+                vec![stat(&db, "m", "series").to_string()],
+            ];
+            (on_disk, rows)
+        };
+        let (memory_mode, memory) = answers("");
+        let (disk_mode, disk) = answers("index_cache='1MB'");
+        assert_eq!(memory_mode, 0);
+        assert_eq!(disk_mode, 1);
+        assert_eq!(disk, memory);
+        assert_eq!(memory[0], ["cpu", "mem"]);
+        assert_eq!(memory[2], ["dev", "prod"]);
+        assert_eq!(memory[10], ["4"]);
+    }
+
+    /// A zero budget caches nothing and still resolves every write to the
+    /// same series.
+    #[test]
+    fn a_zero_budget_resolves_every_write_through_the_store() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='0');")
+            .unwrap();
+        for ts in 0..5 {
+            write(&db, "cpu", r#"{"host":"a"}"#, 1_000 + ts);
+        }
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        assert_eq!(stat(&db, "m", "series"), 1);
+        assert_eq!(stat(&db, "m", "series_resolve_cache_entries"), 0);
+        let points: i64 = db
+            .query_row("SELECT count(*) FROM m WHERE name = 'cpu'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(points, 5);
+    }
+
+    /// A series created inside a rolled-back transaction is gone from the
+    /// catalog, the label index, and the cache.
+    #[test]
+    fn a_rolled_back_series_leaves_no_trace() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='1MB');")
+            .unwrap();
+        fleet(&db);
+        db.execute_batch("BEGIN").unwrap();
+        write(&db, "disk", r#"{"host":"z"}"#, 1_000);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        assert_eq!(stat(&db, "m", "series"), 5);
+        db.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(stat(&db, "m", "series"), 4);
+        assert_eq!(
+            strings(
+                &db,
+                "SELECT value FROM timeless_label_values('m', NULL, '__name__')"
+            ),
+            ["cpu", "mem"]
+        );
+        // Written again, it gets a fresh identity and is readable.
+        write(&db, "disk", r#"{"host":"z"}"#, 1_000);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        assert_eq!(
+            strings(&db, "SELECT labels FROM timeless_series('m', 'disk')"),
+            [r#"{"host":"z"}"#]
+        );
+    }
+
+    /// Retention removes a series with its last chunk from the disk
+    /// catalog and its label index.
+    #[test]
+    fn retention_removes_a_series_from_the_disk_catalog() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE m USING timeless_metrics(retention='100s', index_cache='1MB');",
+        )
+        .unwrap();
+        write(&db, "gone", r#"{"host":"a"}"#, 1_000);
+        write(&db, "kept", r#"{"host":"b"}"#, 1_000);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        write(&db, "kept", r#"{"host":"b"}"#, 1_200);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        assert_eq!(stat(&db, "m", "retention_series_removed"), 1);
+        assert_eq!(
+            strings(
+                &db,
+                "SELECT value FROM timeless_label_values('m', NULL, '__name__')"
+            ),
+            ["kept"]
+        );
+        assert_eq!(
+            strings(
+                &db,
+                "SELECT value FROM timeless_label_values('m', NULL, 'host')"
+            ),
+            ["b"]
+        );
+    }
+
+    /// An existing in-memory table moves to disk when told to and reopened:
+    /// the label index is built from the catalog on the first open.
+    #[test]
+    fn an_existing_table_moves_its_catalog_to_disk_on_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "timeless-disk-series-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let db = Connection::open(&path).unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics;")
+                .unwrap();
+            // Simulate a table from before #132: no label index tables.
+            db.execute_batch("DROP TABLE m_postings; DROP TABLE m_labels;")
+                .unwrap();
+            fleet(&db);
+            assert_eq!(stat(&db, "m", "series_on_disk"), 0);
+            db.execute("INSERT INTO m(m) VALUES ('index_cache:1MB')", [])
+                .unwrap();
+            assert_eq!(
+                stat(&db, "m", "series_on_disk"),
+                0,
+                "takes effect on reopen"
+            );
+        }
+        {
+            let db = Connection::open(&path).unwrap();
+            crate::register_telemetry(&db).unwrap();
+            assert_eq!(stat(&db, "m", "series_on_disk"), 1);
+            assert_eq!(stat(&db, "m", "series"), 4);
+            assert_eq!(
+                strings(
+                    &db,
+                    r#"SELECT labels FROM timeless_series('m', 'cpu', '{"env":"prod"}') ORDER BY labels"#
+                ),
+                [
+                    r#"{"env":"prod","host":"a"}"#,
+                    r#"{"env":"prod","host":"b"}"#
+                ]
+            );
+            write(&db, "cpu", r#"{"host":"d","env":"dev"}"#, 2_000);
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            assert_eq!(
+                strings(
+                    &db,
+                    "SELECT value FROM timeless_label_values('m', 'cpu', 'host')"
+                ),
+                ["a", "b", "c", "d"]
+            );
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[test]
+    fn index_cache_rejects_what_is_not_a_size() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        let err = db
+            .execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='lots');")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("index_cache"), "{err}");
     }
 }

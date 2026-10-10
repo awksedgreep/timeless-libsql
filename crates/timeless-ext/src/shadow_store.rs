@@ -1269,6 +1269,49 @@ impl ChunkStore for ShadowTableStore {
             .unwrap_or(false)
     }
 
+    fn series_index_budget(&self) -> Result<Option<u64>, String> {
+        let conn = Self::conn()?;
+        let meta = sql_ident::qualified_shadow(&self.database, &self.table, "meta");
+        let value: Option<String> = conn
+            .query_row(
+                &format!("SELECT CAST(v AS TEXT) FROM {meta} WHERE k = 'index_cache'"),
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("read index_cache: {e}"))?;
+        match value.as_deref() {
+            None | Some("unbounded") => Ok(None),
+            Some(text) => crate::shadow_label_index::parse_budget(text)
+                .map(Some)
+                .ok_or_else(|| format!("index_cache {text:?} is not a size")),
+        }
+    }
+
+    fn series_ids(&self) -> Result<Vec<i64>, String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&format!("SELECT id FROM {} ORDER BY id", self.series_ident))
+            .map_err(|e| format!("prepare series ids: {e}"))?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("series ids: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("series ids: {e}"))?;
+        Ok(ids)
+    }
+
+    fn series_total(&self) -> Result<usize, String> {
+        let conn = Self::conn()?;
+        conn.query_row(
+            &format!("SELECT count(*) FROM {}", self.series_ident),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n as usize)
+        .map_err(|e| format!("count series: {e}"))
+    }
+
     fn ensure_label_index(&self) -> Result<(), String> {
         let conn = Self::conn()?;
         self.label_index

@@ -4379,6 +4379,9 @@ impl SeriesCursor<'_> {
     }
 
     fn load_current(&mut self) {
+        // A disk-resident catalog (#132) is read through this cursor's own
+        // connection, which xNext does not otherwise bind.
+        let _bind = DbGuard::bind(self.db);
         self.current = if self.pos < self.ids.len() {
             self.shared
                 .as_ref()
@@ -5153,6 +5156,14 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     (
                         "compaction_planned_groups",
                         Value::Integer(info.compaction_planned_groups as i64),
+                    ),
+                    (
+                        "series_on_disk",
+                        Value::Integer(i64::from(info.series_on_disk)),
+                    ),
+                    (
+                        "series_resolve_cache_entries",
+                        Value::Integer(info.series_resolve_cache_entries as i64),
                     ),
                     (
                         "retention_series_removed",

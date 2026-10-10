@@ -285,6 +285,24 @@ pub trait ChunkStore: Send + Sync {
         false
     }
 
+    /// The table's series-index cache budget in bytes: `None` keeps the
+    /// whole catalog in memory (every table created before #132, and
+    /// `index_cache='unbounded'`); `Some(bytes)` keeps it on disk behind a
+    /// resolve cache of at most that size (`0` caches nothing).
+    fn series_index_budget(&self) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
+
+    /// Every series id in the catalog, ascending.
+    fn series_ids(&self) -> Result<Vec<i64>, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
+    /// How many series the catalog holds.
+    fn series_total(&self) -> Result<usize, String> {
+        Err("store does not keep a label index".to_string())
+    }
+
     /// Create the label index if it is missing and bring it up to date with
     /// the series catalog, in the caller's transaction.
     fn ensure_label_index(&self) -> Result<(), String> {
