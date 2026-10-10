@@ -14,8 +14,8 @@ SQLite's page cache is its 2 MB default. Raw CSV in
 
 | measure | memory | disk, 128 MB cache | disk, no cache | phase 1 disk, 128 MB |
 |---|---:|---:|---:|---:|
-| fresh process: RSS after open | 4.58 GB | **6.2 MB** | 6.2 MB | 1.91 GB |
-| fresh process: peak RSS during open | 5.48 GB | 74 MB | 73 MB | 2.81 GB |
+| fresh process: RSS after open | 4.58 GB | **6.4 MB** | 6.4 MB | 1.91 GB |
+| fresh process: peak RSS during open | 5.48 GB | 76 MB | 75 MB | 2.81 GB |
 | fresh process: open to first read | 13.3 s | 3.1 s | 3.1 s | 4.0 s |
 | writer RSS growth (create + 3 cycles + reads) | 5.85 GB | 1.28 GB | 1.16 GB | 3.31 GB |
 | steady ingest cycle | 9.81 s | 8.59 s | 16.4 s | 8.45 s |
@@ -31,7 +31,7 @@ SQLite's page cache is its 2 MB default. Raw CSV in
 
 | measure | 500k memory | 500k 128 MB | 500k 0 | 50k memory | 50k 128 MB | 50k 0 |
 |---|---:|---:|---:|---:|---:|---:|
-| RSS after open | 1.15 GB | 6.2 MB | 6.3 MB | 118 MB | 6.5 MB | 6.3 MB |
+| RSS after open | 1.15 GB | 6.4 MB | 6.4 MB | 118 MB | 6.6 MB | 6.5 MB |
 | open to first read | 3.07 s | 0.68 s | 0.68 s | 279 ms | 75 ms | 70 ms |
 | writer RSS growth | 1.54 GB | 326 MB | 376 MB | 155 MB | 72 MB | 86 MB |
 | steady ingest cycle | 1.99 s | 1.79 s | 3.77 s | 183 ms | 159 ms | 369 ms |
