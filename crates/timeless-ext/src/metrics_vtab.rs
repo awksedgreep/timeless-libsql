@@ -2653,6 +2653,181 @@ mod disk_series_tests {
         assert_eq!(memory[6].len(), 3);
     }
 
+    /// The concurrency gate (#132): one connection creates series in
+    /// transactions, committing some and rolling others back, flushing and
+    /// compacting as it goes, while another reads the disk catalog
+    /// throughout. A reader may be told the store is busy; it must never
+    /// see a row that does not match its selector, a series from a
+    /// rolled-back transaction, or any other error.
+    #[test]
+    fn readers_stay_consistent_while_a_writer_creates_and_rolls_back_series() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let path = std::env::temp_dir().join(format!(
+            "timeless-disk-concurrent-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let open = |path: &std::path::Path| {
+            let db = Connection::open(path).unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db
+        };
+        let writer = open(&path);
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='1MB');",
+            )
+            .unwrap();
+        assert_eq!(stat(&writer, "m", "series_on_disk"), 1);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = {
+            let (done, reads, path) = (Arc::clone(&done), Arc::clone(&reads), path.clone());
+            std::thread::spawn(move || -> Result<(), String> {
+                let db = open(&path);
+                let busy = |error: &rusqlite::Error| {
+                    let text = error.to_string();
+                    text.contains("busy") || text.contains("locked")
+                };
+                let rows = |sql: &str| -> Result<Option<Vec<String>>, String> {
+                    let mut stmt = match db.prepare(sql) {
+                        Ok(stmt) => stmt,
+                        Err(error) if busy(&error) => return Ok(None),
+                        Err(error) => return Err(format!("{sql}: {error}")),
+                    };
+                    let collected: rusqlite::Result<Vec<String>> = stmt
+                        .query_map([], |row| row.get(0))
+                        .and_then(Iterator::collect);
+                    match collected {
+                        Ok(rows) => Ok(Some(rows)),
+                        Err(error) if busy(&error) => Ok(None),
+                        Err(error) => Err(format!("{sql}: {error}")),
+                    }
+                };
+                let mut last_committed = 0usize;
+                while !done.load(Ordering::Relaxed) {
+                    if let Some(found) = rows(
+                        r#"SELECT labels FROM timeless_series('m', 'cpu', '{"fate":"kept"}', 100000, 100000000)"#,
+                    )? {
+                        for labels in &found {
+                            if !labels.contains(r#""fate":"kept""#) {
+                                return Err(format!("selector returned {labels}"));
+                            }
+                        }
+                        // Committed series only ever accumulate.
+                        if found.len() < last_committed {
+                            return Err(format!(
+                                "kept series went from {last_committed} to {}",
+                                found.len()
+                            ));
+                        }
+                        last_committed = found.len();
+                    }
+                    if let Some(found) = rows(
+                        r#"SELECT labels FROM timeless_series('m', 'cpu', '{"fate":"dropped"}')"#,
+                    )? {
+                        // A rolled-back series may be visible only inside
+                        // its own transaction, never to another connection.
+                        if !found.is_empty() {
+                            return Err(format!("saw rolled-back series: {found:?}"));
+                        }
+                    }
+                    if let Some(found) =
+                        rows("SELECT value FROM timeless_label_values('m', NULL, 'fate')")?
+                    {
+                        if found.iter().any(|value| value != "kept") {
+                            return Err(format!("label values: {found:?}"));
+                        }
+                    }
+                    rows(
+                        r#"SELECT labels FROM timeless_series('m', 'cpu', '{"host":{"re":"h1.*"}}')"#,
+                    )?;
+                    rows("SELECT name FROM timeless_label_names('m')")?;
+                    rows("SELECT CAST(count(*) AS TEXT) FROM m WHERE name = 'cpu'")?;
+                    reads.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            })
+        };
+
+        let mut kept = 0usize;
+        for round in 0..120 {
+            let keep = round % 3 != 0;
+            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for i in 0..25 {
+                let fate = if keep { "kept" } else { "dropped" };
+                writer
+                    .execute(
+                        "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', ?1, 1.0, ?2)",
+                        params![
+                            1_000 + round,
+                            format!(r#"{{"host":"h{round}-{i}","fate":"{fate}"}}"#)
+                        ],
+                    )
+                    .unwrap();
+            }
+            writer
+                .execute("INSERT INTO m(m) VALUES ('flush')", [])
+                .unwrap();
+            if keep {
+                writer.execute_batch("COMMIT").unwrap();
+                kept += 25;
+            } else {
+                writer.execute_batch("ROLLBACK").unwrap();
+            }
+            if round % 20 == 19 {
+                writer
+                    .execute("INSERT INTO m(m) VALUES ('compact')", [])
+                    .unwrap();
+            }
+        }
+        // Let the reader run against the finished store too.
+        let seen = reads.load(Ordering::Relaxed);
+        while reads.load(Ordering::Relaxed) < seen + 3 && !reader.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        done.store(true, Ordering::Relaxed);
+        reader.join().unwrap().unwrap();
+        assert!(reads.load(Ordering::Relaxed) > 0, "the reader ran");
+
+        assert_eq!(stat(&writer, "m", "series") as usize, kept);
+        assert_eq!(
+            strings(
+                &writer,
+                r#"SELECT labels FROM timeless_series('m', 'cpu', '{"fate":"kept"}')"#
+            )
+            .len(),
+            kept
+        );
+        assert_eq!(
+            strings(
+                &writer,
+                "SELECT value FROM timeless_label_values('m', NULL, 'fate')"
+            ),
+            ["kept"]
+        );
+        let postings: i64 = writer
+            .query_row("SELECT count(*) FROM m_postings", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            postings as usize,
+            kept * 3,
+            "name, host and fate for each kept series"
+        );
+        drop(writer);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
     #[test]
     fn index_cache_rejects_what_is_not_a_size() {
         let db = Connection::open_in_memory().unwrap();
