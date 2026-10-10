@@ -1444,6 +1444,29 @@ impl ChunkStore for ShadowTableStore {
         Ok(ids)
     }
 
+    fn chunk_series_cataloged(&self) -> Result<bool, String> {
+        // Read off the (series_id, ts_min) index alone: a chunk row is
+        // looked at only for a series the catalog does not have, to see
+        // whether what it has is raw. Opening a store asks this, and its
+        // cost should not be a read of every chunk row.
+        let conn = Self::conn()?;
+        let chunks = &self.chunks_ident;
+        let uncataloged: bool = conn
+            .query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM (SELECT DISTINCT series_id FROM {chunks}) c \
+                     WHERE NOT EXISTS (SELECT 1 FROM {series} s WHERE s.id = c.series_id) \
+                     AND EXISTS (SELECT 1 FROM {chunks} r \
+                                 WHERE r.series_id = c.series_id AND r.resolution = 0))",
+                    series = self.series_ident
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("check chunk series: {e}"))?;
+        Ok(!uncataloged)
+    }
+
     fn chunk_locs_outside(
         &self,
         before: Option<i64>,

@@ -2483,38 +2483,43 @@ impl Engine {
         // With the catalog on disk, the chunk index is read from the store's
         // chunk rows too, if the store can answer for them.
         let disk_chunks = disk_budget.is_some() && store.has_chunk_index();
-        // The series that have chunks: asked of the store for a disk index,
-        // which then never loads a chunk's metadata, or read off the scan.
-        let mut stored_chunks: Vec<StoredChunk> = Vec::new();
-        let chunk_series: Vec<i64> = if disk_chunks {
-            store
-                .chunk_series_ids()
-                .map_err(|err| format!("failed to list chunk series: {err}"))?
-        } else {
-            stored_chunks = store
-                .scan()
-                .map_err(|err| format!("failed to recover chunk index: {err}"))?;
-            Vec::new()
-        };
-
         // A disk catalog is trusted only if it identifies every persisted
         // chunk, the same condition the memory catalog is held to below.
         // One that does not (empty, or a store whose series still live in
         // a legacy registry) goes through that path, which migrates the
         // legacy registry or refuses to open, and never silently adopts
-        // chunks whose series it cannot name.
+        // chunks whose series it cannot name. A disk chunk index asks the
+        // store, and never loads a chunk's metadata to find out.
+        let mut stored_chunks: Vec<StoredChunk> = Vec::new();
         let disk_catalog_complete = disk_budget.is_some() && {
-            let known: HashSet<i64> = store
-                .series_ids()
-                .map_err(|err| format!("failed to list series catalog: {err}"))?
-                .into_iter()
-                .collect();
-            !known.is_empty()
-                && stored_chunks
-                    .iter()
-                    .all(|chunk| known.contains(&chunk.series_id))
-                && chunk_series.iter().all(|id| known.contains(id))
+            if disk_chunks {
+                store
+                    .series_total()
+                    .map_err(|err| format!("failed to count series catalog: {err}"))?
+                    > 0
+                    && store
+                        .chunk_series_cataloged()
+                        .map_err(|err| format!("failed to check chunk series: {err}"))?
+            } else {
+                stored_chunks = store
+                    .scan()
+                    .map_err(|err| format!("failed to recover chunk index: {err}"))?;
+                let known: HashSet<i64> = store
+                    .series_ids()
+                    .map_err(|err| format!("failed to list series catalog: {err}"))?
+                    .into_iter()
+                    .collect();
+                !known.is_empty()
+                    && stored_chunks
+                        .iter()
+                        .all(|chunk| known.contains(&chunk.series_id))
+            }
         };
+        if disk_budget.is_none() {
+            stored_chunks = store
+                .scan()
+                .map_err(|err| format!("failed to recover chunk index: {err}"))?;
+        }
         // A catalog that failed that test is checked the memory way, which
         // needs every chunk's metadata after all.
         if disk_chunks && !disk_catalog_complete {

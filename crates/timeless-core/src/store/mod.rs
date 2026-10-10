@@ -401,6 +401,13 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not answer chunk index queries".to_string())
     }
 
+    /// Whether every series that has a raw chunk is in the series catalog.
+    /// A store that can answer without listing either side should.
+    fn chunk_series_cataloged(&self) -> Result<bool, String> {
+        let known: std::collections::HashSet<i64> = self.series_ids()?.into_iter().collect();
+        Ok(self.chunk_series_ids()?.iter().all(|id| known.contains(id)))
+    }
+
     /// Raw chunks wholly before `before` (`max_ts < before`) or wholly after
     /// `after` (`min_ts > after`); exactly one bound is given.
     fn chunk_locs_outside(
