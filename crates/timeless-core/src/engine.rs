@@ -1046,6 +1046,15 @@ pub struct Engine {
     /// periodic compactor later merges them into large pco chunks.
     defer_compression: bool,
     partitions: DashMap<PartitionKey, PartitionBuffer>,
+    /// When each series whose buffer has been released was last written,
+    /// in seconds since `started_at`. A buffer is released as soon as it
+    /// drains, so that a series costs a buffer only while it holds points;
+    /// this keeps the one thing of it the compaction policy still asks
+    /// (was the series written in the last hour?) at a dozen bytes a
+    /// series. Entries older than that hour are dropped when a sweep is
+    /// planned.
+    released_writes: DashMap<i64, u32>,
+    started_at: Instant,
     index: RwLock<BTreeMap<ChunkKey, ChunkMeta>>,
     /// Source of the ChunkKey sequence field. In-memory only — restart
     /// recovery re-assigns fresh values while scanning.
@@ -1908,7 +1917,7 @@ impl Engine {
             "txn_begin while a transaction journal is already active (nested xBegin?)"
         );
         while let Some(frame) = j.frames.pop() {
-            j.spares.push(frame);
+            Self::park_txn_frame(&mut j.spares, frame);
         }
         let frame = j.spares.pop().unwrap_or_default();
         j.frames.push(self.reset_txn_frame(frame, None));
@@ -1938,7 +1947,7 @@ impl Engine {
     pub fn txn_commit_published(&self, generation: Option<(i64, i64)>) {
         let mut j = self.txn_lock(); // serialize against in-flight recorders
         while let Some(frame) = j.frames.pop() {
-            j.spares.push(frame);
+            Self::park_txn_frame(&mut j.spares, frame);
         }
         if let Some(generation) = generation {
             *self.catalog_gen_lock() = Some(generation);
@@ -1968,7 +1977,7 @@ impl Engine {
         }
         while let Some(mut frame) = j.frames.pop() {
             self.rollback_txn_frame(&mut frame);
-            j.spares.push(frame);
+            Self::park_txn_frame(&mut j.spares, frame);
         }
         self.rebuild_flush_queue();
         if !self.authoritative_series {
@@ -2016,7 +2025,7 @@ impl Engine {
                     .expect("savepoint frame has an outer parent");
                 Self::merge_txn_frame(parent, &mut child);
             }
-            j.spares.push(child);
+            Self::park_txn_frame(&mut j.spares, child);
         }
         self.publish_frame_epoch(&j);
     }
@@ -2036,7 +2045,7 @@ impl Engine {
         while j.frames.len() > pos {
             let mut frame = j.frames.pop().expect("frame length checked");
             self.rollback_txn_frame(&mut frame);
-            j.spares.push(frame);
+            Self::park_txn_frame(&mut j.spares, frame);
         }
         let frame = j.spares.pop().unwrap_or_default();
         j.frames.push(self.reset_txn_frame(frame, Some(id)));
@@ -2044,6 +2053,28 @@ impl Engine {
         self.rebuild_flush_queue();
         if !self.authoritative_series {
             self.series_write().dirty = true;
+        }
+    }
+
+    /// Keep a finished frame for reuse, unless it grew large. A flush
+    /// journals a mark, and a copy of the points, for every buffer it
+    /// drains; parked as it was, that frame held a second copy of a whole
+    /// flush until the next transaction began, and its tables' capacity
+    /// for good (about 300 bytes a series written, in either catalog
+    /// mode). A small frame keeps the cheap path: no allocation to begin a
+    /// transaction, and nothing to free at commit.
+    fn park_txn_frame(spares: &mut Vec<TxnFrame>, frame: TxnFrame) {
+        const KEEP_AT_MOST: usize = 1_024;
+        let held = frame.buffer_marks.capacity()
+            + frame.saved.capacity()
+            + frame.added.capacity()
+            + frame.removed.capacity()
+            + frame.series_added.capacity()
+            + frame.series_removed.capacity()
+            + frame.rollup_added.capacity()
+            + frame.rollup_removed.capacity();
+        if held <= KEEP_AT_MOST {
+            spares.push(frame);
         }
     }
 
@@ -2507,6 +2538,8 @@ impl Engine {
             memory_budget,
             defer_compression,
             partitions: DashMap::new(),
+            released_writes: DashMap::new(),
+            started_at: Instant::now(),
             index: RwLock::new(BTreeMap::new()),
             chunk_seq: AtomicU64::new(0),
             series: RwLock::new(registry),
@@ -3494,6 +3527,13 @@ impl Engine {
             all_metas.extend(self.put_chunk_batch(batch)?);
         }
         self.index_insert_new(all_metas);
+        // Every buffer has drained and been released; the map that held
+        // them would otherwise keep the capacity of its fullest moment
+        // (about 190 bytes a series written). Refilling it costs nothing
+        // measurable against a cycle's ingest.
+        if self.partitions.is_empty() {
+            self.partitions.shrink_to_fit();
+        }
         self.save_series()?;
         Ok(())
     }
@@ -4053,9 +4093,27 @@ impl Engine {
     /// ended, as a process's does, was not: its few small chunks are worth
     /// putting together once, however few they are.
     fn series_written_lately(&self, key: &PartitionKey, now: Instant) -> bool {
-        self.partitions.get(key).is_some_and(|entry| {
-            now.duration_since(entry.value().last_write).as_secs() < COMPACT_MIN_AGE_SECS as u64
-        })
+        if let Some(entry) = self.partitions.get(key) {
+            return now.duration_since(entry.value().last_write).as_secs()
+                < COMPACT_MIN_AGE_SECS as u64;
+        }
+        self.released_writes
+            .get(&key.series_id)
+            .is_some_and(|written| {
+                self.seconds_since_start(now).saturating_sub(*written) < COMPACT_MIN_AGE_SECS as u32
+            })
+    }
+
+    fn seconds_since_start(&self, now: Instant) -> u32 {
+        u32::try_from(now.saturating_duration_since(self.started_at).as_secs()).unwrap_or(u32::MAX)
+    }
+
+    /// Forget released series not written in the last hour: the policy
+    /// answers "no" for them either way.
+    fn forget_idle_released_writes(&self, now: Instant) {
+        let now = self.seconds_since_start(now);
+        self.released_writes
+            .retain(|_, written| now.saturating_sub(*written) < COMPACT_MIN_AGE_SECS as u32);
     }
 
     /// Plan the sweep again from the index as it now is, and say whether
@@ -4093,6 +4151,7 @@ impl Engine {
         raw_min_chunks: usize,
     ) -> Vec<MetricsCompactionGroup> {
         let now = Instant::now();
+        self.forget_idle_released_writes(now);
         let mut groups = Vec::new();
         if self.disk_chunks {
             // The store returns the eligible chunks already, in the index's
@@ -4384,6 +4443,14 @@ impl Engine {
         entry.queued_for_flush = false;
         entry.last_write = Instant::now();
         drop(entry);
+        // The emptied buffer is released. A write that raced in keeps it
+        // (the check is made under the map's lock); a rollback that has
+        // pre-transaction points to put back makes a new one.
+        self.released_writes
+            .insert(key.series_id, self.seconds_since_start(Instant::now()));
+        self.partitions.remove_if(key, |_, buffer| {
+            buffer.timestamps.is_empty() && !buffer.queued_for_flush
+        });
 
         if freed > 0 {
             self.buffer_memory.fetch_sub(freed, Ordering::Relaxed);
@@ -6927,6 +6994,7 @@ impl Engine {
                             .push((*id, String::new(), Labels::new()));
                     }
                     self.partitions.remove(&PartitionKey { series_id: *id });
+                    self.released_writes.remove(id);
                 }
                 doomed
             } else {
@@ -6950,6 +7018,7 @@ impl Engine {
                     series.remove_id(*id);
                     // An emptied buffer is the last thing left of it.
                     self.partitions.remove(&PartitionKey { series_id: *id });
+                    self.released_writes.remove(id);
                 }
                 if !doomed.is_empty() {
                     series.dirty = true;
@@ -7611,6 +7680,7 @@ impl Engine {
             compaction_plans: self.compaction_plans.load(Ordering::Relaxed),
             series_on_disk: self.disk_series.is_some(),
             chunks_on_disk: self.disk_chunks,
+            released_series: self.released_writes.len() as u64,
             series_resolve_cache_entries: self
                 .disk_series
                 .as_ref()
@@ -7720,6 +7790,10 @@ pub struct EngineInfo {
     /// Whether the raw chunk index is read from the store's chunk rows
     /// rather than held in memory (#132 phase 2).
     pub chunks_on_disk: bool,
+    /// Series whose write buffer has been released and whose last write is
+    /// remembered for the compaction policy. `partition_count` is the
+    /// buffers still held.
+    pub released_series: u64,
     pub series_resolve_cache_entries: u64,
     pub retention_series_removed: u64,
     pub rollup_merge_chunks_removed: u64,

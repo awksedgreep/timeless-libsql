@@ -171,6 +171,53 @@ fn status_kib(field: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// glibc's `struct mallinfo2`.
+#[cfg(target_env = "gnu")]
+#[repr(C)]
+#[derive(Default)]
+struct MallInfo2 {
+    arena: usize,
+    ordblks: usize,
+    smblks: usize,
+    hblks: usize,
+    hblkhd: usize,
+    usmblks: usize,
+    fsmblks: usize,
+    uordblks: usize,
+    fordblks: usize,
+    keepcost: usize,
+}
+
+#[cfg(target_env = "gnu")]
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+    fn mallinfo2() -> MallInfo2;
+}
+
+/// Bytes the allocator has handed out and not had back (heap and mmapped
+/// blocks): live data, with none of the freed memory RSS still counts.
+fn in_use_kib() -> u64 {
+    #[cfg(target_env = "gnu")]
+    {
+        let info = unsafe { mallinfo2() };
+        return ((info.uordblks + info.hblkhd) / 1024) as u64;
+    }
+    #[allow(unreachable_code)]
+    0
+}
+
+/// Resident memory actually held: freed memory is handed back to the OS
+/// first, so the figure is what is in use and not the high-water mark the
+/// allocator would otherwise keep. The extension shares this process's
+/// allocator, so its frees are returned too.
+fn held_kib() -> u64 {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        malloc_trim(0);
+    }
+    status_kib("VmRSS:")
+}
+
 fn count(conn: &Connection, sql: &str, args: &[&dyn rusqlite::ToSql]) -> usize {
     let mut stmt = conn.prepare_cached(sql).unwrap();
     let mut rows = stmt.query(args).unwrap();
@@ -356,10 +403,32 @@ pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
             "{series_count},config,index_cache_{},{on_disk},,",
             index_cache.as_deref().unwrap_or("unset")
         );
+        let held_start = held_kib();
+        let in_use_start = in_use_kib();
+        let held = |what: &str| {
+            let kib = held_kib().saturating_sub(held_start);
+            let live = in_use_kib().saturating_sub(in_use_start);
+            println!("{series_count},memory,live_{what}_kib,{live},,");
+            println!(
+                "{series_count},memory,live_{what}_bytes_per_series,{},,",
+                live * 1024 / series_count as u64
+            );
+            // SQLite's own allocations (page cache, statements, schema),
+            // which are part of `live`.
+            let sqlite = unsafe { rusqlite::ffi::sqlite3_memory_used() } / 1024;
+            println!("{series_count},memory,sqlite_{what}_kib,{sqlite},,");
+            println!("{series_count},memory,held_{what}_kib,{kib},,");
+            println!(
+                "{series_count},memory,held_{what}_bytes_per_series,{},,",
+                kib * 1024 / series_count as u64
+            );
+        };
         let create = cycle(&conn, series_count, BASE_TS, 0.0);
         println!("{series_count},ingest,create_cycle_ms,{create:.0},,{series_count}");
+        held("after_create_buffered");
         conn.execute_batch("INSERT INTO metrics(metrics) VALUES ('flush')")
             .unwrap();
+        held("after_create_flushed");
         let mut steady: Vec<f64> = (1..=3)
             .map(|n| {
                 let ms = cycle(&conn, series_count, BASE_TS + n * CYCLE_SECS, n as f64);
@@ -377,7 +446,9 @@ pub(super) fn run(ext: &str, series_count: usize, runs: usize) {
             "{series_count},ingest,steady_ns_per_series,{:.0},,{series_count}",
             steady[1] * 1_000_000.0 / series_count as f64
         );
+        held("after_steady_cycles");
         reads(&conn, series_count, runs);
+        held("after_reads");
         let rss = status_kib("VmRSS:").saturating_sub(rss_start);
         println!("{series_count},memory,writer_rss_delta_kib,{rss},,");
         println!(

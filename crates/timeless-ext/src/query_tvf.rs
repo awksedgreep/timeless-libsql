@@ -5303,6 +5303,11 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         "series_on_disk",
                         Value::Integer(i64::from(info.series_on_disk)),
                     ),
+                    ("write_buffers", Value::Integer(info.partition_count as i64)),
+                    (
+                        "released_series",
+                        Value::Integer(info.released_series as i64),
+                    ),
                     (
                         "chunks_on_disk",
                         Value::Integer(i64::from(info.chunks_on_disk)),
