@@ -86,6 +86,54 @@ a server becomes network-reachable is the moment to consider
 `TIMELESS_AUTH_MODE=required` or `TIMELESS_ADMIN_KEY` (see the
 [API reference](../docs/SERVER_API_REFERENCE.md)).
 
+### Where to put the database
+
+Keep each signal database on a filesystem that overwrites pages in place:
+ext4, xfs, or a copy-on-write filesystem with copy-on-write turned off for
+the data directory. The servers rewrite 4 KB pages all over a multi-gigabyte
+file every few seconds. On btrfs with copy-on-write (its default, often with
+`compress=zstd`) every rewritten page becomes its own extent, and under
+maintenance load the kernel throttles and stalls the writer. On one
+700,000-series deployment `metrics.db` was 3.0 GB in 714,304 extents, the
+writer was blocked for 7–10 seconds at a time in `balance_dirty_pages` and up
+to 3.9 seconds in `fsync`, and queries waited behind it. With the same files
+copied into a no-copy-on-write directory, the longest maintenance step fell
+to under a second (#139). ZFS and other copy-on-write filesystems, and
+container volumes that sit on one, behave the same way to some degree.
+
+On btrfs, copy-on-write is turned off per directory, and only for files
+created afterwards:
+
+```bash
+mkdir /srv/timeless-data
+chattr +C /srv/timeless-data        # must be empty; new files inherit NOCOW
+lsattr -d /srv/timeless-data        # shows a 'C'
+```
+
+For an existing deployment, stop the servers, create a new directory with
+`+C`, copy the files in with `cp -a --reflink=never` (a reflink copy would
+share the old copy-on-write extents), verify, and swap the directory in. The
+trade-off: btrfs neither compresses nor checksums NOCOW files, and a snapshot
+makes the snapshotted extents copy-on-write again until they are next
+rewritten.
+
+To check a running deployment:
+
+```bash
+findmnt -no FSTYPE,OPTIONS -T /srv/timeless-data   # filesystem and mount options
+lsattr /srv/timeless-data/metrics.db               # 'C' on a NOCOW file
+filefrag /srv/timeless-data/metrics.db             # extents: thousands at most, not hundreds of thousands
+```
+
+Signs of this problem: a writer thread in state `D`, with
+`balance_dirty_pages` or `btrfs_sync_file` in
+`/proc/<pid>/task/<tid>/stack`; a `compact_step_max_ns` of several seconds;
+and read retries or timeouts that come and go with maintenance.
+
+For rootless Podman or Docker named volumes, the directory to prepare is the
+volume's `_data` directory (`podman volume inspect <name>`), before the first
+start; or bind-mount a prepared directory instead.
+
 ### Sharing a database with the extension
 
 The servers load the same `libtimeless_ext` and speak the same on-disk
