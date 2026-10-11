@@ -120,6 +120,8 @@ const ROLLUP_MERGE_MIN_CHUNKS: usize = 4;
 /// saying so costs a lookup; a step that stopped at its budget of groups
 /// looked at took thousands of transactions to get round them.
 const ROLLUP_STEP_SCAN_FACTOR: usize = 64;
+/// How many groups' watermarks a rollup step reads at once.
+const ROLLUP_WATERMARK_STRETCH: usize = 8192;
 
 /// Explicit rollup cleanup can use a larger bounded batch than automatic
 /// retention: it is operator-requested and must make practical progress on
@@ -1292,6 +1294,26 @@ pub struct Engine {
     /// Whole-store raw-chunk totals for a disk index, read once and kept
     /// until a write could have changed them.
     disk_chunk_totals: Mutex<Option<ChunkTotals>>,
+    /// A disk index's rollup chunks: how many, and how many hold one
+    /// bucket. Read from the store once and then moved by what each rollup
+    /// pass, merge and delete did, as the raw totals are.
+    disk_rollup_totals: Mutex<Option<(usize, usize)>>,
+    /// Per tier, the coverage end through which a rollup cycle has looked
+    /// at every series' group and left nothing undone. While a tier's next
+    /// coverage end is still that one (an hourly tier's is, for eleven
+    /// sweeps in twelve at a five-minute sweep), there is nothing for the
+    /// tier to do and its groups are not looked at again. Forgotten
+    /// whenever something could give a settled tier work: a sample older
+    /// than what it covers, a rolled-back transaction, deleted rollup
+    /// chunks, another process's writes, a changed ladder.
+    rollup_settled: Mutex<HashMap<i64, i64>>,
+    /// The greatest of `rollup_settled`'s coverage ends, or `i64::MIN`:
+    /// what a flush compares a chunk's oldest sample to.
+    rollup_settled_max: AtomicI64,
+    /// The tier a rollup cycle is in the middle of and the high water it
+    /// began that tier at, so a tier is only called settled by the cycle
+    /// that looked at all of it.
+    rollup_tier_started: Mutex<Option<(i64, i64)>>,
     /// Fused Prometheus ingest telemetry. These cumulative counters are
     /// exposed through timeless_stats so embedding hosts can observe partial
     /// parse success without parsing the exposition body a second time.
@@ -1926,7 +1948,169 @@ impl Engine {
                 .disk_chunk_totals
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = None;
+            *self
+                .disk_rollup_totals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
         }
+    }
+
+    // ── Rollup index reads (#144) ────────────────────────────────────
+    //
+    // As with raw chunks, every reader asks these and never the in-memory
+    // index directly, so the rollup index can live in memory or on disk
+    // behind them.
+
+    /// Something may have given a settled rollup tier work again.
+    fn rollup_unsettle(&self) {
+        if self.rollup_settled_max.swap(i64::MIN, Ordering::Relaxed) != i64::MIN {
+            self.rollup_settled
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+        }
+    }
+
+    /// A cycle looked at every group of these tiers, to these coverage ends.
+    fn rollup_settle(&self, tiers: &[(i64, i64)]) {
+        if tiers.is_empty() {
+            return;
+        }
+        let mut settled = self
+            .rollup_settled
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for (resolution, produce_to) in tiers {
+            settled.insert(*resolution, *produce_to);
+        }
+        let greatest = settled.values().copied().max().unwrap_or(i64::MIN);
+        self.rollup_settled_max.store(greatest, Ordering::Relaxed);
+    }
+
+    /// How many rollup chunks there are, and how many hold one bucket.
+    fn rollup_totals(&self) -> (usize, usize) {
+        if !self.disk_chunks {
+            let rollups = self.rollup_read();
+            return (rollups.len(), rollups.single_bucket());
+        }
+        let mut cached = self
+            .disk_rollup_totals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(totals) = *cached {
+            return totals;
+        }
+        // An unreadable store reports nothing rather than failing a
+        // statistics read; it is not cached, so the next read retries.
+        match self.store.rollup_totals() {
+            Ok(totals) => {
+                *cached = Some(totals);
+                totals
+            }
+            Err(_) => (0, 0),
+        }
+    }
+
+    /// Rollup chunks were written to and removed from a disk index: move
+    /// the totals. Each pair is (chunks, of which hold one bucket).
+    fn disk_rollups_moved(&self, added: (usize, usize), removed: (usize, usize)) {
+        if !self.disk_chunks {
+            return;
+        }
+        let mut cached = self
+            .disk_rollup_totals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some((count, single)) = *cached else {
+            return;
+        };
+        *cached = match (
+            (count + added.0).checked_sub(removed.0),
+            (single + added.1).checked_sub(removed.1),
+        ) {
+            (Some(count), Some(single)) => Some((count, single)),
+            // More removed than was counted: the store says what is there.
+            _ => None,
+        };
+    }
+
+    /// The rollup chunks of each of `series_ids` at `resolution` whose
+    /// coverage overlaps `[start, stop]`, oldest first, in the order of
+    /// `series_ids`.
+    fn rollup_metas_for(
+        &self,
+        resolution: i64,
+        series_ids: &[i64],
+        start: i64,
+        stop: i64,
+    ) -> EngineResult<Vec<Vec<ChunkMeta>>> {
+        if !self.disk_chunks {
+            let rollups = self.rollup_read();
+            return Ok(series_ids
+                .iter()
+                .map(|&series_id| {
+                    let group = RollupGroupKey {
+                        series_id,
+                        resolution,
+                    };
+                    rollups
+                        .entries(&group)
+                        .iter()
+                        .take_while(|entry| entry.min_ts <= stop)
+                        .filter(|entry| entry.max_ts >= start)
+                        .map(|entry| entry.chunk_meta())
+                        .collect()
+                })
+                .collect());
+        }
+        // The store wants distinct ids; a caller may repeat one.
+        let mut distinct = series_ids.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let mut by_series: HashMap<i64, Vec<ChunkMeta>> = HashMap::new();
+        for chunk in self
+            .store
+            .rollup_metas_for(resolution, &distinct, start, stop)
+            .map_err(|err| format!("rollup index read failed: {err}"))?
+        {
+            by_series
+                .entry(chunk.series_id)
+                .or_default()
+                .push(chunk.meta);
+        }
+        Ok(series_ids
+            .iter()
+            .map(|series_id| by_series.get(series_id).cloned().unwrap_or_default())
+            .collect())
+    }
+
+    /// The newest coverage end of each of `series_ids`' rollup chunks at
+    /// `resolution`, for those that have any.
+    fn rollup_watermarks(
+        &self,
+        resolution: i64,
+        series_ids: &[i64],
+    ) -> EngineResult<HashMap<i64, i64>> {
+        if !self.disk_chunks {
+            let rollups = self.rollup_read();
+            return Ok(series_ids
+                .iter()
+                .filter_map(|&series_id| {
+                    rollups
+                        .watermark(&RollupGroupKey {
+                            series_id,
+                            resolution,
+                        })
+                        .map(|watermark| (series_id, watermark))
+                })
+                .collect());
+        }
+        Ok(self
+            .store
+            .rollup_watermarks(resolution, series_ids)
+            .map_err(|err| format!("rollup watermark read failed: {err}"))?
+            .into_iter()
+            .collect())
     }
 
     // ── Series catalog reads (#132) ──────────────────────────────────
@@ -2517,6 +2701,8 @@ impl Engine {
 
     fn rollback_txn_frame(&self, frame: &mut TxnFrame) {
         self.disk_chunks_changed();
+        // Rollup chunks a settled tier counted on may be going with it.
+        self.rollup_unsettle();
         // 1. Truncate buffers to their marks. Partitions without a mark
         //    were not mutated in this frame and are already as they were;
         //    one created during the frame was marked at 0 (the empty
@@ -2674,6 +2860,12 @@ impl Engine {
     fn index_insert_new(&self, items: Vec<(PartitionKey, ChunkMeta)>) {
         if items.is_empty() {
             return;
+        }
+        // A sample no newer than what a rollup tier is settled to gives
+        // that tier work again. Samples normally arrive newer than that.
+        let settled_to = self.rollup_settled_max.load(Ordering::Relaxed);
+        if settled_to != i64::MIN && items.iter().any(|(_, meta)| meta.min_ts <= settled_to) {
+            self.rollup_unsettle();
         }
         if self.disk_chunks {
             // The rows the store just wrote are the index entries. The
@@ -2916,7 +3108,13 @@ impl Engine {
         } else {
             registry
         };
-        let rollup_index = Self::load_rollup_index(store.as_ref())?;
+        // A disk index holds no entry per rollup chunk either (#144): the
+        // store answers from its rollup index, and nothing is read here.
+        let rollup_index = if disk_chunks {
+            RollupIndex::default()
+        } else {
+            Self::load_rollup_index(store.as_ref())?
+        };
 
         let engine = Engine {
             store,
@@ -2965,6 +3163,10 @@ impl Engine {
             series_touched: AtomicBool::new(false),
             disk_chunks,
             disk_chunk_totals: Mutex::new(None),
+            disk_rollup_totals: Mutex::new(None),
+            rollup_settled: Mutex::new(HashMap::new()),
+            rollup_settled_max: AtomicI64::new(i64::MIN),
+            rollup_tier_started: Mutex::new(None),
             prometheus_ingest_batches: AtomicU64::new(0),
             prometheus_ingest_points: AtomicU64::new(0),
             prometheus_ingest_errors: AtomicU64::new(0),
@@ -4334,7 +4536,8 @@ impl Engine {
                 break;
             }
             let group = plan.groups.pop_front().expect("the front group is there");
-            if !self.sources_present(&group) {
+            // A disk index is asked once for the whole step, below.
+            if !self.disk_chunks && !self.sources_present(&group) {
                 continue;
             }
             selected_points = selected_points.saturating_add(points);
@@ -4344,6 +4547,18 @@ impl Engine {
         }
         let budget_limited = !plan.groups.is_empty();
         drop(plan_guard);
+        if self.disk_chunks && !selected.is_empty() {
+            // Nearly always every source is still there, and one statement
+            // says so; only when something has gone is each group asked
+            // after on its own.
+            let locs: Vec<ChunkLoc> = selected
+                .iter()
+                .flat_map(|group| group.sources.iter().map(|(_, meta)| meta.loc.clone()))
+                .collect();
+            if !self.store.chunks_present(&locs).unwrap_or(false) {
+                selected.retain(|group| self.sources_present(group));
+            }
+        }
 
         // Phase 1: re-encode every replacement chunk in memory — nothing
         // is persisted or visible to queries yet. `add` holds the chunks
@@ -6539,6 +6754,7 @@ impl Engine {
         let mut current = self.rollup_tiers.lock().unwrap_or_else(|e| e.into_inner());
         if *current != tiers {
             *current = tiers;
+            self.rollup_unsettle();
             self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
             // A new window is applied at the next boundary, not once the
             // high-water mark has moved a slice of the old one.
@@ -6563,6 +6779,7 @@ impl Engine {
                 .get_or_insert_with(|| current.clone());
         }
         *current = tiers;
+        self.rollup_unsettle();
         self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
         self.retention_floor.store(i64::MIN, Ordering::Relaxed);
     }
@@ -6578,6 +6795,9 @@ impl Engine {
     /// tiers no longer declared by an active ladder. Used by the repair path,
     /// which must sweep every stored tier rather than only current ones.
     pub fn rollup_resolutions(&self) -> Vec<i64> {
+        if self.disk_chunks {
+            return self.store.rollup_resolutions().unwrap_or_default();
+        }
         let rollups = self.rollup_read();
         let mut resolutions: Vec<i64> = rollups
             .groups
@@ -6650,16 +6870,48 @@ impl Engine {
 
     /// Every rollup merge there is to do, from a read snapshot.
     fn plan_rollup_merges(&self) -> Vec<RollupMergeGroup> {
-        let rollups = self.rollup_read();
         // A series with no raw chunk left has nothing more to roll up:
         // its pieces are put together once, however few they are.
         let with_raw: HashSet<i64> = self.chunk_series_ids().into_iter().collect();
         let mut plans = Vec::new();
-        for (group, entries) in &rollups.groups {
+        let plan_group = |group: RollupGroupKey,
+                          entries: &[RollupIndexEntry],
+                          plans: &mut Vec<RollupMergeGroup>| {
             if with_raw.contains(&group.series_id) {
-                Self::plan_live_rollup_group(*group, entries, &mut plans);
+                Self::plan_live_rollup_group(group, entries, plans);
             } else {
-                Self::plan_ended_rollup_group(*group, entries, &mut plans);
+                Self::plan_ended_rollup_group(group, entries, plans);
+            }
+        };
+        if self.disk_chunks {
+            // The store hands the chunks over a group at a time, so only
+            // one group's entries are held while it is planned.
+            let mut current: Option<RollupGroupKey> = None;
+            let mut entries: Vec<RollupIndexEntry> = Vec::new();
+            let visited = self.store.visit_rollup_groups(&mut |chunk| {
+                let (group, entry) = Self::rollup_index_parts(chunk)?;
+                if current != Some(group) {
+                    if let Some(previous) = current {
+                        plan_group(previous, &entries, &mut plans);
+                    }
+                    entries.clear();
+                    current = Some(group);
+                }
+                entries.push(entry);
+                Ok(())
+            });
+            // An unreadable index plans nothing this sweep; the next tries
+            // again, as an unreadable raw index does.
+            if visited.is_err() {
+                return Vec::new();
+            }
+            if let Some(previous) = current {
+                plan_group(previous, &entries, &mut plans);
+            }
+        } else {
+            let rollups = self.rollup_read();
+            for (group, entries) in &rollups.groups {
+                plan_group(*group, entries, &mut plans);
             }
         }
         // Series order, so a merge step's deletes and inserts share pages.
@@ -6759,7 +7011,31 @@ impl Engine {
     /// Put together the planned runs. A run any of whose chunks has gone
     /// since it was planned (retention, an earlier merge) is passed over.
     fn apply_rollup_merges(&self, plans: Vec<RollupMergeGroup>) -> EngineResult<(usize, usize)> {
-        let plans: Vec<RollupMergeGroup> = {
+        let plans: Vec<RollupMergeGroup> = if self.disk_chunks {
+            // Nearly always every source is still there, and one question
+            // settles it; only when something has gone is each run asked
+            // after on its own.
+            let present = |plans: &[RollupMergeGroup]| -> EngineResult<bool> {
+                let locs: Vec<ChunkLoc> = plans
+                    .iter()
+                    .flat_map(|(_, entries)| entries.iter().map(|entry| entry.loc()))
+                    .collect();
+                self.store
+                    .chunks_present(&locs)
+                    .map_err(|err| format!("rollup merge presence check failed: {err}"))
+            };
+            if present(&plans)? {
+                plans
+            } else {
+                let mut still = Vec::with_capacity(plans.len());
+                for plan in plans {
+                    if present(std::slice::from_ref(&plan))? {
+                        still.push(plan);
+                    }
+                }
+                still
+            }
+        } else {
             let rollups = self.rollup_read();
             plans
                 .into_iter()
@@ -6839,6 +7115,35 @@ impl Engine {
         // Phase 2: swap the index, journaled, before any old row goes,
         // so that no reader is sent to a row that is not there.
         let mut old_locs: Vec<ChunkLoc> = Vec::new();
+        if self.disk_chunks {
+            // The rows are the index, and the host transaction undoes
+            // them: there is nothing to swap or journal. No other
+            // connection reads this table inside a write transaction (the
+            // writer gate), and another process reads a committed
+            // snapshot, so nobody sees the new rows beside the old.
+            let mut removed_single = 0;
+            for (_, entries, _) in &merged {
+                for entry in entries {
+                    removed_single += usize::from(entry.point_count == 1);
+                    old_locs.push(entry.loc());
+                }
+            }
+            let errors = self.store.delete_chunks(&old_locs);
+            if !errors.is_empty() {
+                self.disk_chunks_changed();
+                return Err(format!("rollup merge delete failed: {}", errors.join("; ")));
+            }
+            let added_single = batch.iter().filter(|chunk| chunk.bucket_count == 1).count();
+            self.disk_rollups_moved(
+                (batch.len(), added_single),
+                (old_locs.len(), removed_single),
+            );
+            self.rollup_merge_chunks_removed
+                .fetch_add(old_locs.len() as u64, Ordering::Relaxed);
+            self.rollup_merge_chunks_written
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
+            return Ok((old_locs.len(), batch.len()));
+        }
         {
             let _transition = self.transition_write();
             let mut journal = self.txn_guard();
@@ -7019,55 +7324,145 @@ impl Engine {
 
         let mut batch: Vec<EncodedRollupChunk> = Vec::new();
         let mut group_end = group_start;
-        for group_ordinal in group_start..scan_end {
+        // Watermarks are read a stretch of groups at a time: a step looks
+        // at tens of thousands of groups, nearly all with nothing due, and
+        // a disk index answers a stretch in one statement.
+        let mut watermarks: HashMap<i64, i64> = HashMap::new();
+        let mut watermarks_end = group_start;
+        // With a disk index, the series of the stretch that have a raw
+        // chunk to roll up: asking that of the index for the whole stretch
+        // replaces a read of each series' chunks, nearly all of which find
+        // nothing (a statement a group, and tens of thousands a step).
+        let mut due: Option<HashSet<i64>> = None;
+        // The coverage end a tier is rolled up to: its last bucket with a
+        // full bucket of settle behind it.
+        let produce_to_for = |r: i64| -> Option<i64> {
+            let limit = high_water.checked_sub(r)?;
+            let last_bucket = limit.checked_sub(r - 1)?.div_euclid(r) * r;
+            Some(last_bucket + r - 1)
+        };
+        let mut scan_end = scan_end;
+        let mut settled_now: Vec<(i64, i64)> = Vec::new();
+        let settled_before: HashMap<i64, i64> = self
+            .rollup_settled
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let mut group_ordinal = group_start;
+        while group_ordinal < scan_end {
             if batch.len() >= write_limit {
                 break;
             }
-            group_end = group_ordinal + 1;
             let tier = &tiers[group_ordinal / series_ids.len()];
-            let sid = series_ids[group_ordinal % series_ids.len()];
-            let r = tier.resolution;
-            // Eligible buckets: B + R - 1 <= high_water - R (one full
-            // bucket of settle). produce_to is that last coverage end.
-            let Some(limit) = high_water.checked_sub(r) else {
-                continue;
-            };
-            let last_bucket = match limit.checked_sub(r - 1) {
-                Some(x) => x.div_euclid(r) * r,
-                None => continue,
-            };
-            let produce_to = last_bucket + r - 1;
-            let group = RollupGroupKey {
-                series_id: sid,
-                resolution: r,
-            };
-            let watermark = self.rollup_read().watermark(&group);
-            let start = match watermark {
-                Some(w) if w >= produce_to => continue,
-                Some(w) => w.saturating_add(1),
-                None => i64::MIN,
-            };
-            let samples = self.query_range_by_id(sid, start, produce_to)?;
-            if samples.is_empty() {
-                continue;
+            let tier_end = (group_ordinal / series_ids.len() + 1) * series_ids.len();
+            if group_ordinal % series_ids.len() == 0 {
+                // Entering a tier. One that an earlier cycle settled to the
+                // coverage end it would be rolled up to now has nothing to
+                // do: pass over it, at no cost to this step's scan.
+                let settled = produce_to_for(tier.resolution)
+                    .is_some_and(|to| settled_before.get(&tier.resolution) == Some(&to));
+                if settled {
+                    scan_end = scan_end.saturating_add(series_ids.len()).min(group_count);
+                    group_ordinal = tier_end;
+                    group_end = tier_end;
+                    continue;
+                }
+                *self
+                    .rollup_tier_started
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) =
+                    Some((tier.resolution, high_water));
             }
-            let buckets = rollup_buckets(&samples, r)?;
-            let payload = encode_rollup_payload(&buckets)?;
-            // encode_rollup_payload already rejected counts over
-            // u32::MAX, so this cannot wrap.
-            let bucket_count = u32::try_from(buckets.len())
-                .map_err(|_| format!("rollup chunk: {} buckets exceeds u32::MAX", buckets.len()))?;
-            batch.push(EncodedRollupChunk {
-                series_id: sid,
-                resolution: r,
-                min_ts: buckets[0].bucket_ts,
-                max_ts: buckets[buckets.len() - 1].bucket_ts + r - 1,
-                bucket_count,
-                payload,
-            });
+            group_end = group_ordinal + 1;
+            let sid = series_ids[group_ordinal % series_ids.len()];
+            'group: {
+                if group_ordinal >= watermarks_end {
+                    // To the end of the stretch, of the scan, or of this tier,
+                    // whichever comes first.
+                    watermarks_end = group_ordinal
+                        .saturating_add(ROLLUP_WATERMARK_STRETCH)
+                        .min(scan_end)
+                        .min(tier_end);
+                    let first = group_ordinal % series_ids.len();
+                    let stretch = &series_ids[first..first + (watermarks_end - group_ordinal)];
+                    watermarks = self.rollup_watermarks(tier.resolution, stretch)?;
+                    due = match (self.disk_chunks, produce_to_for(tier.resolution)) {
+                        (true, Some(produce_to)) => {
+                            let covered: Vec<(i64, Option<i64>)> = stretch
+                                .iter()
+                                .map(|sid| (*sid, watermarks.get(sid).copied()))
+                                .collect();
+                            Some(
+                                self.store
+                                    .series_with_raw_between(&covered, produce_to)
+                                    .map_err(|err| format!("rollup candidate read failed: {err}"))?
+                                    .into_iter()
+                                    .collect(),
+                            )
+                        }
+                        _ => None,
+                    };
+                }
+                let r = tier.resolution;
+                // Eligible buckets: B + R - 1 <= high_water - R (one full
+                // bucket of settle). produce_to is that last coverage end.
+                let Some(produce_to) = produce_to_for(r) else {
+                    break 'group;
+                };
+                // Nothing on disk to roll up, and nothing buffered that might
+                // be: the read below would find no sample.
+                if due.as_ref().is_some_and(|due| !due.contains(&sid))
+                    && self
+                        .partitions
+                        .get(&PartitionKey { series_id: sid })
+                        .is_none_or(|buffer| buffer.timestamps.is_empty())
+                {
+                    break 'group;
+                }
+                let watermark = watermarks.get(&sid).copied();
+                let start = match watermark {
+                    Some(w) if w >= produce_to => break 'group,
+                    Some(w) => w.saturating_add(1),
+                    None => i64::MIN,
+                };
+                let samples = self.query_range_by_id(sid, start, produce_to)?;
+                if samples.is_empty() {
+                    break 'group;
+                }
+                let buckets = rollup_buckets(&samples, r)?;
+                let payload = encode_rollup_payload(&buckets)?;
+                // encode_rollup_payload already rejected counts over
+                // u32::MAX, so this cannot wrap.
+                let bucket_count = u32::try_from(buckets.len()).map_err(|_| {
+                    format!("rollup chunk: {} buckets exceeds u32::MAX", buckets.len())
+                })?;
+                batch.push(EncodedRollupChunk {
+                    series_id: sid,
+                    resolution: r,
+                    min_ts: buckets[0].bucket_ts,
+                    max_ts: buckets[buckets.len() - 1].bucket_ts + r - 1,
+                    bucket_count,
+                    payload,
+                });
+            }
+            // The last group of a tier, in the cycle that began the tier:
+            // every group of it has been looked at as of this high water.
+            if group_end == tier_end {
+                let began = *self
+                    .rollup_tier_started
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if began == Some((tier.resolution, high_water)) {
+                    if let Some(produce_to) = produce_to_for(tier.resolution) {
+                        settled_now.push((tier.resolution, produce_to));
+                    }
+                }
+            }
+            group_ordinal += 1;
         }
         let more = max_groups.is_some() && group_end < group_count;
         if batch.is_empty() {
+            self.rollup_settle(&settled_now);
             self.rollup_maintenance_cursor
                 .store(if more { group_end } else { 0 }, Ordering::Relaxed);
             return Ok((0, 0, more));
@@ -7088,6 +7483,15 @@ impl Engine {
         }
 
         let buckets_total: usize = batch.iter().map(|c| c.bucket_count as usize).sum();
+        if self.disk_chunks {
+            // The rows just written are the index entries.
+            let single = batch.iter().filter(|chunk| chunk.bucket_count == 1).count();
+            self.disk_rollups_moved((batch.len(), single), (0, 0));
+            self.rollup_settle(&settled_now);
+            self.rollup_maintenance_cursor
+                .store(if more { group_end } else { 0 }, Ordering::Relaxed);
+            return Ok((batch.len(), buckets_total, more));
+        }
         let mut journal = self.txn_guard();
         let mut rollups = self.rollup_write();
         for (chunk, loc) in batch.iter().zip(locs) {
@@ -7118,6 +7522,9 @@ impl Engine {
                 journal.rollup_added.insert(key);
             }
         }
+        drop(rollups);
+        drop(journal);
+        self.rollup_settle(&settled_now);
         self.rollup_maintenance_cursor
             .store(if more { group_end } else { 0 }, Ordering::Relaxed);
         Ok((batch.len(), buckets_total, more))
@@ -7142,20 +7549,10 @@ impl Engine {
             return Err(format!("resolution must be positive, got {resolution}"));
         }
         let _transition = self.transition_read();
-        let group = RollupGroupKey {
-            series_id,
-            resolution,
-        };
-        let metas: Vec<ChunkMeta> = {
-            let rollups = self.rollup_read();
-            rollups
-                .entries(&group)
-                .iter()
-                .take_while(|entry| entry.min_ts <= stop)
-                .filter(|entry| entry.max_ts >= start)
-                .map(|entry| entry.chunk_meta())
-                .collect()
-        };
+        let metas: Vec<ChunkMeta> = self
+            .rollup_metas_for(resolution, &[series_id], start, stop)?
+            .pop()
+            .unwrap_or_default();
         let mut out = Vec::new();
         for meta in metas {
             let bytes = self
@@ -7187,25 +7584,8 @@ impl Engine {
         }
 
         let _transition = self.transition_read();
-        let matching: Vec<Vec<ChunkMeta>> = {
-            let rollups = self.rollup_read();
-            series_ids
-                .iter()
-                .map(|&series_id| {
-                    let group = RollupGroupKey {
-                        series_id,
-                        resolution,
-                    };
-                    rollups
-                        .entries(&group)
-                        .iter()
-                        .take_while(|entry| entry.min_ts <= stop)
-                        .filter(|entry| entry.max_ts >= start)
-                        .map(|entry| entry.chunk_meta())
-                        .collect()
-                })
-                .collect()
-        };
+        let matching: Vec<Vec<ChunkMeta>> =
+            self.rollup_metas_for(resolution, series_ids, start, stop)?;
         let locs: Vec<ChunkLoc> = matching
             .iter()
             .flat_map(|chunks| chunks.iter().map(|meta| meta.loc.clone()))
@@ -7252,6 +7632,14 @@ impl Engine {
     /// transaction).
     fn delete_rollups_before(&self, resolution: i64, cutoff: i64) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
+        if self.disk_chunks {
+            return self.delete_disk_rollups(
+                Some(resolution),
+                Some(cutoff),
+                None,
+                ROLLUP_RETENTION_DELETE_BATCH,
+            );
+        }
         let mut journal = self.txn_guard();
         let mut rollups = self.rollup_write();
         let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
@@ -7284,6 +7672,47 @@ impl Engine {
                 }
             }
         }
+        // A series whose rollups have gone is rolled up again from what
+        // raw samples it still has.
+        self.rollup_unsettle();
+        (victims.len(), more, Vec::new())
+    }
+
+    /// One bounded batch of rollup rows deleted from a disk index: the
+    /// store finds the victims, and each is a row, so there is nothing to
+    /// journal. Returns (deleted, more_may_remain, errors). The caller
+    /// holds the transition lock.
+    fn delete_disk_rollups(
+        &self,
+        resolution: Option<i64>,
+        before: Option<i64>,
+        after: Option<i64>,
+        max_chunks: usize,
+    ) -> (usize, bool, Vec<String>) {
+        let mut victims =
+            match self
+                .store
+                .rollup_victims(resolution, before, after, max_chunks.saturating_add(1))
+            {
+                Ok(victims) => victims,
+                Err(error) => return (0, false, vec![error]),
+            };
+        let more = victims.len() > max_chunks;
+        victims.truncate(max_chunks);
+        if victims.is_empty() {
+            return (0, false, Vec::new());
+        }
+        let locs: Vec<ChunkLoc> = victims.iter().map(|(loc, _)| loc.clone()).collect();
+        let errors = self.store.delete_chunks(&locs);
+        if !errors.is_empty() {
+            self.disk_chunks_changed();
+            return (0, more, errors);
+        }
+        let single = victims.iter().filter(|(_, buckets)| *buckets == 1).count();
+        self.disk_rollups_moved((0, 0), (victims.len(), single));
+        // A series whose rollups have gone is rolled up again from what
+        // raw samples it still has.
+        self.rollup_unsettle();
         (victims.len(), more, Vec::new())
     }
 
@@ -7292,6 +7721,14 @@ impl Engine {
     /// bounded batch. Returns (deleted, more_may_remain, errors).
     fn delete_rollups_after(&self, resolution: i64, after_ts: i64) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
+        if self.disk_chunks {
+            return self.delete_disk_rollups(
+                Some(resolution),
+                None,
+                Some(after_ts),
+                ROLLUP_RETENTION_DELETE_BATCH,
+            );
+        }
         let mut journal = self.txn_guard();
         let mut rollups = self.rollup_write();
         let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
@@ -7324,6 +7761,9 @@ impl Engine {
                 }
             }
         }
+        // A series whose rollups have gone is rolled up again from what
+        // raw samples it still has.
+        self.rollup_unsettle();
         (victims.len(), more, Vec::new())
     }
 
@@ -7339,6 +7779,12 @@ impl Engine {
     /// budget instead of using the larger operator-oriented default batch.
     pub fn clear_rollups_bounded(&self, max_chunks: usize) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
+        if self.disk_chunks {
+            if max_chunks == 0 {
+                return (0, self.rollup_totals().0 > 0, Vec::new());
+            }
+            return self.delete_disk_rollups(None, None, None, max_chunks);
+        }
         let mut journal = self.txn_guard();
         let mut rollups = self.rollup_write();
         if max_chunks == 0 {
@@ -7372,6 +7818,9 @@ impl Engine {
                 }
             }
         }
+        // A series whose rollups have gone is rolled up again from what
+        // raw samples it still has.
+        self.rollup_unsettle();
         (victims.len(), more, Vec::new())
     }
 
@@ -7562,10 +8011,20 @@ impl Engine {
         let _transition = self.transition_write();
         let doomed: Vec<i64> = {
             let mut journal = self.txn_guard();
-            let rollups = self.rollup_read();
             let mut live: HashSet<i64> = HashSet::new();
             live.extend(self.chunk_series_ids());
-            live.extend(rollups.groups.keys().map(|group| group.series_id));
+            if self.disk_chunks {
+                // A series whose rollups cannot be listed is not one to
+                // remove: fail rather than take it for one with none.
+                live.extend(
+                    self.store
+                        .rollup_series_ids()
+                        .map_err(|err| format!("failed to list rollup series: {err}"))?,
+                );
+            } else {
+                let rollups = self.rollup_read();
+                live.extend(rollups.groups.keys().map(|group| group.series_id));
+            }
             live.extend(
                 self.partitions
                     .iter()
@@ -7924,8 +8383,14 @@ impl Engine {
         if self.disk_series.is_none() {
             Self::validate_chunk_series(&registry, &chunks)?;
         }
-        let new_rollups = Self::load_rollup_index(self.store.as_ref())
-            .map_err(|err| format!("failed to refresh rollup index: {err}"))?;
+        // Another process wrote: what it wrote may be work for any tier.
+        self.rollup_unsettle();
+        let new_rollups = if self.disk_chunks {
+            RollupIndex::default()
+        } else {
+            Self::load_rollup_index(self.store.as_ref())
+                .map_err(|err| format!("failed to refresh rollup index: {err}"))?
+        };
 
         let mut new_index = BTreeMap::new();
         for chunk in chunks {
@@ -7987,6 +8452,8 @@ impl Engine {
             .store
             .scan_since(after_rowid)
             .map_err(|err| format!("failed to scan chunk delta: {err}"))?;
+        // Another process wrote: what it wrote may be work for any tier.
+        self.rollup_unsettle();
 
         // Same acquisition order as the full reload: index → series →
         // rollup, under the caller's transition + txn locks.
@@ -8024,7 +8491,7 @@ impl Engine {
             self.raise_raw_ts_upper_bound(chunk.meta.max_ts);
             index.insert((pk, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
         }
-        for chunk in rollup_chunks {
+        for chunk in rollup_chunks.into_iter().filter(|_| !self.disk_chunks) {
             let (group, entry) = Self::rollup_index_parts(chunk)?;
             if rollups.contains_rowid(&group, entry.rowid) {
                 continue;
@@ -8221,10 +8688,7 @@ impl Engine {
         let series_count = self.series_count();
         let (chunk_count, total_disk_points, mut oldest_ts, mut newest_ts) = self.chunk_totals();
         let partition_count = self.partitions.len();
-        let (rollup_chunk_count, rollup_single_bucket_chunks) = {
-            let rollups = self.rollup_read();
-            (rollups.len(), rollups.single_bucket())
-        };
+        let (rollup_chunk_count, rollup_single_bucket_chunks) = self.rollup_totals();
         let buffered_points: usize = self
             .partitions
             .iter()

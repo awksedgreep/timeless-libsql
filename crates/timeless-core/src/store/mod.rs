@@ -447,10 +447,90 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not answer chunk index queries".to_string())
     }
 
+    // ── Rollup index queries (#144) ─────────────────────────────────
+    //
+    // A store that answers chunk index queries answers these too, from an
+    // index over its rollup rows, so that the engine holds no entry per
+    // rollup chunk. Rollup rows always carry `ENC_ROLLUP_V1`.
+
+    /// The newest coverage end among each series' rollup chunks at
+    /// `resolution`, for the series that have any: `(series_id, max_ts)`.
+    fn rollup_watermarks(
+        &self,
+        _resolution: i64,
+        _series_ids: &[i64],
+    ) -> Result<Vec<(i64, i64)>, String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// Rollup chunks of `series_ids` at `resolution` whose coverage
+    /// overlaps `[start, stop]`, ordered by series id, then `min_ts`, then
+    /// insertion. `payload_bytes` is not read and is zero.
+    fn rollup_metas_for(
+        &self,
+        _resolution: i64,
+        _series_ids: &[i64],
+        _start: i64,
+        _stop: i64,
+    ) -> Result<Vec<StoredRollupChunk>, String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// Every rollup chunk, a `(series, resolution)` group at a time and in
+    /// `min_ts` order within it. `payload_bytes` is not read and is zero.
+    fn visit_rollup_groups(
+        &self,
+        _visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
+    ) -> Result<(), String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// At most `limit` rollup chunks to delete, each with its bucket count:
+    /// of `resolution` if one is given, and with coverage ending before
+    /// `before` or beginning after `after` if one of those is.
+    fn rollup_victims(
+        &self,
+        _resolution: Option<i64>,
+        _before: Option<i64>,
+        _after: Option<i64>,
+        _limit: usize,
+    ) -> Result<Vec<(ChunkLoc, u32)>, String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// Ids of the series that have a rollup chunk, ascending.
+    fn rollup_series_ids(&self) -> Result<Vec<i64>, String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// The resolutions rollup chunks are stored at, ascending.
+    fn rollup_resolutions(&self) -> Result<Vec<i64>, String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// How many rollup chunks there are, and how many hold one bucket.
+    fn rollup_totals(&self) -> Result<(usize, usize), String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// Of `series`, each given with the timestamp its rollups already
+    /// cover to (or none), those with a raw chunk holding anything after
+    /// that and at or before `upto`: the series a rollup pass has work
+    /// for, found without reading a chunk.
+    fn series_with_raw_between(
+        &self,
+        _series: &[(i64, Option<i64>)],
+        _upto: i64,
+    ) -> Result<Vec<i64>, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
     /// Raw chunks a compaction sweep may act on: newest sample before
     /// `cutoff_ts`, and either still encoded as `raw_encoding` or holding
     /// anything but exactly `target_points` (smaller ones may merge, larger
-    /// ones are cut down). Ordered by series id, then `min_ts`, then
+    /// ones are cut down). A plan is made of these, so the value
+    /// statistics are not read and are zero, and `payload_bytes` may be an
+    /// estimate. Ordered by series id, then `min_ts`, then
     /// insertion.
     fn compaction_candidates(
         &self,

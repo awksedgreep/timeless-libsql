@@ -541,10 +541,19 @@ impl LabelIndex {
         .map_err(|e| format!("count indexed series: {e}"))
     }
 
-    /// Whether the index reflects `<t>_series` as it now is.
+    /// Whether the index reflects `<t>_series` as it now is: nothing in the
+    /// catalog is past what was indexed, and the two hold as many series.
+    ///
+    /// The watermark may be past the catalog's highest id. Removing the
+    /// newest series (retention taking a series nothing was ever stored
+    /// for, say) lowers the catalog's highest id and leaves the watermark,
+    /// and asking for the two to be equal then called a sound index stale:
+    /// a connection that could not rebuild it, a read-only reader beside
+    /// the writer, fell back to loading the whole catalog into memory until
+    /// enough new series had been created to pass the old watermark.
     pub(crate) fn is_current(&self, conn: &Connection) -> Result<bool, String> {
         Ok(self.present(conn)
-            && self.meta_i64(conn, "label_index_series_max")? == self.series_max(conn)?
+            && self.meta_i64(conn, "label_index_series_max")? >= self.series_max(conn)?
             && self.indexed_rows(conn)? == self.catalog_rows(conn)?)
     }
 
@@ -965,6 +974,32 @@ mod tests {
         let counts = index.counts(&conn);
         assert_eq!(counts[&("__name__".into(), "cpu".into())], 1);
         assert!(!counts.contains_key(&("host".into(), "a".into())));
+    }
+
+    #[test]
+    fn removing_the_newest_series_leaves_the_index_current() {
+        let (conn, index) = store();
+        let a = add(&conn, &index, "cpu", &[("host", "a")]);
+        let b = add(&conn, &index, "cpu", &[("host", "b")]);
+        assert!(index.is_current(&conn).unwrap());
+        // The newest goes, as retention removes it: unindexed, then deleted.
+        index.unindex_series(&conn, &[b]).unwrap();
+        conn.execute("DELETE FROM m_series WHERE id = ?1", [b])
+            .unwrap();
+        assert!(index.is_current(&conn).unwrap());
+        assert_eq!(index.find_series(&conn, Some("cpu"), &[]).unwrap(), [a]);
+        // A series another writer adds without indexing is still noticed,
+        // though SQLite gives it the id that was just freed.
+        conn.execute(
+            "INSERT INTO m_series(name, canonical_labels) VALUES ('cpu', ?1)",
+            [encode(&[("host", "c")])],
+        )
+        .unwrap();
+        assert_eq!(conn.last_insert_rowid(), b);
+        assert!(!index.is_current(&conn).unwrap());
+        index.make_current(&conn, "main", "m").unwrap();
+        assert!(index.is_current(&conn).unwrap());
+        assert_eq!(index.find_series(&conn, Some("cpu"), &[]).unwrap(), [a, b]);
     }
 
     #[test]

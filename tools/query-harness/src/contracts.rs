@@ -376,7 +376,7 @@ fn validate_signal_storage_boundaries(root: &Path) -> Result<Vec<String>> {
     let signals = [
         (
             "metrics",
-            r#"\b(?:metric_samples|metrics)_(?:chunks|chunks_series_ts|series|meta)\b|format!\s*\(\s*"\{\}_(?:chunks|chunks_series_ts|series|meta)""#,
+            r#"\b(?:metric_samples|metrics)_(?:chunks|chunks_series_ts|rollups_series_ts|series|meta)\b|format!\s*\(\s*"\{\}_(?:chunks|chunks_series_ts|rollups_series_ts|series|meta)""#,
         ),
         ("logs", r"\blogs_(?:blocks|blocks_ts|terms|meta)\b"),
         (

@@ -179,6 +179,11 @@ DROP TABLE IF EXISTS {series};
 
 /// The chunk columns `scan_chunk_rows` maps to a `StoredChunk`, unqualified
 /// and qualified by the alias `c`.
+/// Shadow-object suffixes of the two chunk indexes a table whose chunk
+/// index is read from disk has: one over raw rows, one over rollup rows.
+const RAW_CHUNK_INDEX: &str = "chunks_series_ts";
+const ROLLUP_CHUNK_INDEX: &str = "rollups_series_ts";
+
 const META: &str = "id, series_id, ts_min, ts_max, max_ts_val, point_count, \
     min_val, max_val, sum_val, encoding, length(ts_data) + length(val_data)";
 const META_C: &str = "c.id, c.series_id, c.ts_min, c.ts_max, c.max_ts_val, c.point_count, \
@@ -203,6 +208,13 @@ pub(crate) struct ShadowTableStore {
     chunk_locs_after_sql: String,
     compaction_candidates_sql: String,
     chunks_present_sql: String,
+    rollup_watermarks_sql: String,
+    series_with_raw_between_sql: String,
+    rollup_metas_sql: String,
+    rollup_groups_sql: String,
+    rollup_series_ids_sql: String,
+    rollup_resolutions_sql: String,
+    rollup_totals_sql: String,
     /// The on-disk label index (#132), and whether its tables exist:
     /// 0 not yet probed, 1 present, 2 absent (a table created before #132
     /// and not yet upgraded).
@@ -315,13 +327,63 @@ impl ShadowTableStore {
             chunk_locs_after_sql: format!(
                 "SELECT id FROM {chunks} WHERE resolution = 0 AND ts_min > ?1"
             ),
+            // Only what the raw index covers, so a plan reads no chunk row.
+            // In the index's own order, which is by series and `ts_min`;
+            // chunks of a series that begin together are put in insertion
+            // order by the caller, where asking for it here would sort
+            // every row (0.53 s against 0.14 s for 1.9 million).
             compaction_candidates_sql: format!(
-                "SELECT {META} FROM {chunks} \
+                "SELECT id, series_id, ts_min, ts_max, point_count, encoding FROM {chunks} \
                  WHERE resolution = 0 AND ts_max < ?1 AND (encoding = ?2 OR point_count <> ?3) \
-                 ORDER BY series_id, ts_min, id"
+                 ORDER BY series_id, ts_min"
             ),
             chunks_present_sql: format!(
                 "SELECT COUNT(*) FROM {chunks} WHERE id IN (SELECT value FROM json_each(?1))"
+            ),
+            // Every rollup query repeats `resolution > 0`: the rollup index
+            // is partial on it, and SQLite uses a partial index only where
+            // the query's own terms imply its predicate, which a bound
+            // `resolution = ?` does not.
+            //
+            // A group's chunks are appended in coverage order, so the one
+            // with the greatest `ts_min` carries the watermark.
+            rollup_watermarks_sql: format!(
+                "SELECT j.value, (SELECT c.ts_max FROM {chunks} c \
+                   WHERE c.series_id = j.value AND c.resolution = ?2 AND c.resolution > 0 \
+                   ORDER BY c.ts_min DESC LIMIT 1) \
+                 FROM json_each(?1) j"
+            ),
+            // Each element is `[series_id, covered_to]`, the second null for
+            // a series with no rollup yet. Answered from the raw index.
+            series_with_raw_between_sql: format!(
+                "SELECT json_extract(j.value, '$[0]') FROM json_each(?1) j \
+                 WHERE EXISTS (SELECT 1 FROM {chunks} c \
+                   WHERE c.resolution = 0 AND c.series_id = json_extract(j.value, '$[0]') \
+                     AND c.ts_min <= ?2 \
+                     AND (json_extract(j.value, '$[1]') IS NULL \
+                          OR c.ts_max > json_extract(j.value, '$[1]')))"
+            ),
+            rollup_metas_sql: format!(
+                "SELECT c.id, c.series_id, c.resolution, c.ts_min, c.ts_max, c.point_count \
+                 FROM json_each(?1) j CROSS JOIN {chunks} c \
+                 WHERE c.series_id = j.value AND c.resolution = ?2 AND c.resolution > 0 \
+                   AND c.ts_min <= ?3 AND c.ts_max >= ?4 \
+                 ORDER BY c.series_id, c.ts_min, c.id"
+            ),
+            rollup_groups_sql: format!(
+                "SELECT id, series_id, resolution, ts_min, ts_max, point_count \
+                 FROM {chunks} WHERE resolution > 0 \
+                 ORDER BY series_id, resolution, ts_min, id"
+            ),
+            rollup_series_ids_sql: format!(
+                "SELECT DISTINCT series_id FROM {chunks} WHERE resolution > 0 ORDER BY series_id"
+            ),
+            rollup_resolutions_sql: format!(
+                "SELECT DISTINCT resolution FROM {chunks} WHERE resolution > 0 ORDER BY resolution"
+            ),
+            rollup_totals_sql: format!(
+                "SELECT COUNT(*), COALESCE(SUM(point_count = 1), 0) \
+                 FROM {chunks} WHERE resolution > 0"
             ),
             label_index: crate::shadow_label_index::LabelIndex::new(database, table),
             label_index_state: std::sync::atomic::AtomicU8::new(0),
@@ -446,11 +508,11 @@ impl ShadowTableStore {
     }
 
     /// Whether this table's label index tables exist, probed once.
-    /// The `CREATE INDEX` text of this table's `(series_id, ts_min)` chunk
-    /// index, if it has one.
-    fn chunk_index_sql(&self, conn: &Connection) -> Result<Option<String>, String> {
+    /// The `CREATE INDEX` text of one of this table's chunk indexes, if it
+    /// has it.
+    fn index_sql(&self, conn: &Connection, name: &str) -> Result<Option<String>, String> {
         let schema = sql_ident::quote(&self.database);
-        let name = sql_ident::shadow_object(&self.table, "chunks_series_ts");
+        let name = sql_ident::shadow_object(&self.table, name);
         conn.query_row(
             &format!("SELECT sql FROM {schema}.sqlite_master WHERE type = 'index' AND name = ?1"),
             [name],
@@ -656,6 +718,46 @@ impl ShadowTableStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("rollup scan row failed: {e}"))?;
         Ok(rows)
+    }
+
+    /// A rollup chunk from the columns the rollup index covers: `id,
+    /// series_id, resolution, ts_min, ts_max, point_count`.
+    fn rollup_index_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRollupChunk> {
+        Ok(StoredRollupChunk {
+            series_id: row.get(1)?,
+            resolution: row.get(2)?,
+            meta: ChunkMeta {
+                min_ts: row.get(3)?,
+                max_ts: row.get(4)?,
+                max_ts_val: None,
+                point_count: row.get::<_, i64>(5)? as u32,
+                payload_bytes: 0,
+                min_val: 0.0,
+                max_val: 0.0,
+                sum_val: 0.0,
+                loc: ChunkLoc::Row { rowid: row.get(0)? },
+                encoding: timeless_core::ENC_ROLLUP_V1,
+            },
+        })
+    }
+
+    fn scan_rollup_index_rows<P: rusqlite::Params>(
+        conn: &Connection,
+        sql: &str,
+        params: P,
+        map: &mut dyn FnMut(StoredRollupChunk) -> Result<StoredRollupChunk, String>,
+    ) -> Result<Vec<StoredRollupChunk>, String> {
+        let mut stmt = conn
+            .prepare_cached(sql)
+            .map_err(|e| format!("prepare rollup index read: {e}"))?;
+        let mut rows = stmt
+            .query(params)
+            .map_err(|e| format!("rollup index read: {e}"))?;
+        let mut chunks = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| format!("rollup index row: {e}"))? {
+            chunks.push(map(Self::rollup_index_row(row).map_err(|e| e.to_string())?)?);
+        }
+        Ok(chunks)
     }
 
     /// Borrow the CALLING connection for one store operation — the
@@ -1375,36 +1477,62 @@ impl ChunkStore for ShadowTableStore {
     }
 
     fn has_chunk_index(&self) -> bool {
-        // The queries below are only as good as the index under them: a
+        // The queries below are only as good as the indexes under them: a
         // table whose chunk index was last read from memory has none, and a
-        // connection that could not create it reads from memory too.
-        Self::conn()
-            .ok()
-            .and_then(|conn| self.chunk_index_sql(&conn).ok().flatten())
-            .is_some()
+        // connection that could not create them reads from memory too. Both
+        // or neither: the engine reads raw and rollup chunks the same way.
+        let Ok(conn) = Self::conn() else {
+            return false;
+        };
+        let present = |name: &str| self.index_sql(&conn, name).ok().flatten().is_some();
+        present(RAW_CHUNK_INDEX) && present(ROLLUP_CHUNK_INDEX)
     }
 
     fn ensure_chunk_index(&self, wanted: bool) -> Result<(), String> {
         let conn = Self::conn()?;
-        let index = sql_ident::qualified_shadow(&self.database, &self.table, "chunks_series_ts");
-        let existing = self.chunk_index_sql(&conn)?;
-        let raw_only = existing
-            .as_deref()
-            .is_some_and(|sql| sql.to_ascii_lowercase().contains("where resolution = 0"));
-        if wanted && raw_only || !wanted && existing.is_none() {
-            return Ok(());
-        }
+        let chunks = sql_ident::quoted_shadow(&self.table, "chunks");
         let mut sql = String::new();
-        if existing.is_some() {
-            sql.push_str(&format!("DROP INDEX {index};"));
+        // Raw rows only in one index and rollup rows only in the other:
+        // every query asks for one kind, and each kind's queries want
+        // different columns.
+        for (name, definition, marker) in [
+            // `ts_max`, `point_count` and `encoding` ride along so that the
+            // totals (how many raw chunks, their points, their oldest and
+            // newest timestamps), retention's search for expired chunks and
+            // a compaction sweep's candidates are answered from the index,
+            // not from every chunk row: on 3.9 million raw chunks the totals
+            // took 1.5 s from the rows, and planning a sweep was a third of
+            // its cost.
+            (
+                RAW_CHUNK_INDEX,
+                "(series_id, ts_min, ts_max, point_count, encoding) WHERE resolution = 0",
+                "(series_id, ts_min, ts_max, point_count, encoding) where resolution = 0",
+            ),
+            // Covers what the engine asks of a rollup chunk without its
+            // row: its group, its coverage, and how many buckets it holds.
+            (
+                ROLLUP_CHUNK_INDEX,
+                "(series_id, resolution, ts_min, ts_max, point_count) WHERE resolution > 0",
+                "(series_id, resolution, ts_min, ts_max, point_count) where resolution > 0",
+            ),
+        ] {
+            let index = sql_ident::qualified_shadow(&self.database, &self.table, name);
+            let existing = self.index_sql(&conn, name)?;
+            let current = existing
+                .as_deref()
+                .is_some_and(|sql| sql.to_ascii_lowercase().contains(marker));
+            if wanted && current || !wanted && existing.is_none() {
+                continue;
+            }
+            if existing.is_some() {
+                sql.push_str(&format!("DROP INDEX {index};"));
+            }
+            if wanted {
+                sql.push_str(&format!("CREATE INDEX {index} ON {chunks}{definition};"));
+            }
         }
-        if wanted {
-            // Raw rows only: every chunk-index query asks for
-            // `resolution = 0`, and rollup rows would be most of the index.
-            sql.push_str(&format!(
-                "CREATE INDEX {index} ON {}(series_id, ts_min) WHERE resolution = 0;",
-                sql_ident::quoted_shadow(&self.table, "chunks")
-            ));
+        if sql.is_empty() {
+            return Ok(());
         }
         conn.execute_batch(&sql)
             .map_err(|e| format!("settle chunk index: {e}"))
@@ -1629,6 +1757,185 @@ impl ChunkStore for ShadowTableStore {
         Ok(locs)
     }
 
+    fn rollup_watermarks(
+        &self,
+        resolution: i64,
+        series_ids: &[i64],
+    ) -> Result<Vec<(i64, i64)>, String> {
+        if series_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.rollup_watermarks_sql)
+            .map_err(|e| format!("prepare rollup watermarks: {e}"))?;
+        let rows = stmt
+            .query_map(params![Self::id_list(series_ids), resolution], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+            })
+            .map_err(|e| format!("rollup watermarks: {e}"))?;
+        let mut watermarks = Vec::new();
+        for row in rows {
+            if let (series_id, Some(watermark)) =
+                row.map_err(|e| format!("rollup watermark row: {e}"))?
+            {
+                watermarks.push((series_id, watermark));
+            }
+        }
+        Ok(watermarks)
+    }
+
+    fn series_with_raw_between(
+        &self,
+        series: &[(i64, Option<i64>)],
+        upto: i64,
+    ) -> Result<Vec<i64>, String> {
+        if series.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut list = String::with_capacity(series.len() * 24 + 2);
+        list.push('[');
+        for (i, (series_id, covered_to)) in series.iter().enumerate() {
+            if i > 0 {
+                list.push(',');
+            }
+            match covered_to {
+                Some(covered_to) => list.push_str(&format!("[{series_id},{covered_to}]")),
+                None => list.push_str(&format!("[{series_id},null]")),
+            }
+        }
+        list.push(']');
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.series_with_raw_between_sql)
+            .map_err(|e| format!("prepare series with raw samples: {e}"))?;
+        let ids = stmt
+            .query_map(params![list, upto], |row| row.get(0))
+            .map_err(|e| format!("series with raw samples: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("series with raw samples row: {e}"))?;
+        Ok(ids)
+    }
+
+    fn rollup_metas_for(
+        &self,
+        resolution: i64,
+        series_ids: &[i64],
+        start: i64,
+        stop: i64,
+    ) -> Result<Vec<StoredRollupChunk>, String> {
+        if series_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = Self::conn()?;
+        Self::scan_rollup_index_rows(
+            &conn,
+            &self.rollup_metas_sql,
+            params![Self::id_list(series_ids), resolution, stop, start],
+            &mut |chunk| Ok(chunk),
+        )
+    }
+
+    fn visit_rollup_groups(
+        &self,
+        visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.rollup_groups_sql)
+            .map_err(|e| format!("prepare rollup group scan: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("rollup group scan: {e}"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("rollup group scan row: {e}"))?
+        {
+            visitor(Self::rollup_index_row(row).map_err(|e| e.to_string())?)?;
+        }
+        Ok(())
+    }
+
+    fn rollup_victims(
+        &self,
+        resolution: Option<i64>,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(ChunkLoc, u32)>, String> {
+        let conn = Self::conn()?;
+        // Assembled, not pre-formatted: a retention pass runs it a few
+        // times, and the three optional terms would be eight statements.
+        let mut sql = format!(
+            "SELECT id, point_count FROM {} WHERE resolution > 0",
+            self.chunks_ident
+        );
+        let mut values: Vec<i64> = Vec::new();
+        for (term, value) in [
+            (" AND resolution = ?", resolution),
+            (" AND ts_max < ?", before),
+            (" AND ts_min > ?", after),
+        ] {
+            if let Some(value) = value {
+                sql.push_str(term);
+                values.push(value);
+            }
+        }
+        sql.push_str(" LIMIT ?");
+        values.push(i64::try_from(limit).unwrap_or(i64::MAX));
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare rollup victims: {e}"))?;
+        let victims = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    ChunkLoc::Row { rowid: row.get(0)? },
+                    row.get::<_, i64>(1)? as u32,
+                ))
+            })
+            .map_err(|e| format!("rollup victims: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("rollup victim row: {e}"))?;
+        Ok(victims)
+    }
+
+    fn rollup_series_ids(&self) -> Result<Vec<i64>, String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.rollup_series_ids_sql)
+            .map_err(|e| format!("prepare rollup series: {e}"))?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("rollup series: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("rollup series row: {e}"))?;
+        Ok(ids)
+    }
+
+    fn rollup_resolutions(&self) -> Result<Vec<i64>, String> {
+        let conn = Self::conn()?;
+        let mut stmt = conn
+            .prepare_cached(&self.rollup_resolutions_sql)
+            .map_err(|e| format!("prepare rollup resolutions: {e}"))?;
+        let resolutions = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("rollup resolutions: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("rollup resolution row: {e}"))?;
+        Ok(resolutions)
+    }
+
+    fn rollup_totals(&self) -> Result<(usize, usize), String> {
+        let conn = Self::conn()?;
+        conn.query_row(&self.rollup_totals_sql, [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?.max(0) as usize,
+                row.get::<_, i64>(1)?.max(0) as usize,
+            ))
+        })
+        .map_err(|e| format!("rollup totals: {e}"))
+    }
+
     fn compaction_candidates(
         &self,
         cutoff_ts: i64,
@@ -1636,11 +1943,52 @@ impl ChunkStore for ShadowTableStore {
         target_points: u32,
     ) -> Result<Vec<StoredChunk>, String> {
         let conn = Self::conn()?;
-        Self::scan_chunk_rows(
-            &conn,
-            &self.compaction_candidates_sql,
-            params![cutoff_ts, raw_encoding, target_points],
-        )
+        let mut stmt = conn
+            .prepare_cached(&self.compaction_candidates_sql)
+            .map_err(|e| format!("prepare compaction candidates: {e}"))?;
+        let mut rows = stmt
+            .query(params![cutoff_ts, raw_encoding, target_points])
+            .map_err(|e| format!("compaction candidates: {e}"))?;
+        let mut chunks = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("compaction candidate row: {e}"))?
+        {
+            let read = |e: rusqlite::Error| format!("compaction candidate: {e}");
+            let point_count = row.get::<_, i64>(4).map_err(read)? as u32;
+            let encoding = row.get::<_, i64>(5).map_err(read)? as u8;
+            chunks.push(StoredChunk {
+                series_id: row.get(1).map_err(read)?,
+                meta: ChunkMeta {
+                    min_ts: row.get(2).map_err(read)?,
+                    max_ts: row.get(3).map_err(read)?,
+                    max_ts_val: None,
+                    point_count,
+                    // The payload is not read to plan with. A raw chunk is
+                    // sixteen bytes a point exactly; a compressed one is
+                    // taken at two, which is only what a step's byte budget
+                    // counts it as.
+                    payload_bytes: u64::from(point_count)
+                        * if encoding == raw_encoding { 16 } else { 2 },
+                    min_val: 0.0,
+                    max_val: 0.0,
+                    sum_val: 0.0,
+                    loc: ChunkLoc::Row {
+                        rowid: row.get(0).map_err(read)?,
+                    },
+                    encoding,
+                },
+            });
+        }
+        // Nearly sorted already, which a stable sort does in one pass.
+        chunks.sort_by_key(|chunk| {
+            let rowid = match chunk.meta.loc {
+                ChunkLoc::Row { rowid } => rowid,
+                ChunkLoc::File { .. } => 0,
+            };
+            (chunk.series_id, chunk.meta.min_ts, rowid)
+        });
+        Ok(chunks)
     }
 
     fn chunks_present(&self, locs: &[ChunkLoc]) -> Result<bool, String> {

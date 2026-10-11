@@ -233,8 +233,24 @@ Creation arguments:
   whole catalog in memory, for the lowest read latency, at a few hundred
   bytes to a kilobyte of memory a series. **A table created without the
   argument uses `64MB`.** A dedicated server should ask for `unbounded`;
-  the bundled metrics server does. A table created by an extension older
+  the bundled metrics server does unless told otherwise
+  (`TIMELESS_METRICS_INDEX_CACHE`). A table created by an extension older
   than this setting has none and behaves as `unbounded`.
+
+  With a size, the chunk index is read from disk as well, raw chunks and
+  rollup chunks alike, through two partial indexes on the chunks table
+  (`<t>_chunks_series_ts` over raw rows and `<t>_rollups_series_ts` over
+  rollup rows). Nothing is then held in memory per series or per chunk, so
+  opening the table does not read the store: a table of 700,000 series,
+  3.9 million raw chunks and 5.5 million rollup chunks opens in under a
+  second in 40 MiB, where `unbounded` takes nine seconds and 1.9 GiB. A
+  second process reading the table beside its writer also has nothing to
+  reload when the writer compacts. The price is in reads that touch many
+  series, which ask the index rather than memory (two to three times as
+  long for a 100,000-series selection), and in the two indexes' space. The
+  indexes are made when a table is first opened to be read this way and
+  dropped when it is opened `unbounded`; a connection that cannot make
+  them (a read-only one) reads from memory until a writer has.
 
 Writes are append-only. Insert rows with `(name,ts,value,labels)` or with a
 previously resolved `series_id`. Use the hidden command column for:

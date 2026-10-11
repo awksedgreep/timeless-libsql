@@ -14,7 +14,17 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
-Upgrade notes: the merge target of a compressed metrics chunk is now 2,048
+Upgrade notes: a metrics table whose index is on disk (`index_cache` a
+size; the extension's default for a table it creates) has its raw chunk
+index rebuilt with more columns and gains a rollup chunk index the first
+time a connection that can write opens it: a few seconds per several
+million chunk rows, once. Until then a read-only connection reads from
+memory, as before. An older extension opening the store afterwards works
+with the new indexes. A table read `unbounded`, as the metrics server's is
+unless `TIMELESS_METRICS_INDEX_CACHE` says otherwise, has no chunk index and
+is not touched.
+
+The merge target of a compressed metrics chunk is now 2,048
 points (was 32,768). Maintenance cuts existing larger chunks down to it, a
 bounded step at a time, the first time it runs on a store that has them; on
 a 582-million-point store that was two minutes of work in all. A table
@@ -23,8 +33,52 @@ has no chunk that large and is not rewritten. Raw retention removes whole
 chunks, so a store whose chunks spanned days may shrink to its configured
 window at the same time.
 
+### Added
+
+- A metrics table whose catalog is on disk (`index_cache` a size) now reads
+  its rollup chunk index from disk too, and so holds nothing in memory per
+  rollup chunk (#144). The store gains a second partial index,
+  `<t>_rollups_series_ts`, over rollup rows, and the raw one,
+  `<t>_chunks_series_ts`, now also covers `ts_max`, `point_count` and
+  `encoding`, so chunk totals, retention's search and a compaction plan are
+  answered from the index instead of from chunk rows. On a store of 702,000
+  series, 3.9 million raw chunks and 5.5 million rollup chunks:
+
+  | | `unbounded` | size, 0.8.16 | size, now |
+  |---|---|---|---|
+  | server ready after start | 8.7 s | 5.0 s | 0.8 s |
+  | heap after start | 1,945 MiB | 475 MiB | 40 MiB |
+
+  Results are the same in both modes, through rollup passes, merges,
+  retention of a tier, rollback and clearing.
+- `TIMELESS_METRICS_INDEX_CACHE` tells the metrics server where to read the
+  index from (`unbounded`, or a size). It applies to an existing database
+  during startup, in one start. Unset, nothing changes: new databases are
+  `unbounded` and existing ones keep their setting.
+- A second process reading a table beside its writer no longer reloads the
+  whole index each time the writer compacts, merges rollups or applies
+  retention, when the table's index is on disk (#146). A reader's first
+  read after such a change took 1.85 s on a 228,000-series store with the
+  index in memory, and takes 42 ms with it on disk. With the index in
+  memory the reload is as it was.
+
 ### Changed
 
+- A rollup cycle passes over a tier it has already rolled up to the same
+  coverage end: an hourly tier's coverage end moves once an hour, so at a
+  five-minute sweep eleven cycles in twelve had nothing to do for it and
+  still looked at every series. A tier is looked at again when a sample
+  older than what it covers arrives, a transaction rolls back, rollup chunks
+  are deleted, another process writes, or the ladder changes. Sweep CPU in
+  the 548,000-series fleet benchmark: 119.1 s over 26 rounds before, 112.8 s
+  after, with the index in memory.
+- With the index on disk, a maintenance sweep reads the index a stretch of
+  series at a time instead of a statement a series. The same benchmark:
+  144.5 s of sweep CPU (it took about five times the in-memory figure
+  before), for the same chunks; ingest is faster there (28.5 s against
+  37.3 s), so the writer's work in all is 193 s against 168 s. Its longest
+  step is longer than in memory (1.3 s against 0.5 s), because a plan
+  reads the index from disk.
 - A compressed metrics chunk holds at most 2,048 points, and a larger one is
   cut down by compaction. A read decodes a chunk whole, so reading one moment
   of a densely sampled series' older data cost a decode of up to 32,768
@@ -48,6 +102,11 @@ window at the same time.
   sent as JSON by a standard exporter were strings where the same span sent
   as protobuf had numbers. A value that is not a 64-bit integer is rejected
   (#80).
+- A label index was called stale after the newest series was removed (by
+  retention, for a series nothing had been stored for), because the
+  catalog's highest id was then below the index's watermark. A connection
+  that could not rebuild it, a read-only reader beside the writer, read the
+  whole catalog into memory instead until enough new series were created.
 - A metrics table whose catalog is on disk (`index_cache` a size) no longer
   reads its raw chunk totals again after every flush and compaction step.
   The totals are an aggregate over every raw chunk row, and rollup

@@ -2630,6 +2630,142 @@ mod disk_series_tests {
         );
     }
 
+    /// A rollup index read from disk (#144) answers as the one held in
+    /// memory does, through everything that changes rollup chunks: a pass,
+    /// merges, retention of a tier, a rolled-back pass, clearing. Its
+    /// totals are moved, not read again, so they are checked against the
+    /// rows each time.
+    #[test]
+    fn rollups_read_from_disk_as_from_memory() {
+        let table = |index_cache: &str| {
+            let db = Connection::open_in_memory().unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE m USING timeless_metrics(\
+                 retention='500s', rollups='10s@2000s,100s@0', index_cache='{index_cache}');"
+            ))
+            .unwrap();
+            db
+        };
+        let memory = table("unbounded");
+        let disk = table("1MB");
+        assert_eq!(stat(&disk, "m", "series_on_disk"), 1);
+        let both = |sql: &str| {
+            for db in [&memory, &disk] {
+                db.execute_batch(sql).unwrap();
+            }
+        };
+        let rolled = |db: &Connection, resolution: i64, agg: &str| -> Vec<(String, i64, f64)> {
+            let mut statement = db
+                .prepare(&format!(
+                    "SELECT labels, ts, value FROM timeless_rollup('m', 'cpu', NULL, \
+                     {resolution}, 0, 1000000, '{agg}') ORDER BY labels, ts"
+                ))
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            rows
+        };
+        let agree = |when: &str| -> i64 {
+            for resolution in [10, 100] {
+                for agg in ["sum", "count", "max"] {
+                    assert_eq!(
+                        rolled(&disk, resolution, agg),
+                        rolled(&memory, resolution, agg),
+                        "{resolution}s {agg} {when}"
+                    );
+                }
+            }
+            for key in ["rollup_chunks", "rollup_single_bucket_chunks", "series"] {
+                assert_eq!(
+                    stat(&disk, "m", key),
+                    stat(&memory, "m", key),
+                    "{key} {when}"
+                );
+            }
+            let (chunks, single): (i64, i64) = disk
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(point_count = 1), 0) FROM m_chunks \
+                     WHERE resolution > 0",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(stat(&disk, "m", "rollup_chunks"), chunks, "rows {when}");
+            assert_eq!(
+                stat(&disk, "m", "rollup_single_bucket_chunks"),
+                single,
+                "one-bucket rows {when}"
+            );
+            chunks
+        };
+        // Asked before there is anything, so every later total was moved.
+        assert_eq!(agree("empty"), 0);
+
+        // Many short passes: each leaves a one-bucket chunk a series a
+        // tier, which the merges then put together.
+        let mut most = 0;
+        for round in 0..40_i64 {
+            for host in ["a", "b", "c"] {
+                for offset in [0, 3, 7] {
+                    let sql = format!(
+                        "INSERT INTO m(name, ts, value, labels) VALUES \
+                         ('cpu', {}, {}, '{{\"host\":\"{host}\"}}');",
+                        1_000 + round * 10 + offset,
+                        round + offset
+                    );
+                    both(&sql);
+                }
+            }
+            both("INSERT INTO m(m) VALUES ('flush'); INSERT INTO m(m) VALUES ('rollup');");
+            most = most.max(agree("after a pass"));
+        }
+        assert!(agree("after the passes") > 0);
+        both("INSERT INTO m(m) VALUES ('compact');");
+        assert!(
+            agree("after merging") < most,
+            "merging put one-bucket chunks together"
+        );
+
+        // A pass that is rolled back takes its chunks with it.
+        both(
+            "BEGIN;
+             INSERT INTO m(name, ts, value, labels) VALUES ('cpu', 1500, 1.0, '{\"host\":\"a\"}');
+             INSERT INTO m(m) VALUES ('flush');
+             INSERT INTO m(m) VALUES ('rollup');
+             ROLLBACK;",
+        );
+        agree("after a rollback");
+
+        // Far enough ahead that the 10 s tier's window has passed. A tier
+        // loses whole chunks, so what is checked is that it lost some.
+        let fine_before = rolled(&disk, 10, "count").len();
+        // The raw samples are past their own, shorter window too: a tier
+        // whose raw samples remain is rolled up again by the next pass.
+        both(
+            "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', 9000, 1.0, '{\"host\":\"a\"}');
+             INSERT INTO m(m) VALUES ('flush');
+             INSERT INTO m(m) VALUES ('rollup');",
+        );
+        agree("after a tier's retention");
+        assert!(
+            rolled(&disk, 10, "count").len() < fine_before,
+            "the 10 s tier keeps 2,000 s"
+        );
+        assert!(
+            !rolled(&disk, 100, "count").is_empty(),
+            "the 100 s tier keeps all"
+        );
+
+        both(
+            "INSERT INTO m(m) VALUES ('rollups:none'); INSERT INTO m(m) VALUES ('clear-rollups');",
+        );
+        assert_eq!(agree("after clearing"), 0);
+    }
+
     /// A disk index's totals are moved by each flush and compaction rather
     /// than read again (a scan of every raw chunk row per write, #144), so
     /// they must stay what the rows say through every way the rows change.
@@ -2808,6 +2944,16 @@ mod disk_series_tests {
             .optional()
             .unwrap()
         };
+        let rollup_index_sql = |db: &Connection| -> Option<String> {
+            use rusqlite::OptionalExtension;
+            db.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'm_rollups_series_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
         let hosts = |db: &Connection| {
             strings(
                 db,
@@ -2834,6 +2980,7 @@ mod disk_series_tests {
             db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
             assert_eq!(stat(&db, "m", "series_on_disk"), 0);
             assert_eq!(index_sql(&db), None);
+            assert_eq!(rollup_index_sql(&db), None);
             assert_eq!(points(&db), 4);
         }
         {
@@ -2859,6 +3006,8 @@ mod disk_series_tests {
             assert_eq!(stat(&db, "m", "series_on_disk"), 1);
             let sql = index_sql(&db).expect("a disk chunk index has its index");
             assert!(sql.contains("WHERE resolution = 0"), "{sql}");
+            let sql = rollup_index_sql(&db).expect("and one over its rollup rows");
+            assert!(sql.contains("WHERE resolution > 0"), "{sql}");
             assert_eq!(points(&db), 4);
             assert_eq!(hosts(&db), ["a", "b", "c"]);
             write(&db, "cpu", r#"{"host":"d","env":"dev"}"#, 2_000);
@@ -2868,10 +3017,12 @@ mod disk_series_tests {
             assert_eq!(points(&db), 5);
         }
         {
-            // An older table read from disk: the full index is replaced.
+            // An older table read from disk: the full index is replaced,
+            // and the rollup index, which it never had (#144), is made.
             let db = Connection::open(&path).unwrap();
             db.execute_batch(
                 "DROP INDEX m_chunks_series_ts;
+                 DROP INDEX m_rollups_series_ts;
                  CREATE INDEX m_chunks_series_ts ON m_chunks(series_id, ts_min);",
             )
             .unwrap();
@@ -2882,6 +3033,8 @@ mod disk_series_tests {
             assert_eq!(points(&db), 5);
             let sql = index_sql(&db).unwrap();
             assert!(sql.contains("WHERE resolution = 0"), "{sql}");
+            assert!(rollup_index_sql(&db).is_some());
+            assert_eq!(stat(&db, "m", "series_on_disk"), 1);
             assert_eq!(hosts(&db), ["a", "b", "c", "d"]);
             db.execute("INSERT INTO m(m) VALUES ('index_cache:unbounded')", [])
                 .unwrap();
@@ -2892,6 +3045,7 @@ mod disk_series_tests {
             assert_eq!(points(&db), 5);
             assert_eq!(stat(&db, "m", "series_on_disk"), 0);
             assert_eq!(index_sql(&db), None);
+            assert_eq!(rollup_index_sql(&db), None);
             assert_eq!(hosts(&db), ["a", "b", "c", "d"]);
             write(&db, "cpu", r#"{"host":"e","env":"dev"}"#, 3_000);
             db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();

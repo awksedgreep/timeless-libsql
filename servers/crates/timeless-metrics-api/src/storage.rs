@@ -1605,6 +1605,32 @@ fn reader_main(
     Ok(())
 }
 
+/// Where the operator asked for the metrics index to be read from:
+/// `TIMELESS_METRICS_INDEX_CACHE`, `unbounded` or a size such as `64MB`
+/// or `0`. Unset, a new table is created `unbounded` and an existing one
+/// keeps the setting it has.
+const INDEX_CACHE_ENV: &str = "TIMELESS_METRICS_INDEX_CACHE";
+
+fn requested_index_cache() -> Result<Option<String>, String> {
+    match std::env::var(INDEX_CACHE_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("{INDEX_CACHE_ENV}: {error}")),
+        Ok(value) => index_cache_request(&value).map(Some),
+    }
+}
+
+/// An `index_cache` value as an operator wrote it, fit to go into SQL text.
+/// What it means is the extension's to check.
+fn index_cache_request(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!(
+            "{INDEX_CACHE_ENV} must be 'unbounded' or a size such as '64MB' or '0', got {value:?}"
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 fn open_connection(
     path: &Path,
     extension: &Path,
@@ -1612,6 +1638,49 @@ fn open_connection(
     expected_table: Option<MetricsTable>,
     new_database_rollups: Option<&str>,
 ) -> Result<(Connection, MetricsTable), String> {
+    // A changed index_cache takes effect when the table is next opened, and
+    // this connection is the only one there is while it initializes: closing
+    // it lets go of the engine, and opening it again reads the new setting.
+    match open_connection_once(
+        path,
+        extension,
+        initialize,
+        expected_table,
+        new_database_rollups,
+    )? {
+        (conn, table, false) => Ok((conn, table)),
+        (conn, _, true) => {
+            drop(conn);
+            // The engine just let go of was the size of the whole index if
+            // it was read from memory; give that back before going on.
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            // SAFETY: malloc_trim only releases free heap pages.
+            unsafe {
+                libc::malloc_trim(0);
+            }
+            let (conn, table, _) = open_connection_once(
+                path,
+                extension,
+                initialize,
+                expected_table,
+                new_database_rollups,
+            )?;
+            Ok((conn, table))
+        }
+    }
+}
+
+/// One attempt at [`open_connection`]. The flag says the table's
+/// `index_cache` was changed, so the engine under this connection still
+/// reads the old way.
+fn open_connection_once(
+    path: &Path,
+    extension: &Path,
+    initialize: bool,
+    expected_table: Option<MetricsTable>,
+    new_database_rollups: Option<&str>,
+) -> Result<(Connection, MetricsTable, bool), String> {
+    let mut index_cache_changed = false;
     let conn =
         Connection::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
     unsafe {
@@ -1687,9 +1756,7 @@ fn open_connection(
         // A store from before the setting existed has none, which already
         // means the catalog is in memory; record the server's choice so it
         // does not depend on what an absent setting means.
-        let index_cache: Option<String> = if !index_cache_supported {
-            Some("unbounded".to_owned())
-        } else {
+        let read_index_cache = || -> Result<Option<String>, String> {
             match conn.query_row(
                 &format!(
                     "SELECT value FROM timeless_stats('{}') WHERE key = 'index_cache'",
@@ -1698,18 +1765,44 @@ fn open_connection(
                 [],
                 |row| row.get::<_, Option<String>>(0),
             ) {
-                Ok(value) => value,
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(error) => return Err(format!("read metrics index_cache: {error}")),
+                Ok(value) => Ok(value),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(error) => Err(format!("read metrics index_cache: {error}")),
             }
         };
-        if index_cache.is_none() {
-            run_command(
-                &conn,
-                table,
-                "index_cache:unbounded",
-                "record the metrics index_cache setting",
-            )?;
+        let index_cache: Option<String> = if !index_cache_supported {
+            Some("unbounded".to_owned())
+        } else {
+            read_index_cache()?
+        };
+        match requested_index_cache()? {
+            Some(requested) if index_cache_supported => {
+                // The extension stores a size as a number of bytes, so what
+                // was asked for is compared after it has been recorded.
+                run_command(
+                    &conn,
+                    table,
+                    &format!("index_cache:{requested}"),
+                    "apply the metrics index_cache setting",
+                )?;
+                // A table with no setting reads from memory, as `unbounded`.
+                let before = index_cache.unwrap_or_else(|| "unbounded".to_owned());
+                index_cache_changed = read_index_cache()?.as_deref() != Some(before.as_str());
+            }
+            Some(requested) => {
+                return Err(format!(
+                    "{INDEX_CACHE_ENV}={requested} needs an extension that supports index_cache"
+                ));
+            }
+            None if index_cache.is_none() => {
+                run_command(
+                    &conn,
+                    table,
+                    "index_cache:unbounded",
+                    "record the metrics index_cache setting",
+                )?;
+            }
+            None => {}
         }
         // The server flushes and compacts on its own timers. Left on, the
         // table's own flush interval would only matter under a server flush
@@ -1748,17 +1841,17 @@ fn open_connection(
         validate_metrics_table(&conn, table)?;
         table
     };
-    Ok((conn, table))
+    Ok((conn, table, index_cache_changed))
 }
 
 fn new_metrics_table_sql(rollups: Option<&str>, index_cache: bool) -> Result<String, String> {
     // A dedicated server keeps the series catalog in memory for the lowest
     // read latency, and says so: the extension's own default for a new
     // table is embedded-sized.
-    let index_cache = if index_cache {
-        "index_cache='unbounded'"
-    } else {
-        ""
+    let index_cache = match requested_index_cache()? {
+        Some(requested) if index_cache => format!("index_cache='{requested}'"),
+        Some(_) | None if index_cache => "index_cache='unbounded'".to_owned(),
+        _ => String::new(),
     };
     let arguments = |rollups: Option<String>| -> String {
         let arguments: Vec<String> = rollups
@@ -2718,6 +2811,14 @@ mod tests {
             new_metrics_table_sql(None, false).unwrap(),
             "CREATE VIRTUAL TABLE metric_samples USING timeless_metrics;"
         );
+        // An index_cache request is a word or a size, and nothing else
+        // reaches the SQL it is written into.
+        assert_eq!(index_cache_request(" 64MB ").unwrap(), "64MB");
+        assert_eq!(index_cache_request("unbounded").unwrap(), "unbounded");
+        assert_eq!(index_cache_request("0").unwrap(), "0");
+        for refused in ["", "64 MB", "1MB'); DROP TABLE x; --", "64MB;"] {
+            assert!(index_cache_request(refused).is_err(), "{refused:?}");
+        }
         assert_eq!(
             new_metrics_table_sql(Some("NONE"), false).unwrap(),
             new_metrics_table_sql(None, false).unwrap()

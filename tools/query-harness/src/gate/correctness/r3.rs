@@ -164,6 +164,8 @@ fn complete_lifecycle(extension: &Path, temporary: &Path) -> Result<()> {
         ("table".into(), "metrics_labels".into()),
         ("table".into(), "metrics_postings".into()),
         ("index".into(), "metrics_chunks_series_ts".into()),
+        // The rollup index of a table whose chunk index is on disk (#144).
+        ("index".into(), "metrics_rollups_series_ts".into()),
         ("table".into(), "logs".into()),
         ("table".into(), "logs_blocks".into()),
         ("table".into(), "logs_terms".into()),

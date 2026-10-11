@@ -541,6 +541,65 @@ fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail()
     );
 }
 
+/// A tier a cycle has looked at all of is not looked at again while its
+/// coverage end stands, and anything that could give it work makes it
+/// looked at again: here, a series whose samples are older than what the
+/// tier is settled to, arriving after it settled.
+#[test]
+fn a_settled_tier_is_rolled_up_again_when_older_samples_arrive() {
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    engine.set_rollups(vec![RollupTier {
+        resolution: 60,
+        retention: 0,
+    }]);
+    let mut first = labels();
+    first.insert("host".to_string(), "first".to_string());
+    let mut late = labels();
+    late.insert("host".to_string(), "late".to_string());
+    let first_id = engine.resolve_cached("cpu", &first).unwrap();
+    for i in 0..100 {
+        engine.write_point(first_id, 1_000 + i * 10, i as f64);
+    }
+    engine.flush_all().unwrap();
+    let (chunks, _) = engine.rollup().unwrap();
+    assert_eq!(chunks, 1);
+    // Settled: the same pass again has nothing to do, twice over.
+    assert_eq!(engine.rollup().unwrap(), (0, 0));
+    assert_eq!(engine.rollup().unwrap(), (0, 0));
+
+    // The high water does not move, so the tier's coverage end stands;
+    // only the arrival itself can say there is work.
+    let late_id = engine.resolve_cached("cpu", &late).unwrap();
+    for i in 0..30 {
+        engine.write_point(late_id, 1_000 + i * 10, 1.0);
+    }
+    engine.flush_all().unwrap();
+    let (chunks, buckets) = engine.rollup().unwrap();
+    assert_eq!(chunks, 1, "the late series is rolled up");
+    assert!(buckets > 0);
+    assert!(!engine
+        .query_rollup_by_id(late_id, 60, i64::MIN, i64::MAX)
+        .unwrap()
+        .is_empty());
+    assert_eq!(engine.rollup().unwrap(), (0, 0));
+
+    // A newer sample moves the coverage end: the first series' last
+    // buckets are now due, and the late one's were all rolled up already.
+    engine.write_point(first_id, 5_000, 1.0);
+    engine.flush_all().unwrap();
+    let (chunks, _) = engine.rollup().unwrap();
+    assert_eq!(chunks, 1, "the first series' last buckets settled");
+    assert_eq!(engine.rollup().unwrap(), (0, 0));
+}
+
 /// A chunk written under an earlier, larger target is cut down to the
 /// target, once: a read decodes a chunk whole, so an oversized chunk makes
 /// every read of its series pay for all of it (#145).
