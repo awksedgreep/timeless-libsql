@@ -10,9 +10,11 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.13 -->
+<!-- release-target: 0.8.14 -->
 
 ## [Unreleased]
+
+## [0.8.14] — 2026-10-11
 
 Upgrade notes: a metrics table used directly through the extension now
 flushes and compacts for itself. Once the oldest buffered point has waited
