@@ -1226,3 +1226,21 @@ async fn metrics_exposition_reconciles_storage_series_with_timeless_stats() {
     assert_eq!(engine("compression_output_bytes_total"), compression_output);
     assert_eq!(engine("ingest_raw_bytes_total"), raw_ingested);
 }
+
+/// A database a server creates can give freed pages back: `auto_vacuum` is
+/// only taken before the header is written, and switching to WAL writes
+/// it, so the pragma has to come first (#79).
+#[tokio::test]
+async fn a_new_database_is_created_with_incremental_auto_vacuum() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let database = directory.path().join("fresh.db");
+    let storage =
+        timeless_traces_api::Storage::start(database.clone(), required_extension(), 1, 8, None)
+            .unwrap();
+    storage.shutdown().await.unwrap();
+    let mode: i64 = Connection::open(&database)
+        .unwrap()
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, 2, "2 is INCREMENTAL");
+}

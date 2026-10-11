@@ -27,7 +27,13 @@ than the exact tree being tagged verifies nothing.
    `servers/` plus four tool workspaces drifted unnoticed while only the root
    was checked (issue #45).
 4. **Cargo suites**: `cargo test --workspace --locked` in the root and
-   `servers/`.
+   `servers/`. Then the extension's own unit tests and lint under the
+   `embedded` feature, which the default build does not compile:
+   `cargo test -p timeless-ext --no-default-features --features embedded --locked`
+   and
+   `cargo clippy -p timeless-ext --no-default-features --features embedded --all-targets --locked -- -D warnings`.
+   Both drifted unnoticed while only the default features were run (#134,
+   #135).
 5. **CLI suite**: `./tests/cli.sh` — all sections.
 6. **Correctness suites**: `./tests/correctness.sh` for each section
    (`r1 r2 r3 r4 r8 logs-rich`), plus `./tests/dbhealth.sh` and

@@ -529,8 +529,14 @@ async fn jaeger_search_rejects_garbage_and_absurd_limits() {
 #[tokio::test]
 async fn jaeger_search_honors_the_read_deadline() {
     // Regression test (issue #47, H1): reads had no deadline — one
-    // unbounded search could pin a reader indefinitely. Seed the
-    // fixture repeatedly so a 1ms deadline cannot win the race.
+    // unbounded search could pin a reader indefinitely.
+    //
+    // The clock is paused for the timed request, so the deadline does not
+    // race the search. A read is handed to a reader thread, so its future
+    // is pending when first polled; the runtime then has nothing to run,
+    // and a paused clock with nothing to run jumps straight to the next
+    // timer, which is the deadline. On a real clock a 1 ms deadline lost
+    // to the search about half the time on a fast host (#131).
     let extension = required_extension();
     let directory = TempDir::new().unwrap();
     let storage =
@@ -552,7 +558,9 @@ async fn jaeger_search_honors_the_read_deadline() {
             ..TracesQueryLimits::default()
         },
     );
+    tokio::time::pause();
     let (status, body) = get_json(&app, "/select/jaeger/api/traces?service=contract-svc").await;
+    tokio::time::resume();
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
     assert_eq!(body["status"], "error");
     storage.shutdown().await.unwrap();

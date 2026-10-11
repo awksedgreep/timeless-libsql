@@ -638,13 +638,20 @@ fn json_attributes(value: Option<&Value>, context: &str) -> Result<Map<String, V
 
 fn json_any_value(value: &Value, context: &str) -> Result<Value, String> {
     let value = object(value, context)?;
-    for key in [
-        "stringValue",
-        "boolValue",
-        "intValue",
-        "doubleValue",
-        "bytesValue",
-    ] {
+    // OTLP/JSON follows the protobuf JSON mapping, in which a 64-bit integer
+    // is a decimal string; receivers are to accept a number as well. Either
+    // is stored as a number, as the protobuf route stores it (#80).
+    if let Some(value) = value.get("intValue") {
+        let parsed = match value {
+            Value::Number(number) => number.as_i64(),
+            Value::String(text) => text.parse::<i64>().ok(),
+            _ => None,
+        };
+        return parsed
+            .map(|number| Value::Number(number.into()))
+            .ok_or_else(|| format!("{context}: intValue {value} is not a 64-bit integer"));
+    }
+    for key in ["stringValue", "boolValue", "doubleValue", "bytesValue"] {
         if let Some(value) = value.get(key) {
             return Ok(value.clone());
         }
@@ -1140,7 +1147,34 @@ mod tests {
         assert_eq!(spans.len(), 1);
         let attrs: Value = serde_json::from_str(&spans[0].attributes).unwrap();
         assert_eq!(attrs["nested"]["ok"], true);
-        assert_eq!(attrs["array"], serde_json::json!(["7", 1.25]));
+        assert_eq!(attrs["array"], serde_json::json!([7, 1.25]));
+    }
+
+    #[test]
+    fn json_int_values_are_numbers_however_they_are_spelled() {
+        let span = |int_value: &str| {
+            format!(
+                r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{{"traceId":"00000000000000000000000000000001","spanId":"0000000000000001","startTimeUnixNano":"10","endTimeUnixNano":"20","attributes":[{{"key":"process.pid","value":{{"intValue":{int_value}}}}}]}}]}}]}}]}}"#
+            )
+        };
+        for spelled in [r#""173994""#, "173994"] {
+            let spans = parse_json(span(spelled).as_bytes()).unwrap();
+            let attrs: Value = serde_json::from_str(&spans[0].attributes).unwrap();
+            assert_eq!(attrs["process.pid"], serde_json::json!(173994), "{spelled}");
+        }
+        let negative = parse_json(span(r#""-9223372036854775808""#).as_bytes()).unwrap();
+        let attrs: Value = serde_json::from_str(&negative[0].attributes).unwrap();
+        assert_eq!(attrs["process.pid"], serde_json::json!(i64::MIN));
+        for bad in [
+            r#""12.5""#,
+            r#""pid""#,
+            "1.5",
+            "true",
+            r#""9223372036854775808""#,
+        ] {
+            let error = parse_json(span(bad).as_bytes()).unwrap_err();
+            assert!(error.contains("intValue"), "{bad}: {error}");
+        }
     }
 
     #[test]

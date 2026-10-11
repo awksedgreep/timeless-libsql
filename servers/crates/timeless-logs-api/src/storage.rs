@@ -2301,9 +2301,9 @@ fn apply_store_policy(
         // can churn the WAL (a policy change reindexes every block), so it
         // must not leave a high-water WAL file behind either.
         conn.execute_batch(&format!(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA wal_autocheckpoint = 1000;
              PRAGMA journal_size_limit = 67108864;
              CREATE VIRTUAL TABLE logs USING timeless_logs(
@@ -2471,10 +2471,10 @@ fn open_connection(
         // every boot. The cache/mmap/temp_store tuning matches the metrics
         // and traces writers.
         conn.execute_batch(&format!(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA cache_size = -128000;
-             PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA mmap_size = 2147483648;
              PRAGMA wal_autocheckpoint = 1000;
              PRAGMA journal_size_limit = 67108864;

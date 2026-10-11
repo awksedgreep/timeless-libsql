@@ -239,12 +239,22 @@ mod limit_pushdown_tests {
         assert!(plan(&db, "SELECT * FROM metrics LIMIT 1 OFFSET 2").contains("limit-offset"));
         assert!(!plan(&db, "SELECT * FROM metrics WHERE ts > 0 LIMIT 1").contains("limit"));
 
-        assert!(plan(&db, "SELECT * FROM logs LIMIT 1").contains("bounded-any"));
-        assert!(plan(&db, "SELECT * FROM logs LIMIT 1 OFFSET 2").contains("bounded-any-offset"));
+        // Logs bound a LIMIT only where the order is the table's own: by
+        // `ts`, either way. A bare LIMIT has no bounded plan (69fcf2f): the
+        // unordered scan streams, and SQLite stops it at the limit.
+        assert!(plan(&db, "SELECT * FROM logs ORDER BY ts LIMIT 1").contains("bounded-ts-asc"));
         assert!(
-            !plan(&db, "SELECT * FROM logs WHERE message LIKE '%x%' LIMIT 1")
-                .contains("bounded-any")
+            plan(&db, "SELECT * FROM logs ORDER BY ts DESC LIMIT 1 OFFSET 2")
+                .contains("bounded-ts-desc-offset")
         );
+        for unbounded in [
+            "SELECT * FROM logs LIMIT 1",
+            "SELECT * FROM logs LIMIT 1 OFFSET 2",
+            "SELECT * FROM logs WHERE message LIKE '%x%' ORDER BY ts LIMIT 1",
+            "SELECT * FROM logs WHERE json_extract(metadata,'$.a') = 1 ORDER BY ts LIMIT 1",
+        ] {
+            assert!(!plan(&db, unbounded).contains("bounded"), "{unbounded}");
+        }
 
         assert!(plan(
             &db,

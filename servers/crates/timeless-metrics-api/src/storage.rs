@@ -1661,10 +1661,10 @@ fn open_connection(
         // always takes this branch, so they apply on every boot.
         conn.execute_batch(
             "PRAGMA page_size = 16384;
+             PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA cache_size = -128000;
-             PRAGMA auto_vacuum = INCREMENTAL;
              PRAGMA mmap_size = 2147483648;
              PRAGMA wal_autocheckpoint = 1000;
              PRAGMA journal_size_limit = 67108864;

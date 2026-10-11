@@ -16905,3 +16905,27 @@ async fn export_accepts_match_selectors_like_prometheus_and_victoria() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("metric or match[]"), "{body}");
 }
+
+/// A database a server creates can give freed pages back: `auto_vacuum` is
+/// only taken before the header is written, and switching to WAL writes
+/// it, so the pragma has to come first (#79).
+#[tokio::test]
+#[ignore = "requires a built timeless_ext shared library"]
+async fn a_new_database_is_created_with_incremental_auto_vacuum() {
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("fresh.db");
+    let storage = Storage::start(
+        database.clone(),
+        extension_path(),
+        1,
+        8,
+        DEFAULT_RAW_RETENTION,
+    )
+    .unwrap();
+    storage.shutdown().await.unwrap();
+    let mode: i64 = Connection::open(&database)
+        .unwrap()
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, 2, "2 is INCREMENTAL");
+}

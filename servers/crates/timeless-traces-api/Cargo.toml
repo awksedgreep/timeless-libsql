@@ -19,6 +19,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 timeless-api-common = { path = "../timeless-api-common" }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

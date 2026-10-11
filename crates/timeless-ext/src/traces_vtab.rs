@@ -2325,6 +2325,8 @@ mod schema_spike_tests {
     /// Insert one span through the vtab, hex TEXT ids. `parent=None` is a
     /// root; durations pass through verbatim (negative/overflowing
     /// included) so edge semantics stay exact.
+    // One argument per column the tests vary; a struct would only move them.
+    #[allow(clippy::too_many_arguments)]
     fn insert_span(
         db: &Connection,
         trace: &str,

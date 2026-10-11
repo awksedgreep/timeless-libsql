@@ -230,3 +230,22 @@ fn make_lines(start: usize, count: usize) -> String {
     }
     body
 }
+
+/// A database a server creates can give freed pages back: `auto_vacuum` is
+/// only taken before the header is written, and switching to WAL writes
+/// it, so the pragma has to come first (#79).
+#[tokio::test]
+#[ignore = "requires TIMELESS_EXT_TEST_PATH pointing at libtimeless_ext"]
+async fn a_new_database_is_created_with_incremental_auto_vacuum() {
+    let extension = std::env::var("TIMELESS_EXT_TEST_PATH")
+        .expect("TIMELESS_EXT_TEST_PATH must point at libtimeless_ext");
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("fresh.db");
+    let storage = Storage::start(database.clone(), extension.into(), 1, 8).unwrap();
+    storage.shutdown().await.unwrap();
+    let mode: i64 = Connection::open(&database)
+        .unwrap()
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, 2, "2 is INCREMENTAL");
+}

@@ -36,6 +36,18 @@ window at the same time.
 
 ### Fixed
 
+- The servers create their databases with `auto_vacuum = INCREMENTAL`, as
+  they always meant to. The pragma was issued after `journal_mode = WAL`,
+  which writes the header, and SQLite only takes `auto_vacuum` before that:
+  every database a server created had `auto_vacuum = 0`, and `PRAGMA
+  incremental_vacuum` (which `dbhealth` recommends) did nothing. Databases
+  created by earlier servers keep mode 0 until a one-time `VACUUM` (#79).
+- OTLP/JSON `intValue` is stored as a number whether it arrives as a JSON
+  number or, as the protobuf JSON mapping spells a 64-bit integer, as a
+  decimal string. It was stored as it arrived, so the attributes of a span
+  sent as JSON by a standard exporter were strings where the same span sent
+  as protobuf had numbers. A value that is not a 64-bit integer is rejected
+  (#80).
 - A metrics table whose catalog is on disk (`index_cache` a size) no longer
   reads its raw chunk totals again after every flush and compaction step.
   The totals are an aggregate over every raw chunk row, and rollup
