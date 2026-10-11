@@ -226,6 +226,25 @@ fn read_permit<'a, E>(
         .map_err(module_err)
 }
 
+/// A read permit on a metrics table, for a read that is about to look at
+/// stored chunks.
+///
+/// Points written in the open transaction are buffered until it commits.
+/// If the connection reading is the one that wrote them, they are stored
+/// first, so that a transaction reads its own writes from rows like
+/// everything else and no read has to merge a buffer. That write lands in
+/// the caller's own transaction; under `PRAGMA query_only` it cannot, and
+/// the read fails saying so.
+fn metrics_read<'a>(
+    shared: &'a SharedEngine<Engine>,
+    db: *mut ffi::sqlite3,
+    table: &str,
+) -> Result<shared::ReadPermit<'a>> {
+    let permit = read_permit(shared, db, table)?;
+    MetricsTab::store_own_writes(shared, db)?;
+    Ok(permit)
+}
+
 /// F8: one compiled non-equality matcher. Equality keys never appear
 /// here — they push down into the registry's label index instead.
 #[derive(Debug)]
@@ -1154,7 +1173,7 @@ fn run_kernel(
     let _bind = DbGuard::bind(db);
     let shared: Arc<SharedEngine<Engine>> =
         MetricsTab::shared_engine_for(db, &ka.database, &ka.table)?;
-    let _read = read_permit(&shared, db, &ka.table)?;
+    let _read = metrics_read(&shared, db, &ka.table)?;
     shared
         .engine
         .refresh_authoritative_state()
@@ -1446,7 +1465,7 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
         let _bind = DbGuard::bind(self.db);
         let shared: Arc<SharedEngine<Engine>> =
             MetricsTab::shared_engine_for(self.db, &ka.database, &ka.table)?;
-        let _read = read_permit(&shared, self.db, &ka.table)?;
+        let _read = metrics_read(&shared, self.db, &ka.table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -1792,7 +1811,7 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -1947,7 +1966,7 @@ unsafe impl VTabCursor for AggregateFrameCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -2092,7 +2111,7 @@ unsafe impl VTabCursor for LatestCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -2244,7 +2263,7 @@ unsafe impl VTabCursor for LatestFrameCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -2403,7 +2422,7 @@ unsafe impl VTabCursor for RawCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -2552,7 +2571,7 @@ unsafe impl VTabCursor for RawBatchCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -2737,7 +2756,7 @@ unsafe impl VTabCursor for RawFrameCursor<'_> {
 
         let _bind = DbGuard::bind(self.db);
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -3177,7 +3196,7 @@ unsafe impl VTabCursor for RollupBatchCursor<'_> {
         let _bind = DbGuard::bind(self.db);
         let shared: Arc<SharedEngine<Engine>> =
             MetricsTab::shared_engine_for(self.db, &ka.database, &ka.table)?;
-        let _read = read_permit(&shared, self.db, &ka.table)?;
+        let _read = metrics_read(&shared, self.db, &ka.table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -4516,7 +4535,7 @@ unsafe impl VTabCursor for SeriesCursor<'_> {
             )));
         }
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -4836,7 +4855,7 @@ unsafe impl VTabCursor for LabelValuesCursor<'_> {
             )));
         }
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -4981,7 +5000,7 @@ unsafe impl VTabCursor for LabelNamesCursor<'_> {
             )));
         }
         let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-        let _read = read_permit(&shared, self.db, &table)?;
+        let _read = metrics_read(&shared, self.db, &table)?;
         shared
             .engine
             .refresh_authoritative_state()
@@ -5209,7 +5228,7 @@ unsafe impl VTabCursor for StatsCursor<'_> {
         match module {
             TimelessModule::Metrics => {
                 let shared = MetricsTab::shared_engine_for(self.db, &database, &table)?;
-                let _read = read_permit(&shared, self.db, &table)?;
+                let _read = metrics_read(&shared, self.db, &table)?;
                 shared
                     .engine
                     .refresh_authoritative_state()

@@ -815,11 +815,13 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
         .await
         .unwrap();
     storage.barrier().await.unwrap();
+    // A batch is stored when its transaction commits: nothing is left in
+    // a buffer once the write has been acknowledged.
     let before_threshold = storage.stats().await.unwrap();
     assert_eq!(before_threshold.series, 1);
-    assert_eq!(before_threshold.buffered_points, 4_095);
-    assert_eq!(before_threshold.disk_points, 0);
-    assert_eq!(before_threshold.raw_tier_chunks, 0);
+    assert_eq!(before_threshold.buffered_points, 0);
+    assert_eq!(before_threshold.disk_points, 4_095);
+    assert_eq!(before_threshold.raw_tier_chunks, 1);
 
     storage
         .submit_named_batch(named_batch(1, 1_700_004_095), 1)
@@ -829,7 +831,7 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     let at_threshold = storage.stats().await.unwrap();
     assert_eq!(at_threshold.buffered_points, 0);
     assert_eq!(at_threshold.disk_points, 4_096);
-    assert_eq!(at_threshold.raw_tier_chunks, 1);
+    assert_eq!(at_threshold.raw_tier_chunks, 2);
     assert_eq!(at_threshold.admitted_batches, 2);
     assert_eq!(at_threshold.admitted_points, 4_096);
     assert_eq!(at_threshold.completed_batches, 2);
@@ -882,7 +884,7 @@ async fn session_one_pins_the_existing_storage_lifecycle() {
     assert_eq!(recovered.disk_points, 4_106);
     assert_eq!(recovered.buffered_points, 0);
     assert_eq!(recovered.total_points, 4_106);
-    assert_eq!(recovered.raw_tier_chunks, 2);
+    assert_eq!(recovered.raw_tier_chunks, 3);
     assert_eq!(recovered.sqlite_index_bytes, 0);
     assert_eq!(recovered.rollup_tiers, None);
     reopened.shutdown().await.unwrap();
@@ -16191,8 +16193,8 @@ async fn compression_reporting_derives_raw_bytes_without_scanning_index_pages() 
     .unwrap();
     let app = router(storage.clone());
 
-    // Cross the 4,096-point flush threshold so points sit on disk and in
-    // the write buffer at once; raw bytes must count both sides.
+    // Two batches, each stored when it commits; raw bytes count every
+    // stored sample.
     storage
         .submit_named_batch(named_batch(4_096, 1_700_000_000), 4_096)
         .await
@@ -16205,15 +16207,14 @@ async fn compression_reporting_derives_raw_bytes_without_scanning_index_pages() 
 
     let stats = get_json(&app, "/select/metrics/stats").await;
     assert_eq!(stats.0, StatusCode::OK);
-    assert_eq!(stats.1["disk_points"], 4_096);
-    assert_eq!(stats.1["buffered_points"], 10);
+    assert_eq!(stats.1["disk_points"], 4_106);
+    assert_eq!(stats.1["buffered_points"], 0);
     assert_eq!(stats.1["total_points"], 4_106);
     assert_eq!(stats.1["raw_ingested_bytes"], 16 * 4_106);
     assert_eq!(stats.1["sqlite_index_bytes"], 0);
 
-    // Flush so the exposition reflects a fully durable database; a flush
-    // moves points to disk, it never mints or drops them, so raw bytes
-    // must not move.
+    // A flush finds nothing left to store, and must not mint or drop
+    // points: raw bytes do not move.
     let flush = post_json(&app, "/api/v1/flush").await;
     assert_eq!(flush.0, StatusCode::OK);
     assert_eq!(flush.1["status"], "ok");

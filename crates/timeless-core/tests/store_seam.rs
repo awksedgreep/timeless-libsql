@@ -52,6 +52,7 @@ fn a_reopened_engine_reads_what_was_stored() {
         )
         .unwrap();
         let sid = engine.resolve_cached("cpu_usage", &labels).unwrap();
+        engine.flush_all().unwrap();
         let rows = engine.query_range_by_id(sid, 0, n_points).unwrap();
         assert_eq!(
             rows.len(),
@@ -60,6 +61,7 @@ fn a_reopened_engine_reads_what_was_stored() {
         );
         assert_eq!(rows[4_999], (4_999, 4_999.0 * 2.0));
 
+        engine.flush_all().unwrap();
         let info = engine.info();
         assert_eq!(info.series_count, 1);
         assert!(info.total_bytes > 0, "storage_stats sees the chunk rows");
@@ -91,6 +93,7 @@ fn compaction_failure_restart_and_backfill_preserve_exact_metrics() {
     store.inject(MemFault::ReplaceFails);
     let error = engine.compact_partitions(i64::MAX).unwrap_err();
     assert_eq!(error, "injected compaction replacement failure");
+    engine.flush_all().unwrap();
     let rows = engine.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
     assert_eq!(rows.len(), 32_768);
     assert_eq!(rows.first(), Some(&(0, 0.0)));
@@ -116,6 +119,7 @@ fn compaction_failure_restart_and_backfill_preserve_exact_metrics() {
     reopened.flush_all().unwrap();
     reopened.compact_partitions(i64::MAX).unwrap();
 
+    reopened.flush_all().unwrap();
     let rows = reopened.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
     assert_eq!(rows.len(), 33_792);
     assert_eq!(rows.first(), Some(&(-1024, -1024.0)));
@@ -179,6 +183,7 @@ fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
     engine.flush_all().unwrap();
 
     store.inject(MemFault::BatchReadFails);
+    engine.flush_all().unwrap();
     let error = engine
         .query_latest_batch_by_id_limited(&[sid], 0, 8, 9)
         .unwrap_err();
@@ -186,12 +191,14 @@ fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
         error.contains("work point limit 9 exceeded"),
         "payload read occurred before admission: {error}"
     );
+    engine.flush_all().unwrap();
     assert!(engine
         .query_latest_batch_by_id_limited(&[sid], 0, 8, 10)
         .unwrap_err()
         .contains("injected batch read failure"));
 
     store.inject(MemFault::None);
+    engine.flush_all().unwrap();
     assert_eq!(
         engine
             .query_latest_batch_by_id_limited(&[sid], 0, 9, 1)
@@ -199,10 +206,12 @@ fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
         vec![(sid, Some((9, 9.0)))]
     );
     engine.write_point(sid, 10, 10.0);
+    engine.flush_all().unwrap();
     assert!(engine
         .query_latest_batch_by_id_limited(&[sid], 0, 10, 1)
         .unwrap_err()
         .contains("work point limit"));
+    engine.flush_all().unwrap();
     assert_eq!(
         engine
             .query_latest_batch_by_id_limited(&[sid], 0, 10, 2)

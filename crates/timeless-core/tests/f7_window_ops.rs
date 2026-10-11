@@ -134,8 +134,10 @@ fn window_ops_match_naive() {
         let step = 1 + (round * 61) % 240;
         let window = 1 + (round * 97) % 500;
         // Engine-ordered samples for the naive side.
+        engine.flush_all().unwrap();
         let sorted = engine.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
         for op in ops {
+            engine.flush_all().unwrap();
             let kernel = engine
                 .query_window_op_by_id(sid, start, stop, step, window, op)
                 .unwrap();
@@ -182,6 +184,7 @@ fn window_op_edges() {
     for (ts, v) in [(1, 10.0), (2, f64::NAN), (3, 30.0), (4, 20.0)] {
         engine.write_point(sid, ts, v);
     }
+    engine.flush_all().unwrap();
     let one = |op| engine.query_window_op_by_id(sid, 4, 4, 1, 10, op).unwrap();
     // p50 over NaN-excluded sort [10, 20, 30]: rank ceil(1.5)=2 → 20.
     assert_eq!(one(WindowOp::Percentile(50.0)), vec![(4, 20.0)]);
@@ -202,18 +205,22 @@ fn window_op_edges() {
     // All-NaN window → percentile/tavg emit no row.
     let sid2 = engine.resolve_cached("allnan", &labels).unwrap();
     engine.write_point(sid2, 1, f64::NAN);
+    engine.flush_all().unwrap();
     assert!(engine
         .query_window_op_by_id(sid2, 1, 1, 1, 10, WindowOp::Percentile(95.0))
         .unwrap()
         .is_empty());
 
     // Validation: out-of-range parameters are errors.
+    engine.flush_all().unwrap();
     assert!(engine
         .query_window_op_by_id(sid, 1, 4, 1, 10, WindowOp::Percentile(0.0))
         .is_err());
+    engine.flush_all().unwrap();
     assert!(engine
         .query_window_op_by_id(sid, 1, 4, 1, 10, WindowOp::Percentile(100.1))
         .is_err());
+    engine.flush_all().unwrap();
     assert!(engine
         .query_window_op_by_id(sid, 1, 4, 1, 10, WindowOp::TrimmedMean(50.0))
         .is_err());

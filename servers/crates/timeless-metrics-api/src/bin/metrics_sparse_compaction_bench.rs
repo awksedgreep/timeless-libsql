@@ -26,11 +26,11 @@
 //! Everything is deterministic for a given gateway count.
 
 use std::env;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -657,15 +657,14 @@ async fn run(
         let _ = task.await;
     }
     let reads = (readers > 0).then(|| {
-        let mut micros = std::mem::take(
-            &mut *latencies
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
+        let mut micros =
+            std::mem::take(&mut *latencies.lock().unwrap_or_else(|error| error.into_inner()));
         micros.sort_unstable();
         let at = |quantile: f64| -> f64 {
             micros
-                .get(((micros.len() as f64 * quantile) as usize).min(micros.len().saturating_sub(1)))
+                .get(
+                    ((micros.len() as f64 * quantile) as usize).min(micros.len().saturating_sub(1)),
+                )
                 .map_or(0.0, |micros| f64::from(*micros) / 1000.0)
         };
         ReadReport {
@@ -676,7 +675,9 @@ async fn run(
             p50_ms: at(0.50),
             p90_ms: at(0.90),
             p99_ms: at(0.99),
-            max_ms: micros.last().map_or(0.0, |micros| f64::from(*micros) / 1000.0),
+            max_ms: micros
+                .last()
+                .map_or(0.0, |micros| f64::from(*micros) / 1000.0),
             over_100ms: micros.iter().filter(|micros| **micros > 100_000).count(),
             retries: final_stats.api_read_retries,
             wait_ms: final_stats.api_read_wait_ns as f64 / 1_000_000.0,

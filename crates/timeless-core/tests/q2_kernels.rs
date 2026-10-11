@@ -237,8 +237,10 @@ fn kernels_match_naive_reference() {
         for &sid in &sids {
             // The reference consumes the engine's own sorted sample order
             // (that order IS part of the contract; ties = last wins).
+            engine.flush_all().unwrap();
             let all = engine.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
 
+            engine.flush_all().unwrap();
             let kernel = engine
                 .query_grid_last_by_id(sid, start, stop, step, lookback)
                 .unwrap();
@@ -250,6 +252,7 @@ fn kernels_match_naive_reference() {
             );
 
             for agg in aggs {
+                engine.flush_all().unwrap();
                 let kernel = engine
                     .query_window_agg_by_id(sid, start, stop, step, window, agg)
                     .unwrap();
@@ -289,6 +292,7 @@ fn labeled_wrappers_match_by_id() {
     engine.flush_all().unwrap();
 
     let (start, stop, step, lookback, window) = (900i64, 6000i64, 30i64, 45i64, 120i64);
+    engine.flush_all().unwrap();
     let grid = engine
         .query_grid_last(
             "q2.labeled",
@@ -306,12 +310,14 @@ fn labeled_wrappers_match_by_id() {
             .iter()
             .find(|(l, _)| l.get("host").unwrap() == host)
             .unwrap();
+        engine.flush_all().unwrap();
         let expect = engine
             .query_grid_last_by_id(*sid, start, stop, step, lookback)
             .unwrap();
         assert_bit_eq(points, &expect, &format!("labeled grid host {host}"));
     }
 
+    engine.flush_all().unwrap();
     let win = engine
         .query_window_agg(
             "q2.labeled",
@@ -330,6 +336,7 @@ fn labeled_wrappers_match_by_id() {
             .iter()
             .find(|(l, _)| l.get("host").unwrap() == host)
             .unwrap();
+        engine.flush_all().unwrap();
         let expect = engine
             .query_window_agg_by_id(*sid, start, stop, step, window, AggFn::Avg)
             .unwrap();
@@ -337,12 +344,14 @@ fn labeled_wrappers_match_by_id() {
     }
 
     let sids: Vec<i64> = by_labels.iter().map(|(_, sid)| *sid).collect();
+    engine.flush_all().unwrap();
     let batch = engine
         .query_window_op_batch_by_id(&sids, start, stop, step, window, WindowOp::Agg(AggFn::Avg))
         .unwrap();
     assert_eq!(batch.len(), sids.len());
     for ((result_sid, points), expected_sid) in batch.iter().zip(&sids) {
         assert_eq!(result_sid, expected_sid, "batch retains input series order");
+        engine.flush_all().unwrap();
         let expect = engine
             .query_window_agg_by_id(*expected_sid, start, stop, step, window, AggFn::Avg)
             .unwrap();
@@ -365,6 +374,7 @@ fn window_average_compensates_cancellation_and_falls_back_before_overflow() {
     for (timestamp, value) in [(10, 1e16), (20, 1.0), (30, -1e16)] {
         engine.write_point(precision, timestamp, value);
     }
+    engine.flush_all().unwrap();
     let average = engine
         .query_window_agg_by_id(precision, 30, 30, 1, 30, AggFn::Avg)
         .unwrap();
@@ -373,6 +383,7 @@ fn window_average_compensates_cancellation_and_falls_back_before_overflow() {
     let overflow = engine.resolve_cached("overflow", &labels).unwrap();
     engine.write_point(overflow, 20, f64::MAX);
     engine.write_point(overflow, 30, f64::MAX);
+    engine.flush_all().unwrap();
     let average = engine
         .query_window_agg_by_id(overflow, 30, 30, 1, 20, AggFn::Avg)
         .unwrap();
@@ -386,6 +397,7 @@ fn window_average_compensates_cancellation_and_falls_back_before_overflow() {
         let series = engine.resolve_cached(name, &labels).unwrap();
         engine.write_point(series, 20, values[0]);
         engine.write_point(series, 30, values[1]);
+        engine.flush_all().unwrap();
         let average = engine
             .query_window_agg_by_id(series, 30, 30, 1, 20, AggFn::Avg)
             .unwrap()[0]
@@ -409,6 +421,7 @@ fn window_sum_compensates_cancellation_and_preserves_ieee_results() {
     for (timestamp, value) in [(10, 1e16), (20, 1.0), (30, -1e16)] {
         engine.write_point(precision, timestamp, value);
     }
+    engine.flush_all().unwrap();
     let sum = engine
         .query_window_agg_by_id(precision, 30, 30, 1, 30, AggFn::Sum)
         .unwrap()[0]
@@ -424,6 +437,7 @@ fn window_sum_compensates_cancellation_and_preserves_ieee_results() {
         let series = engine.resolve_cached(name, &labels).unwrap();
         engine.write_point(series, 20, values[0]);
         engine.write_point(series, 30, values[1]);
+        engine.flush_all().unwrap();
         let sum = engine
             .query_window_agg_by_id(series, 30, 30, 1, 20, AggFn::Sum)
             .unwrap()[0]
@@ -452,6 +466,7 @@ fn window_min_ignores_later_nan_replaces_leading_nan_and_preserves_first_zero() 
         let series = engine.resolve_cached(name, &labels).unwrap();
         engine.write_point(series, 20, values[0]);
         engine.write_point(series, 30, values[1]);
+        engine.flush_all().unwrap();
         let minimum = engine
             .query_window_agg_by_id(series, 30, 30, 1, 20, AggFn::Min)
             .unwrap()[0]
@@ -462,6 +477,7 @@ fn window_min_ignores_later_nan_replaces_leading_nan_and_preserves_first_zero() 
     let all_nan = engine.resolve_cached("all_nan", &labels).unwrap();
     engine.write_point(all_nan, 20, f64::NAN);
     engine.write_point(all_nan, 30, f64::NAN);
+    engine.flush_all().unwrap();
     assert!(engine
         .query_window_agg_by_id(all_nan, 30, 30, 1, 20, AggFn::Min)
         .unwrap()[0]
@@ -485,6 +501,7 @@ fn window_max_ignores_later_nan_replaces_leading_nan_and_preserves_first_zero() 
         let series = engine.resolve_cached(name, &labels).unwrap();
         engine.write_point(series, 20, values[0]);
         engine.write_point(series, 30, values[1]);
+        engine.flush_all().unwrap();
         let maximum = engine
             .query_window_agg_by_id(series, 30, 30, 1, 20, AggFn::Max)
             .unwrap()[0]
@@ -495,6 +512,7 @@ fn window_max_ignores_later_nan_replaces_leading_nan_and_preserves_first_zero() 
     let all_nan = engine.resolve_cached("all_nan", &labels).unwrap();
     engine.write_point(all_nan, 20, f64::NAN);
     engine.write_point(all_nan, 30, f64::NAN);
+    engine.flush_all().unwrap();
     assert!(engine
         .query_window_agg_by_id(all_nan, 30, 30, 1, 20, AggFn::Max)
         .unwrap()[0]
@@ -513,25 +531,33 @@ fn kernel_argument_contract() {
     engine.write_point(sid, 100, 1.0);
 
     // step must be positive
+    engine.flush_all().unwrap();
     assert!(engine.query_grid_last_by_id(sid, 0, 100, 0, 10).is_err());
+    engine.flush_all().unwrap();
     assert!(engine.query_grid_last_by_id(sid, 0, 100, -5, 10).is_err());
     // lookback must be >= 0; window must be > 0
+    engine.flush_all().unwrap();
     assert!(engine.query_grid_last_by_id(sid, 0, 100, 10, -1).is_err());
+    engine.flush_all().unwrap();
     assert!(engine
         .query_window_agg_by_id(sid, 0, 100, 10, 0, AggFn::Sum)
         .is_err());
     // stop < start: empty, not an error
+    engine.flush_all().unwrap();
     assert!(engine
         .query_grid_last_by_id(sid, 100, 0, 10, 10)
         .unwrap()
         .is_empty());
     // grid cap: an epoch-wide range at step 1 must be rejected loudly
+    engine.flush_all().unwrap();
     assert!(engine
         .query_grid_last_by_id(sid, 0, i64::MAX - 1, 1, 10)
         .is_err());
     // lookback 0 = exact grid hits only
+    engine.flush_all().unwrap();
     let exact = engine.query_grid_last_by_id(sid, 100, 100, 1, 0).unwrap();
     assert!(exact.is_empty(), "(t-0, t] is empty by half-open contract");
+    engine.flush_all().unwrap();
     let one = engine.query_grid_last_by_id(sid, 100, 100, 1, 1).unwrap();
     assert_eq!(one, vec![(100, 1.0)]);
     engine.shutdown().unwrap();

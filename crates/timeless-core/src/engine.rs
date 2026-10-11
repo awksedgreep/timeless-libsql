@@ -401,14 +401,6 @@ impl<T: Copy> Buffered<T> {
         }
     }
 
-    fn truncate(&mut self, len: usize) {
-        match self {
-            Buffered::Many(values) => values.truncate(len),
-            Buffered::One(_) if len == 0 => *self = Buffered::Empty,
-            _ => {}
-        }
-    }
-
     fn into_vec(self) -> Vec<T> {
         match self {
             Buffered::Empty => Vec::new(),
@@ -438,11 +430,6 @@ struct PartitionBuffer {
     /// Seconds since the engine started (see `seconds_since_start`).
     last_write: u32,
     queued_for_flush: bool,
-    /// Epoch of the innermost undo frame that holds this partition's
-    /// buffer mark. Equal to the engine's current frame epoch exactly
-    /// when every open frame already has a mark for it, so a write can
-    /// skip the journal. Frame epochs are never reused; 0 matches none.
-    mark_epoch: u64,
 }
 
 impl PartitionBuffer {
@@ -452,7 +439,6 @@ impl PartitionBuffer {
             values: Buffered::Empty,
             last_write: 0,
             queued_for_flush: false,
-            mark_epoch: 0,
         }
     }
     fn memory_bytes(&self) -> usize {
@@ -1235,9 +1221,6 @@ pub struct Engine {
     /// arriving, in milliseconds; 0 leaves flushing to the point threshold
     /// and the host. See `flush_due`.
     flush_interval_ms: AtomicU64,
-    /// When the oldest unflushed point was buffered, in milliseconds since
-    /// `started_at` plus one; 0 when a flush has left nothing older.
-    buffered_since_ms: AtomicU64,
     /// A compaction the table started for itself has work left.
     self_compaction_more: AtomicBool,
     /// When the table last started a compaction for itself (as above).
@@ -1347,13 +1330,6 @@ pub struct Engine {
     /// skip journal work with a single relaxed-ish load when no
     /// transaction is active (the overwhelmingly common case).
     txn_active: AtomicBool,
-    /// Epoch of the innermost open undo frame (0 when none is open).
-    /// Written only under the journal lock; read by the write path to
-    /// skip the journal for partitions this frame has already marked.
-    txn_frame_epoch: AtomicU64,
-    /// Source of frame epochs. Starts at 1 so no frame matches a fresh
-    /// partition's mark_epoch of 0.
-    txn_next_epoch: AtomicU64,
     /// The transaction journal itself (PLAN.md risk R5). See txn_begin
     /// for the full design story.
     txn: Mutex<TxnJournal>,
@@ -1416,33 +1392,24 @@ pub struct Engine {
 // ═══════════════════════════════════════════════════════════════════════
 // Transaction journal (PLAN.md risk R5)
 //
-// THE PROBLEM: the engine buffers points in memory and persists chunks
-// through the store. When the store is SQLite shadow tables, chunk ROWS
-// ride the host transaction — ROLLBACK removes them — but the engine's
-// in-memory state (partition buffers, chunk index, flush queue) knows
-// nothing about SQL transactions. Without a journal, ROLLBACK leaves:
-//   - buffered points that SQL says never happened, and worse
-//   - index entries pointing at chunk rows that no longer exist
-//     (dangling locs → read errors on the next query).
+// THE PROBLEM: chunk ROWS ride the host transaction — ROLLBACK removes
+// them — but the engine's in-memory index knows nothing about SQL
+// transactions. Without a journal, ROLLBACK leaves index entries
+// pointing at chunk rows that no longer exist (dangling locs → read
+// errors on the next query).
 //
-// THE FIX: while a journal is active, every mutation of engine memory
+// Write buffers need no journal: they hold only what the open
+// transaction wrote and has not stored yet. The host stores them at a
+// savepoint and at commit, so a rollback (outer or to a savepoint) just
+// drops them and SQLite undoes any rows already written.
+//
+// THE FIX: while a journal is active, every mutation of the index
 // records enough to undo itself. SQLite calls xBegin before the FIRST
 // write of ANY transaction — including the implicit per-statement
-// transaction wrapping a bare INSERT in autocommit mode (verified
-// empirically, see metrics_vtab.rs) — so txn_begin must be CHEAP: O(1),
-// into reused (capacity-retaining) collections. It once took a mark for
-// every partition up front, which at 550k series was most of a
-// maintenance step's CPU (#120); marks are now taken on first touch.
+// transaction wrapping a bare INSERT in autocommit mode — so txn_begin
+// must be CHEAP: O(1), into reused (capacity-retaining) collections.
 //
 // WHAT IS JOURNALED:
-//   - buffer_marks: a partition's buffered length when the frame began,
-//     recorded by the frame's first mutation of that partition. Rollback
-//     truncates back to the mark (points pushed during the txn vanish);
-//     partitions without a mark were not changed.
-//   - saved: pre-txn buffered points that an intra-txn flush DRAINED
-//     into chunks. Those chunk rows roll back with the host txn, so the
-//     points must return to the buffer or they would be silently lost
-//     (they were inserted by previously-COMMITTED statements!).
 //   - added: index keys inserted during the txn (flush/compact). Their
 //     rows vanish at rollback, so the entries must be removed or they
 //     would dangle.
@@ -1458,16 +1425,13 @@ pub struct Engine {
 // concerned. Restores therefore never resurrect intra-txn chunks.
 //
 // SERIES CATALOG:
-//   - Filesystem stores retain the legacy registry blob behavior.
 //   - Authoritative stores record IDs inserted by each frame. Rollback
 //     removes those identities from memory and clears the resolve cache,
 //     matching the host rollback of their `_series` rows.
 //
 // PRECONDITIONS:
 //   - The store must be transactional (shadow tables riding the host
-//     txn). Over FsStore, file writes/deletes cannot roll back — the
-//     txn_* API must simply not be used there (the vtab is the only
-//     caller and always uses ShadowTableStore).
+//     txn, or the in-memory test store's own begin/rollback).
 //   - SQLite never nests xBegin. Savepoints create additional undo
 //     frames inside the one outer transaction journal.
 //
@@ -1483,20 +1447,6 @@ pub struct Engine {
 #[derive(Default)]
 struct TxnFrame {
     savepoint: Option<i32>,
-    /// Unique per frame push; see PartitionBuffer::mark_epoch.
-    epoch: u64,
-    /// Partition buffer lengths at the frame's start (or 0 after an
-    /// intra-txn flush drained a partition — its pre-txn points moved
-    /// to `saved`). Recorded lazily, by the first mutation of each
-    /// partition inside the frame, so begin is O(1) however many
-    /// partitions exist (#120). A partition absent from the map has not
-    /// changed since the frame began. Every mark recorded in a frame is
-    /// recorded in each enclosing frame at the same moment, so an outer
-    /// frame's keys always include an inner frame's.
-    buffer_marks: HashMap<PartitionKey, usize>,
-    /// Pre-txn buffered points drained by intra-txn flushes; restored
-    /// into the buffers on rollback.
-    saved: Vec<(PartitionKey, Vec<i64>, Vec<f64>)>,
     /// Index keys inserted during the txn (their chunk rows roll back).
     added: HashSet<ChunkKey>,
     /// Pre-txn index entries removed during the txn (their chunk rows
@@ -2473,8 +2423,7 @@ impl Engine {
             Self::park_txn_frame(&mut j.spares, frame);
         }
         let frame = j.spares.pop().unwrap_or_default();
-        j.frames.push(self.reset_txn_frame(frame, None));
-        self.publish_frame_epoch(&j);
+        j.frames.push(Self::reset_txn_frame(frame, None));
         self.txn_active.store(true, Ordering::SeqCst);
     }
 
@@ -2505,7 +2454,6 @@ impl Engine {
         if let Some(generation) = generation {
             *self.catalog_gen_lock() = Some(generation);
         }
-        self.publish_frame_epoch(&j);
         self.txn_active.store(false, Ordering::SeqCst);
         self.series_settled();
     }
@@ -2533,11 +2481,10 @@ impl Engine {
             self.rollback_txn_frame(&mut frame);
             Self::park_txn_frame(&mut j.spares, frame);
         }
-        self.rebuild_flush_queue();
+        self.clear_buffers();
         if !self.authoritative_series {
             self.series_write().dirty = true;
         }
-        self.publish_frame_epoch(&j);
         self.txn_active.store(false, Ordering::SeqCst);
         self.series_settled();
     }
@@ -2553,8 +2500,7 @@ impl Engine {
             "duplicate savepoint id {id}"
         );
         let frame = j.spares.pop().unwrap_or_default();
-        j.frames.push(self.reset_txn_frame(frame, Some(id)));
-        self.publish_frame_epoch(&j);
+        j.frames.push(Self::reset_txn_frame(frame, Some(id)));
     }
 
     /// Release `id` and every nested frame, merging their undo records
@@ -2582,7 +2528,6 @@ impl Engine {
             }
             Self::park_txn_frame(&mut j.spares, child);
         }
-        self.publish_frame_epoch(&j);
     }
 
     /// Restore the state captured by `id`, discard nested frames, and
@@ -2603,26 +2548,22 @@ impl Engine {
             Self::park_txn_frame(&mut j.spares, frame);
         }
         let frame = j.spares.pop().unwrap_or_default();
-        j.frames.push(self.reset_txn_frame(frame, Some(id)));
-        self.publish_frame_epoch(&j);
-        self.rebuild_flush_queue();
+        j.frames.push(Self::reset_txn_frame(frame, Some(id)));
+        // What is buffered was written after the savepoint (the host
+        // flushes when it opens one), and goes with it.
+        self.clear_buffers();
         if !self.authoritative_series {
             self.series_write().dirty = true;
         }
     }
 
-    /// Keep a finished frame for reuse, unless it grew large. A flush
-    /// journals a mark, and a copy of the points, for every buffer it
-    /// drains; parked as it was, that frame held a second copy of a whole
-    /// flush until the next transaction began, and its tables' capacity
-    /// for good (about 300 bytes a series written, in either catalog
-    /// mode). A small frame keeps the cheap path: no allocation to begin a
-    /// transaction, and nothing to free at commit.
+    /// Keep a finished frame for reuse, unless it grew large: parked as it
+    /// was, a frame that journaled a large change would hold its tables'
+    /// capacity for good. A small frame keeps the cheap path: no
+    /// allocation to begin a transaction, and nothing to free at commit.
     fn park_txn_frame(spares: &mut Vec<TxnFrame>, frame: TxnFrame) {
         const KEEP_AT_MOST: usize = 1_024;
-        let held = frame.buffer_marks.capacity()
-            + frame.saved.capacity()
-            + frame.added.capacity()
+        let held = frame.added.capacity()
             + frame.removed.capacity()
             + frame.series_added.capacity()
             + frame.series_removed.capacity()
@@ -2633,11 +2574,8 @@ impl Engine {
         }
     }
 
-    fn reset_txn_frame(&self, mut frame: TxnFrame, savepoint: Option<i32>) -> TxnFrame {
+    fn reset_txn_frame(mut frame: TxnFrame, savepoint: Option<i32>) -> TxnFrame {
         frame.savepoint = savepoint;
-        frame.epoch = self.txn_next_epoch.fetch_add(1, Ordering::Relaxed);
-        frame.buffer_marks.clear();
-        frame.saved.clear();
         frame.added.clear();
         frame.removed.clear();
         frame.series_added.clear();
@@ -2648,54 +2586,20 @@ impl Engine {
         frame
     }
 
-    /// Mirror the innermost open frame's epoch for the write path's
-    /// lock-free check. Called under the journal lock after every change
-    /// to the frame stack.
-    fn publish_frame_epoch(&self, j: &TxnJournal) {
-        let epoch = j.frames.last().map_or(0, |frame| frame.epoch);
-        self.txn_frame_epoch.store(epoch, Ordering::SeqCst);
+    /// Drop every buffered point. Buffers hold what the open transaction
+    /// has written and not yet stored, so this is what a rollback does to
+    /// them; the rows the transaction did store are the host's to undo.
+    fn clear_buffers(&self) {
+        self.partitions.clear();
+        self.partitions.shrink_to_fit();
+        self.flush_queue_lock().clear();
+        self.buffer_memory.store(0, Ordering::Relaxed);
     }
 
-    /// Record `len` as `key`'s mark in every open frame that has none,
-    /// innermost first; then stamp the buffer so later writes in this
-    /// frame skip the journal. `len` must be the buffer's length before
-    /// the mutation about to happen. A frame without a mark has seen no
-    /// mutation of the partition, so that length is also its length when
-    /// the frame began. Stopping at the first frame that has a mark is
-    /// sound because enclosing frames' marks are a superset.
-    fn record_buffer_mark(j: &mut TxnJournal, key: PartitionKey, buf: &mut PartitionBuffer) {
-        let len = buf.timestamps.len();
-        for frame in j.frames.iter_mut().rev() {
-            if frame.buffer_marks.contains_key(&key) {
-                break;
-            }
-            frame.buffer_marks.insert(key, len);
-        }
-        buf.mark_epoch = j.frames.last().map_or(0, |frame| frame.epoch);
-    }
-
-    /// The write path's journal step: whether a buffer must be marked
-    /// before it is appended to. A single pair of atomic loads when no
-    /// transaction is open or this frame has already marked it.
-    #[inline]
-    fn needs_buffer_mark(&self, buf: &PartitionBuffer) -> bool {
-        self.txn_active.load(Ordering::SeqCst)
-            && buf.mark_epoch != self.txn_frame_epoch.load(Ordering::SeqCst)
-    }
-
-    /// Slow path of needs_buffer_mark: take the journal before the
-    /// partition (lock order), and mark the partition, creating it if it
-    /// does not exist yet (its mark is then 0).
-    #[cold]
-    fn mark_partition(&self, key: PartitionKey) {
-        let Some(mut j) = self.txn_guard() else {
-            return;
-        };
-        let mut entry = self
-            .partitions
-            .entry(key)
-            .or_insert_with(PartitionBuffer::new);
-        Self::record_buffer_mark(&mut j, key, entry.value_mut());
+    /// Whether any point is buffered: written in the open transaction and
+    /// not yet stored.
+    pub fn has_buffered_points(&self) -> bool {
+        self.buffer_memory.load(Ordering::Relaxed) != 0
     }
 
     fn rollback_txn_frame(&self, frame: &mut TxnFrame) {
@@ -2712,46 +2616,7 @@ impl Engine {
             .store(i64::MIN, Ordering::Relaxed);
         self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
         self.retention_floor.store(i64::MIN, Ordering::Relaxed);
-        // 1. Truncate buffers to their marks. Partitions without a mark
-        //    were not mutated in this frame and are already as they were;
-        //    one created during the frame was marked at 0 (the empty
-        //    PartitionBuffer entry itself is harmless and stays).
-        for (key, mark) in frame.buffer_marks.drain() {
-            let Some(mut e) = self.partitions.get_mut(&key) else {
-                continue;
-            };
-            let buf = e.value_mut();
-            if buf.timestamps.len() > mark {
-                let before = buf.memory_bytes();
-                buf.timestamps.truncate(mark);
-                buf.values.truncate(mark);
-                let freed = before - buf.memory_bytes();
-                if freed > 0 {
-                    self.buffer_memory.fetch_sub(freed, Ordering::Relaxed);
-                }
-            }
-        }
-
-        // 2. Restore drained pre-txn points. Order within the buffer
-        //    does not matter: flush sorts before encoding and queries
-        //    sort results.
-        for (key, timestamps, values) in frame.saved.drain(..) {
-            let added = partition_vec_memory(&timestamps, &values);
-            let mut entry = self
-                .partitions
-                .entry(key)
-                .or_insert_with(PartitionBuffer::new);
-            let buf = entry.value_mut();
-            buf.timestamps.extend_from_slice(&timestamps);
-            buf.values.extend_from_slice(&values);
-            buf.last_write = self.seconds_since_start(Instant::now());
-            drop(entry);
-            if added > 0 {
-                self.buffer_memory.fetch_add(added, Ordering::Relaxed);
-            }
-        }
-
-        // 3. Index: adds out, removals back in. The dedup rule at
+        // Index: adds out, removals back in. The dedup rule at
         //    record time guarantees `removed` never contains an entry
         //    whose chunk row was created inside this frame.
         {
@@ -2806,33 +2671,7 @@ impl Engine {
         }
     }
 
-    fn rebuild_flush_queue(&self) {
-        let mut queue = self.flush_queue_lock();
-        queue.clear();
-        for mut entry in self.partitions.iter_mut() {
-            let key = *entry.key();
-            let buf = entry.value_mut();
-            let should_queue = buf.timestamps.len() >= self.flush_threshold;
-            buf.queued_for_flush = should_queue;
-            if should_queue {
-                queue.push(key);
-            }
-        }
-    }
-
     fn merge_txn_frame(parent: &mut TxnFrame, child: &mut TxnFrame) {
-        for (key, mut timestamps, mut values) in child.saved.drain(..) {
-            let Some(mark) = parent.buffer_marks.get_mut(&key) else {
-                continue;
-            };
-            if *mark == 0 {
-                continue;
-            }
-            timestamps.truncate(*mark);
-            values.truncate(*mark);
-            parent.saved.push((key, timestamps, values));
-            *mark = 0;
-        }
         for (key, meta) in child.removed.drain(..) {
             if !parent.added.remove(&key) {
                 parent.removed.push((key, meta));
@@ -2912,7 +2751,7 @@ impl Engine {
     }
 
     /// An engine over the in-memory store kept under `name` (see
-    /// [`MemStore::named`]): for tests and tools that want an engine and no
+    /// [`crate::store::MemStore::named`]): for tests and tools that want an engine and no
     /// database. Opening the same name again reads what was written to it.
     pub fn in_memory(
         name: impl AsRef<std::path::Path>,
@@ -3137,7 +2976,6 @@ impl Engine {
             released_writes: DashMap::new(),
             started_at: Instant::now(),
             flush_interval_ms: AtomicU64::new(0),
-            buffered_since_ms: AtomicU64::new(0),
             self_compaction_more: AtomicBool::new(false),
             self_compacted_at_ms: AtomicU64::new(0),
             index: RwLock::new(BTreeMap::new()),
@@ -3196,8 +3034,6 @@ impl Engine {
             window_batch_query_buffered_points_considered: AtomicU64::new(0),
             window_batch_query_returned_points: AtomicU64::new(0),
             txn_active: AtomicBool::new(false),
-            txn_frame_epoch: AtomicU64::new(0),
-            txn_next_epoch: AtomicU64::new(1),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(primed_gen),
             append_wm: Mutex::new(primed_wm),
@@ -3491,21 +3327,12 @@ impl Engine {
                 .partitions
                 .entry(key)
                 .or_insert_with(PartitionBuffer::new);
-            if self.needs_buffer_mark(entry.value()) {
-                drop(entry);
-                self.mark_partition(key);
-                entry = self
-                    .partitions
-                    .entry(key)
-                    .or_insert_with(PartitionBuffer::new);
-            }
             let buf = entry.value_mut();
             let old_cap = buf.memory_bytes();
             self.raise_raw_ts_upper_bound(ts);
             buf.timestamps.push(ts);
             buf.values.push(val);
             buf.last_write = self.seconds_since_start(now);
-            self.note_buffered(now);
             let new_cap = buf.memory_bytes();
             mem_delta = (new_cap as isize) - (old_cap as isize);
             should_queue_flush =
@@ -3648,14 +3475,6 @@ impl Engine {
                 .partitions
                 .entry(key)
                 .or_insert_with(PartitionBuffer::new);
-            if self.needs_buffer_mark(entry.value()) {
-                drop(entry);
-                self.mark_partition(key);
-                entry = self
-                    .partitions
-                    .entry(key)
-                    .or_insert_with(PartitionBuffer::new);
-            }
             let buf = entry.value_mut();
             let old_cap = buf.memory_bytes();
             if let Some(&newest) = timestamps[a..b].iter().max() {
@@ -3664,7 +3483,6 @@ impl Engine {
             buf.timestamps.extend_from_slice(&timestamps[a..b]);
             buf.values.extend_from_slice(&values[a..b]);
             buf.last_write = self.seconds_since_start(now);
-            self.note_buffered(now);
             let new_cap = buf.memory_bytes();
             let mem_delta = (new_cap as isize) - (old_cap as isize);
             let should_queue_flush =
@@ -4050,20 +3868,12 @@ impl Engine {
             + 1
     }
 
-    fn note_buffered(&self, now: Instant) {
-        if self.buffered_since_ms.load(Ordering::Relaxed) == 0 {
-            let _ = self.buffered_since_ms.compare_exchange(
-                0,
-                self.millis_since_start(now),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            );
-        }
-    }
-
-    /// Configure how long a buffered point may wait for a flush (`None`
-    /// leaves it to the point threshold and the host). Idempotent; called
-    /// at every connect with the table's setting.
+    /// Configure how often the table compacts for itself (`None`: never,
+    /// the host does). Idempotent; called at every connect with the
+    /// table's `flush_interval` setting, which once also said how long a
+    /// committed point might wait in memory. Points are stored when their
+    /// transaction commits now, so what is left of it is the pace of the
+    /// table's own maintenance.
     pub fn set_flush_interval(&self, interval: Option<Duration>) {
         let ms = interval.map_or(0, |interval| {
             u64::try_from(interval.as_millis())
@@ -4073,49 +3883,22 @@ impl Engine {
         self.flush_interval_ms.store(ms, Ordering::Relaxed);
     }
 
-    /// Flush what has waited long enough or grown too large; true when
-    /// anything was flushed. A table has no clock of its own: this is
-    /// asked at the end of each ingest statement, so a point waits for the
-    /// first write after its interval, not for the interval alone.
-    ///
-    /// A whole flush when the oldest buffered point is older than the
-    /// flush interval: a host that polls is then flushed a poll at a time,
-    /// as a server's timer has it. The largest buffers, when together they
-    /// are over the memory budget.
-    pub fn flush_due(&self) -> EngineResult<bool> {
-        let interval = self.flush_interval_ms.load(Ordering::Relaxed);
-        let since = self.buffered_since_ms.load(Ordering::Relaxed);
-        if interval != 0
-            && since != 0
-            && self
-                .millis_since_start(Instant::now())
-                .saturating_sub(since)
-                >= interval
-        {
-            self.flush_all()?;
-            return Ok(true);
-        }
-        if self.buffer_memory.load(Ordering::Relaxed) > self.memory_budget {
-            return Ok(self.flush_by_memory()? > 0);
-        }
-        Ok(false)
-    }
-
     /// Whether the table should take a compaction step for itself now:
-    /// one it began has work left, or it has just flushed for itself and
-    /// has not begun one for `every`. A host that flushes on its own
-    /// timer never has the table flush for it, and so is never compacted
-    /// behind its back.
-    pub fn self_compaction_due(&self, flushed: bool, every: Duration) -> bool {
+    /// one it began has work left, or it maintains itself and has not
+    /// begun one for its interval. A table has no clock of its own: this
+    /// is asked as a transaction commits. A host that maintains the table
+    /// (`flush_interval` off) is never compacted behind its back.
+    pub fn self_compaction_due(&self) -> bool {
         if self.self_compaction_more.load(Ordering::Relaxed) {
             return true;
         }
-        if !flushed {
+        let every = self.flush_interval_ms.load(Ordering::Relaxed);
+        if every == 0 {
             return false;
         }
         let now = self.millis_since_start(Instant::now());
         let last = self.self_compacted_at_ms.load(Ordering::Relaxed);
-        if last != 0 && u128::from(now.saturating_sub(last)) < every.as_millis() {
+        if last != 0 && now.saturating_sub(last) < every {
             return false;
         }
         self.self_compacted_at_ms.store(now, Ordering::Relaxed);
@@ -4184,8 +3967,6 @@ impl Engine {
         // append, drain, truncate, and restore), so zero means every buffer
         // is empty: a timed flush between scrapes need not walk a partition
         // per series to find that out (#125).
-        // Whatever is buffered from here on is the next interval's.
-        self.buffered_since_ms.store(0, Ordering::Relaxed);
         if self.buffer_memory.load(Ordering::Relaxed) == 0 {
             return self.save_series();
         }
@@ -5174,31 +4955,13 @@ impl Engine {
     where
         F: FnOnce(&PartitionBuffer) -> bool,
     {
-        // The caller holds the transition guard. Journal before the
-        // partition lock: draining while
-        // a transaction is active moves pre-txn points into chunks
-        // whose rows would vanish on rollback — so the pre-txn prefix
-        // (everything below this partition's mark) is SAVED before the
-        // drain and the mark drops to 0: from here on, everything in
-        // this buffer is txn-era and rollback simply truncates it.
-        let mut j = self.txn_guard();
+        // The caller holds the transition guard. Every point in a buffer
+        // was written by the open transaction, so the chunk it becomes is
+        // that transaction's to keep or lose: there is nothing to journal.
         let mut entry = self.partitions.get_mut(key)?;
         if !should_drain(&entry) {
             return None;
         }
-        if let Some(j) = j.as_deref_mut() {
-            Self::record_buffer_mark(j, *key, entry.value_mut());
-            let mark = j.buffer_marks.get(key).copied().unwrap_or(0);
-            if mark > 0 {
-                j.saved.push((
-                    *key,
-                    entry.timestamps[..mark].to_vec(),
-                    entry.values[..mark].to_vec(),
-                ));
-                j.buffer_marks.insert(*key, 0);
-            }
-        }
-        drop(j);
 
         let freed = entry.memory_bytes();
         let timestamps = std::mem::take(&mut entry.timestamps).into_vec();
@@ -5207,8 +4970,7 @@ impl Engine {
         entry.last_write = self.seconds_since_start(Instant::now());
         drop(entry);
         // The emptied buffer is released. A write that raced in keeps it
-        // (the check is made under the map's lock); a rollback that has
-        // pre-transaction points to put back makes a new one.
+        // (the check is made under the map's lock).
         self.released_writes
             .insert(key.series_id, self.seconds_since_start(Instant::now()));
         self.partitions.remove_if(key, |_, buffer| {
@@ -5297,17 +5059,6 @@ impl Engine {
                 }
             }
         }
-        if let Some(buffer) = self.partitions.get(&pk) {
-            for index in 0..buffer.timestamps.len() {
-                let timestamp = buffer.timestamps[index];
-                if timestamp >= t_start && timestamp <= t_end {
-                    out.push((timestamp, buffer.values[index]));
-                    if out.len() == max_points {
-                        break;
-                    }
-                }
-            }
-        }
         Ok(out)
     }
 
@@ -5365,15 +5116,7 @@ impl Engine {
             .flat_map(|chunks| chunks.iter())
             .map(|meta| u64::from(meta.point_count))
             .sum::<u64>();
-        let preflight_buffered_points = series_ids.iter().fold(0_u64, |total, &series_id| {
-            let pk = PartitionKey { series_id };
-            total.saturating_add(
-                self.partitions
-                    .get(&pk)
-                    .map_or(0, |buffer| buffer.timestamps.len() as u64),
-            )
-        });
-        let preflight_work_points = decoded_points.saturating_add(preflight_buffered_points);
+        let preflight_work_points = decoded_points;
         if let Some(limit) = max_work_points.filter(|limit| preflight_work_points > *limit) {
             self.record_raw_batch_query(
                 started,
@@ -5381,7 +5124,7 @@ impl Engine {
                 locs.len(),
                 0,
                 decoded_points,
-                preflight_buffered_points,
+                0,
                 0,
             );
             return Err(format!(
@@ -5404,7 +5147,7 @@ impl Engine {
         let candidate_chunks = locs.len();
         let mut payloads = chunk_bytes.into_iter();
         let mut result = Vec::with_capacity(series_ids.len());
-        let mut buffered_points_considered = 0_u64;
+        let buffered_points_considered = 0_u64;
         let mut returned_points = 0_u64;
         for (&series_id, chunks) in series_ids.iter().zip(matching) {
             // Pre-size from the chunk point counts: one allocation per
@@ -5422,33 +5165,6 @@ impl Engine {
                 points.extend(Self::decode_chunk_data(&meta, &bytes, t_start, t_end)?);
             }
 
-            let pk = PartitionKey { series_id };
-            if let Some(buffer) = self.partitions.get(&pk) {
-                buffered_points_considered =
-                    buffered_points_considered.saturating_add(buffer.timestamps.len() as u64);
-                let observed_work_points =
-                    decoded_points.saturating_add(buffered_points_considered);
-                if let Some(limit) = max_work_points.filter(|limit| observed_work_points > *limit) {
-                    self.record_raw_batch_query(
-                        started,
-                        series_ids.len(),
-                        candidate_chunks,
-                        payload_bytes,
-                        decoded_points,
-                        buffered_points_considered,
-                        returned_points,
-                    );
-                    return Err(format!(
-                        "raw batch work point limit {limit} exceeded (candidate points: {observed_work_points})"
-                    ));
-                }
-                for index in 0..buffer.timestamps.len() {
-                    let timestamp = buffer.timestamps[index];
-                    if timestamp >= t_start && timestamp <= t_end {
-                        points.push((timestamp, buffer.values[index]));
-                    }
-                }
-            }
             points.sort_unstable_by_key(|&(timestamp, _)| timestamp);
             returned_points = returned_points.saturating_add(points.len() as u64);
             result.push((series_id, points));
@@ -5529,15 +5245,6 @@ impl Engine {
         let mut results = Vec::new();
         for (meta, bytes) in matching.iter().zip(chunk_bytes.iter()) {
             results.extend(Self::decode_chunk_data(meta, bytes, t_start, t_end)?);
-        }
-
-        if let Some(buf) = self.partitions.get(&pk) {
-            for i in 0..buf.timestamps.len() {
-                let ts = buf.timestamps[i];
-                if ts >= t_start && ts <= t_end {
-                    results.push((ts, buf.values[i]));
-                }
-            }
         }
 
         results.sort_by_key(|&(ts, _)| ts);
@@ -5655,15 +5362,7 @@ impl Engine {
                         1
                     })
                 });
-            let work_points = series_ids.iter().fold(chunk_work, |total, series_id| {
-                total.saturating_add(
-                    self.partitions
-                        .get(&PartitionKey {
-                            series_id: *series_id,
-                        })
-                        .map_or(0, |buffer| buffer.timestamps.len() as u64),
-                )
-            });
+            let work_points = chunk_work;
             if work_points > limit {
                 return Err(format!("latest batch work point limit {limit} exceeded (candidate work: {work_points})"));
             }
@@ -5679,23 +5378,8 @@ impl Engine {
 
         let mut result = Vec::with_capacity(series_ids.len());
         for (&series_id, chunks) in series_ids.iter().zip(work) {
-            let pk = PartitionKey { series_id };
             // Buffered points follow persisted chunks in stable raw order.
             let mut best: Option<(i64, f64, usize)> = None;
-            if let Some(buffer) = self.partitions.get(&pk) {
-                for index in 0..buffer.timestamps.len() {
-                    let timestamp = buffer.timestamps[index];
-                    if timestamp < t_start || timestamp > t_end {
-                        continue;
-                    }
-                    if best
-                        .as_ref()
-                        .is_none_or(|(best_timestamp, _, _)| timestamp > *best_timestamp)
-                    {
-                        best = Some((timestamp, buffer.values[index], usize::MAX));
-                    }
-                }
-            }
 
             for (rank, meta, decode_index) in chunks {
                 let possible_ts = meta.max_ts.min(t_end);
@@ -5775,17 +5459,6 @@ impl Engine {
         // (timestamp, value, source rank). Buffered points follow every chunk
         // in query_range_by_id, so usize::MAX is their source rank.
         let mut best: Option<(i64, f64, usize)> = None;
-        if let Some(buf) = self.partitions.get(&pk) {
-            for i in 0..buf.timestamps.len() {
-                let ts = buf.timestamps[i];
-                if ts < t_start || ts > t_end {
-                    continue;
-                }
-                if best.as_ref().is_none_or(|(best_ts, _, _)| ts > *best_ts) {
-                    best = Some((ts, buf.values[i], usize::MAX));
-                }
-            }
-        }
 
         for (rank, meta) in chunks {
             let possible_ts = meta.max_ts.min(t_end);
@@ -5962,25 +5635,6 @@ impl Engine {
                 }
             }
 
-            let pk = PartitionKey { series_id };
-            if let Some(buffer) = self.partitions.get(&pk) {
-                for index in 0..buffer.timestamps.len() {
-                    if buffer.timestamps[index] >= t_start && buffer.timestamps[index] <= t_end {
-                        let value = buffer.values[index];
-                        total_count += 1;
-                        total_sum += value;
-                        global_min = Some(match global_min {
-                            Some(current) => current.min(value),
-                            None => value,
-                        });
-                        global_max = Some(match global_max {
-                            Some(current) => current.max(value),
-                            None => value,
-                        });
-                    }
-                }
-            }
-
             let summary = (total_count != 0).then(|| AggregateSummary {
                 count: total_count,
                 sum: total_sum,
@@ -6030,24 +5684,6 @@ impl Engine {
                 // inherited a leading NaN in their metadata.
                 let points = self.read_chunk_data(meta, t_start, t_end)?;
                 for &(_, val) in &points {
-                    total_count += 1;
-                    total_sum += val;
-                    global_min = Some(match global_min {
-                        Some(m) => m.min(val),
-                        None => val,
-                    });
-                    global_max = Some(match global_max {
-                        Some(m) => m.max(val),
-                        None => val,
-                    });
-                }
-            }
-        }
-
-        if let Some(buf) = self.partitions.get(&pk) {
-            for i in 0..buf.timestamps.len() {
-                if buf.timestamps[i] >= t_start && buf.timestamps[i] <= t_end {
-                    let val = buf.values[i];
                     total_count += 1;
                     total_sum += val;
                     global_min = Some(match global_min {
@@ -6481,15 +6117,7 @@ impl Engine {
             .flat_map(|chunks| chunks.iter())
             .map(|meta| u64::from(meta.point_count))
             .sum::<u64>();
-        let preflight_buffered_points = series_ids.iter().fold(0_u64, |total, &series_id| {
-            let pk = PartitionKey { series_id };
-            total.saturating_add(
-                self.partitions
-                    .get(&pk)
-                    .map_or(0, |buffer| buffer.timestamps.len() as u64),
-            )
-        });
-        let preflight_work_points = decoded_points.saturating_add(preflight_buffered_points);
+        let preflight_work_points = decoded_points;
         if let Some(limit) = max_work_points.filter(|limit| preflight_work_points > *limit) {
             self.record_window_batch_query(
                 started,
@@ -6497,7 +6125,7 @@ impl Engine {
                 locs.len(),
                 0,
                 decoded_points,
-                preflight_buffered_points,
+                0,
                 0,
             );
             return Err(format!(
@@ -6520,7 +6148,7 @@ impl Engine {
         let candidate_chunks = locs.len();
         let mut payloads = chunk_bytes.into_iter();
         let mut result = Vec::with_capacity(series_ids.len());
-        let mut buffered_points_considered = 0_u64;
+        let buffered_points_considered = 0_u64;
         let mut returned_points = 0_u64;
         for (&sid, chunks) in series_ids.iter().zip(matching) {
             let mut samples = Vec::new();
@@ -6531,33 +6159,6 @@ impl Engine {
                 samples.extend(Self::decode_chunk_data(&meta, &bytes, range_start, stop)?);
             }
 
-            let pk = PartitionKey { series_id: sid };
-            if let Some(buf) = self.partitions.get(&pk) {
-                buffered_points_considered =
-                    buffered_points_considered.saturating_add(buf.timestamps.len() as u64);
-                let observed_work_points =
-                    decoded_points.saturating_add(buffered_points_considered);
-                if let Some(limit) = max_work_points.filter(|limit| observed_work_points > *limit) {
-                    self.record_window_batch_query(
-                        started,
-                        series_ids.len(),
-                        candidate_chunks,
-                        payload_bytes,
-                        decoded_points,
-                        buffered_points_considered,
-                        returned_points,
-                    );
-                    return Err(format!(
-                        "window batch work point limit {limit} exceeded (candidate input points: {observed_work_points})"
-                    ));
-                }
-                for index in 0..buf.timestamps.len() {
-                    let timestamp = buf.timestamps[index];
-                    if timestamp >= range_start && timestamp <= stop {
-                        samples.push((timestamp, buf.values[index]));
-                    }
-                }
-            }
             samples.sort_by_key(|&(timestamp, _)| timestamp);
             let points = Self::window_op_walk(&samples, start, stop, step, window, op);
             returned_points = returned_points.saturating_add(points.len() as u64);
@@ -6824,19 +6425,16 @@ impl Engine {
         resolutions
     }
 
-    /// Max queryable RAW ts (chunk index + buffers) — the data-time
-    /// reference for retention and rollup settling.
+    /// The newest stored raw timestamp — the data-time reference for
+    /// retention and rollup settling. Buffered points are not counted:
+    /// they are an open transaction's, stored before it commits and
+    /// before it runs any maintenance.
     fn raw_high_water(&self) -> Option<i64> {
         let mut high_water = i64::MIN;
         if let Some(newest) = self.chunk_high_water() {
             // A disk index does not prime the bound at open.
             self.raise_raw_ts_upper_bound(newest);
             high_water = high_water.max(newest);
-        }
-        for entry in self.partitions.iter() {
-            if let Some(&mx) = entry.value().timestamps.iter().max() {
-                high_water = high_water.max(mx);
-            }
         }
         (high_water != i64::MIN).then_some(high_water)
     }
@@ -7432,14 +7030,9 @@ impl Engine {
                 let Some(produce_to) = produce_to_for(r) else {
                     break 'group;
                 };
-                // Nothing on disk to roll up, and nothing buffered that might
-                // be: the read below would find no sample.
-                if due.as_ref().is_some_and(|due| !due.contains(&sid))
-                    && self
-                        .partitions
-                        .get(&PartitionKey { series_id: sid })
-                        .is_none_or(|buffer| buffer.timestamps.is_empty())
-                {
+                // Nothing stored to roll up: the read below would find no
+                // sample.
+                if due.as_ref().is_some_and(|due| !due.contains(&sid)) {
                     break 'group;
                 }
                 let watermark = watermarks.get(&sid).copied();
@@ -8526,50 +8119,29 @@ impl Engine {
         Ok(())
     }
 
-    /// F1 catalog: one row per known series with chunk-index aggregates
-    /// and buffered-state — NO chunk decompression, so it stays cheap at
-    /// any table size. Locks are taken strictly one at a time (index,
-    /// then partitions, then registry) so no ordering hazard can exist.
-    /// min/max ts include buffered points: the catalog describes what a
-    /// query would see, not just what is durable.
+    /// F1 catalog: one row per known series with chunk-index aggregates —
+    /// NO chunk decompression, so it stays cheap at any table size. It
+    /// describes stored points; a transaction's own points are stored
+    /// before the transaction reads, so `buffered` is always 0.
     pub fn series_overview(&self) -> Vec<SeriesOverview> {
         let _transition = self.transition_read();
 
         let chunk_agg = self.chunk_stats_all();
-
-        let mut buf_agg: HashMap<i64, (usize, i64, i64)> = HashMap::new();
-        for entry in self.partitions.iter() {
-            let buf = entry.value();
-            let (Some(&mn), Some(&mx)) = (buf.timestamps.iter().min(), buf.timestamps.iter().max())
-            else {
-                continue;
-            };
-            buf_agg.insert(entry.key().series_id, (buf.timestamps.len(), mn, mx));
-        }
 
         let mut out: Vec<SeriesOverview> = Vec::new();
         let _ = self.visit_series(None, &mut |series_id, info| {
             let (name, labels) = (&info.metric_name, &info.labels);
             out.push({
                 let chunks = chunk_agg.get(&series_id);
-                let buffered = buf_agg.get(&series_id);
-                let min_ts = match (chunks.map(|c| c.0), buffered.map(|b| b.1)) {
-                    (Some(c), Some(b)) => Some(c.min(b)),
-                    (c, b) => c.or(b),
-                };
-                let max_ts = match (chunks.map(|c| c.1), buffered.map(|b| b.2)) {
-                    (Some(c), Some(b)) => Some(c.max(b)),
-                    (c, b) => c.or(b),
-                };
                 SeriesOverview {
                     series_id,
                     name: name.clone(),
                     labels: labels.clone(),
-                    min_ts,
-                    max_ts,
+                    min_ts: chunks.map(|c| c.0),
+                    max_ts: chunks.map(|c| c.1),
                     disk_points: chunks.map_or(0, |c| c.2),
                     chunks: chunks.map_or(0, |c| c.3),
-                    buffered: buffered.map_or(0, |b| b.0),
+                    buffered: 0,
                 }
             });
             Ok(std::ops::ControlFlow::Continue(()))
@@ -8580,8 +8152,8 @@ impl Engine {
 
     /// Catalog rows for one metric and an indexed equality subset.
     ///
-    /// Unlike `series_overview`, this walks chunk-index ranges and buffers
-    /// only for candidate series. SQL discovery TVFs apply regex/negative
+    /// Unlike `series_overview`, this walks chunk-index ranges only for
+    /// candidate series. SQL discovery TVFs apply regex/negative
     /// matchers to these rows before crossing the host boundary, so a
     /// selective catalog query does not pay O(all chunks) first.
     pub fn series_overview_matching(
@@ -8598,7 +8170,7 @@ impl Engine {
 
     /// Catalog rows for an already selected series-id set. This lets an SQL
     /// host apply regex/negative matchers to registry labels before it asks
-    /// the engine to aggregate chunk and buffer metadata.
+    /// the engine to aggregate chunk metadata.
     pub fn series_overview_by_ids(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
         let _transition = self.transition_read();
         self.series_overview_by_ids_inner(series_ids)
@@ -8606,9 +8178,7 @@ impl Engine {
 
     /// One catalog row, built on demand. A streaming cursor calls this per row
     /// so a full-catalog read never holds every series' cloned labels in
-    /// memory at once. Everything here is in-memory state (chunk index,
-    /// buffers, registry); it reads no store bytes and needs no read permit,
-    /// so it is safe to call between `xFilter` and `xNext`.
+    /// memory at once. It reads index entries only, never chunk bytes.
     pub fn series_overview_by_id(&self, series_id: i64) -> Option<SeriesOverview> {
         let _transition = self.transition_read();
         let SeriesInfo {
@@ -8617,38 +8187,15 @@ impl Engine {
         } = self.series_info(series_id).ok().flatten()?;
 
         let stats = self.chunk_stats(&[series_id]).remove(&series_id);
-        let mut min_ts: Option<i64> = stats.map(|stats| stats.0);
-        let mut max_ts: Option<i64> = stats.map(|stats| stats.1);
-        let disk_points: u64 = stats.map_or(0, |stats| stats.2);
-        let chunks: usize = stats.map_or(0, |stats| stats.3);
-
-        let buffered = self.partitions.get(&PartitionKey { series_id });
-        let (buffered_count, buffer_min, buffer_max) = match buffered.as_ref() {
-            Some(buf) => (
-                buf.timestamps.len(),
-                buf.timestamps.iter().min().copied(),
-                buf.timestamps.iter().max().copied(),
-            ),
-            None => (0, None, None),
-        };
-        min_ts = match (min_ts, buffer_min) {
-            (Some(chunk), Some(buffer)) => Some(chunk.min(buffer)),
-            (chunk, buffer) => chunk.or(buffer),
-        };
-        max_ts = match (max_ts, buffer_max) {
-            (Some(chunk), Some(buffer)) => Some(chunk.max(buffer)),
-            (chunk, buffer) => chunk.or(buffer),
-        };
-
         Some(SeriesOverview {
             series_id,
             name,
             labels,
-            min_ts,
-            max_ts,
-            disk_points,
-            chunks,
-            buffered: buffered_count,
+            min_ts: stats.map(|stats| stats.0),
+            max_ts: stats.map(|stats| stats.1),
+            disk_points: stats.map_or(0, |stats| stats.2),
+            chunks: stats.map_or(0, |stats| stats.3),
+            buffered: 0,
         })
     }
 
@@ -8675,32 +8222,15 @@ impl Engine {
         let mut out = Vec::with_capacity(candidates.len());
         for (series_id, name, labels) in candidates {
             let chunks = chunk_agg.get(&series_id);
-            let buffered = self.partitions.get(&PartitionKey { series_id });
-            let buffer_count = buffered.as_ref().map_or(0, |buf| buf.timestamps.len());
-            let buffer_min = buffered
-                .as_ref()
-                .and_then(|buf| buf.timestamps.iter().min().copied());
-            let buffer_max = buffered
-                .as_ref()
-                .and_then(|buf| buf.timestamps.iter().max().copied());
-            let min_ts = match (chunks.map(|c| c.0), buffer_min) {
-                (Some(chunk), Some(buffer)) => Some(chunk.min(buffer)),
-                (chunk, buffer) => chunk.or(buffer),
-            };
-            let max_ts = match (chunks.map(|c| c.1), buffer_max) {
-                (Some(chunk), Some(buffer)) => Some(chunk.max(buffer)),
-                (chunk, buffer) => chunk.or(buffer),
-            };
-
             out.push(SeriesOverview {
                 series_id,
                 name,
                 labels,
-                min_ts,
-                max_ts,
+                min_ts: chunks.map(|chunk| chunk.0),
+                max_ts: chunks.map(|chunk| chunk.1),
                 disk_points: chunks.map_or(0, |chunk| chunk.2),
                 chunks: chunks.map_or(0, |chunk| chunk.3),
-                buffered: buffer_count,
+                buffered: 0,
             });
         }
         out.sort_by(|a, b| (&a.name, a.series_id).cmp(&(&b.name, b.series_id)));
@@ -9031,25 +8561,16 @@ mod buffered_tests {
         column.push(8);
         column.extend_from_slice(&[9, 10]);
         assert_eq!(&*column, &[7, 8, 9, 10]);
-        column.truncate(1);
-        assert_eq!(&*column, &[7]);
-        column.truncate(0);
-        assert!(column.is_empty());
 
         let mut column = Buffered::<i64>::default();
         column.extend_from_slice(&[]);
         assert!(matches!(column, Buffered::Empty));
         column.extend_from_slice(&[1]);
         assert!(matches!(column, Buffered::One(1)));
-        column.truncate(5);
         column.extend_from_slice(&[2, 3]);
         assert_eq!(column.into_vec(), vec![1, 2, 3]);
         assert_eq!(Buffered::One(4).into_vec(), vec![4]);
         assert_eq!(Buffered::<i64>::Empty.into_vec(), Vec::<i64>::new());
-
-        let mut column = Buffered::One(1);
-        column.truncate(0);
-        assert!(column.is_empty());
     }
 }
 

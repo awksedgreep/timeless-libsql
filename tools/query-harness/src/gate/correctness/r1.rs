@@ -102,6 +102,11 @@ struct MaintenanceCase {
     commands: [&'static str; 3],
     row_count: &'static str,
     block_count: &'static str,
+    // What the block table holds once the commands are rolled back and
+    // the transaction commits. Metrics stores points when their
+    // transaction commits and at a savepoint, so each of the three writes
+    // is a chunk of its own; logs and traces still hold theirs in a buffer.
+    blocks: i64,
 }
 
 const MAINTENANCE_CASES: [MaintenanceCase; 3] = [
@@ -115,6 +120,7 @@ const MAINTENANCE_CASES: [MaintenanceCase; 3] = [
         ],
         row_count: "SELECT COUNT(*) FROM metrics_maint",
         block_count: "SELECT COUNT(*) FROM metrics_maint_chunks",
+        blocks: 3,
     },
     MaintenanceCase {
         table: "logs_maint",
@@ -126,6 +132,7 @@ const MAINTENANCE_CASES: [MaintenanceCase; 3] = [
         ],
         row_count: "SELECT COUNT(*) FROM logs_maint",
         block_count: "SELECT COUNT(*) FROM logs_maint_blocks",
+        blocks: 1,
     },
     MaintenanceCase {
         table: "traces_maint",
@@ -137,6 +144,7 @@ const MAINTENANCE_CASES: [MaintenanceCase; 3] = [
         ],
         row_count: "SELECT COUNT(*) FROM traces_maint",
         block_count: "SELECT COUNT(*) FROM traces_maint_blocks",
+        blocks: 1,
     },
 ];
 
@@ -147,11 +155,18 @@ pub(super) fn run(extension: &Path, temporary: &Path) -> Result<()> {
         "CREATE VIRTUAL TABLE metrics USING timeless_metrics;
          CREATE VIRTUAL TABLE logs USING timeless_logs;
          CREATE VIRTUAL TABLE traces USING timeless_traces;
-         CREATE VIRTUAL TABLE metrics_threshold USING timeless_metrics;
+         CREATE VIRTUAL TABLE metrics_threshold USING timeless_metrics(flush_interval='off');
+         BEGIN;
          WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<4095)
          INSERT INTO metrics_threshold(name,ts,value)
          SELECT 'threshold_metric',100000+n,n FROM seq;",
     )?;
+    // Inside a transaction a series' points are buffered until it holds
+    // 4,096 of them (or the transaction reads, opens a savepoint, or
+    // commits). The chunk table is asked directly: a statistics read
+    // would store the buffered points first, as any read by the writing
+    // connection does. The table's own maintenance is off so that the
+    // chunk the threshold wrote is still as it was written at the end.
     let metric_stat = |key: &str| -> Result<i64> {
         Ok(connection.query_row(
             "SELECT CAST(value AS INTEGER) FROM timeless_stats('metrics_threshold') WHERE key=?1",
@@ -159,13 +174,19 @@ pub(super) fn run(extension: &Path, temporary: &Path) -> Result<()> {
             |row| row.get(0),
         )?)
     };
-    ensure!(metric_stat("buffered_points")? == 4095);
-    ensure!(metric_stat("disk_points")? == 0);
     ensure!(scalar(&connection, "SELECT COUNT(*) FROM metrics_threshold_chunks")? == 0);
     connection.execute(
         "INSERT INTO metrics_threshold(name,ts,value) VALUES ('threshold_metric',104096,4096)",
         [],
     )?;
+    ensure!(scalar(&connection, "SELECT COUNT(*) FROM metrics_threshold_chunks")? == 1);
+    ensure!(
+        scalar(
+            &connection,
+            "SELECT SUM(point_count) FROM metrics_threshold_chunks"
+        )? == 4096
+    );
+    connection.execute("COMMIT", [])?;
     ensure!(metric_stat("buffered_points")? == 0);
     ensure!(metric_stat("disk_points")? == 4096);
     ensure!(scalar(&connection, "SELECT COUNT(*) FROM metrics_threshold_chunks")? == 1);
@@ -296,7 +317,7 @@ pub(super) fn run(extension: &Path, temporary: &Path) -> Result<()> {
         connection.execute(&format!("RELEASE {}_maintenance", case.table), [])?;
         connection.execute("COMMIT", [])?;
         ensure!(scalar(&connection, case.row_count)? == 3);
-        ensure!(scalar(&connection, case.block_count)? == 1);
+        ensure!(scalar(&connection, case.block_count)? == case.blocks);
     }
 
     connection.execute_batch(

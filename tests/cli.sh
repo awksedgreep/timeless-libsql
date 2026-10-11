@@ -164,7 +164,7 @@ pre|cpu|200|2.5|{"host":"a"}
 post|cpu|100|1.5|{"host":"a"}
 post|mem|150|3.0|{"host":"b"}
 post|cpu|200|2.5|{"host":"a"}
-chunks|2|3
+chunks|3|3
 series|2
 legacy_registry|0
 metric_sample_types|["float64"]
@@ -286,15 +286,13 @@ check_eq "compact merges 2 chunks into 1, data intact" "$got" "$expected"
 
 # ---------------------------------------------------------------------------
 echo "== section 6: metrics transaction rollback (R5 — real semantics) =="
-# PLAN.md risk R5 is FIXED: the engines keep a transaction journal
-# activated by xBegin (which SQLite fires before the first write of
-# EVERY transaction — one per statement in autocommit, one per explicit
-# BEGIN). ROLLBACK must:
+# Points are stored when their transaction commits (one per statement in
+# autocommit, one per explicit BEGIN), so a buffer only ever holds the
+# open transaction's own points. ROLLBACK must:
 #   - discard points buffered during the txn (pre- AND post-reopen),
 #   - undo intra-txn 'flush' completely: the chunk ROWS roll back with
-#     the host txn, the journal removes their index entries (no
-#     dangling locs), and pre-txn buffered points the flush drained are
-#     RESTORED to the buffer (they came from committed statements!),
+#     the host txn, and nothing the engine holds still points at them,
+#   - leave every point committed before the txn where it was,
 #   - leave the db bit-happy (PRAGMA integrity_check) with no orphan
 #     index state (queries return exactly the pre-txn data).
 RBDB="$TMP/rollback_metrics.db"
@@ -333,21 +331,22 @@ INSERT INTO metrics(metrics) VALUES ('flush');
 SQL
 )
 # pre: base@100 (flushed) + base@200 (buffered) = 2.
-# chunks_in_txn: baseline chunk + intra-txn flush of base@200 and
-# rb2@400 (one chunk per series) = 3; back to 1 after ROLLBACK.
-# rows_post: base@100 from the chunk, base@200 RESTORED to the buffer.
+# chunks_in_txn: base@100 and base@200 are a chunk each (each statement
+# committed, and stored, on its own) and the intra-txn flush adds rb2@400
+# = 3; back to 2 after ROLLBACK.
+# rows_post: base@100 and base@200, both from their chunks.
 # big: 5000 points cross the 4096 auto-queue threshold inside the txn —
-# all gone after ROLLBACK (and the flush queue must be rebuilt, which
-# the final committed 'flush' exercises).
+# all gone after ROLLBACK, and the final committed 'flush' finds nothing
+# left over from it.
 expected='pre|2
 in_txn|3
 post|2|0
 chunks_in_txn|3
-chunks_post|1
+chunks_post|2
 rows_post|base|100|1.0
 rows_post|base|200|2.0
 compact_in_txn|1
-compact_post|1|2
+compact_post|2|2
 big_post|0
 ok'
 check_eq "metrics rollback: buffered + intra-txn flush + auto-queue" "$got" "$expected"
@@ -1340,7 +1339,7 @@ check_eq "packed window max_work_points is inclusive" \
 # primitive's work, whoever calls it. Values are exactly double the
 # packed-only era (same three queries in each shape).
 check_eq "window batch stats count row + packed users of the primitive" \
-  "$(grep '^window_stats|' <<<"$got")" 'window_stats|6|12|12|30|6|30|1|1'
+  "$(grep '^window_stats|' <<<"$got")" 'window_stats|6|12|18|36|0|30|1|1'
 check_eq "label filter restricts to host b" \
   "$(grep '^filtered|' <<<"$got")" \
 'filtered|{"host":"b"}|110|10.5
@@ -1370,7 +1369,7 @@ check_eq "packed window errors name their own public module" \
 err=$(sqlite3 "$Q2DB" ".load $EXT" \
   "SELECT * FROM timeless_window_batches('m','cpu',NULL,140,140,20,100,'sum',NULL,4);" 2>&1 || true)
 check_eq "packed window max_work_points rejects excess input before decode" \
-  "$(grep -c 'work point limit 4 exceeded.*candidate input points: 5' <<<"$err")" "1"
+  "$(grep -c 'work point limit 4 exceeded.*candidate input points: 6' <<<"$err")" "1"
 
 # Fresh-connection recovery: the TVF must build the engine itself (no
 # prior vtab query on this connection) and still see flushed data.
@@ -1456,13 +1455,13 @@ SQL
 )
 check_eq "catalog rows (buffered extends max_ts; per-series split)" \
   "$(grep '^cat|' <<<"$got")" \
-'cat|cpu|{"host":"a"}|100|250|3|1|1
+'cat|cpu|{"host":"a"}|100|250|3|2|0
 cat|cpu|{"host":"b"}|150|150|1|1|0'
 check_eq "catalog count == DISTINCT series over raw vtab" \
   "$(grep '^catcount|' <<<"$got")" "catcount|1"
 check_eq "metrics stats keys" "$(grep '^sm|' <<<"$got")" \
-'sm|buffered_points|1
-sm|disk_points|3
+'sm|buffered_points|0
+sm|disk_points|4
 sm|module|timeless_metrics
 sm|series|2'
 check_eq "logs stats keys" "$(grep '^sl|' <<<"$got")" \
@@ -1512,7 +1511,7 @@ SELECT 'fresh', name, min_ts, max_ts, points, buffered FROM timeless_series('m')
 SQL
 )
 check_eq "catalog after committed DROP/recreate is fresh (R4)" \
-  "$(grep '^fresh|' <<<"$got")" "fresh|disk|999|999|1|1"
+  "$(grep '^fresh|' <<<"$got")" "fresh|disk|999|999|1|0"
 
 # ---------------------------------------------------------------------------
 echo "== section 23b: legacy logs/traces storage-counter migration does not self-lock =="
@@ -1627,14 +1626,13 @@ check_eq "logs: epoch-2 flush auto-prunes epoch 1" \
   "$(grep '^lrows|' <<<"$got")" "lrows|7000|new"
 check_eq "traces: epoch-2 flush auto-prunes epoch 1" \
   "$(grep '^trows|' <<<"$got")" "trows|new"
-# The rolled-back txn's flush pruned nothing new (guard) but drained the
-# 1400 buffer point; rollback must restore it as buffered, and 1600 must
-# vanish. Chunks 1200/1210 remain.
-check_eq "rollback restores buffered point drained by the rolled-back flush" \
+# The point at 1400 was stored when its statement committed, and with a
+# 100 s window that put 1200 and 1210 past retention. Inside the
+# transaction, 1600 does the same to 1400; the rollback must bring 1400's
+# chunk back and take 1600 with it.
+check_eq "rollback restores the chunk a rolled-back flush's retention pruned" \
   "$(grep '^postrb|' <<<"$got")" \
-'postrb|1200
-postrb|1210
-postrb|1400'
+'postrb|1400'
 # Steady state (acceptance): 4 retention windows of continuous ingest —
 # point count must not grow past ~2 epochs' worth.
 got=$(sqlite3 "$F2DB" <<SQL

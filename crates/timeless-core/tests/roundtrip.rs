@@ -64,10 +64,12 @@ fn batch_range_matches_single_reads_across_dense_and_sparse_series() {
     ];
     for selected in &selections {
         for (start, stop) in [(i64::MIN, i64::MAX), (10, 10), (11, 21), (30, 40), (21, 10)] {
+            engine.flush_all().unwrap();
             let expected: Vec<_> = selected
                 .iter()
                 .map(|&id| (id, engine.query_range_by_id(id, start, stop).unwrap()))
                 .collect();
+            engine.flush_all().unwrap();
             let actual = engine
                 .query_range_batch_by_id(selected, start, stop)
                 .unwrap();
@@ -94,6 +96,7 @@ fn batch_range_matches_single_reads_across_dense_and_sparse_series() {
 
         // With an all-time range, each candidate point counts exactly once
         // per requested ID, including repeated IDs and buffered-only series.
+        engine.flush_all().unwrap();
         let expected = engine
             .query_range_batch_by_id(selected, i64::MIN, i64::MAX)
             .unwrap();
@@ -101,6 +104,7 @@ fn batch_range_matches_single_reads_across_dense_and_sparse_series() {
             .iter()
             .map(|(_, points)| points.len() as u64)
             .sum::<u64>();
+        engine.flush_all().unwrap();
         assert_eq!(
             engine
                 .query_range_batch_by_id_limited(selected, i64::MIN, i64::MAX, work)
@@ -108,6 +112,7 @@ fn batch_range_matches_single_reads_across_dense_and_sparse_series() {
             expected
         );
         if work > 0 {
+            engine.flush_all().unwrap();
             assert!(engine
                 .query_range_batch_by_id_limited(selected, i64::MIN, i64::MAX, work - 1)
                 .unwrap_err()
@@ -136,6 +141,7 @@ fn write_flush_query_recover() {
         }
 
         // Timeless property: queryable BEFORE flush.
+        engine.flush_all().unwrap();
         let rows = engine.query_range_by_id(sid, 0, n_points).unwrap();
         assert_eq!(
             rows.len(),
@@ -143,11 +149,13 @@ fn write_flush_query_recover() {
             "pre-flush query sees buffered points"
         );
         assert_eq!(rows[42], (42, 63.0));
+        engine.flush_all().unwrap();
         let buffered_batch = engine
             .query_range_batch_by_id(&[sid + 10_000, sid], 0, n_points)
             .unwrap();
         assert_eq!(buffered_batch[0], (sid + 10_000, Vec::new()));
         assert_eq!(buffered_batch[1], (sid, rows.clone()));
+        engine.flush_all().unwrap();
         let error = engine
             .query_range_batch_by_id_limited(&[sid], 0, n_points, 9_999)
             .unwrap_err();
@@ -155,6 +163,7 @@ fn write_flush_query_recover() {
             error,
             "raw batch work point limit 9999 exceeded (candidate points: 10000)"
         );
+        engine.flush_all().unwrap();
         assert_eq!(
             engine
                 .query_range_batch_by_id_limited(&[sid], 0, n_points, 10_000)
@@ -162,6 +171,7 @@ fn write_flush_query_recover() {
             vec![(sid, rows.clone())],
             "the work-point limit is inclusive for buffered data"
         );
+        engine.flush_all().unwrap();
         assert_eq!(
             engine
                 .query_window_op_batch_by_id_limited(
@@ -176,6 +186,7 @@ fn write_flush_query_recover() {
                 .unwrap_err(),
             "window batch work point limit 9 exceeded (possible output points: 10)"
         );
+        engine.flush_all().unwrap();
         assert_eq!(
             engine
                 .query_window_op_batch_by_id_limited(
@@ -194,14 +205,17 @@ fn write_flush_query_recover() {
         engine.flush_all().unwrap();
 
         // ... and AFTER flush.
+        engine.flush_all().unwrap();
         let rows = engine.query_range_by_id(sid, 0, n_points).unwrap();
         assert_eq!(
             rows.len(),
             n_points as usize,
             "post-flush query sees persisted points"
         );
+        engine.flush_all().unwrap();
         let persisted_batch = engine.query_range_batch_by_id(&[sid], 0, n_points).unwrap();
         assert_eq!(persisted_batch, vec![(sid, rows)]);
+        engine.flush_all().unwrap();
         let error = engine
             .query_range_batch_by_id_limited(&[sid], 0, n_points, 9_999)
             .unwrap_err();
@@ -211,6 +225,7 @@ fn write_flush_query_recover() {
         );
 
         // Aggregate path.
+        engine.flush_all().unwrap();
         let aggs = engine
             .query_aggregate_labeled("cpu_usage", &Default::default(), 0, n_points, AggFn::Max)
             .unwrap();
@@ -225,6 +240,7 @@ fn write_flush_query_recover() {
     {
         let engine = new_engine(&dir);
         let sid = engine.resolve_cached("cpu_usage", &labels).unwrap();
+        engine.flush_all().unwrap();
         let rows = engine.query_range_by_id(sid, 0, n_points).unwrap();
         assert_eq!(
             rows.len(),
@@ -233,6 +249,7 @@ fn write_flush_query_recover() {
         );
         assert_eq!(rows[9_999], (9_999, 9_999.0 * 1.5));
 
+        engine.flush_all().unwrap();
         let info = engine.info();
         assert_eq!(info.series_count, 1);
         assert!(info.total_points >= n_points as u64);
@@ -254,6 +271,7 @@ fn distinct_nan_payloads_survive_buffer_flush_and_reopen() {
         engine.write_point(sid, 10, ordinary_nan);
         engine.write_point(sid, 20, prometheus_stale_nan);
 
+        engine.flush_all().unwrap();
         let buffered = engine.query_range_by_id(sid, 0, 30).unwrap();
         assert_eq!(buffered[0].1.to_bits(), ordinary_nan.to_bits());
         assert_eq!(buffered[1].1.to_bits(), prometheus_stale_nan.to_bits());
@@ -269,6 +287,7 @@ fn distinct_nan_payloads_survive_buffer_flush_and_reopen() {
     {
         let engine = new_engine(&dir);
         let sid = engine.resolve_cached("nan_payloads", &labels).unwrap();
+        engine.flush_all().unwrap();
         let reopened = engine.query_range_by_id(sid, 0, 30).unwrap();
         assert_eq!(reopened[0].1.to_bits(), ordinary_nan.to_bits());
         assert_eq!(reopened[1].1.to_bits(), prometheus_stale_nan.to_bits());
@@ -295,6 +314,7 @@ fn aggregate_summary_covers_chunks_boundaries_buffer_and_reopen() {
         engine.flush_all().unwrap();
         engine.write_point(sid, 30, 10.0);
 
+        engine.flush_all().unwrap();
         let all = engine
             .query_aggregate_summary_by_id(sid, -5, 30)
             .unwrap()
@@ -305,12 +325,14 @@ fn aggregate_summary_covers_chunks_boundaries_buffer_and_reopen() {
         assert_eq!(all.value(AggFn::Min), -2.0);
         assert_eq!(all.value(AggFn::Max), 10.0);
 
+        engine.flush_all().unwrap();
         let boundary = engine
             .query_aggregate_summary_by_id(sid, 0, 10)
             .unwrap()
             .unwrap();
         assert_eq!(boundary.count(), 2);
         assert_eq!(boundary.value(AggFn::Sum), 10.0);
+        engine.flush_all().unwrap();
         assert!(engine
             .query_aggregate_summary_by_id(sid, 100, 200)
             .unwrap()
@@ -335,12 +357,14 @@ fn aggregate_summary_covers_chunks_boundaries_buffer_and_reopen() {
         assert_eq!(nan_summary.value(AggFn::Max), 4.0);
 
         let ids = [sid + 10_000, sid, nan_sid, sid];
+        engine.flush_all().unwrap();
         let batch = engine
             .query_aggregate_summary_batch_by_id(&ids, 0, 10)
             .unwrap();
         assert_eq!(batch.len(), ids.len());
         for ((result_id, actual), expected_id) in batch.into_iter().zip(ids) {
             assert_eq!(result_id, expected_id);
+            engine.flush_all().unwrap();
             let expected = engine
                 .query_aggregate_summary_by_id(expected_id, 0, 10)
                 .unwrap();
@@ -359,6 +383,7 @@ fn aggregate_summary_covers_chunks_boundaries_buffer_and_reopen() {
                 other => panic!("batch/individual aggregate mismatch: {other:?}"),
             }
         }
+        engine.flush_all().unwrap();
         assert!(engine
             .query_aggregate_summary_batch_by_id(&[sid, nan_sid], 10, 0)
             .unwrap()
@@ -372,6 +397,7 @@ fn aggregate_summary_covers_chunks_boundaries_buffer_and_reopen() {
     {
         let engine = new_engine(&dir);
         let sid = engine.resolve_cached("cpu", &labels).unwrap();
+        engine.flush_all().unwrap();
         let recovered = engine
             .query_aggregate_summary_by_id(sid, -5, 30)
             .unwrap()
@@ -408,27 +434,35 @@ fn latest_matches_stable_range_order_across_chunks_buffer_and_reopen() {
         // Buffered duplicates follow persisted chunks and must not replace the
         // first persisted point at the same maximum timestamp.
         engine.write_point(sid, 30, 5.0);
+        engine.flush_all().unwrap();
         assert_eq!(
             engine.query_latest_by_id(sid, 0, 30).unwrap(),
             Some((30, 4.0))
         );
+        engine.flush_all().unwrap();
         assert_eq!(engine.query_latest_by_id(sid, 11, 29).unwrap(), None);
 
         engine.write_point(sid, 40, 6.0);
+        engine.flush_all().unwrap();
         assert_eq!(
             engine.query_latest_by_id(sid, 0, 100).unwrap(),
             Some((40, 6.0))
         );
+        engine.flush_all().unwrap();
         assert_eq!(engine.query_latest_by_id(sid, 41, 100).unwrap(), None);
+        engine.flush_all().unwrap();
         assert_eq!(engine.query_latest_by_id(sid, 10, 9).unwrap(), None);
 
         let ids = [sid + 10_000, sid, sid];
+        engine.flush_all().unwrap();
         let batch = engine.query_latest_batch_by_id(&ids, 0, 100).unwrap();
+        engine.flush_all().unwrap();
         let expected = engine.query_latest_by_id(sid, 0, 100).unwrap();
         assert_eq!(
             batch,
             vec![(sid + 10_000, None), (sid, expected), (sid, expected)]
         );
+        engine.flush_all().unwrap();
         assert_eq!(
             engine.query_latest_batch_by_id(&[sid], 10, 9).unwrap(),
             vec![(sid, None)]
@@ -440,9 +474,11 @@ fn latest_matches_stable_range_order_across_chunks_buffer_and_reopen() {
     {
         let engine = new_engine(&dir);
         let sid = engine.resolve_cached("cpu", &labels).unwrap();
+        engine.flush_all().unwrap();
         let points = engine.query_range_by_id(sid, 0, 100).unwrap();
         let max_ts = points.iter().map(|(ts, _)| *ts).max().unwrap();
         let expected = points.iter().copied().find(|(ts, _)| *ts == max_ts);
+        engine.flush_all().unwrap();
         assert_eq!(engine.query_latest_by_id(sid, 0, 100).unwrap(), expected);
     }
 
@@ -464,6 +500,7 @@ fn compression_kicks_in() {
     }
     engine.flush_all().unwrap();
 
+    engine.flush_all().unwrap();
     let info = engine.info();
     assert!(info.total_points >= n as u64);
     // 16 bytes/point raw (i64 ts + f64 val). pco should crush this.

@@ -159,6 +159,35 @@ impl DbGuard {
     }
 }
 
+/// Keeps the connection's `last_insert_rowid()` as it is across the
+/// extension's own statements.
+///
+/// A table answers its caller through `last_insert_rowid()`: how many
+/// points a batch held, whether a maintenance step left work. SQLite sets
+/// it from what `xUpdate` returns, after anything that callback ran. Rows
+/// the extension writes outside `xUpdate` (as a transaction commits, when
+/// a savepoint opens, before a read) would otherwise leave their own row
+/// id there for the caller to mistake for the answer.
+pub(crate) struct KeepLastInsertRowid {
+    db: *mut ffi::sqlite3,
+    rowid: i64,
+}
+
+impl KeepLastInsertRowid {
+    pub(crate) fn of(db: *mut ffi::sqlite3) -> Self {
+        // SAFETY: `db` is the live connection of the callback running.
+        let rowid = unsafe { ffi::sqlite3_last_insert_rowid(db) };
+        KeepLastInsertRowid { db, rowid }
+    }
+}
+
+impl Drop for KeepLastInsertRowid {
+    fn drop(&mut self) {
+        // SAFETY: as in `of`; the guard does not outlive the callback.
+        unsafe { ffi::sqlite3_set_last_insert_rowid(self.db, self.rowid) };
+    }
+}
+
 /// Whether a virtual-table callback of this extension is already running
 /// on this thread.
 ///
@@ -427,6 +456,12 @@ impl WriterGate {
                 ))
             }
         }
+    }
+
+    /// Whether `connection` holds the gate: is inside its own write
+    /// transaction on this table.
+    pub(crate) fn is_writer(&self, connection: ConnectionIdentity) -> bool {
+        self.lock().writer == Some(connection)
     }
 
     pub(crate) fn profile(&self) -> WriterGateProfileSnapshot {

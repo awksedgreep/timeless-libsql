@@ -56,6 +56,7 @@ fn prometheus_ingest_semantics() {
     let sid = engine
         .resolve_cached("http_requests_total", &HashMap::new())
         .unwrap();
+    engine.flush_all().unwrap();
     let rows = engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap();
     assert_eq!(
         rows,
@@ -72,6 +73,7 @@ fn prometheus_ingest_semantics() {
     .into_iter()
     .collect();
     let sid = engine.resolve_cached("node_temp_celsius", &labels).unwrap();
+    engine.flush_all().unwrap();
     let rows = engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap();
     assert_eq!(
         rows,
@@ -82,6 +84,7 @@ fn prometheus_ingest_semantics() {
     let nan = engine
         .resolve_cached("bad_metric", &HashMap::new())
         .unwrap();
+    engine.flush_all().unwrap();
     let nan_rows = engine.query_range_by_id(nan, 0, i64::MAX - 1).unwrap();
     assert_eq!(nan_rows.len(), 1);
     assert!(nan_rows[0].1.is_nan());
@@ -95,6 +98,7 @@ fn prometheus_ingest_semantics() {
         ("negative_inf", f64::NEG_INFINITY),
     ] {
         let sid = engine.resolve_cached(name, &HashMap::new()).unwrap();
+        engine.flush_all().unwrap();
         assert_eq!(
             engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap(),
             vec![(default_ts, expected)]
@@ -112,6 +116,7 @@ fn prometheus_ingest_semantics() {
     .into_iter()
     .collect();
     let sid = engine.resolve_cached("escaped_labels", &escaped).unwrap();
+    engine.flush_all().unwrap();
     assert_eq!(
         engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap(),
         vec![(1_800_000_000, 7.0)]
@@ -119,6 +124,7 @@ fn prometheus_ingest_semantics() {
     let sid = engine
         .resolve_cached("crlf_metric", &HashMap::new())
         .unwrap();
+    engine.flush_all().unwrap();
     assert_eq!(
         engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap(),
         vec![(default_ts, 9.0)]
@@ -136,6 +142,7 @@ fn prometheus_ingest_semantics() {
     ] {
         let labels = HashMap::from([("node.name".to_owned(), node.to_owned())]);
         let sid = engine.resolve_cached(name, &labels).unwrap();
+        engine.flush_all().unwrap();
         assert_eq!(
             engine.query_range_by_id(sid, 0, i64::MAX - 1).unwrap(),
             vec![(1_800_000_000, expected)]
@@ -149,6 +156,7 @@ fn prometheus_ingest_semantics() {
         .unwrap();
     assert_eq!((count, errors), (0, 2));
 
+    engine.flush_all().unwrap();
     let info = engine.info();
     assert_eq!(info.prometheus_ingest_batches, 4);
     assert_eq!(info.prometheus_ingest_points, 9);

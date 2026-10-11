@@ -33,14 +33,16 @@ fn overview_matches_naive_walk() {
     engine.flush_all().unwrap();
     for ts in 0..100 {
         engine.write_point(sids[0], 4000 + ts, 1.0); // overlaps flushed range
-        engine.write_point(sids[2], 100_000 + ts, 3.0); // buffered-only series
+        engine.write_point(sids[2], 100_000 + ts, 3.0); // a series with one chunk
     }
 
+    engine.flush_all().unwrap();
     let overview = engine.series_overview();
     assert_eq!(overview.len(), 3);
 
     for row in &overview {
         // Naive truth: everything the engine says is queryable.
+        engine.flush_all().unwrap();
         let all = engine
             .query_range_by_id(row.series_id, i64::MIN, i64::MAX)
             .unwrap();
@@ -64,9 +66,10 @@ fn overview_matches_naive_walk() {
         );
     }
 
-    // Buffered-only series: no chunks, everything in the buffer.
+    // A series written once: one chunk, and nothing reported as buffered
+    // (a transaction's points are stored before anything reads them).
     let mem = overview.iter().find(|r| r.name == "mem").unwrap();
-    assert_eq!((mem.chunks, mem.disk_points, mem.buffered), (0, 0, 100));
+    assert_eq!((mem.chunks, mem.disk_points, mem.buffered), (1, 100, 0));
 
     // Ordering contract: sorted by (name, series_id).
     let names: Vec<_> = overview.iter().map(|r| (&r.name, r.series_id)).collect();
@@ -79,6 +82,7 @@ fn overview_matches_naive_walk() {
     let filter: Labels = [("host".to_string(), "a".to_string())]
         .into_iter()
         .collect();
+    engine.flush_all().unwrap();
     let filtered = engine.series_overview_matching("cpu", &filter);
     assert_eq!(filtered.len(), 1);
     let expected = overview

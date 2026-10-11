@@ -211,9 +211,6 @@ const DEFAULT_INDEX_CACHE_BYTES: u64 = 64 << 20;
 /// buys durability and bounded memory, not compression: that is the
 /// compaction ladder's, whatever size the flushed chunks are.
 const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 60;
-/// Least time between compactions a table begins for itself after its own
-/// flushes; one that has work left continues at the next statement.
-const SELF_COMPACT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// Series a table's own compaction step takes up, as a server's does.
 const SELF_COMPACT_SERIES: usize = 1024;
 
@@ -586,16 +583,52 @@ impl MetricsTab {
         }
     }
 
-    /// What every ingest statement ends with, so that a table used
-    /// directly looks after itself: flush the series that reached the
-    /// point threshold, flush everything once the oldest buffered point
-    /// has waited the flush interval, and after such a flush take a
-    /// bounded compaction step, as a server's maintenance would.
+    /// What every ingest statement ends with: store the series that have
+    /// reached the point threshold, and the largest buffers if together
+    /// they are over the memory budget, so that a long transaction does
+    /// not hold everything it writes in memory until it commits.
     fn after_ingest(&self) -> Result<()> {
         let engine = &self.shared.engine;
         engine.flush_pending().map_err(module_err)?;
-        let flushed = engine.flush_due().map_err(module_err)?;
-        if engine.self_compaction_due(flushed, SELF_COMPACT_EVERY) {
+        engine.flush_by_memory().map_err(module_err)?;
+        Ok(())
+    }
+
+    /// Store every point the open transaction has buffered. Called as the
+    /// transaction commits, when a savepoint opens, and before the
+    /// transaction reads or maintains the table.
+    fn store_buffered(&self) -> Result<()> {
+        if self.shared.engine.has_buffered_points() {
+            self.shared.engine.flush_all().map_err(module_err)?;
+        }
+        Ok(())
+    }
+
+    /// Before `db` reads this table: if it is the connection writing to
+    /// it, store what it has buffered (see `query_tvf::metrics_read`).
+    pub(crate) fn store_own_writes(
+        shared: &SharedEngine<Engine>,
+        db: *mut ffi::sqlite3,
+    ) -> Result<()> {
+        if shared.engine.has_buffered_points()
+            && shared.write_gate.is_writer(shared::connection_identity(db))
+        {
+            let _rowid = shared::KeepLastInsertRowid::of(db);
+            shared.engine.flush_all().map_err(|error| {
+                module_err(format!(
+                    "cannot store this transaction's points before reading them: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A table that maintains itself (`flush_interval` not `off`) takes a
+    /// bounded compaction step as a transaction commits, at most once an
+    /// interval, as a server's maintenance would on its timer.
+    fn self_maintain(&self) -> Result<()> {
+        let engine = &self.shared.engine;
+        if engine.self_compaction_due() {
             let (_, _, raw_more) = engine
                 .compact_partitions_budgeted(
                     i64::MAX,
@@ -619,6 +652,9 @@ impl MetricsTab {
     /// Handle a hidden-column command insert. Returns the (synthetic,
     /// meaningless) rowid 0 — commands do not create rows.
     pub(crate) fn run_command(&self, cmd: &str) -> Result<i64> {
+        // A command works on what is stored: maintenance reads rows, and
+        // a setting should not be changed around half-written points.
+        self.store_buffered()?;
         if cmd == "schema" {
             let host = unsafe { Connection::from_handle(self.db) }?;
             schema::install_metric_views(&host, &self.database_name, &self.table_name)?;
@@ -1670,6 +1706,14 @@ impl TransactionVTab<'_> for MetricsTab {
     fn sync(&mut self) -> Result<()> {
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
+            // The transaction is committing: its points become rows now,
+            // inside it, so that what commits is what was written. SQLite
+            // has stopped calling savepoint hooks by this point, and a
+            // failure here fails the commit and rolls the transaction
+            // back.
+            let _rowid = shared::KeepLastInsertRowid::of(self.db);
+            self.store_buffered()?;
+            self.self_maintain()?;
             // xSync is the prepare phase: all virtual-table writes are done,
             // the caller sees its own uncommitted shadow rows, and SQLite's
             // write transaction still excludes another writer. Capturing now
@@ -1723,6 +1767,15 @@ impl SavepointVTab for MetricsTab {
         }
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
+            // What has been written so far is stored before the savepoint
+            // opens, so the rows are outside it: rolling back to it undoes
+            // only what is written after, and the engine has nothing of
+            // its own to put back.
+            let _rowid = shared::KeepLastInsertRowid::of(self.db);
+            self.shared
+                .engine
+                .flush_all()
+                .map_err(|error| format!("store points before savepoint {id}: {error}"))?;
             self.shared.engine.txn_savepoint(id);
         }
         Ok(())
@@ -1890,6 +1943,7 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
             .write_gate
             .acquire_read(self.connection, &self.table_name)
             .map_err(module_err)?;
+        MetricsTab::store_own_writes(&self.shared, self.db)?;
         self.shared
             .engine
             .refresh_authoritative_state()
@@ -3445,71 +3499,119 @@ mod disk_series_tests {
         assert_eq!(stat(&db, "big", "series_on_disk"), 0);
     }
 
-    /// A table used directly flushes for itself: once the oldest buffered
-    /// point has waited the interval, the next ingest statement flushes
-    /// everything, its own point included.
+    /// Points are stored when their transaction commits: nothing a
+    /// committed statement wrote waits in memory, whatever `flush_interval`
+    /// says. Inside an open transaction they are buffered until it reads
+    /// them, opens a savepoint, or commits.
     #[test]
-    fn buffered_points_are_flushed_after_the_flush_interval() {
+    fn points_are_stored_when_their_transaction_commits() {
         let db = Connection::open_in_memory().unwrap();
         crate::register_telemetry(&db).unwrap();
         db.execute_batch(
             "CREATE VIRTUAL TABLE m USING timeless_metrics(flush_interval='1s');
-             CREATE VIRTUAL TABLE unset USING timeless_metrics;",
+             CREATE VIRTUAL TABLE unset USING timeless_metrics;
+             CREATE VIRTUAL TABLE host USING timeless_metrics(flush_interval='off');",
         )
         .unwrap();
         assert_eq!(stat(&db, "m", "flush_interval"), 1);
         assert_eq!(stat(&db, "unset", "flush_interval"), 60);
+        assert_eq!(stat(&db, "host", "flush_interval"), 0);
 
+        // Autocommit: each statement is a transaction.
         write(&db, "cpu", r#"{"host":"a"}"#, 1_000);
         write(&db, "cpu", r#"{"host":"b"}"#, 1_000);
-        assert_eq!(stat(&db, "m", "buffered_points"), 2);
-        assert_eq!(stat(&db, "m", "disk_points"), 0);
-        std::thread::sleep(std::time::Duration::from_millis(1_200));
-        write(&db, "cpu", r#"{"host":"a"}"#, 1_300);
         assert_eq!(stat(&db, "m", "buffered_points"), 0);
-        assert_eq!(stat(&db, "m", "disk_points"), 3);
-        // The interval starts again with the next point buffered.
-        write(&db, "cpu", r#"{"host":"a"}"#, 1_600);
-        assert_eq!(stat(&db, "m", "buffered_points"), 1);
+        assert_eq!(stat(&db, "m", "disk_points"), 2);
+        assert_eq!(stat(&db, "m", "chunks"), 2);
+        db.execute(
+            "INSERT INTO host(name, ts, value, labels) VALUES ('cpu', 1000, 1.0, '{}')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(stat(&db, "host", "disk_points"), 1, "off or not");
 
-        // Off: left to the point threshold and the host, as it was.
-        db.execute("INSERT INTO m(m) VALUES ('flush_interval:off')", [])
+        // One transaction: its points share a chunk a series, stored at
+        // commit and not before.
+        db.execute_batch("BEGIN").unwrap();
+        for ts in [1_300, 1_310, 1_320] {
+            write(&db, "cpu", r#"{"host":"a"}"#, ts);
+        }
+        let stored: i64 = db
+            .query_row(
+                "SELECT COALESCE(SUM(point_count), 0) FROM m_chunks",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(stat(&db, "m", "flush_interval"), 0);
-        std::thread::sleep(std::time::Duration::from_millis(1_200));
-        write(&db, "cpu", r#"{"host":"a"}"#, 1_900);
-        assert_eq!(stat(&db, "m", "buffered_points"), 2);
+        assert_eq!(stored, 2, "the transaction's points are not rows yet");
+        db.execute_batch("COMMIT").unwrap();
+        assert_eq!(stat(&db, "m", "disk_points"), 5);
+        assert_eq!(stat(&db, "m", "chunks"), 3, "three points, one chunk");
+
+        // A transaction reads its own writes: they are stored for it.
+        db.execute_batch("BEGIN").unwrap();
+        write(&db, "cpu", r#"{"host":"a"}"#, 1_600);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM m", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        db.execute_batch("ROLLBACK").unwrap();
         assert_eq!(
             db.query_row("SELECT count(*) FROM m", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             5
         );
+        assert_eq!(stat(&db, "m", "disk_points"), 5);
     }
 
-    /// After flushing for itself a table takes a compaction step for
-    /// itself, so that nobody has to ask for its small raw chunks to be
-    /// put together.
+    /// The answer a batch gives through `last_insert_rowid()` is not lost
+    /// to the rows stored as its statement commits.
     #[test]
-    fn a_table_that_flushes_for_itself_compacts_for_itself() {
+    fn storing_at_commit_leaves_last_insert_rowid_to_the_statement() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics;")
+            .unwrap();
+        // Several rows first, so that the chunk table's next row id is not
+        // the same number as the answer below.
+        for ts in 0..5 {
+            write(&db, "cpu", r#"{"host":"a"}"#, 1_000 + ts);
+        }
+        let body = "cpu{host=\"b\"} 1 2000\ncpu{host=\"c\"} 2 2000\n";
+        db.execute("INSERT INTO m(m) VALUES (?1)", [body.as_bytes()])
+            .unwrap();
+        assert_eq!(db.last_insert_rowid(), 2, "two samples ingested");
+        assert_eq!(stat(&db, "m", "disk_points"), 7);
+    }
+
+    /// A table that maintains itself takes a compaction step as a
+    /// transaction commits, at most once an interval, so that nobody has
+    /// to ask for its small raw chunks to be put together. A table whose
+    /// host maintains it (`off`) is left alone.
+    #[test]
+    fn a_table_that_maintains_itself_compacts_as_it_commits() {
         let db = Connection::open_in_memory().unwrap();
         crate::register_telemetry(&db).unwrap();
         db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(flush_interval='off');")
             .unwrap();
         for ts in 0..4 {
             write(&db, "cpu", r#"{"host":"a"}"#, 1_000 + ts * 300);
-            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
         }
-        assert_eq!(stat(&db, "m", "chunks"), 4);
+        assert_eq!(stat(&db, "m", "chunks"), 4, "the host has not asked");
 
-        db.execute("INSERT INTO m(m) VALUES ('flush_interval:1s')", [])
+        // Told to look after itself, it does so as that very statement
+        // commits: the four chunks are put together.
+        db.execute("INSERT INTO m(m) VALUES ('flush_interval:1h')", [])
             .unwrap();
-        write(&db, "cpu", r#"{"host":"a"}"#, 2_200);
-        assert_eq!(stat(&db, "m", "chunks"), 4);
-        std::thread::sleep(std::time::Duration::from_millis(1_200));
-        write(&db, "cpu", r#"{"host":"a"}"#, 2_500);
-        assert_eq!(stat(&db, "m", "buffered_points"), 0);
         assert_eq!(stat(&db, "m", "chunks"), 1);
-        assert_eq!(stat(&db, "m", "disk_points"), 6);
+        assert_eq!(stat(&db, "m", "disk_points"), 4);
+        // Not again until the interval has passed.
+        for ts in 0..4 {
+            write(&db, "cpu", r#"{"host":"a"}"#, 2_200 + ts * 300);
+        }
+        assert_eq!(stat(&db, "m", "chunks"), 5);
+        assert_eq!(stat(&db, "m", "disk_points"), 8);
     }
 
     #[test]
