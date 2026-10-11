@@ -1881,6 +1881,7 @@ dependencies = [
  "fs2",
  "futures-executor",
  "http",
+ "libc",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-otlp",

@@ -7,6 +7,7 @@
 mod admission;
 mod auth;
 mod error;
+mod filesystem;
 mod lease;
 pub mod otel;
 pub mod otlp_http;
@@ -15,6 +16,7 @@ mod prometheus;
 pub use admission::{BytesGate, GatePermit};
 pub use auth::{protect_router, AuthConfig, ClaimLimits, VerifiedClaims, RESULT_ROWS_HEADER};
 pub use error::{native_error, native_error_with_message, native_internal_error};
+pub use filesystem::copy_on_write_warning;
 pub use lease::{acquire_database_lease, DatabaseLease};
 pub use prometheus::{build_info, Exposition, PROMETHEUS_CONTENT_TYPE};
 

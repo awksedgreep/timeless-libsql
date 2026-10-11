@@ -60,6 +60,11 @@ async fn main() -> ExitCode {
              optionally TIMELESS_ADMIN_KEY) to lock it down."
         );
     }
+    if let Some(warning) =
+        timeless_api_common::copy_on_write_warning(std::path::Path::new(&database_path))
+    {
+        eprintln!("WARNING: timeless-logs-api: {warning}");
+    }
 
     let defaults = Config::default();
     let timestamp_unit = match std::env::var("TIMELESS_LOGS_TIMESTAMP_UNIT") {
