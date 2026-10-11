@@ -1,75 +1,11 @@
-//! Storage-seam acceptance tests: data written through the default
-//! filesystem engine must be recoverable both through an engine built
-//! over an explicit FsStore (the seam carries recovery) and through the
-//! bare FsStore scan (the store alone understands the on-disk layout).
+//! The engine over its store: what it recovers on reopen, and what it does
+//! when the store fails or answers short. The store is the in-memory one
+//! (`MemStore`), which answers the same questions the SQLite store does and
+//! can be told to fail.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
-use timeless_core::{ChunkBytes, ChunkLoc, ChunkStore, EncodedChunk, Engine, FsStore, StoredChunk};
 
-struct FaultyBatchStore {
-    inner: FsStore,
-    mode: Arc<AtomicU8>,
-}
-
-impl ChunkStore for FaultyBatchStore {
-    fn put_chunks(&self, chunks: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String> {
-        self.inner.put_chunks(chunks)
-    }
-
-    fn replace_chunks(
-        &self,
-        add: &[EncodedChunk],
-        remove: &[ChunkLoc],
-        on_committed: &mut dyn FnMut(&[ChunkLoc]),
-    ) -> Result<Vec<ChunkLoc>, String> {
-        if self.mode.load(Ordering::SeqCst) == 3 {
-            return Err("injected compaction replacement failure".into());
-        }
-        self.inner.replace_chunks(add, remove, on_committed)
-    }
-
-    fn read_chunk(&self, loc: &ChunkLoc) -> Result<ChunkBytes, String> {
-        self.inner.read_chunk(loc)
-    }
-
-    fn read_chunks(&self, locs: &[ChunkLoc]) -> Result<Vec<ChunkBytes>, String> {
-        match self.mode.load(Ordering::SeqCst) {
-            1 => Err("injected batch read failure".into()),
-            2 => {
-                let mut payloads = self.inner.read_chunks(locs)?;
-                payloads.pop();
-                Ok(payloads)
-            }
-            _ => self.inner.read_chunks(locs),
-        }
-    }
-
-    fn delete_chunks(&self, locs: &[ChunkLoc]) -> Vec<String> {
-        self.inner.delete_chunks(locs)
-    }
-
-    fn scan(&self) -> Result<Vec<StoredChunk>, String> {
-        self.inner.scan()
-    }
-
-    fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
-        self.inner.save_registry(bytes)
-    }
-
-    fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
-        self.inner.load_registry()
-    }
-
-    fn storage_stats(&self) -> (u64, usize) {
-        self.inner.storage_stats()
-    }
-
-    fn sweep_cache(&self) {
-        self.inner.sweep_cache();
-    }
-}
+use timeless_core::{Engine, MemFault, MemStore};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir =
@@ -82,30 +18,11 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn new_engine(dir: &std::path::Path) -> Engine {
     // (data_dir, flush_threshold, min_flush_size, compression_level,
     //  memory_budget, defer_compression)
-    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap()
+    Engine::in_memory(dir, 1000, 0, 8, 64 * 1024 * 1024, false).unwrap()
 }
 
 #[test]
-fn engine_open_fails_closed_on_malformed_compaction_manifest() {
-    let dir = temp_dir("malformed_manifest");
-    let manifest = dir.join("compaction.manifest");
-    std::fs::write(&manifest, "P\tmissing-final-path\n").unwrap();
-
-    let err = match Engine::new(dir.clone(), 1000, 0, 8, 64 * 1024 * 1024, false) {
-        Ok(_) => panic!("engine opened with malformed recovery state"),
-        Err(err) => err,
-    };
-
-    assert!(err.contains("line 1"), "unexpected error: {err}");
-    assert!(
-        manifest.exists(),
-        "engine discarded malformed recovery state"
-    );
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn with_store_recovers_fs_data() {
+fn a_reopened_engine_reads_what_was_stored() {
     let dir = temp_dir("store_seam");
 
     let labels: HashMap<String, String> = [("host".to_string(), "pvm1".to_string())]
@@ -122,11 +39,11 @@ fn with_store_recovers_fs_data() {
         engine.shutdown().unwrap();
     }
 
-    // "Restart" through the seam: an engine built over an explicit
-    // FsStore must recover the registry and chunk index identically.
+    // "Restart": another engine over the same store finds the series and
+    // every chunk, with nothing held from the first.
     {
         let engine = Engine::with_store(
-            Box::new(FsStore::new(dir.clone()).unwrap()),
+            Box::new(MemStore::named(&dir)),
             1000,
             0,
             8,
@@ -139,13 +56,13 @@ fn with_store_recovers_fs_data() {
         assert_eq!(
             rows.len(),
             n_points as usize,
-            "seam recovery rebuilds index via store.scan()"
+            "a reopened engine reads every stored point"
         );
         assert_eq!(rows[4_999], (4_999, 4_999.0 * 2.0));
 
         let info = engine.info();
         assert_eq!(info.series_count, 1);
-        assert!(info.total_bytes > 0, "storage_stats sees the chunk files");
+        assert!(info.total_bytes > 0, "storage_stats sees the chunk rows");
     }
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -154,13 +71,10 @@ fn with_store_recovers_fs_data() {
 #[test]
 fn compaction_failure_restart_and_backfill_preserve_exact_metrics() {
     let dir = temp_dir("compact_failure_restart_backfill");
-    let mode = Arc::new(AtomicU8::new(0));
+    let store = MemStore::named(&dir);
     let labels = HashMap::new();
     let engine = Engine::with_store(
-        Box::new(FaultyBatchStore {
-            inner: FsStore::new(dir.clone()).unwrap(),
-            mode: mode.clone(),
-        }),
+        Box::new(store.clone()),
         100_000,
         0,
         8,
@@ -174,7 +88,7 @@ fn compaction_failure_restart_and_backfill_preserve_exact_metrics() {
     }
     engine.flush_all().unwrap();
 
-    mode.store(3, Ordering::SeqCst);
+    store.inject(MemFault::ReplaceFails);
     let error = engine.compact_partitions(i64::MAX).unwrap_err();
     assert_eq!(error, "injected compaction replacement failure");
     let rows = engine.query_range_by_id(sid, i64::MIN, i64::MAX).unwrap();
@@ -182,15 +96,12 @@ fn compaction_failure_restart_and_backfill_preserve_exact_metrics() {
     assert_eq!(rows.first(), Some(&(0, 0.0)));
     assert_eq!(rows.last(), Some(&(32_767, 32_767.0)));
 
-    mode.store(0, Ordering::SeqCst);
+    store.inject(MemFault::None);
     engine.compact_partitions(i64::MAX).unwrap();
     drop(engine);
 
     let reopened = Engine::with_store(
-        Box::new(FaultyBatchStore {
-            inner: FsStore::new(dir.clone()).unwrap(),
-            mode,
-        }),
+        Box::new(store.clone()),
         100_000,
         0,
         8,
@@ -214,55 +125,11 @@ fn compaction_failure_restart_and_backfill_preserve_exact_metrics() {
 }
 
 #[test]
-fn fs_store_scan_reads_engine_output() {
-    let dir = temp_dir("store_compat");
-
-    let labels: HashMap<String, String> = HashMap::new();
-    let n_points: i64 = 3_000;
-    let sid;
-    {
-        let engine = new_engine(&dir);
-        sid = engine.resolve_cached("gauge", &labels).unwrap();
-        for ts in 0..n_points {
-            engine.write_point(sid, ts, 1.0);
-        }
-        engine.flush_all().unwrap();
-    }
-
-    // A bare FsStore over the same dir must enumerate the chunks the
-    // engine persisted, with intact metadata.
-    let store = FsStore::new(dir.clone()).unwrap();
-    let chunks = store.scan().unwrap();
-    assert!(!chunks.is_empty(), "scan finds persisted chunks");
-    let total_points: u64 = chunks
-        .iter()
-        .filter(|c| c.series_id == sid)
-        .map(|c| c.meta.point_count as u64)
-        .sum();
-    assert_eq!(total_points, n_points as u64);
-    let min_ts = chunks.iter().map(|c| c.meta.min_ts).min().unwrap();
-    let max_ts = chunks.iter().map(|c| c.meta.max_ts).max().unwrap();
-    assert_eq!((min_ts, max_ts), (0, n_points - 1));
-
-    // And each chunk's payload must be readable at its ChunkLoc.
-    for chunk in &chunks {
-        let bytes = store.read_chunk(&chunk.meta.loc).unwrap();
-        assert!(!bytes.ts().is_empty());
-        assert!(!bytes.val().is_empty());
-    }
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn aggregate_and_latest_batches_propagate_store_contract_failures() {
     let dir = temp_dir("batch_store_failures");
-    let mode = Arc::new(AtomicU8::new(0));
-    let store = FaultyBatchStore {
-        inner: FsStore::new(dir.clone()).unwrap(),
-        mode: Arc::clone(&mode),
-    };
-    let engine = Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap();
+    let store = MemStore::named(&dir);
+    let engine =
+        Engine::with_store(Box::new(store.clone()), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap();
     let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
     for timestamp in 0..10 {
         engine.write_point(sid, timestamp, timestamp as f64);
@@ -271,7 +138,7 @@ fn aggregate_and_latest_batches_propagate_store_contract_failures() {
 
     // The strict subrange forces both primitives off their metadata-only fast
     // paths so the injected batch-store behavior is observed.
-    mode.store(1, Ordering::SeqCst);
+    store.inject(MemFault::BatchReadFails);
     for error in [
         engine
             .query_aggregate_summary_batch_by_id(&[sid], 1, 8)
@@ -281,7 +148,7 @@ fn aggregate_and_latest_batches_propagate_store_contract_failures() {
         assert!(error.contains("injected batch read failure"), "{error}");
     }
 
-    mode.store(2, Ordering::SeqCst);
+    store.inject(MemFault::BatchReadShort);
     for error in [
         engine
             .query_aggregate_summary_batch_by_id(&[sid], 1, 8)
@@ -294,7 +161,7 @@ fn aggregate_and_latest_batches_propagate_store_contract_failures() {
         );
     }
 
-    mode.store(0, Ordering::SeqCst);
+    store.inject(MemFault::None);
     engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -302,19 +169,16 @@ fn aggregate_and_latest_batches_propagate_store_contract_failures() {
 #[test]
 fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
     let dir = temp_dir("latest_budget");
-    let mode = Arc::new(AtomicU8::new(0));
-    let store = FaultyBatchStore {
-        inner: FsStore::new(dir.clone()).unwrap(),
-        mode: Arc::clone(&mode),
-    };
-    let engine = Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap();
+    let store = MemStore::named(&dir);
+    let engine =
+        Engine::with_store(Box::new(store.clone()), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap();
     let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
     for timestamp in 0..10 {
         engine.write_point(sid, timestamp, timestamp as f64);
     }
     engine.flush_all().unwrap();
 
-    mode.store(1, Ordering::SeqCst);
+    store.inject(MemFault::BatchReadFails);
     let error = engine
         .query_latest_batch_by_id_limited(&[sid], 0, 8, 9)
         .unwrap_err();
@@ -327,7 +191,7 @@ fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
         .unwrap_err()
         .contains("injected batch read failure"));
 
-    mode.store(0, Ordering::SeqCst);
+    store.inject(MemFault::None);
     assert_eq!(
         engine
             .query_latest_batch_by_id_limited(&[sid], 0, 9, 1)
@@ -347,65 +211,4 @@ fn latest_work_limit_precedes_payload_reads_and_preserves_metadata_fast_path() {
     );
     engine.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_bounded_step_keeps_a_batch_file_its_other_chunks_still_use() {
-    // One flush packs every series' chunk into one batch file. A step that
-    // compacts one series must leave that file for the series it did not
-    // reach (#118: only file units are shared, so only they are checked).
-    const SERIES: usize = 50;
-    let dir = temp_dir("bounded_step_shared_batch");
-    let labels = HashMap::new();
-    let engine = Engine::with_store(
-        Box::new(FsStore::new(dir.clone()).unwrap()),
-        100_000,
-        10,
-        8,
-        64 * 1024 * 1024,
-        true,
-    )
-    .unwrap();
-    let ids: Vec<i64> = (0..SERIES)
-        .map(|n| {
-            engine
-                .resolve_cached(&format!("shared_{n}"), &labels)
-                .unwrap()
-        })
-        .collect();
-    for epoch in 0..2i64 {
-        for &id in &ids {
-            engine.write_point(id, 1_000 + epoch, epoch as f64);
-        }
-        engine.flush_all().unwrap();
-    }
-    let shared = |engine: &Engine| {
-        let mut files = std::collections::HashSet::new();
-        for &id in &ids {
-            assert_eq!(
-                engine.query_range_by_id(id, i64::MIN, i64::MAX).unwrap(),
-                vec![(1_000, 0.0), (1_001, 1.0)],
-                "series {id}"
-            );
-        }
-        for entry in std::fs::read_dir(dir.join("batches")).into_iter().flatten() {
-            files.insert(entry.unwrap().path());
-        }
-        files.len()
-    };
-    let files = shared(&engine);
-    assert!(files > 0, "the flushes wrote batch files");
-
-    let (series, _, more) = engine.compact_partitions_bounded(i64::MAX, 1).unwrap();
-    assert_eq!(series, 1);
-    assert!(more);
-    assert_eq!(
-        shared(&engine),
-        files,
-        "no batch file a survivor uses is gone"
-    );
-    engine.compact_partitions(i64::MAX).unwrap();
-    shared(&engine);
-    drop(engine);
-    let _ = std::fs::remove_dir_all(dir);
 }

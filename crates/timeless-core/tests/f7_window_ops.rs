@@ -89,7 +89,7 @@ fn sorted_nanless(win: &[(i64, f64)]) -> Vec<f64> {
 
 #[test]
 fn window_ops_match_naive() {
-    let engine = Engine::new(temp_dir("ops"), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(temp_dir("ops"), 100_000, 0, 3, 64 << 20, false).unwrap();
     let mut rng = Rng(0xF7F7_0001);
     let labels: HashMap<String, String> = HashMap::new();
     let sid = engine.resolve_cached("counter", &labels).unwrap();
@@ -175,7 +175,7 @@ fn window_ops_match_naive() {
 
 #[test]
 fn window_op_edges() {
-    let engine = Engine::new(temp_dir("edges"), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(temp_dir("edges"), 100_000, 0, 3, 64 << 20, false).unwrap();
     let labels: HashMap<String, String> = HashMap::new();
     let sid = engine.resolve_cached("m", &labels).unwrap();
     // One window: [10.0, NaN, 30.0, 20.0] at ts 1..4.

@@ -15,7 +15,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 }
 
 fn setup(name: &str) -> (Engine, Vec<(i64, Labels)>) {
-    let engine = Engine::new(temp_dir(name), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(temp_dir(name), 100_000, 0, 3, 64 << 20, false).unwrap();
     let mut series = Vec::new();
     for (host, env) in [
         (Some("a"), Some("prod")),

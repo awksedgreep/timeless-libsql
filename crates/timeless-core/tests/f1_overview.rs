@@ -15,7 +15,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 #[test]
 fn overview_matches_naive_walk() {
     let dir = temp_dir("overview");
-    let engine = Engine::new(dir, 10_000, 0, 3, 64 * 1024 * 1024, false).unwrap();
+    let engine = Engine::in_memory(dir, 10_000, 0, 3, 64 * 1024 * 1024, false).unwrap();
 
     // Three series across two metrics; one gets flushed data + buffered
     // overlap, one flushed only, one buffered only.

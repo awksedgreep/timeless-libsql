@@ -1,5 +1,5 @@
 use crate::store::{
-    ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk,
+    ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, StoredChunk,
     StoredSeries, ENC_PCO, ENC_RAW,
 };
 
@@ -11,7 +11,6 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2912,20 +2911,19 @@ impl Engine {
         }
     }
 
-    /// Convenience constructor over the filesystem backend. Opening is
-    /// fallible because interrupted compaction recovery must complete
-    /// before the store can safely scan persisted chunks.
-    pub fn new(
-        data_dir: PathBuf,
+    /// An engine over the in-memory store kept under `name` (see
+    /// [`MemStore::named`]): for tests and tools that want an engine and no
+    /// database. Opening the same name again reads what was written to it.
+    pub fn in_memory(
+        name: impl AsRef<std::path::Path>,
         flush_threshold: usize,
         min_flush_size: usize,
         compression_level: usize,
         memory_budget: usize,
         defer_compression: bool,
     ) -> EngineResult<Self> {
-        let store = FsStore::new(data_dir)?;
         Self::with_store(
-            Box::new(store),
+            Box::new(crate::store::MemStore::named(name.as_ref())),
             flush_threshold,
             min_flush_size,
             compression_level,

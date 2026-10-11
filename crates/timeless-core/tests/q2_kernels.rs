@@ -20,7 +20,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 }
 
 fn new_engine(dir: &std::path::Path) -> Engine {
-    Engine::new(dir.to_path_buf(), 100_000, 0, 3, 64 * 1024 * 1024, false).unwrap()
+    Engine::in_memory(dir, 100_000, 0, 3, 64 * 1024 * 1024, false).unwrap()
 }
 
 struct Rng(u64);

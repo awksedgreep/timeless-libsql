@@ -1,19 +1,15 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
 use timeless_core::{
-    BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta, BlockStore, ChunkBytes, ChunkLoc,
-    ChunkStore, EncodedBlock, EncodedChunk, EncodedSpanBlock, Engine, FsStore, LogEntry, LogQuery,
-    MemBlockStore, MemSpanStore, ResolvedSeries, SpanBlockEngine, SpanBlockStore, SpanEngineConfig,
-    SpanEntry, SpanQuery, SpanQueryOrder, StoredChunk, StoredSeries,
+    BlockEngine, BlockEngineConfig, BlockLoc, BlockMeta, BlockStore, EncodedBlock,
+    EncodedSpanBlock, LogEntry, LogQuery, MemBlockStore, MemSpanStore, SpanBlockEngine,
+    SpanBlockStore, SpanEngineConfig, SpanEntry, SpanQuery, SpanQueryOrder,
 };
 
 const MAINTENANCE_WINDOW: Duration = Duration::from_millis(200);
-static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 struct ReadPause {
     armed: AtomicBool,
@@ -53,93 +49,8 @@ impl ReadPause {
     }
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "timeless_r5_{name}_{}_{}",
-        std::process::id(),
-        sequence
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 fn wait_for_overtake(done: &mpsc::Receiver<()>) {
     let _ = done.recv_timeout(MAINTENANCE_WINDOW);
-}
-
-struct PausingChunkStore {
-    inner: FsStore,
-    pause: Arc<ReadPause>,
-}
-
-impl ChunkStore for PausingChunkStore {
-    fn put_chunks(&self, chunks: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String> {
-        self.inner.put_chunks(chunks)
-    }
-
-    fn replace_chunks(
-        &self,
-        add: &[EncodedChunk],
-        remove: &[ChunkLoc],
-        on_committed: &mut dyn FnMut(&[ChunkLoc]),
-    ) -> Result<Vec<ChunkLoc>, String> {
-        self.inner.replace_chunks(add, remove, on_committed)
-    }
-
-    fn read_chunk(&self, loc: &ChunkLoc) -> Result<ChunkBytes, String> {
-        self.pause.before_read();
-        if let ChunkLoc::File { path, .. } = loc {
-            if !path.exists() {
-                return Err(format!(
-                    "test reader observed deleted chunk {}",
-                    path.display()
-                ));
-            }
-        }
-        self.inner.read_chunk(loc)
-    }
-
-    fn delete_chunks(&self, locs: &[ChunkLoc]) -> Vec<String> {
-        self.inner.delete_chunks(locs)
-    }
-
-    fn scan(&self) -> Result<Vec<StoredChunk>, String> {
-        self.inner.scan()
-    }
-
-    fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
-        self.inner.save_registry(bytes)
-    }
-
-    fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
-        self.inner.load_registry()
-    }
-
-    fn load_series(&self) -> Result<Vec<StoredSeries>, String> {
-        self.inner.load_series()
-    }
-
-    fn resolve_series(
-        &self,
-        name: &str,
-        labels: &[(String, String)],
-    ) -> Result<ResolvedSeries, String> {
-        self.inner.resolve_series(name, labels)
-    }
-
-    fn migrate_series(&self, series: &[StoredSeries]) -> Result<(), String> {
-        self.inner.migrate_series(series)
-    }
-
-    fn storage_stats(&self) -> (u64, usize) {
-        self.inner.storage_stats()
-    }
-
-    fn sweep_cache(&self) {
-        self.inner.sweep_cache();
-    }
 }
 
 struct PausingBlockStore {
@@ -438,83 +349,6 @@ fn span_query() -> SpanQuery {
         name: None,
         attribute: None,
     }
-}
-
-#[test]
-fn metrics_query_cannot_miss_buffer_during_flush() {
-    let dir = temp_dir("metrics_flush");
-    let pause = Arc::new(ReadPause::new());
-    let store = PausingChunkStore {
-        inner: FsStore::new(dir.clone()).unwrap(),
-        pause: pause.clone(),
-    };
-    let engine =
-        Arc::new(Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap());
-    let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
-    engine.write_point(sid, 1, 1.0);
-    engine.flush_all().unwrap();
-    engine.write_point(sid, 2, 2.0);
-
-    pause.arm();
-    let query_engine = engine.clone();
-    let query = thread::spawn(move || query_engine.query_range_by_id(sid, 0, 10));
-    pause.wait_until_paused();
-
-    let (done_tx, done_rx) = mpsc::channel();
-    let flush_engine = engine.clone();
-    let flush = thread::spawn(move || {
-        let result = flush_engine.flush_all();
-        done_tx.send(()).unwrap();
-        result
-    });
-    wait_for_overtake(&done_rx);
-    pause.resume();
-
-    let rows = query.join().unwrap().unwrap();
-    flush.join().unwrap().unwrap();
-    assert_eq!(rows, vec![(1, 1.0), (2, 2.0)]);
-
-    drop(engine);
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn metrics_query_cannot_read_deleted_location_during_compaction() {
-    let dir = temp_dir("metrics_compact");
-    let pause = Arc::new(ReadPause::new());
-    let store = PausingChunkStore {
-        inner: FsStore::new(dir.clone()).unwrap(),
-        pause: pause.clone(),
-    };
-    let engine =
-        Arc::new(Engine::with_store(Box::new(store), 1000, 0, 8, 64 * 1024 * 1024, true).unwrap());
-    let sid = engine.resolve_cached("cpu", &HashMap::new()).unwrap();
-    engine.write_point(sid, 1, 1.0);
-    engine.flush_all().unwrap();
-    engine.write_point(sid, 2, 2.0);
-    engine.flush_all().unwrap();
-
-    pause.arm();
-    let query_engine = engine.clone();
-    let query = thread::spawn(move || query_engine.query_range_by_id(sid, 0, 10));
-    pause.wait_until_paused();
-
-    let (done_tx, done_rx) = mpsc::channel();
-    let compact_engine = engine.clone();
-    let compact = thread::spawn(move || {
-        let result = compact_engine.compact_partitions(i64::MAX);
-        done_tx.send(()).unwrap();
-        result
-    });
-    wait_for_overtake(&done_rx);
-    pause.resume();
-
-    let rows = query.join().unwrap().unwrap();
-    compact.join().unwrap().unwrap();
-    assert_eq!(rows, vec![(1, 1.0), (2, 2.0)]);
-
-    drop(engine);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

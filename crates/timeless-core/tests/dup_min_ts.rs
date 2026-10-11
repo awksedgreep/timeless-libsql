@@ -19,7 +19,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn engine(dir: &std::path::Path) -> Engine {
     // min_flush_size 1 → every flush_all writes individual chunks,
     // matching the donor regression test's parameters.
-    Engine::new(dir.to_path_buf(), 100, 1, 8, usize::MAX, false).unwrap()
+    Engine::in_memory(dir, 100, 1, 8, usize::MAX, false).unwrap()
 }
 
 /// Donor regression test `duplicate_min_ts_chunks_do_not_shadow`,

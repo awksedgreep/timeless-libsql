@@ -1924,23 +1924,10 @@ meta|trigram|0'
 err=$(sqlite3 "$F6DB" ".load $EXT"   "CREATE VIRTUAL TABLE bad USING timeless_logs(message_index='btree');" 2>&1 || true)
 check_eq "invalid message_index value rejected"   "$(grep -c "expected 'trigram' or 'none'" <<<"$err")" "1"
 
-# ---------------------------------------------------------------------------
-echo "== section 29: M1b fs-store importer (selftest incl. NaN + hostile labels) =="
-# The selftest builds a hostile FsStore fixture (escaped/quoted labels,
-# NaN payload bits — the case that found the shadow-store NaN stat bug —
-# duplicate ts, a multi-blob series), imports it through Tier 2 blobs,
-# and verifies every point. It exits nonzero on ANY mismatch.
-(cd "$ROOT/tools/bench" && cargo build --release --bin import >/dev/null 2>&1)
-if "$ROOT/tools/bench/target/release/import" --selftest "$EXT" "$TMP/import_st" > "$TMP/import.log" 2>&1; then
-  pass "importer selftest (bit-exact incl. NaN + hostile labels)"
-else
-  fail "importer selftest: $(tail -2 "$TMP/import.log")"
-fi
-got=$(sqlite3 "$TMP/import_st/imported.db" ".load $EXT" \
-  "SELECT COUNT(*), (SELECT COUNT(*) FROM timeless_series('metrics')) FROM metrics;")
-check_eq "imported db independently queryable (rows + catalog)" "$got" "150015|4"
+# Section 29 was the fs-store importer selftest. The file store and its
+# importer were removed with the in-memory index (0.9.0); the number is
+# left unused so later sections keep theirs.
 
-# ---------------------------------------------------------------------------
 echo "== section 30: F7 window vocabulary (counters, percentiles, trimmed folds) =="
 # Hand-verified literal expectations on a tiny dataset (the pinned
 # definitions from FEATURE_PLAN F7, computed by hand in the comments):

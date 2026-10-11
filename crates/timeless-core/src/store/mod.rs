@@ -11,9 +11,9 @@
 //! byte-level reuse (e.g. `ChunkMeta` floats): always convert at the
 //! seam, never reinterpret foreign bytes.
 
-pub mod fs;
+pub mod mem;
 
-pub use fs::FsStore;
+pub use mem::{MemFault, MemStore};
 
 use std::ops::Range;
 use std::path::PathBuf;

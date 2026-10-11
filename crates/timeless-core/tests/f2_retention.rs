@@ -29,7 +29,7 @@ fn retention_prunes_and_recovers() {
     let labels: HashMap<String, String> = HashMap::new();
     let sid;
     {
-        let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+        let engine = Engine::in_memory(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
         engine.set_retention(Some(100));
         sid = engine.resolve_cached("cpu", &labels).unwrap();
 
@@ -55,7 +55,7 @@ fn retention_prunes_and_recovers() {
 
     // Reopen: retention keeps working from the RECOVERED index.
     {
-        let engine = Engine::new(dir, 100_000, 0, 3, 64 << 20, false).unwrap();
+        let engine = Engine::in_memory(dir, 100_000, 0, 3, 64 << 20, false).unwrap();
         engine.set_retention(Some(100));
         let sid2 = engine.resolve_cached("cpu", &labels).unwrap();
         assert_eq!(sid2, sid, "series identity recovered");
@@ -82,7 +82,7 @@ fn retention_prunes_and_recovers() {
 fn backfill_does_not_move_cutoff() {
     let dir = temp_dir("backfill");
     let labels: HashMap<String, String> = HashMap::new();
-    let engine = Engine::new(dir, 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(dir, 100_000, 0, 3, 64 << 20, false).unwrap();
     engine.set_retention(Some(100));
     let sid = engine.resolve_cached("cpu", &labels).unwrap();
 
@@ -125,7 +125,7 @@ fn backfill_does_not_move_cutoff() {
 fn disabled_retention_is_inert() {
     let dir = temp_dir("inert");
     let labels: HashMap<String, String> = HashMap::new();
-    let engine = Engine::new(dir, 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(dir, 100_000, 0, 3, 64 << 20, false).unwrap();
     let sid = engine.resolve_cached("cpu", &labels).unwrap();
     engine.write_point(sid, 0, 1.0);
     engine.flush_all().unwrap();
@@ -193,7 +193,7 @@ fn prune_after_removes_future_chunks() {
     let labels: HashMap<String, String> = HashMap::new();
     let sid;
     {
-        let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+        let engine = Engine::in_memory(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
         sid = engine.resolve_cached("cpu", &labels).unwrap();
 
         // A normal chunk at sane epoch seconds, flushed on its own.
@@ -233,7 +233,7 @@ fn prune_after_removes_future_chunks() {
 fn retention_removes_series_it_has_left_nothing_of() {
     let dir = temp_dir("sweep");
     let labels: HashMap<String, String> = HashMap::new();
-    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
     engine.set_retention(Some(100));
     let gone = engine.resolve_cached("gone", &labels).unwrap();
     let kept = engine.resolve_cached("kept", &labels).unwrap();
@@ -252,7 +252,7 @@ fn retention_removes_series_it_has_left_nothing_of() {
         "the series whose only chunk was pruned is gone"
     );
     assert_eq!(info.retention_series_removed, 1);
-    assert!(engine.series_read().list_metrics() == vec!["kept".to_string()]);
+    assert!(engine.metric_names().unwrap() == vec!["kept".to_string()]);
     assert_eq!(count_points(&engine, gone), 0);
     assert_eq!(count_points(&engine, kept), 1);
 
@@ -264,8 +264,8 @@ fn retention_removes_series_it_has_left_nothing_of() {
     // buffer while the cutoff passes `kept`'s first chunk.
     engine.compact_partitions(i64::MAX).unwrap();
     assert!(engine
-        .series_read()
-        .list_metrics()
+        .metric_names()
+        .unwrap()
         .contains(&"buffered".to_string()));
 
     // Once it has flushed and expired, it goes like any other.
@@ -273,8 +273,8 @@ fn retention_removes_series_it_has_left_nothing_of() {
     engine.write_point(kept, 1600, 5.0);
     engine.flush_all().unwrap();
     assert!(!engine
-        .series_read()
-        .list_metrics()
+        .metric_names()
+        .unwrap()
         .contains(&"buffered".to_string()));
     assert_eq!(engine.info().retention_series_removed, 2);
 
@@ -286,8 +286,8 @@ fn retention_removes_series_it_has_left_nothing_of() {
     engine.shutdown().unwrap();
 
     // The registry that was saved knows nothing of them either.
-    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
-    let mut names = engine.series_read().list_metrics();
+    let engine = Engine::in_memory(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let mut names = engine.metric_names().unwrap();
     names.sort();
     assert_eq!(names, vec!["gone".to_string(), "kept".to_string()]);
     engine.shutdown().unwrap();
@@ -300,7 +300,7 @@ fn retention_removes_series_it_has_left_nothing_of() {
 fn rollback_restores_a_series_retention_removed() {
     let dir = temp_dir("sweep_rollback");
     let labels: HashMap<String, String> = HashMap::new();
-    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
     engine.set_retention(Some(100));
     let gone = engine.resolve_cached("gone", &labels).unwrap();
     let kept = engine.resolve_cached("kept", &labels).unwrap();
@@ -308,6 +308,10 @@ fn rollback_restores_a_series_retention_removed() {
     engine.write_point(kept, 1000, 1.0);
     engine.flush_all().unwrap();
 
+    // The host's transaction undoes the rows; the engine's undoes what it
+    // holds beside them.
+    let store = timeless_core::MemStore::named(&dir);
+    store.begin();
     engine.txn_begin();
     engine.write_point(kept, 1200, 2.0);
     engine.flush_all().unwrap();
@@ -317,6 +321,7 @@ fn rollback_restores_a_series_retention_removed() {
         "removed inside the transaction"
     );
     engine.txn_rollback();
+    store.rollback();
 
     assert_eq!(engine.info().series_count, 2, "and back with the rollback");
     assert_eq!(
@@ -338,7 +343,7 @@ fn rollback_restores_a_series_retention_removed() {
 fn a_rolled_back_write_does_not_move_the_cutoff() {
     let dir = temp_dir("bound_rollback");
     let labels: HashMap<String, String> = HashMap::new();
-    let engine = Engine::new(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
+    let engine = Engine::in_memory(dir.clone(), 100_000, 0, 3, 64 << 20, false).unwrap();
     engine.set_retention(Some(1_600));
     let sid = engine.resolve_cached("cpu", &labels).unwrap();
     let timestamps = |engine: &Engine| {

@@ -16,7 +16,7 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 fn new_engine(dir: &std::path::Path) -> Engine {
     // (data_dir, flush_threshold, min_flush_size, compression_level,
     //  memory_budget, defer_compression)
-    Engine::new(dir.to_path_buf(), 1000, 0, 8, 64 * 1024 * 1024, false).unwrap()
+    Engine::in_memory(dir, 1000, 0, 8, 64 * 1024 * 1024, false).unwrap()
 }
 
 #[test]
