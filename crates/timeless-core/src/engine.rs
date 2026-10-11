@@ -264,12 +264,17 @@ type RollupMergeGroup = (RollupGroupKey, Vec<RollupIndexEntry>);
 struct RollupIndex {
     groups: HashMap<RollupGroupKey, Vec<RollupIndexEntry>>,
     len: usize,
+    /// Entries holding exactly one bucket: what a tier's chunks look like
+    /// before they are merged, and so a measure of merging keeping up
+    /// (#137, #141). Kept as entries come and go.
+    single_bucket: usize,
 }
 
 impl RollupIndex {
     fn push_unsorted(&mut self, group: RollupGroupKey, entry: RollupIndexEntry) {
         self.groups.entry(group).or_default().push(entry);
         self.len += 1;
+        self.single_bucket += usize::from(entry.point_count == 1);
     }
 
     fn sort_groups(&mut self) {
@@ -285,10 +290,16 @@ impl RollupIndex {
     ) -> Option<RollupIndexEntry> {
         let entries = self.groups.entry(group).or_default();
         match entries.binary_search_by_key(&entry.key(), |candidate| candidate.key()) {
-            Ok(position) => Some(std::mem::replace(&mut entries[position], entry)),
+            Ok(position) => {
+                let previous = std::mem::replace(&mut entries[position], entry);
+                self.single_bucket += usize::from(entry.point_count == 1);
+                self.single_bucket -= usize::from(previous.point_count == 1);
+                Some(previous)
+            }
             Err(position) => {
                 entries.insert(position, entry);
                 self.len += 1;
+                self.single_bucket += usize::from(entry.point_count == 1);
                 None
             }
         }
@@ -308,6 +319,7 @@ impl RollupIndex {
             self.groups.remove(&group);
         }
         self.len -= 1;
+        self.single_bucket -= usize::from(removed.point_count == 1);
         Some(removed)
     }
 
@@ -329,6 +341,10 @@ impl RollupIndex {
 
     fn len(&self) -> usize {
         self.len
+    }
+
+    fn single_bucket(&self) -> usize {
+        self.single_bucket
     }
 }
 
@@ -8099,7 +8115,10 @@ impl Engine {
         let series_count = self.series_count();
         let (chunk_count, total_disk_points, mut oldest_ts, mut newest_ts) = self.chunk_totals();
         let partition_count = self.partitions.len();
-        let rollup_chunk_count = self.rollup_read().len();
+        let (rollup_chunk_count, rollup_single_bucket_chunks) = {
+            let rollups = self.rollup_read();
+            (rollups.len(), rollups.single_bucket())
+        };
         let buffered_points: usize = self
             .partitions
             .iter()
@@ -8134,6 +8153,7 @@ impl Engine {
         EngineInfo {
             chunk_count,
             rollup_chunk_count,
+            rollup_single_bucket_chunks,
             partition_count,
             series_count,
             disk_points: total_disk_points,
@@ -8244,6 +8264,8 @@ pub struct SeriesOverview {
 pub struct EngineInfo {
     pub chunk_count: usize,
     pub rollup_chunk_count: usize,
+    /// Rollup chunks holding exactly one bucket.
+    pub rollup_single_bucket_chunks: usize,
     pub partition_count: usize,
     pub series_count: usize,
     pub disk_points: u64,

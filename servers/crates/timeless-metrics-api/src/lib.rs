@@ -28,7 +28,9 @@ pub use api::{router, router_with_limits};
 pub use scrape::{
     ScrapeAuth, ScrapeTarget, ScrapeTargetReport, ScrapeTargetSet, ScrapeTargetSetReport,
 };
-pub use storage::{FlushReport, Storage, StorageStats};
+pub use storage::{
+    DurationHistogram, FlushReport, Storage, StorageStats, DURATION_BUCKET_BOUNDS_NS,
+};
 use timeless_api_common::otel::trace_requests;
 pub use timeless_api_common::otel::{
     OtelExportState, OtelHeaders, OtelTelemetry, OtelTracesConfig, OtelTracesStats,

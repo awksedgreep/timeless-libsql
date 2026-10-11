@@ -14,7 +14,10 @@ use timeless_api_common::{
 };
 
 use crate::query::{self, Params, ReadRequest};
-use crate::{victoria, PromQueryLimits, ScrapeTargetSet, Storage};
+use crate::{
+    victoria, DurationHistogram, PromQueryLimits, ScrapeTargetSet, Storage,
+    DURATION_BUCKET_BOUNDS_NS,
+};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
@@ -542,6 +545,12 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 "Chunks in rollup tiers.",
                 stats.rollup_chunks,
             );
+            x.gauge(
+                "timeless_metrics_rollup_single_bucket_chunks",
+                "Rollup chunks holding one bucket (not yet merged). Close to \
+                 the rollup chunk count means rollup merging is not keeping up.",
+                stats.rollup_single_bucket_chunks,
+            );
             x.counter(
                 "timeless_metrics_compaction_plans_total",
                 "Times a compaction sweep was planned from the chunk index.",
@@ -609,6 +618,107 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
                 "timeless_metrics_freelist_bytes",
                 "Reusable free pages inside the database file.",
                 stats.freelist_bytes,
+            );
+            let histogram = |x: &mut Exposition, name: &str, help: &str, h: &DurationHistogram| {
+                x.duration_histogram(name, help, &DURATION_BUCKET_BOUNDS_NS, &h.counts, h.sum_ns);
+            };
+            histogram(
+                &mut x,
+                "timeless_metrics_maintenance_step_seconds",
+                "Duration of each maintenance (compaction and rollup) step. A step \
+                 holds the writer, so ingest and reads wait behind it.",
+                &stats.compact_step_histogram,
+            );
+            x.counter(
+                "timeless_metrics_maintenance_step_cpu_nanoseconds_total",
+                "Writer-thread CPU time in maintenance steps. The step seconds sum \
+                 less this is time the writer was blocked (locks, disk, kernel \
+                 write throttling).",
+                clamp(stats.compact_step_histogram.cpu_ns),
+            );
+            x.gauge(
+                "timeless_metrics_maintenance_step_max_nanoseconds",
+                "Longest maintenance step since start.",
+                clamp(stats.compact_step_max_ns),
+            );
+            x.counter(
+                "timeless_metrics_maintenance_sweeps_total",
+                "Maintenance sweeps completed or abandoned.",
+                clamp(stats.compact_count),
+            );
+            x.counter(
+                "timeless_metrics_maintenance_errors_total",
+                "Maintenance sweeps abandoned on an error.",
+                clamp(stats.compact_errors),
+            );
+            x.gauge(
+                "timeless_metrics_maintenance_last_sweep_steps",
+                "Steps in the most recent maintenance sweep.",
+                clamp(stats.compact_last_steps),
+            );
+            x.gauge(
+                "timeless_metrics_maintenance_last_sweep_nanoseconds",
+                "Time in steps during the most recent maintenance sweep.",
+                clamp(stats.compact_last_total_ns),
+            );
+            x.gauge(
+                "timeless_metrics_maintenance_last_sweep_step_max_nanoseconds",
+                "Longest step of the most recent maintenance sweep.",
+                clamp(stats.compact_last_step_max_ns),
+            );
+            x.gauge(
+                "timeless_metrics_maintenance_last_sweep_finished_timestamp_seconds",
+                "When the most recent maintenance sweep finished (unix seconds; 0 before the first).",
+                stats.compact_last_finished_unix,
+            );
+            histogram(
+                &mut x,
+                "timeless_metrics_scheduled_flush_seconds",
+                "Duration of each scheduled flush.",
+                &stats.scheduled_flush_histogram,
+            );
+            x.counter(
+                "timeless_metrics_scheduled_flush_cpu_nanoseconds_total",
+                "Writer-thread CPU time in scheduled flushes.",
+                clamp(stats.scheduled_flush_histogram.cpu_ns),
+            );
+            x.counter(
+                "timeless_metrics_scheduled_flush_errors_total",
+                "Scheduled flushes that failed (retried at the next interval).",
+                clamp(stats.scheduled_flush_errors),
+            );
+            histogram(
+                &mut x,
+                "timeless_metrics_read_seconds",
+                "Duration of each read, from request to result, including time \
+                 waiting behind a writer.",
+                &stats.api_read_histogram,
+            );
+            x.counter(
+                "timeless_metrics_read_wait_nanoseconds_total",
+                "Time reads spent in attempts refused behind a writer.",
+                clamp(stats.api_read_wait_ns),
+            );
+            x.counter(
+                "timeless_metrics_read_retries_total",
+                "Read attempts refused behind a writer and started again.",
+                clamp(stats.api_read_retries),
+            );
+            x.counter(
+                "timeless_metrics_read_errors_total",
+                "Reads that failed.",
+                clamp(stats.api_read_errors),
+            );
+            x.counter(
+                "timeless_metrics_write_busy_retries_total",
+                "Writes (ingest, flush, maintenance) attempted again after a busy \
+                 refusal, such as the writer waiting out its gate behind a long read.",
+                clamp(stats.write_busy_retries),
+            );
+            x.gauge(
+                "timeless_metrics_wal_high_water_bytes",
+                "Largest write-ahead log seen after a flush or maintenance step.",
+                clamp(stats.wal_high_water_bytes),
             );
             timeless_api_common::otel::expose_health(&mut x, "metrics", &stats.otel_traces);
             (

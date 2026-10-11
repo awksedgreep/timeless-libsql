@@ -1363,6 +1363,15 @@ fn rollup_chunks_per_group_stay_logarithmic_as_buckets_accumulate() {
         "a group reached {most_chunks_per_group} chunks over {SWEEPS} buckets"
     );
     assert!(engine.info().rollup_merge_chunks_written > 0);
+    // Unmerged one-bucket chunks are counted, and few: fewer than a run's
+    // worth per group.
+    let info = engine.info();
+    assert!(info.rollup_single_bucket_chunks <= info.rollup_chunk_count);
+    assert!(
+        info.rollup_single_bucket_chunks < 4 * SERIES,
+        "{} one-bucket chunks",
+        info.rollup_single_bucket_chunks
+    );
     for &series_id in &series_ids {
         let buckets = engine
             .query_rollup_by_id(series_id, 60, i64::MIN, i64::MAX)

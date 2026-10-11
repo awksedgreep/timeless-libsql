@@ -293,6 +293,24 @@ async fn scheduled_compaction_commits_in_bounded_steps_and_keeps_discovery_avail
     assert!(stats.compact_step_count >= 2, "{stats:?}");
     assert!(stats.compact_step_max_ns > 0);
     assert!(stats.compact_step_max_ns <= stats.compact_total_ns);
+    // The distributions agree with the totals they break down (#141).
+    let steps = stats.compact_step_histogram;
+    assert_eq!(steps.count(), stats.compact_step_count, "{steps:?}");
+    assert_eq!(steps.sum_ns, stats.compact_total_ns, "{steps:?}");
+    assert_eq!(steps.max_ns, stats.compact_step_max_ns, "{steps:?}");
+    assert!(steps.cpu_ns <= steps.sum_ns, "{steps:?}");
+    assert_eq!(stats.compact_last_steps, stats.compact_step_count);
+    assert_eq!(stats.compact_last_total_ns, stats.compact_total_ns);
+    assert_eq!(stats.compact_last_step_max_ns, stats.compact_step_max_ns);
+    assert!(stats.compact_last_finished_unix > 1_700_000_000);
+    assert_eq!(
+        stats.api_read_histogram.count(),
+        stats.api_read_requests,
+        "{:?}",
+        stats.api_read_histogram
+    );
+    assert_eq!(stats.api_read_histogram.sum_ns, stats.api_read_total_ns);
+    assert!(stats.api_read_wait_ns <= stats.api_read_total_ns);
     let series = OVER_STEP_SERIES as i64;
     assert_eq!(stats.extension_compaction_raw_steps, series);
     assert_eq!(stats.extension_compaction_raw_chunks, RAW_RUN * series);
@@ -16132,6 +16150,20 @@ async fn self_metrics_exposes_prometheus_families() {
         "# TYPE timeless_metrics_index_bytes gauge",
         "# TYPE timeless_metrics_database_file_bytes gauge",
         "# TYPE timeless_metrics_wal_bytes gauge",
+        "# TYPE timeless_metrics_maintenance_step_seconds histogram",
+        "timeless_metrics_maintenance_step_seconds_bucket{le=\"0.01\"}",
+        "timeless_metrics_maintenance_step_seconds_bucket{le=\"+Inf\"}",
+        "# TYPE timeless_metrics_maintenance_step_cpu_nanoseconds_total counter",
+        "# TYPE timeless_metrics_maintenance_errors_total counter",
+        "# TYPE timeless_metrics_maintenance_last_sweep_step_max_nanoseconds gauge",
+        "# TYPE timeless_metrics_scheduled_flush_seconds histogram",
+        "# TYPE timeless_metrics_scheduled_flush_errors_total counter",
+        "# TYPE timeless_metrics_read_seconds histogram",
+        "# TYPE timeless_metrics_read_wait_nanoseconds_total counter",
+        "# TYPE timeless_metrics_read_retries_total counter",
+        "# TYPE timeless_metrics_wal_high_water_bytes gauge",
+        "# TYPE timeless_metrics_write_busy_retries_total counter",
+        "# TYPE timeless_metrics_rollup_single_bucket_chunks gauge",
         "# TYPE timeless_metrics_oldest_queued_ms gauge",
     ] {
         assert!(text.contains(family), "missing {family} in:\n{text}");

@@ -34,11 +34,40 @@ The exact public storage contract is in the
   the same bounded writer path. Elixir is not in the scrape or ingest path.
 - Flushes persist raw metrics quickly. Scheduled compact/rollup sweeps perform
   first compression separately from size-tiered compressed merges and resume
-  across SQLite transactions capped at 64 metrics series, 262,144 source points,
-  4 MiB encoded input, and 64 rollup groups. They pause between commits for
-  reader admission. JSON stats expose the `extension_compaction_raw_*` and
-  `extension_compaction_merge_*` phase families alongside
-  `compact_step_count`, `compact_step_max_ns`, and `api_read_retries`.
+  across SQLite transactions capped at 1,024 metrics series, 262,144 source
+  points, 4 MiB encoded input, 100 ms of compaction work, and 1,024 rollup
+  groups. They pause between commits for reader admission. JSON stats expose
+  the `extension_compaction_raw_*` and `extension_compaction_merge_*` phase
+  families alongside `compact_step_count`, `compact_step_max_ns`, and
+  `api_read_retries`.
+- How long things take, not only how long in total. JSON stats carry
+  `compact_step_histogram`, `scheduled_flush_histogram` and
+  `api_read_histogram`: a count per duration bucket (10 ms, 50 ms, 100 ms,
+  500 ms, 1 s, 5 s, 10 s, and above), `sum_ns`, `max_ns`, and for the two
+  writer-side ones `cpu_ns`, the writer thread's CPU time. Wall time less
+  CPU time is time the writer was blocked: on a lock, on the disk, or
+  throttled by the kernel. `compact_last_*` describe the most recent sweep,
+  `api_read_wait_ns` is the part of read time spent refused behind a writer,
+  `wal_high_water_bytes` the largest write-ahead log seen after a flush or
+  step, and `rollup_single_bucket_chunks` the rollup chunks not yet merged.
+  `/metrics` serves the same as
+  `timeless_metrics_maintenance_step_seconds`,
+  `timeless_metrics_scheduled_flush_seconds` and
+  `timeless_metrics_read_seconds` histograms, with
+  `*_cpu_nanoseconds_total`, `timeless_metrics_maintenance_errors_total`,
+  `timeless_metrics_scheduled_flush_errors_total`,
+  `timeless_metrics_read_wait_nanoseconds_total`,
+  `timeless_metrics_read_retries_total`,
+  `timeless_metrics_read_errors_total`,
+  `timeless_metrics_maintenance_last_sweep_*`,
+  `timeless_metrics_wal_high_water_bytes`,
+  `timeless_metrics_write_busy_retries_total` and
+  `timeless_metrics_rollup_single_bucket_chunks`.
+- A write refused as busy is tried again. The writer waits up to five
+  seconds for reads in flight before a transaction; if that runs out (one
+  long read is enough), the ingest batch, flush, or maintenance step is
+  attempted up to five more times before its error is reported, and
+  `write_busy_retries` counts each one.
 - Optional first-party OpenTelemetry export is deliberately limited to those
   scheduled compact/rollup sweeps. Set
   `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` to a full OTLP/HTTP endpoint such as

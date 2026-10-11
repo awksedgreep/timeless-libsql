@@ -83,9 +83,59 @@ impl Exposition {
         self.buf.push_str("} 1\n");
     }
 
+    /// A histogram of durations, in the exposition's base unit of seconds.
+    /// `upper_bounds_ns` are the finite bucket bounds, ascending;
+    /// `counts` holds one observation count per bound plus a final one for
+    /// everything above the last bound (not cumulative: this writes the
+    /// running totals `le` buckets carry). `name` is the family name
+    /// without a suffix, conventionally ending in `_seconds`.
+    pub fn duration_histogram(
+        &mut self,
+        name: &str,
+        help: &str,
+        upper_bounds_ns: &[u64],
+        counts: &[u64],
+        sum_ns: u64,
+    ) {
+        debug_assert_eq!(counts.len(), upper_bounds_ns.len() + 1);
+        self.header(name, help, "histogram");
+        let mut running = 0_u64;
+        for (bound, count) in upper_bounds_ns.iter().zip(counts) {
+            running = running.saturating_add(*count);
+            self.buf.push_str(name);
+            self.buf.push_str("_bucket{le=\"");
+            self.buf.push_str(&seconds(*bound));
+            self.buf.push_str("\"} ");
+            self.buf.push_str(&running.to_string());
+            self.buf.push('\n');
+        }
+        let total = counts
+            .iter()
+            .fold(0_u64, |total, count| total.saturating_add(*count));
+        self.buf.push_str(name);
+        self.buf.push_str("_bucket{le=\"+Inf\"} ");
+        self.buf.push_str(&total.to_string());
+        self.buf.push('\n');
+        self.buf.push_str(name);
+        self.buf.push_str("_sum ");
+        self.buf.push_str(&seconds(sum_ns));
+        self.buf.push('\n');
+        self.buf.push_str(name);
+        self.buf.push_str("_count ");
+        self.buf.push_str(&total.to_string());
+        self.buf.push('\n');
+    }
+
     pub fn finish(self) -> String {
         self.buf
     }
+}
+
+/// Nanoseconds as decimal seconds, without float rounding or exponents.
+fn seconds(ns: u64) -> String {
+    let text = format!("{}.{:09}", ns / 1_000_000_000, ns % 1_000_000_000);
+    let trimmed = text.trim_end_matches('0');
+    trimmed.strip_suffix('.').unwrap_or(trimmed).to_string()
 }
 
 fn itoa(value: i64) -> String {
@@ -137,6 +187,27 @@ mod tests {
         assert!(text.contains("# HELP t_things_total Things seen.\n# TYPE t_things_total counter\nt_things_total 42\n"));
         assert!(text.contains("# TYPE t_depth gauge\nt_depth -3\n"));
         assert!(text.contains("t_info{v=\"1.2\\\"x\\\\y\\n\"} 1\n"));
+    }
+
+    #[test]
+    fn a_duration_histogram_is_cumulative_and_in_seconds() {
+        let mut exposition = Exposition::new();
+        exposition.duration_histogram(
+            "t_step_seconds",
+            "Step time.",
+            &[10_000_000, 1_000_000_000],
+            &[3, 2, 1],
+            4_250_000_000,
+        );
+        assert_eq!(
+            exposition.finish(),
+            "# HELP t_step_seconds Step time.\n# TYPE t_step_seconds histogram\n\
+             t_step_seconds_bucket{le=\"0.01\"} 3\n\
+             t_step_seconds_bucket{le=\"1\"} 5\n\
+             t_step_seconds_bucket{le=\"+Inf\"} 6\n\
+             t_step_seconds_sum 4.25\n\
+             t_step_seconds_count 6\n"
+        );
     }
 
     #[test]

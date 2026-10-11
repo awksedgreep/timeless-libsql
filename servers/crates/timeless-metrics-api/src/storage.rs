@@ -80,6 +80,9 @@ pub struct StorageStats {
     pub chunks: i64,
     pub raw_tier_chunks: i64,
     pub rollup_chunks: i64,
+    /// Rollup chunks holding one bucket: unmerged ones. Close to
+    /// `rollup_chunks` means rollup merging is not keeping up (#137).
+    pub rollup_single_bucket_chunks: i64,
     pub disk_points: i64,
     pub buffered_points: i64,
     pub total_points: i64,
@@ -171,6 +174,28 @@ pub struct StorageStats {
     pub compact_yield_count: u64,
     pub compact_yield_total_ns: u64,
     pub compact_errors: u64,
+    /// Every maintenance step, by duration; `cpu_ns` is the writer
+    /// thread's, so `sum_ns - cpu_ns` is time the writer was blocked.
+    pub compact_step_histogram: DurationHistogram,
+    /// The most recent sweep: steps, time in steps, its longest step, and
+    /// when it finished (unix seconds; 0 before the first).
+    pub compact_last_steps: u64,
+    pub compact_last_total_ns: u64,
+    pub compact_last_step_max_ns: u64,
+    pub compact_last_finished_unix: i64,
+    /// Every scheduled flush, by duration, with the writer thread's CPU.
+    pub scheduled_flush_histogram: DurationHistogram,
+    /// Every read, by duration from request to result (CPU not measured).
+    pub api_read_histogram: DurationHistogram,
+    /// Time reads spent in attempts refused behind a writer and the pauses
+    /// between them; part of `api_read_total_ns`.
+    pub api_read_wait_ns: u64,
+    /// Largest write-ahead log seen after a flush or maintenance step.
+    pub wal_high_water_bytes: u64,
+    /// Writes (ingest batches, flushes, maintenance steps) attempted again
+    /// after a busy refusal: the writer had waited out its gate behind a
+    /// reader, or SQLite reported the file busy.
+    pub write_busy_retries: u64,
     pub prune_count: u64,
     pub prune_total_ns: u64,
     pub prune_errors: u64,
@@ -237,6 +262,81 @@ pub struct FlushReport {
     pub api_request_ns: u64,
 }
 
+/// Upper bounds, in nanoseconds, of the buckets a [`DurationHistogram`]
+/// counts into: 10 ms, 50 ms, 100 ms, 500 ms, 1 s, 5 s, 10 s, and above.
+pub const DURATION_BUCKET_BOUNDS_NS: [u64; 7] = [
+    10_000_000,
+    50_000_000,
+    100_000_000,
+    500_000_000,
+    1_000_000_000,
+    5_000_000_000,
+    10_000_000_000,
+];
+
+/// How long one kind of operation has taken, since the server started: a
+/// count per duration bucket, the total, the longest, and the CPU time the
+/// thread doing it used. Wall time less CPU time is time spent blocked — on
+/// a lock, on the disk, or throttled by the kernel — which a total and a
+/// lifetime maximum cannot tell from computation (#141).
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct DurationHistogram {
+    /// One count per bound in [`DURATION_BUCKET_BOUNDS_NS`], then one for
+    /// everything longer. Not cumulative.
+    pub counts: [u64; 8],
+    pub sum_ns: u64,
+    pub max_ns: u64,
+    /// CPU time of the thread across the same operations; 0 where it is
+    /// not measured.
+    pub cpu_ns: u64,
+}
+
+impl DurationHistogram {
+    fn record(&mut self, wall_ns: u64, cpu_ns: u64) {
+        let bucket = DURATION_BUCKET_BOUNDS_NS
+            .iter()
+            .position(|bound| wall_ns <= *bound)
+            .unwrap_or(DURATION_BUCKET_BOUNDS_NS.len());
+        self.counts[bucket] = self.counts[bucket].saturating_add(1);
+        self.sum_ns = self.sum_ns.saturating_add(wall_ns);
+        self.max_ns = self.max_ns.max(wall_ns);
+        self.cpu_ns = self.cpu_ns.saturating_add(cpu_ns);
+    }
+
+    pub fn count(&self) -> u64 {
+        self.counts
+            .iter()
+            .fold(0, |total, count| total.saturating_add(*count))
+    }
+}
+
+/// CPU time the calling thread has used, in nanoseconds; 0 where the
+/// platform has no per-thread clock.
+fn thread_cpu_ns() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `time` is a valid timespec for the call to fill.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } == 0 {
+            return (time.tv_sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(time.tv_nsec as u64);
+        }
+    }
+    0
+}
+
+/// What a read cost beyond its own work: attempts refused behind a writer.
+#[derive(Clone, Copy, Debug, Default)]
+struct ReadAttempts {
+    retries: u64,
+    /// Time in refused attempts and the pauses between them.
+    wait_ns: u64,
+}
+
 #[derive(Default)]
 struct ApiProfile {
     sum_profile: query::InstantSumProfile,
@@ -296,6 +396,16 @@ struct ApiProfile {
     compact_yield_count: u64,
     compact_yield_total_ns: u64,
     compact_errors: u64,
+    compact_steps: DurationHistogram,
+    compact_last_steps: u64,
+    compact_last_total_ns: u64,
+    compact_last_step_max_ns: u64,
+    compact_last_finished_unix: i64,
+    write_busy_retries: u64,
+    scheduled_flushes: DurationHistogram,
+    reads: DurationHistogram,
+    read_wait_ns: u64,
+    wal_high_water_bytes: u64,
     prune_count: u64,
     prune_total_ns: u64,
     prune_errors: u64,
@@ -387,7 +497,7 @@ enum ReadCommand {
     Query {
         request: Box<ReadRequest>,
         cancelled: Arc<AtomicBool>,
-        reply: oneshot::Sender<(Result<ReadOutput, String>, u64)>,
+        reply: oneshot::Sender<(Result<ReadOutput, String>, ReadAttempts)>,
     },
     Shutdown,
 }
@@ -1061,17 +1171,22 @@ impl Storage {
         {
             cancellation.disarm();
             let error = "SQLite reader is not running".to_string();
-            record_read_completion(&self.0.profile, started, 0, &Err(error.clone()));
+            record_read_completion(
+                &self.0.profile,
+                started,
+                ReadAttempts::default(),
+                &Err(error.clone()),
+            );
             return Err(error);
         }
-        let (result, retries) = reply_rx.await.unwrap_or_else(|_| {
+        let (result, attempts) = reply_rx.await.unwrap_or_else(|_| {
             (
                 Err("SQLite reader stopped before query completed".to_string()),
-                0,
+                ReadAttempts::default(),
             )
         });
         cancellation.disarm();
-        record_read_completion(&self.0.profile, started, retries, &result);
+        record_read_completion(&self.0.profile, started, attempts, &result);
         result
     }
 
@@ -1144,13 +1259,16 @@ impl Drop for ReadCancellation {
 fn record_read_completion(
     profile: &StdMutex<ApiProfile>,
     started: Instant,
-    retries: u64,
+    attempts: ReadAttempts,
     result: &Result<ReadOutput, String>,
 ) {
     let mut profile = profile_lock(profile);
+    let read_ns = elapsed_ns(started);
     profile.read_in_flight = profile.read_in_flight.saturating_sub(1);
-    profile.read_total_ns = profile.read_total_ns.saturating_add(elapsed_ns(started));
-    profile.read_retries = profile.read_retries.saturating_add(retries);
+    profile.read_total_ns = profile.read_total_ns.saturating_add(read_ns);
+    profile.reads.record(read_ns, 0);
+    profile.read_retries = profile.read_retries.saturating_add(attempts.retries);
+    profile.read_wait_ns = profile.read_wait_ns.saturating_add(attempts.wait_ns);
     match result {
         Ok(output) => {
             profile.sum_profile.add(output.sum_profile);
@@ -1215,10 +1333,11 @@ fn writer_main(
                 record_queue_start(&profile, Some(points), body_bytes);
                 let started = Instant::now();
                 let result =
-                    insert_named_batch(&conn, table, &blob, points).map(|()| IngestOutcome {
-                        points,
-                        import_errors: 0,
-                    });
+                    retry_busy_write(&profile, || insert_named_batch(&conn, table, &blob, points))
+                        .map(|()| IngestOutcome {
+                            points,
+                            import_errors: 0,
+                        });
                 let insert_ns = elapsed_ns(started);
                 record_queue_completion(&profile, Some(points), body_bytes, insert_ns, &result);
                 // The admitting caller hears the failure directly AND the
@@ -1235,7 +1354,9 @@ fn writer_main(
             } => {
                 record_queue_start(&profile, None, body_bytes);
                 let started = Instant::now();
-                let result = insert_prometheus_body(&conn, table, body.as_ref());
+                let result = retry_busy_write(&profile, || {
+                    insert_prometheus_body(&conn, table, body.as_ref())
+                });
                 let insert_ns = elapsed_ns(started);
                 record_queue_completion(&profile, None, body_bytes, insert_ns, &result);
                 let _ = reply.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
@@ -1253,14 +1374,21 @@ fn writer_main(
                 reply,
             } => {
                 let started = Instant::now();
-                let flush_result = run_command(&conn, table, "flush", "flush metrics");
+                let cpu_started = thread_cpu_ns();
+                let flush_result = retry_busy_write(&profile, || {
+                    run_command(&conn, table, "flush", "flush metrics")
+                });
                 let flush_ns = elapsed_ns(started);
+                let flush_cpu_ns = thread_cpu_ns().saturating_sub(cpu_started);
+                let wal_bytes = file_size(&suffix_path(&database_path, "-wal"));
                 {
                     let mut api = profile_lock(&profile);
+                    api.wal_high_water_bytes = api.wal_high_water_bytes.max(wal_bytes);
                     if explicit {
                         api.explicit_flush_sqlite_ns =
                             api.explicit_flush_sqlite_ns.saturating_add(flush_ns);
                     } else {
+                        api.scheduled_flushes.record(flush_ns, flush_cpu_ns);
                         api.scheduled_flush_count = api.scheduled_flush_count.saturating_add(1);
                         api.scheduled_flush_total_ns =
                             api.scheduled_flush_total_ns.saturating_add(flush_ns);
@@ -1290,16 +1418,19 @@ fn writer_main(
                 reply,
             } => {
                 let started = Instant::now();
+                let cpu_started = thread_cpu_ns();
                 let step = |conn: &Connection| {
-                    run_compact_step(conn, table, COMPACT_STEP_WORK_ITEMS, cutoff_ts, sweep)
-                        .and_then(|more| {
-                            if cleanup_rollups {
-                                run_clear_rollup_step(conn, table, COMPACT_STEP_WORK_ITEMS)
-                                    .map(|clear_more| more || clear_more)
-                            } else {
-                                Ok(more)
-                            }
-                        })
+                    retry_busy_write(&profile, || {
+                        run_compact_step(conn, table, COMPACT_STEP_WORK_ITEMS, cutoff_ts, sweep)
+                    })
+                    .and_then(|more| {
+                        if cleanup_rollups {
+                            run_clear_rollup_step(conn, table, COMPACT_STEP_WORK_ITEMS)
+                                .map(|clear_more| more || clear_more)
+                        } else {
+                            Ok(more)
+                        }
+                    })
                 };
                 let result = if with_work {
                     compaction_work(&conn, table).and_then(|before| {
@@ -1316,7 +1447,15 @@ fn writer_main(
                         work: CompactionWork::default(),
                     })
                 };
-                let _ = reply.send((result, elapsed_ns(started)));
+                let step_ns = elapsed_ns(started);
+                let step_cpu_ns = thread_cpu_ns().saturating_sub(cpu_started);
+                let wal_bytes = file_size(&suffix_path(&database_path, "-wal"));
+                {
+                    let mut api = profile_lock(&profile);
+                    api.compact_steps.record(step_ns, step_cpu_ns);
+                    api.wal_high_water_bytes = api.wal_high_water_bytes.max(wal_bytes);
+                }
+                let _ = reply.send((result, step_ns));
             }
             WriteCommand::Prune {
                 cutoff_seconds,
@@ -1414,7 +1553,7 @@ fn reader_main(
                 let mut retries = 0_u64;
                 let result = retry_read(
                     || storage_stats(&conn, table),
-                    || retries = retries.saturating_add(1),
+                    |_| retries = retries.saturating_add(1),
                 )
                 .map(|stats| (stats, elapsed_ns(started), retries));
                 let _ = reply.send(result);
@@ -1425,7 +1564,7 @@ fn reader_main(
                 reply,
             } => {
                 let progress_cancelled = Arc::clone(&cancelled);
-                let mut retries = 0_u64;
+                let mut attempts = ReadAttempts::default();
                 let result = conn
                     .progress_handler(
                         1_000,
@@ -1442,7 +1581,10 @@ fn reader_main(
                                     &cancelled,
                                 )
                             },
-                            || retries = retries.saturating_add(1),
+                            |wait_ns| {
+                                attempts.retries = attempts.retries.saturating_add(1);
+                                attempts.wait_ns = attempts.wait_ns.saturating_add(wait_ns);
+                            },
                         )
                     });
                 let cleared = conn.progress_handler(0, None::<fn() -> bool>);
@@ -1453,7 +1595,7 @@ fn reader_main(
                         Err(format!("clear query cancellation handler: {error}"))
                     }
                 };
-                let _ = reply.send((result, retries));
+                let _ = reply.send((result, attempts));
             }
             ReadCommand::Shutdown => return Ok(()),
         }
@@ -1914,6 +2056,7 @@ fn storage_stats(conn: &Connection, table: MetricsTable) -> Result<StorageStats,
         chunks: raw_tier_chunks.saturating_add(rollup_entries),
         raw_tier_chunks,
         rollup_chunks: rollup_entries,
+        rollup_single_bucket_chunks: integer("rollup_single_bucket_chunks"),
         disk_points,
         buffered_points,
         total_points,
@@ -2112,6 +2255,16 @@ fn apply_profile(stats: &mut StorageStats, profile: &ApiProfile) {
     stats.compact_yield_count = profile.compact_yield_count;
     stats.compact_yield_total_ns = profile.compact_yield_total_ns;
     stats.compact_errors = profile.compact_errors;
+    stats.compact_step_histogram = profile.compact_steps;
+    stats.compact_last_steps = profile.compact_last_steps;
+    stats.compact_last_total_ns = profile.compact_last_total_ns;
+    stats.compact_last_step_max_ns = profile.compact_last_step_max_ns;
+    stats.compact_last_finished_unix = profile.compact_last_finished_unix;
+    stats.scheduled_flush_histogram = profile.scheduled_flushes;
+    stats.api_read_histogram = profile.reads;
+    stats.api_read_wait_ns = profile.read_wait_ns;
+    stats.wal_high_water_bytes = profile.wal_high_water_bytes;
+    stats.write_busy_retries = profile.write_busy_retries;
     stats.prune_count = profile.prune_count;
     stats.prune_total_ns = profile.prune_total_ns;
     stats.prune_errors = profile.prune_errors;
@@ -2257,6 +2410,10 @@ fn record_compaction(
     profile.compact_step_count = profile.compact_step_count.saturating_add(steps);
     profile.compact_total_ns = profile.compact_total_ns.saturating_add(total_ns);
     profile.compact_step_max_ns = profile.compact_step_max_ns.max(step_max_ns);
+    profile.compact_last_steps = steps;
+    profile.compact_last_total_ns = total_ns;
+    profile.compact_last_step_max_ns = step_max_ns;
+    profile.compact_last_finished_unix = unix_seconds_now();
     if let Err(error) = result {
         profile.compact_errors = profile.compact_errors.saturating_add(1);
         profile.last_error = Some(error.clone());
@@ -2305,17 +2462,56 @@ fn file_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// A write refused as busy is tried again this many times before its error
+/// is reported. The refusal comes before the statement has changed anything
+/// (the extension's writer gate is taken as the transaction begins, after
+/// waiting five seconds for readers to finish), and its message says to
+/// retry, as SQLite's own busy does. Without this, one read that ran for
+/// five seconds failed whichever ingest batch, flush, or maintenance step
+/// was waiting behind it (#140).
+const WRITE_BUSY_RETRIES: u32 = 5;
+
+fn is_retryable_write(error: &str) -> bool {
+    error.contains("is busy (timed out")
+        || error.contains("database is locked")
+        || error.contains("database is busy")
+}
+
+/// Run a write, again while it is refused as busy, up to
+/// [`WRITE_BUSY_RETRIES`] more times. Each refusal has already waited out
+/// a timeout, so there is no pause between attempts.
+fn retry_busy_write<T>(
+    profile: &StdMutex<ApiProfile>,
+    mut operation: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut retries = 0;
+    loop {
+        match operation() {
+            Err(error) if retries < WRITE_BUSY_RETRIES && is_retryable_write(&error) => {
+                retries += 1;
+                let mut profile = profile_lock(profile);
+                profile.write_busy_retries = profile.write_busy_retries.saturating_add(1);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Run a read, starting it again while a writer refuses it, for up to five
+/// seconds. `retried` is told, for each refused attempt, how long that
+/// attempt and the pause after it took.
 fn retry_read<T>(
     mut operation: impl FnMut() -> Result<T, String>,
-    mut retried: impl FnMut(),
+    mut retried: impl FnMut(u64),
 ) -> Result<T, String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
+        let attempt = Instant::now();
         match operation() {
             Ok(value) => return Ok(value),
             Err(error) if Instant::now() < deadline && is_retryable_read(&error) => {
-                retried();
                 thread::sleep(Duration::from_millis(1));
+                retried(elapsed_ns(attempt));
             }
             Err(error) => return Err(error),
         }
@@ -2391,6 +2587,7 @@ mod tests {
     fn pending_writer_conflicts_are_retried() {
         let attempts = Cell::new(0_u64);
         let retries = Cell::new(0_u64);
+        let waited = Cell::new(0_u64);
         let value = retry_read(
             || {
                 attempts.set(attempts.get() + 1);
@@ -2400,12 +2597,97 @@ mod tests {
                     Ok(42)
                 }
             },
-            || retries.set(retries.get() + 1),
+            |wait_ns| {
+                retries.set(retries.get() + 1);
+                waited.set(waited.get() + wait_ns);
+            },
         )
         .unwrap();
         assert_eq!(value, 42);
         assert_eq!(attempts.get(), 2);
         assert_eq!(retries.get(), 1);
+        assert!(
+            waited.get() >= 1_000_000,
+            "a refused attempt and its pause are reported: {} ns",
+            waited.get()
+        );
+    }
+
+    #[test]
+    fn a_busy_write_is_tried_again_and_other_errors_are_not() {
+        let profile = StdMutex::new(ApiProfile::default());
+        let attempts = Cell::new(0_u32);
+        let value = retry_busy_write(&profile, || {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() <= 2 {
+                Err(
+                    "flush metrics: table \"metric_samples\" is busy (timed out after 5s \
+                     waiting for no writer and 1 active reader(s) — retry, as for SQLITE_BUSY)"
+                        .to_string(),
+                )
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(value, Ok(7));
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(profile_lock(&profile).write_busy_retries, 2);
+
+        // An error that is not a busy refusal is reported at once.
+        attempts.set(0);
+        let failed: Result<(), String> = retry_busy_write(&profile, || {
+            attempts.set(attempts.get() + 1);
+            Err("batch blob: unsupported version".to_string())
+        });
+        assert!(failed.is_err());
+        assert_eq!(attempts.get(), 1);
+
+        // A writer that stays busy is given up on, after the bound.
+        attempts.set(0);
+        let stuck: Result<(), String> = retry_busy_write(&profile, || {
+            attempts.set(attempts.get() + 1);
+            Err("database is locked".to_string())
+        });
+        assert!(stuck.is_err());
+        assert_eq!(attempts.get(), WRITE_BUSY_RETRIES + 1);
+    }
+
+    #[test]
+    fn a_duration_histogram_counts_each_observation_once() {
+        let mut histogram = DurationHistogram::default();
+        for (wall_ns, cpu_ns) in [
+            (1, 1),
+            (10_000_000, 2_000_000),
+            (10_000_001, 0),
+            (900_000_000, 100_000_000),
+            (9_000_000_000, 1_000_000_000),
+            (30_000_000_000, 0),
+        ] {
+            histogram.record(wall_ns, cpu_ns);
+        }
+        // <=10ms, <=50ms, <=100ms, <=500ms, <=1s, <=5s, <=10s, above.
+        assert_eq!(histogram.counts, [2, 1, 0, 0, 1, 0, 1, 1]);
+        assert_eq!(histogram.count(), 6);
+        assert_eq!(histogram.max_ns, 30_000_000_000);
+        assert_eq!(histogram.sum_ns, 39_920_000_002);
+        assert_eq!(histogram.cpu_ns, 1_102_000_001);
+    }
+
+    #[test]
+    fn thread_cpu_time_advances_with_work_and_not_with_sleep() {
+        let before = thread_cpu_ns();
+        thread::sleep(Duration::from_millis(30));
+        let slept = thread_cpu_ns().saturating_sub(before);
+        let mut x = 0_u64;
+        for i in 0..20_000_000_u64 {
+            x = x.wrapping_mul(31).wrapping_add(i);
+        }
+        std::hint::black_box(x);
+        let worked = thread_cpu_ns().saturating_sub(before);
+        if cfg!(unix) {
+            assert!(slept < 20_000_000, "sleeping is not CPU time: {slept} ns");
+            assert!(worked > slept, "work is CPU time: {worked} vs {slept} ns");
+        }
     }
 
     #[test]

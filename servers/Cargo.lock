@@ -1947,6 +1947,7 @@ dependencies = [
  "chrono",
  "form_urlencoded",
  "fs2",
+ "libc",
  "opentelemetry",
  "opentelemetry_sdk",
  "promql-parser",

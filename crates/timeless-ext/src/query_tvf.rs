@@ -5428,6 +5428,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                     Value::Integer(info.rollup_chunk_count as i64),
                 ));
                 rows.push((
+                    "rollup_single_bucket_chunks",
+                    Value::Integer(info.rollup_single_bucket_chunks as i64),
+                ));
+                rows.push((
                     "index_bytes",
                     // Exact per-index page accounting requires a full dbstat
                     // walk. Metrics exposes database/page/freelist bytes at

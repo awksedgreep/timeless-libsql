@@ -21,6 +21,37 @@ whose catalog is on disk has it rebuilt over raw rows only, once (a few
 seconds per several million chunk rows). An older extension opening the
 store afterwards works with either shape.
 
+### Added
+
+- **The metrics server reports how long things take, and how long it was
+  blocked (#141).** `/select/metrics/stats` carries duration histograms for
+  maintenance steps, scheduled flushes, and reads (a count per bucket from
+  10 ms to above 10 s, total, and longest), with the writer thread's CPU time
+  beside the two writer-side ones: wall time less CPU time is time blocked on
+  a lock, the disk, or kernel write throttling. It also reports the most
+  recent sweep (`compact_last_*`), time reads spent refused behind a writer
+  (`api_read_wait_ns`), the write-ahead log's high water
+  (`wal_high_water_bytes`), busy write retries, and
+  `rollup_single_bucket_chunks`. `/metrics` serves them as
+  `timeless_metrics_maintenance_step_seconds`,
+  `timeless_metrics_scheduled_flush_seconds`, and
+  `timeless_metrics_read_seconds` histograms with their CPU, error, retry,
+  and last-sweep series. `timeless_stats` gains `rollup_single_bucket_chunks`.
+- **Signal servers warn at startup when their database is on btrfs with
+  copy-on-write (#142),** where rewritten pages fragment the file and the
+  kernel can stall the writer for seconds; the servers README says where to
+  put a database and how to convert one.
+
+### Fixed
+
+- **A write refused as busy is tried again (#140).** The metrics writer
+  waits up to five seconds for reads in flight before a transaction. When
+  that ran out (one long read is enough), the ingest batch was failed back to
+  its sender, a flush was skipped until the next interval, or a maintenance
+  sweep was abandoned. Each is now attempted up to five more times before its
+  error is reported; the refusal comes before the statement has changed
+  anything.
+
 ### Changed
 
 - **A metrics table keeps its `(series_id, ts_min)` chunk index only while
