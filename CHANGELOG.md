@@ -10,9 +10,11 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.15 -->
+<!-- release-target: 0.8.16 -->
 
 ## [Unreleased]
+
+## [0.8.16] — 2026-10-11
 
 Upgrade notes: the first writable open of a metrics table settles its
 `<t>_chunks_series_ts` index. A table whose catalog is held in memory
