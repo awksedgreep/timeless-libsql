@@ -265,8 +265,9 @@ struct RollupIndex {
     groups: HashMap<RollupGroupKey, Vec<RollupIndexEntry>>,
     len: usize,
     /// Entries holding exactly one bucket: what a tier's chunks look like
-    /// before they are merged, and so a measure of merging keeping up
-    /// (#137, #141). Kept as entries come and go.
+    /// before they are merged. A group holds up to three (a run of four
+    /// merges), so many more than three a group means merging is not
+    /// keeping up (#137, #141). Kept as entries come and go.
     single_bucket: usize,
 }
 

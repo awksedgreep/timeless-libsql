@@ -80,8 +80,10 @@ pub struct StorageStats {
     pub chunks: i64,
     pub raw_tier_chunks: i64,
     pub rollup_chunks: i64,
-    /// Rollup chunks holding one bucket: unmerged ones. Close to
-    /// `rollup_chunks` means rollup merging is not keeping up (#137).
+    /// Rollup chunks holding one bucket: unmerged ones. Up to three per
+    /// series per tier is normal (a run of four merges), so on a healthy
+    /// store they can outnumber the merged chunks; many more than
+    /// `3 x series x tiers` means rollup merging is not keeping up (#137).
     pub rollup_single_bucket_chunks: i64,
     pub disk_points: i64,
     pub buffered_points: i64,

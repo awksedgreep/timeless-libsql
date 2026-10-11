@@ -547,8 +547,9 @@ async fn self_metrics(State(storage): State<Storage>) -> Response {
             );
             x.gauge(
                 "timeless_metrics_rollup_single_bucket_chunks",
-                "Rollup chunks holding one bucket (not yet merged). Close to \
-                 the rollup chunk count means rollup merging is not keeping up.",
+                "Rollup chunks holding one bucket (not yet merged). Up to three \
+                 per series per rollup tier is normal, since a run of four merges; \
+                 many more than that means rollup merging is not keeping up.",
                 stats.rollup_single_bucket_chunks,
             );
             x.counter(
