@@ -471,7 +471,9 @@ fn bounded_metrics_maintenance_drains_across_commit_sized_steps() {
 #[test]
 fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail() {
     const ROUNDS: usize = 64;
-    const POINTS_PER_ROUND: usize = 1024;
+    // A thirty-second of the target, so the tiers below fall where the
+    // comment at the end says whatever the target is.
+    const POINTS_PER_ROUND: usize = timeless_core::METRICS_COMPACTION_TARGET_POINTS / 32;
 
     let engine = Engine::with_store(
         Box::new(MemChunkStore::new()),
@@ -523,10 +525,10 @@ fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail()
     assert_eq!(info.compaction_raw_points, ingested);
     assert_eq!(info.compaction_raw_input_bytes, ingested * 16);
     assert!(info.compaction_raw_output_bytes < info.compaction_raw_input_bytes);
-    // Four 1K chunks merge at every fourth round; the 4K joins four more at
-    // the eighth, and 4K + 8K + 4K at the sixteenth; 4K + 8K + 16K at the
-    // thirty-second makes the target. Over 32 rounds that is 4 + 8 + 4 + 16
-    // + 4 + 8 + 4 + 32 = 80K rewritten for 32K ingested.
+    // In rounds' worth of points: four 1s merge at every fourth round; the 4
+    // joins four more at the eighth, and 4 + 8 + 4 at the sixteenth; 4 + 8
+    // + 16 at the thirty-second makes the target. Over 32 rounds that is 4 +
+    // 8 + 4 + 16 + 4 + 8 + 4 + 32 = 80 rewritten for 32 ingested.
     assert_eq!(info.compaction_merge_points, ingested * 5 / 2);
     assert!(info.compaction_merge_input_bytes > 0);
     assert!(info.compaction_merge_output_bytes > 0);
@@ -539,13 +541,68 @@ fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail()
     );
 }
 
+/// A chunk written under an earlier, larger target is cut down to the
+/// target, once: a read decodes a chunk whole, so an oversized chunk makes
+/// every read of its series pay for all of it (#145).
+#[test]
+fn an_oversized_compressed_chunk_is_cut_down_to_the_target_once() {
+    const TARGET: usize = timeless_core::METRICS_COMPACTION_TARGET_POINTS;
+    const POINTS: usize = TARGET * 5 + TARGET / 2;
+    let store = Arc::new(MemChunkStore::new());
+    let registry_engine = Engine::with_store(
+        Box::new(SharedMemChunkStore(store.clone())),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    let series_id = registry_engine
+        .resolve_cached("oversized", &labels())
+        .unwrap();
+    registry_engine.flush_all().unwrap();
+    drop(registry_engine);
+    store
+        .put_chunks(&[compressed_chunk(series_id, 0, POINTS)])
+        .unwrap();
+    let engine = Engine::with_store(
+        Box::new(SharedMemChunkStore(store)),
+        1_000_000,
+        0,
+        3,
+        64 << 20,
+        true,
+    )
+    .unwrap();
+    assert_eq!(engine.info().chunk_count, 1);
+
+    let (_, sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+    assert_eq!(sources, 1, "the oversized chunk is rewritten on its own");
+    assert!(!more, "five full chunks and a half are nothing to merge");
+    assert_eq!(engine.info().chunk_count, 6);
+
+    // Full chunks are left alone, and the half has no peer to join.
+    let (_, sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+    assert_eq!((sources, more), (0, false));
+    assert_eq!(engine.info().chunk_count, 6);
+
+    let points = engine
+        .query_range_by_id(series_id, i64::MIN, i64::MAX)
+        .unwrap();
+    assert_eq!(points.len(), POINTS);
+    assert_eq!(points.first().unwrap().0, 0);
+    assert_eq!(points.last().unwrap().0, POINTS as i64 - 1);
+}
+
 #[test]
 fn compressed_merge_reports_a_newly_unlocked_next_tier() {
     const CHUNKS: usize = 6;
-    const POINTS_PER_CHUNK: usize = 8 * 1024;
-    // Five equal peers fill the planner's 125%-of-target group. Its 40K
-    // replacement splits into 32K + 8K; that remainder and the sixth 8K
-    // source form a newly actionable tier only after the first swap commits.
+    const POINTS_PER_CHUNK: usize = timeless_core::METRICS_COMPACTION_TARGET_POINTS / 4;
+    // Five equal peers, a quarter of the target each, fill the planner's
+    // 125%-of-target group. Its replacement splits into a full chunk and a
+    // quarter; that remainder and the sixth source form a newly actionable
+    // tier only after the first swap commits.
     let store = Arc::new(MemChunkStore::new());
     let registry_engine = Engine::with_store(
         Box::new(SharedMemChunkStore(store.clone())),
@@ -583,7 +640,7 @@ fn compressed_merge_reports_a_newly_unlocked_next_tier() {
 
     let (_, first_sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
     assert_eq!(first_sources, 5);
-    assert!(more, "the committed 8K remainder unlocks another tier");
+    assert!(more, "the committed remainder unlocks another tier");
 
     let (_, second_sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
     assert_eq!(second_sources, 2);
@@ -935,7 +992,8 @@ fn a_planned_group_whose_chunks_retention_took_is_passed_over() {
 #[test]
 fn bounded_metrics_compaction_caps_each_transaction_by_input_points_and_bytes() {
     const SERIES: usize = 9;
-    const POINTS: usize = timeless_core::METRICS_COMPACTION_TARGET_POINTS;
+    // An eighth of a step's point budget a series, so eight fit a step.
+    const POINTS: usize = timeless_core::METRICS_COMPACTION_STEP_INPUT_POINTS / 8;
 
     let engine = Engine::with_store(
         Box::new(MemChunkStore::new()),
@@ -963,7 +1021,7 @@ fn bounded_metrics_compaction_caps_each_transaction_by_input_points_and_bytes() 
     let before = engine.info();
     let (series, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
     let after = engine.info();
-    assert_eq!(series, 8, "point budget should admit eight target groups");
+    assert_eq!(series, 8, "point budget should admit eight groups");
     assert!(more);
     assert_eq!(
         after.compaction_raw_points - before.compaction_raw_points,

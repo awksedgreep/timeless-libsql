@@ -14,6 +14,26 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+Upgrade notes: the merge target of a compressed metrics chunk is now 2,048
+points (was 32,768). Maintenance cuts existing larger chunks down to it, a
+bounded step at a time, the first time it runs on a store that has them; on
+a 582-million-point store that was two minutes of work in all. A table
+sampled no more often than every five minutes with a seven-day raw window
+has no chunk that large and is not rewritten. Raw retention removes whole
+chunks, so a store whose chunks spanned days may shrink to its configured
+window at the same time.
+
+### Changed
+
+- A compressed metrics chunk holds at most 2,048 points, and a larger one is
+  cut down by compaction. A read decodes a chunk whole, so reading one moment
+  of a densely sampled series' older data cost a decode of up to 32,768
+  points a series. On a 10-second-interval store of 230,000 series, the 33
+  `timeless_latest` reads behind one screen of a moment three days back took
+  866 ms before and 184 ms after; at six days, 977 ms and 176 ms. Storage is
+  unchanged within noise (payload 98 MiB before, 103 MiB after), for 419,000
+  raw chunks instead of 252,000 (#145).
+
 ### Fixed
 
 - A metrics table whose catalog is on disk (`index_cache` a size) no longer

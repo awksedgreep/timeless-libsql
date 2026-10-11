@@ -317,7 +317,7 @@ impl ShadowTableStore {
             ),
             compaction_candidates_sql: format!(
                 "SELECT {META} FROM {chunks} \
-                 WHERE resolution = 0 AND ts_max < ?1 AND (encoding = ?2 OR point_count < ?3) \
+                 WHERE resolution = 0 AND ts_max < ?1 AND (encoding = ?2 OR point_count <> ?3) \
                  ORDER BY series_id, ts_min, id"
             ),
             chunks_present_sql: format!(

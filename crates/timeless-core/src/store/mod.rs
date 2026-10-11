@@ -448,8 +448,9 @@ pub trait ChunkStore: Send + Sync {
     }
 
     /// Raw chunks a compaction sweep may act on: newest sample before
-    /// `cutoff_ts`, and either still encoded as `raw_encoding` or smaller
-    /// than `target_points`. Ordered by series id, then `min_ts`, then
+    /// `cutoff_ts`, and either still encoded as `raw_encoding` or holding
+    /// anything but exactly `target_points` (smaller ones may merge, larger
+    /// ones are cut down). Ordered by series id, then `min_ts`, then
     /// insertion.
     fn compaction_candidates(
         &self,

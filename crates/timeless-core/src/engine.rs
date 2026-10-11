@@ -36,7 +36,17 @@ const COMPACT_MIN_AGE_SECS: i64 = 3600;
 /// Target size of one compressed metrics chunk. Size-tiered compaction may
 /// briefly plan up to 125% of this many input points so two half-full peers
 /// can converge instead of remaining stranded just above the target.
-pub const METRICS_COMPACTION_TARGET_POINTS: usize = 32 * 1024;
+///
+/// A read decodes a chunk whole, so this is what a read of one moment
+/// costs per series: about 0.04 ms plus 0.011 ms per thousand points. At
+/// the earlier target of 32,768 a densely sampled series' older data cost
+/// 0.38 ms a series to read one sample from; at 2,048 it costs 0.07 ms,
+/// close to the floor, and a chunk costs so little to store above a
+/// thousand points that the extra rows are noise (#145). A series sampled
+/// every five minutes holds 2,016 points in seven days, so the usual raw
+/// window of a server is still one chunk a series. A chunk also sets the
+/// granularity of retention, which removes whole chunks.
+pub const METRICS_COMPACTION_TARGET_POINTS: usize = 2 * 1024;
 
 /// Default per-transaction compaction budgets used by the public bounded
 /// command. A single pre-existing source larger than either budget is allowed
@@ -4731,9 +4741,12 @@ impl Engine {
         let mut series: Vec<MetricsCandidate<'a>> = Vec::new();
         let mut current: Option<PartitionKey> = None;
         for (chunk_key, meta) in entries {
+            // Anything but a compressed chunk of exactly the target: smaller
+            // ones may merge, and a larger one (written under an earlier,
+            // larger target) is cut down to it (#145).
             let eligible = meta.max_ts < cutoff_ts
                 && (meta.encoding == ENC_RAW
-                    || meta.point_count < METRICS_COMPACTION_TARGET_POINTS as u32);
+                    || meta.point_count != METRICS_COMPACTION_TARGET_POINTS as u32);
             if !eligible {
                 continue;
             }
@@ -4809,6 +4822,20 @@ impl Engine {
                 key,
                 sources: owned_sources(&current),
                 kind: MetricsCompactionKind::RawCompression,
+            });
+        }
+
+        // A compressed chunk over the target is rewritten on its own: the
+        // encoder cuts it at the target, and the full pieces are then left
+        // alone. Only its tail, if any, is small enough to merge later.
+        let (oversized, compressed): (Vec<_>, Vec<_>) = compressed
+            .into_iter()
+            .partition(|(_, meta)| meta.point_count as usize > METRICS_COMPACTION_TARGET_POINTS);
+        for source in oversized {
+            groups.push(MetricsCompactionGroup {
+                key,
+                sources: owned_sources(&[source]),
+                kind: MetricsCompactionKind::CompressedMerge,
             });
         }
 
