@@ -10,9 +10,16 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.14 -->
+<!-- release-target: 0.8.15 -->
 
 ## [Unreleased]
+
+## [0.8.15] — 2026-10-11
+
+Upgrade notes: the first maintenance sweep after upgrading merges a store's
+backlog of one-bucket rollup chunks, in bounded steps. On a 700,000-series
+store with 61 hours of hourly rollups that was one 134-second sweep writing
+about 6.5 GB, once.
 
 ### Fixed
 
