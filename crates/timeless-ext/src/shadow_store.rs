@@ -197,6 +197,7 @@ pub(crate) struct ShadowTableStore {
     chunk_totals_sql: String,
     /// `chunk_metas_one_sql` with the payload columns after `META`'s.
     chunk_rows_one_sql: String,
+    chunk_stats_one_sql: String,
     chunk_series_ids_sql: String,
     chunk_locs_before_sql: String,
     chunk_locs_after_sql: String,
@@ -286,6 +287,10 @@ impl ShadowTableStore {
                  JOIN {chunks} AS c ON c.series_id = wanted.value \
                  WHERE c.resolution = 0 AND c.ts_min <= ?2 AND c.ts_max >= ?3 \
                  ORDER BY c.series_id, c.ts_min, c.id"
+            ),
+            chunk_stats_one_sql: format!(
+                "SELECT series_id, MIN(ts_min), MAX(ts_max), SUM(point_count), COUNT(*) \
+                 FROM {chunks} WHERE series_id = ?1 AND resolution = 0 GROUP BY series_id"
             ),
             chunk_stats_some_sql: format!(
                 "SELECT c.series_id, MIN(c.ts_min), MAX(c.ts_max), SUM(c.point_count), COUNT(*) \
@@ -1469,6 +1474,26 @@ impl ChunkStore for ShadowTableStore {
         };
         let rows = match series_ids {
             Some([]) => return Ok(Vec::new()),
+            // A handful of series: an index range each, without the
+            // list, its join and the grouping.
+            Some(ids) if ids.len() <= 64 => {
+                let mut stmt = conn
+                    .prepare_cached(&self.chunk_stats_one_sql)
+                    .map_err(|e| format!("prepare chunk stats: {e}"))?;
+                let mut wanted = ids.to_vec();
+                wanted.sort_unstable();
+                wanted.dedup();
+                let mut rows = Vec::with_capacity(wanted.len());
+                for id in wanted {
+                    rows.extend(
+                        stmt.query_map([id], map)
+                            .map_err(|e| format!("chunk stats: {e}"))?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|e| format!("chunk stats: {e}"))?,
+                    );
+                }
+                Ok(rows)
+            }
             Some(ids) => conn
                 .prepare_cached(&self.chunk_stats_some_sql)
                 .map_err(|e| format!("prepare chunk stats: {e}"))?

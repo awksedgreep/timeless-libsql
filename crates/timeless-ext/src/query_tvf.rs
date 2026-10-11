@@ -5321,6 +5321,10 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                         Value::Integer(info.series_resolve_cache_entries as i64),
                     ),
                     (
+                        "selection_cache_entries",
+                        Value::Integer(info.selection_cache_entries as i64),
+                    ),
+                    (
                         "retention_series_removed",
                         Value::Integer(info.retention_series_removed as i64),
                     ),

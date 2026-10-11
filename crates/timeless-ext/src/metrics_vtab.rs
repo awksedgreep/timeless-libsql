@@ -2461,6 +2461,15 @@ mod disk_series_tests {
             .unwrap()
     }
 
+    fn strings_i64(db: &Connection, sql: &str) -> Vec<i64> {
+        db.prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     fn write(db: &Connection, name: &str, labels: &str, ts: i64) {
         db.execute(
             "INSERT INTO m(name, ts, value, labels) VALUES (?1, ?2, 1.0, ?3)",
@@ -3124,6 +3133,93 @@ mod disk_series_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("flush_interval"), "{err}");
+    }
+
+    /// A repeated selection is answered from the cache, and never with
+    /// an answer the catalog has moved on from: a series created, a
+    /// creation rolled back, another connection's commit.
+    #[test]
+    fn remembered_selections_follow_the_catalog() {
+        const PROD: &str = r#"SELECT series_id FROM timeless_series('m', 'cpu', '{"env":"prod"}')"#;
+        let path = std::env::temp_dir().join(format!(
+            "timeless_selection_cache_{}.db",
+            std::process::id()
+        ));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        let open = || {
+            let db = Connection::open(&path).unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            db
+        };
+        let db = open();
+        db.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='1MB');",
+        )
+        .unwrap();
+        fleet(&db);
+        let count = |db: &Connection| strings_i64(db, PROD).len();
+        assert_eq!(count(&db), 2);
+        assert_eq!(stat(&db, "m", "selection_cache_entries"), 1);
+        assert_eq!(count(&db), 2);
+
+        // A series created: the answer is worked out again.
+        write(&db, "cpu", r#"{"host":"d","env":"prod"}"#, 1_000);
+        assert_eq!(stat(&db, "m", "selection_cache_entries"), 0);
+        assert_eq!(count(&db), 3);
+        assert_eq!(stat(&db, "m", "selection_cache_entries"), 1);
+
+        // A creation rolled back: seen inside the transaction, never
+        // remembered, gone after it.
+        db.execute_batch("BEGIN").unwrap();
+        write(&db, "cpu", r#"{"host":"e","env":"prod"}"#, 1_000);
+        assert_eq!(count(&db), 4);
+        assert_eq!(stat(&db, "m", "selection_cache_entries"), 0);
+        db.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(count(&db), 3);
+        assert_eq!(count(&db), 3);
+
+        // Another connection's transaction: a read waits it out (the
+        // table refuses one meanwhile) and then sees what it committed.
+        let other = open();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        other
+            .execute(
+                "INSERT INTO m(name, ts, value, labels) VALUES ('cpu', 1000, 1.0, ?1)",
+                params![r#"{"host":"f","env":"prod"}"#],
+            )
+            .unwrap();
+        assert!(db
+            .prepare(PROD)
+            .and_then(|mut read| read.exists([]))
+            .is_err());
+        other.execute_batch("COMMIT").unwrap();
+        assert_eq!(count(&db), 4);
+        assert_eq!(count(&other), 4);
+    }
+
+    /// With no cache budget nothing is remembered.
+    #[test]
+    fn no_selections_are_remembered_without_a_cache() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='0');")
+            .unwrap();
+        fleet(&db);
+        for _ in 0..2 {
+            assert_eq!(
+                strings_i64(
+                    &db,
+                    r#"SELECT series_id FROM timeless_series('m', 'cpu', '{"env":"prod"}')"#
+                )
+                .len(),
+                2
+            );
+        }
+        assert_eq!(stat(&db, "m", "selection_cache_entries"), 0);
     }
 
     #[test]

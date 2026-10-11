@@ -226,7 +226,10 @@ Creation arguments:
   disk. A size (`64MB`, `16MB`, `0`; `KB`/`MB`/`GB` are powers of 1024)
   reads it from there, with a cache of at most that size mapping a series'
   identity to its id for ingest: memory then does not grow with the number
-  of series, and `0` caches nothing. `unbounded` additionally holds the
+  of series, and `0` caches nothing. An eighth of the size remembers the
+  answers to repeated selections (a metric and its label matchers) until
+  the set of series next changes, so a dashboard's repeated reads skip the
+  label index. `unbounded` additionally holds the
   whole catalog in memory, for the lowest read latency, at a few hundred
   bytes to a kilobyte of memory a series. **A table created without the
   argument uses `64MB`.** A dedicated server should ask for `unbounded`;
@@ -653,7 +656,7 @@ persists the counters in the same host transaction.
 
 | Signal | Public storage and maintenance keys |
 |---|---|
-| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, `retention_series_removed`, `rollup_merge_chunks_removed`, `rollup_merge_chunks_written`, the `raw_batch_query_*` / `window_batch_query_*` work counters, and the catalog's `index_cache` (the setting, or NULL for a table that predates it), `series_on_disk` (1 when the catalog is read from disk) and `series_resolve_cache_entries`. |
+| metrics | `series`, raw `chunks`, `rollup_chunks`, `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, `retention_series_removed`, `rollup_merge_chunks_removed`, `rollup_merge_chunks_written`, the `raw_batch_query_*` / `window_batch_query_*` work counters, and the catalog's `index_cache` (the setting, or NULL for a table that predates it), `series_on_disk` (1 when the catalog is read from disk), `series_resolve_cache_entries` and `selection_cache_entries`. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `ingest_raw_bytes_total`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
 | traces | `blocks`, `raw_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `ingest_raw_bytes_total`, `duration_bounded_blocks`, `duration_unknown_blocks`, `attribute_index_fields`, `attribute_bloom_rows`, `attribute_bloom_bytes`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
 

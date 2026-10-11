@@ -1061,6 +1061,82 @@ fn identity_key_of(metric: &str, labels: &Labels) -> u128 {
 pub(crate) struct DiskResolveCache {
     map: DashMap<u128, i64>,
     capacity: usize,
+    selections: SelectionCache,
+}
+
+/// What a selection found, by what was asked: the ids of the series of a
+/// metric that carry given labels. A dashboard asks the same few
+/// selections again and again, and with the catalog on disk each costs a
+/// statement per label and one to intersect their postings; a repeat is
+/// answered from here instead.
+///
+/// An answer is only as good as the catalog it was read from, so every
+/// change to the set of series empties the cache: a series this engine
+/// creates or removes, a transaction that did so committing or rolling
+/// back, and a reload after another process wrote. An answer is admitted
+/// only if no such change happened while it was being worked out.
+struct SelectionCache {
+    map: DashMap<Vec<u8>, std::sync::Arc<[i64]>>,
+    bytes: AtomicUsize,
+    capacity: usize,
+    epoch: AtomicU64,
+}
+
+impl SelectionCache {
+    /// Bytes an entry costs beyond its key and its ids.
+    const ENTRY_BYTES: usize = 96;
+
+    fn new(capacity: usize) -> Self {
+        SelectionCache {
+            map: DashMap::new(),
+            bytes: AtomicUsize::new(0),
+            capacity,
+            epoch: AtomicU64::new(0),
+        }
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    fn get(&self, key: &[u8]) -> Option<std::sync::Arc<[i64]>> {
+        if self.capacity == 0 {
+            return None;
+        }
+        self.map.get(key).map(|ids| ids.clone())
+    }
+
+    /// Keep `ids` for `key` if the catalog has not changed since `epoch`
+    /// was read. One answer may take a quarter of the budget at most; a
+    /// full cache starts over, since which selections recur is not known
+    /// until they do.
+    fn admit(&self, key: Vec<u8>, ids: &[i64], epoch: u64) {
+        let cost = Self::ENTRY_BYTES + key.len() + std::mem::size_of_val(ids);
+        if cost > self.capacity / 4 || self.epoch() != epoch {
+            return;
+        }
+        if self.bytes.load(Ordering::Relaxed) + cost > self.capacity {
+            self.map.clear();
+            self.bytes.store(0, Ordering::Relaxed);
+        }
+        if self.map.insert(key, ids.into()).is_none() {
+            self.bytes.fetch_add(cost, Ordering::Relaxed);
+        }
+        // A change that raced the insert emptied the cache before or
+        // after it; make it before.
+        if self.epoch() != epoch {
+            self.map.clear();
+            self.bytes.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn invalidate(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        if !self.map.is_empty() {
+            self.map.clear();
+        }
+        self.bytes.store(0, Ordering::Relaxed);
+    }
 }
 
 impl DiskResolveCache {
@@ -1068,10 +1144,15 @@ impl DiskResolveCache {
     const ENTRY_BYTES: u64 = 48;
 
     fn new(budget_bytes: u64) -> Self {
-        let capacity = usize::try_from(budget_bytes / Self::ENTRY_BYTES).unwrap_or(usize::MAX);
+        // An eighth of the budget remembers selections for reads; the rest
+        // resolves identities for ingest.
+        let selections = budget_bytes / 8;
+        let capacity =
+            usize::try_from((budget_bytes - selections) / Self::ENTRY_BYTES).unwrap_or(usize::MAX);
         DiskResolveCache {
             map: DashMap::new(),
             capacity,
+            selections: SelectionCache::new(usize::try_from(selections).unwrap_or(usize::MAX)),
         }
     }
 
@@ -1087,6 +1168,7 @@ impl DiskResolveCache {
 
     fn clear(&self) {
         self.map.clear();
+        self.selections.invalidate();
     }
 
     fn len(&self) -> usize {
@@ -1171,6 +1253,10 @@ pub struct Engine {
     /// stays empty, catalog reads go to the store's label index, and
     /// resolution goes through this bounded cache.
     disk_series: Option<DiskResolveCache>,
+    /// A series was created or removed since the last commit or rollback:
+    /// remembered selections are emptied again when the transaction ends,
+    /// for a reader that worked one out meanwhile from its own snapshot.
+    series_touched: AtomicBool,
     /// Whether the raw chunk index lives on disk (#132 phase 2): the
     /// store's chunk rows answer every index question, the in-memory index
     /// stays empty, and nothing of it is journaled, because the rows are
@@ -1833,16 +1919,83 @@ impl Engine {
         Ok(self.series_read().info_for(id).is_some())
     }
 
+    /// The label index's answer to a selection, remembered between
+    /// changes to the catalog (see [`SelectionCache`]).
+    fn find_series_on_disk(
+        &self,
+        metric: &str,
+        eq: &[(String, String)],
+        any_of: &[(String, Vec<String>)],
+    ) -> EngineResult<std::sync::Arc<[i64]>> {
+        let cache = &self.disk_series.as_ref().expect("disk mode").selections;
+        let mut key = Vec::with_capacity(64);
+        let mut text = |part: &str| {
+            key.extend_from_slice(&(part.len() as u32).to_le_bytes());
+            key.extend_from_slice(part.as_bytes());
+        };
+        text(metric);
+        for (name, value) in eq {
+            text(name);
+            text(value);
+        }
+        for (name, values) in any_of {
+            // No label name is empty: this sets a group off from the pairs.
+            text("");
+            text(name);
+            for value in values {
+                text(value);
+            }
+        }
+        if let Some(ids) = cache.get(&key) {
+            return Ok(ids);
+        }
+        let epoch = cache.epoch();
+        let ids = if any_of.is_empty() {
+            self.store.find_series_ids(Some(metric), eq)
+        } else {
+            self.store.find_series_ids_any(Some(metric), eq, any_of)
+        }
+        .map_err(|err| format!("failed to select series: {err}"))?;
+        // Kept only if it was read from the catalog as it now stands: not
+        // inside a transaction that may yet roll back or that others
+        // cannot see, and not from a snapshot older than what this engine
+        // last saw committed.
+        if cache.capacity > 0
+            && !self.txn_active.load(Ordering::SeqCst)
+            && self
+                .store
+                .catalog_generation()
+                .is_ok_and(|seen| seen.is_some() && seen == *self.catalog_gen_lock())
+        {
+            cache.admit(key, &ids, epoch);
+        }
+        Ok(ids.into())
+    }
+
+    /// The set of series changed: what was remembered of it is forgotten.
+    fn series_changed(&self) {
+        if let Some(cache) = self.disk_series.as_ref() {
+            self.series_touched.store(true, Ordering::SeqCst);
+            cache.selections.invalidate();
+        }
+    }
+
+    /// A transaction ended: forget again, if it changed the set of series.
+    fn series_settled(&self) {
+        if self.series_touched.swap(false, Ordering::SeqCst) {
+            if let Some(cache) = self.disk_series.as_ref() {
+                cache.selections.invalidate();
+            }
+        }
+    }
+
     /// Series of `metric` carrying every label in `eq`, ascending by id,
     /// with their labels.
     pub fn select_series(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<(i64, Labels)>> {
         if self.disk_series.is_some() {
             let pairs: Vec<(String, String)> =
                 eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            let ids = self
-                .store
-                .find_series_ids(Some(metric), &pairs)
-                .map_err(|err| format!("failed to select series: {err}"))?;
+            let ids = self.find_series_on_disk(metric, &pairs, &[])?;
             // Recheck what the rows say: a stale posting can only make a
             // selection miss a series, never return a wrong one.
             return Ok(self
@@ -1877,10 +2030,7 @@ impl Engine {
             return self.select_series(metric, eq);
         }
         let pairs: Vec<(String, String)> = eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let ids = self
-            .store
-            .find_series_ids_any(Some(metric), &pairs, any_of)
-            .map_err(|err| format!("failed to select series: {err}"))?;
+        let ids = self.find_series_on_disk(metric, &pairs, any_of)?;
         Ok(self
             .series_infos(&ids)?
             .into_iter()
@@ -1899,10 +2049,7 @@ impl Engine {
             // and by `refresh_authoritative_state` for anyone else's.
             let pairs: Vec<(String, String)> =
                 eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            return self
-                .store
-                .find_series_ids(Some(metric), &pairs)
-                .map_err(|err| format!("failed to select series: {err}"));
+            return Ok(self.find_series_on_disk(metric, &pairs, &[])?.to_vec());
         }
         Ok(self.series_read().find_series(metric, eq))
     }
@@ -2100,6 +2247,7 @@ impl Engine {
         }
         self.publish_frame_epoch(&j);
         self.txn_active.store(false, Ordering::SeqCst);
+        self.series_settled();
     }
 
     /// Rollback: undo every journaled mutation, in an order that
@@ -2131,6 +2279,7 @@ impl Engine {
         }
         self.publish_frame_epoch(&j);
         self.txn_active.store(false, Ordering::SeqCst);
+        self.series_settled();
     }
 
     /// Start an undo frame for SQLite savepoint `id`.
@@ -2724,6 +2873,7 @@ impl Engine {
             rollup_merge_chunks_written: AtomicU64::new(0),
             resolve_cache: DashMap::new(),
             disk_series: disk_budget.map(DiskResolveCache::new),
+            series_touched: AtomicBool::new(false),
             disk_chunks,
             disk_chunk_totals: Mutex::new(None),
             prometheus_ingest_batches: AtomicU64::new(0),
@@ -2798,6 +2948,7 @@ impl Engine {
             if let Some(journal) = journal.as_deref_mut() {
                 journal.series_added.insert(resolved.id);
             }
+            self.series_changed();
         }
         cache.admit(key, resolved.id);
         Ok(resolved.id)
@@ -2862,6 +3013,9 @@ impl Engine {
                 }
                 cache.admit(key, res.id);
             }
+        }
+        if resolved.iter().any(|res| res.created) {
+            self.series_changed();
         }
         for (idx, slot) in pending {
             out[idx] = resolved[slot].id;
@@ -7289,6 +7443,7 @@ impl Engine {
         if let Some(cache) = self.disk_series.as_ref() {
             cache.clear();
         }
+        self.series_changed();
         // No engine locks here: store DML can re-enter the vtab's
         // savepoint hooks (invariant 1), as with every other store write.
         if self.authoritative_series {
@@ -7517,6 +7672,10 @@ impl Engine {
             .map_err(|err| format!("failed to read catalog generation: {err}"))?;
         if observed.is_some() && observed == *self.catalog_gen_lock() {
             return Ok(());
+        }
+        // Someone else wrote: whatever follows, the catalog may differ.
+        if let Some(cache) = self.disk_series.as_ref() {
+            cache.selections.invalidate();
         }
 
         let _transition = self.transition_write();
@@ -7942,6 +8101,10 @@ impl Engine {
                 .disk_series
                 .as_ref()
                 .map_or(0, |cache| cache.len() as u64),
+            selection_cache_entries: self
+                .disk_series
+                .as_ref()
+                .map_or(0, |cache| cache.selections.map.len() as u64),
             compaction_planned_groups: self
                 .compaction_plan_lock()
                 .as_ref()
@@ -8055,6 +8218,8 @@ pub struct EngineInfo {
     /// that to the point threshold and the host.
     pub flush_interval_secs: u64,
     pub series_resolve_cache_entries: u64,
+    /// Selections a disk catalog is remembering the answers to.
+    pub selection_cache_entries: u64,
     pub retention_series_removed: u64,
     pub rollup_merge_chunks_removed: u64,
     pub rollup_merge_chunks_written: u64,

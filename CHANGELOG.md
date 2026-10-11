@@ -41,6 +41,13 @@ own flush and compaction passes `flush_interval='off'` (or issues the
   written: a drained buffer is released, a committed transaction's large
   journal frames are dropped, and a buffer's first point needs no
   allocation (#132).
+- Reads of a metrics table whose catalog is on disk are faster where they
+  are selective: chunk metadata and payloads come from one read, small
+  label and chunk-bound fetches are primary-key lookups, and an eighth of
+  `index_cache` remembers the series a repeated selection found until the
+  set of series changes (`selection_cache_entries` in `timeless_stats`). A
+  19-series raw frame at 500k series: 173 -> 101 us (70 with the catalog
+  in memory).
 - Metrics buffered points over the 256 MiB buffer budget are flushed,
   largest buffers first, at the end of an ingest statement.
 

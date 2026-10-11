@@ -131,9 +131,13 @@ pub(crate) struct LabelIndex {
     label_sql: String,
     posting_sql: String,
     series_rows_sql: String,
+    series_row_sql: String,
 }
 
 impl LabelIndex {
+    /// Rows `series_rows` looks up one at a time rather than as a list.
+    const PROBE_ROWS_AT_MOST: usize = 64;
+
     pub(crate) fn new(database: &str, table: &str) -> Self {
         let labels = sql_ident::qualified_shadow(database, table, "labels");
         let postings = sql_ident::qualified_shadow(database, table, "postings");
@@ -144,6 +148,9 @@ impl LabelIndex {
             label_sql: format!("SELECT id, series FROM {labels} WHERE key = ?1 AND value = ?2"),
             posting_sql: format!(
                 "SELECT series_id FROM {postings} WHERE label_id = ?1 ORDER BY series_id"
+            ),
+            series_row_sql: format!(
+                "SELECT id, name, canonical_labels FROM {series} WHERE id = ?1"
             ),
             series_rows_sql: format!(
                 "SELECT id, name, canonical_labels FROM {series} \
@@ -464,6 +471,36 @@ impl LabelIndex {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        let mut out = Vec::with_capacity(ids.len());
+        let mut read = |rows: &mut rusqlite::Rows<'_>| -> Result<(), String> {
+            while let Some(row) = rows.next().map_err(|e| format!("series rows: {e}"))? {
+                let blob = row
+                    .get_ref(2)
+                    .map_err(|e| format!("series rows: {e}"))?
+                    .as_blob()
+                    .map_err(|e| format!("series rows: {e}"))?;
+                out.push((
+                    row.get(0).map_err(|e| format!("series rows: {e}"))?,
+                    row.get(1).map_err(|e| format!("series rows: {e}"))?,
+                    decode_labels(blob)?,
+                ));
+            }
+            Ok(())
+        };
+        // A selective read wants a handful of rows: a lookup each by
+        // primary key costs less than setting the list up.
+        if ids.len() <= Self::PROBE_ROWS_AT_MOST {
+            let mut wanted = ids.to_vec();
+            wanted.sort_unstable();
+            wanted.dedup();
+            let mut stmt = conn
+                .prepare_cached(&self.series_row_sql)
+                .map_err(|e| format!("prepare series row: {e}"))?;
+            for id in wanted {
+                read(&mut stmt.query([id]).map_err(|e| format!("series rows: {e}"))?)?;
+            }
+            return Ok(out);
+        }
         let mut list = String::with_capacity(ids.len() * 8 + 2);
         list.push('[');
         for (i, id) in ids.iter().enumerate() {
@@ -476,22 +513,11 @@ impl LabelIndex {
         let mut stmt = conn
             .prepare_cached(&self.series_rows_sql)
             .map_err(|e| format!("prepare series rows: {e}"))?;
-        let mut rows = stmt
-            .query([list])
-            .map_err(|e| format!("series rows: {e}"))?;
-        let mut out = Vec::with_capacity(ids.len());
-        while let Some(row) = rows.next().map_err(|e| format!("series rows: {e}"))? {
-            let blob = row
-                .get_ref(2)
-                .map_err(|e| format!("series rows: {e}"))?
-                .as_blob()
-                .map_err(|e| format!("series rows: {e}"))?;
-            out.push((
-                row.get(0).map_err(|e| format!("series rows: {e}"))?,
-                row.get(1).map_err(|e| format!("series rows: {e}"))?,
-                decode_labels(blob)?,
-            ));
-        }
+        read(
+            &mut stmt
+                .query([list])
+                .map_err(|e| format!("series rows: {e}"))?,
+        )?;
         Ok(out)
     }
 
