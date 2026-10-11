@@ -1321,3 +1321,60 @@ fn a_step_out_of_time_leaves_its_remaining_groups_for_the_next() {
         );
     }
 }
+
+/// A group still being rolled up holds O(log buckets) chunks: new
+/// one-bucket chunks merge among themselves instead of waiting behind the
+/// group's largest chunk (#137). Under the old single-run rule this series
+/// reached 60 and more chunks.
+#[test]
+fn rollup_chunks_per_group_stay_logarithmic_as_buckets_accumulate() {
+    const SERIES: usize = 3;
+    const SWEEPS: u64 = 200;
+    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let series_ids: Vec<i64> = (0..SERIES)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("tiered_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    engine.set_rollups(vec![RollupTier {
+        resolution: 60,
+        retention: 0,
+    }]);
+
+    let mut most_chunks_per_group = 0;
+    for sweep in 1..=SWEEPS {
+        for &series_id in &series_ids {
+            engine.write_point(series_id, sweep as i64 * 60, sweep as f64);
+        }
+        engine.flush_all().unwrap();
+        loop {
+            let (_, _, more) = engine.rollup_bounded_for_sweep(64, sweep).unwrap();
+            if !more {
+                break;
+            }
+        }
+        most_chunks_per_group =
+            most_chunks_per_group.max(engine.info().rollup_chunk_count.div_ceil(SERIES));
+    }
+    assert!(
+        most_chunks_per_group <= 16,
+        "a group reached {most_chunks_per_group} chunks over {SWEEPS} buckets"
+    );
+    assert!(engine.info().rollup_merge_chunks_written > 0);
+    for &series_id in &series_ids {
+        let buckets = engine
+            .query_rollup_by_id(series_id, 60, i64::MIN, i64::MAX)
+            .unwrap();
+        let minutes: Vec<i64> = buckets.iter().map(|bucket| bucket.bucket_ts).collect();
+        // Every settled minute, once, in order. The last sample's own
+        // bucket and the one before it are not settled yet.
+        assert_eq!(
+            minutes,
+            (60..=(SWEEPS as i64 - 2) * 60)
+                .step_by(60)
+                .collect::<Vec<_>>()
+        );
+    }
+}

@@ -14,6 +14,21 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rollup chunks of a live series merge as they arrive (#137).** A group's
+  chunks were merged as one run in time order, and only once the run was
+  twice its largest member, so a 64-bucket chunk held back every newer
+  one-bucket chunk until there were 64 of them. On a 700,000-series store
+  after 61 hours, 9.2 million of 9.8 million hourly rollup chunks held a
+  single bucket, and the rollup tiers held more payload than the raw data.
+  Runs are now built from the newest chunk backwards over neighbours of
+  similar size, so a group holds a logarithmic number of chunks. The first
+  sweep after upgrading merges the backlog in bounded steps: on a copy of
+  that store, 11.7 million rollup chunks became 3.3 million in one 134 s
+  sweep whose longest step was under a second, with rollup query results
+  unchanged.
+
 ## [0.8.14] — 2026-10-11
 
 Upgrade notes: a metrics table used directly through the extension now

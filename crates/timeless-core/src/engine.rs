@@ -6528,43 +6528,104 @@ impl Engine {
         let with_raw: HashSet<i64> = self.chunk_series_ids().into_iter().collect();
         let mut plans = Vec::new();
         for (group, entries) in &rollups.groups {
-            let live = with_raw.contains(&group.series_id);
-            let at_least = if live { ROLLUP_MERGE_MIN_CHUNKS } else { 2 };
-            let mut run: Vec<RollupIndexEntry> = Vec::new();
-            let mut buckets = 0usize;
-            let close = |run: &mut Vec<RollupIndexEntry>, plans: &mut Vec<_>| {
-                let largest = run
-                    .iter()
-                    .map(|e| e.point_count as usize)
-                    .max()
-                    .unwrap_or(0);
-                let total: usize = run.iter().map(|e| e.point_count as usize).sum();
-                if run.len() >= at_least && (!live || total >= largest.saturating_mul(2)) {
-                    plans.push((*group, std::mem::take(run)));
-                } else {
-                    run.clear();
-                }
-            };
-            for entry in entries {
-                let count = entry.point_count as usize;
-                if count >= ROLLUP_MERGE_TARGET_BUCKETS {
-                    // Full already: a boundary, not a member.
-                    close(&mut run, &mut plans);
-                    buckets = 0;
-                    continue;
-                }
-                if !run.is_empty() && buckets + count > ROLLUP_MERGE_TARGET_BUCKETS {
-                    close(&mut run, &mut plans);
-                    buckets = 0;
-                }
-                run.push(*entry);
-                buckets += count;
+            if with_raw.contains(&group.series_id) {
+                Self::plan_live_rollup_group(*group, entries, &mut plans);
+            } else {
+                Self::plan_ended_rollup_group(*group, entries, &mut plans);
             }
-            close(&mut run, &mut plans);
         }
         // Series order, so a merge step's deletes and inserts share pages.
         plans.sort_unstable_by_key(|(group, _)| (group.series_id, group.resolution));
         plans
+    }
+
+    /// Runs to merge for a group still being rolled up, size-tiered over
+    /// neighbours. Chunks are in time order and only neighbours may merge,
+    /// so runs are built from the newest chunk backwards: an older chunk
+    /// joins while it is no larger than what the run already holds and the
+    /// run stays within the target, and otherwise ends it. A run is merged
+    /// at [`ROLLUP_MERGE_MIN_CHUNKS`] members, if it is at least twice its
+    /// largest. New one-bucket chunks therefore merge among themselves, and
+    /// what they make merges with its neighbour when it has grown to match:
+    /// a group holds O(log buckets) chunks and a bucket is rewritten about
+    /// log times.
+    ///
+    /// One run in time order, as this once was, let a large old chunk head
+    /// the run and hold every newer chunk until together they were twice
+    /// its size: 64 one-bucket chunks behind a 64-bucket one, per series,
+    /// which at 700k series was 9.2M of 9.8M hourly chunks (#137).
+    fn plan_live_rollup_group(
+        group: RollupGroupKey,
+        entries: &[RollupIndexEntry],
+        plans: &mut Vec<RollupMergeGroup>,
+    ) {
+        let mut run: Vec<RollupIndexEntry> = Vec::new();
+        let mut total = 0usize;
+        let close = |run: &mut Vec<RollupIndexEntry>, plans: &mut Vec<RollupMergeGroup>| {
+            let largest = run
+                .iter()
+                .map(|entry| entry.point_count as usize)
+                .max()
+                .unwrap_or(0);
+            let total: usize = run.iter().map(|entry| entry.point_count as usize).sum();
+            if run.len() >= ROLLUP_MERGE_MIN_CHUNKS && total >= largest.saturating_mul(2) {
+                // Collected newest first; a merge reads them oldest first.
+                run.reverse();
+                plans.push((group, std::mem::take(run)));
+            } else {
+                run.clear();
+            }
+        };
+        for entry in entries.iter().rev() {
+            let count = entry.point_count as usize;
+            if count >= ROLLUP_MERGE_TARGET_BUCKETS {
+                // Full already: a boundary, not a member.
+                close(&mut run, plans);
+                total = 0;
+                continue;
+            }
+            if !run.is_empty() && (count > total || total + count > ROLLUP_MERGE_TARGET_BUCKETS) {
+                close(&mut run, plans);
+                total = 0;
+            }
+            run.push(*entry);
+            total += count;
+        }
+        close(&mut run, plans);
+    }
+
+    /// Runs to merge for a group whose series has no raw chunk left: its
+    /// neighbouring chunks are put together up to the target, whatever
+    /// their sizes, since nothing more will arrive to merge them with.
+    fn plan_ended_rollup_group(
+        group: RollupGroupKey,
+        entries: &[RollupIndexEntry],
+        plans: &mut Vec<RollupMergeGroup>,
+    ) {
+        let mut run: Vec<RollupIndexEntry> = Vec::new();
+        let mut buckets = 0usize;
+        let close = |run: &mut Vec<RollupIndexEntry>, plans: &mut Vec<RollupMergeGroup>| {
+            if run.len() >= 2 {
+                plans.push((group, std::mem::take(run)));
+            } else {
+                run.clear();
+            }
+        };
+        for entry in entries {
+            let count = entry.point_count as usize;
+            if count >= ROLLUP_MERGE_TARGET_BUCKETS {
+                close(&mut run, plans);
+                buckets = 0;
+                continue;
+            }
+            if !run.is_empty() && buckets + count > ROLLUP_MERGE_TARGET_BUCKETS {
+                close(&mut run, plans);
+                buckets = 0;
+            }
+            run.push(*entry);
+            buckets += count;
+        }
+        close(&mut run, plans);
     }
 
     /// Put together the planned runs. A run any of whose chunks has gone
