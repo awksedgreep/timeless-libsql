@@ -2702,7 +2702,13 @@ impl Engine {
         };
 
         // With the catalog on disk, the chunk index is read from the store's
-        // chunk rows too, if the store can answer for them.
+        // chunk rows too, if the store can answer for them. The store keeps
+        // an index for that only while it is read that way: with the chunk
+        // index in memory, every flush and compaction step otherwise
+        // rewrote an index over every chunk row that nothing read (#138).
+        // A connection that cannot change it leaves it, and reads from
+        // memory if it is not there.
+        let _ = store.ensure_chunk_index(disk_budget.is_some());
         let disk_chunks = disk_budget.is_some() && store.has_chunk_index();
         // A disk catalog is trusted only if it identifies every persisted
         // chunk, the same condition the memory catalog is held to below.

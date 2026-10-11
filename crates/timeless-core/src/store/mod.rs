@@ -368,6 +368,20 @@ pub trait ChunkStore: Send + Sync {
         false
     }
 
+    /// Bring whatever on-store index those queries need in line with how
+    /// the engine is about to read its chunk index: present when `wanted`
+    /// (the chunk index is read from the store), absent otherwise, so that
+    /// a table whose chunk index is held in memory does not pay to maintain
+    /// one nobody reads. Called once when an engine is opened; an error
+    /// leaves things as they are, and `has_chunk_index` then says what the
+    /// store can answer. That covers a connection that cannot write, and
+    /// an engine first opened from inside a running statement (a table-
+    /// valued function), where the schema cannot be changed: the next open
+    /// that can settles it.
+    fn ensure_chunk_index(&self, _wanted: bool) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Metadata of the raw chunks of `series_ids` overlapping
     /// `[t_start, t_end]`, ordered by series id, then `min_ts`, then
     /// insertion.

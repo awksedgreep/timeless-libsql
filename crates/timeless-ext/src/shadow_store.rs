@@ -62,10 +62,11 @@ use crate::{shared, sql_ident};
 ///   migration later. 0 = raw resolution.
 pub(crate) fn ddl(database: &str, table: &str) -> String {
     let chunks = sql_ident::qualified_shadow(database, table, "chunks");
-    let chunks_local = sql_ident::quoted_shadow(table, "chunks");
-    let chunks_index = sql_ident::qualified_shadow(database, table, "chunks_series_ts");
     let meta = sql_ident::qualified_shadow(database, table, "meta");
     let series = sql_ident::qualified_shadow(database, table, "series");
+    // No chunk index here: whether a table keeps `<t>_chunks_series_ts`
+    // follows how its chunk index is read, and `ensure_chunk_index` settles
+    // it each time the engine is opened (#138).
     format!(
         r#"
 CREATE TABLE IF NOT EXISTS {chunks} (
@@ -83,7 +84,6 @@ CREATE TABLE IF NOT EXISTS {chunks} (
   ts_data     BLOB NOT NULL,
   val_data    BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS {chunks_index} ON {chunks_local}(series_id, ts_min);
 CREATE TABLE IF NOT EXISTS {meta} (k TEXT PRIMARY KEY, v BLOB);
 INSERT OR IGNORE INTO {meta}(k, v) VALUES ('chunk_rows', 0), ('chunk_bytes', 0);
 CREATE TABLE IF NOT EXISTS {series} (
@@ -446,6 +446,21 @@ impl ShadowTableStore {
     }
 
     /// Whether this table's label index tables exist, probed once.
+    /// The `CREATE INDEX` text of this table's `(series_id, ts_min)` chunk
+    /// index, if it has one.
+    fn chunk_index_sql(&self, conn: &Connection) -> Result<Option<String>, String> {
+        let schema = sql_ident::quote(&self.database);
+        let name = sql_ident::shadow_object(&self.table, "chunks_series_ts");
+        conn.query_row(
+            &format!("SELECT sql FROM {schema}.sqlite_master WHERE type = 'index' AND name = ?1"),
+            [name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(|e| format!("read chunk index definition: {e}"))
+    }
+
     fn label_index_present(&self, conn: &Connection) -> bool {
         use std::sync::atomic::Ordering;
         match self.label_index_state.load(Ordering::Relaxed) {
@@ -1360,7 +1375,39 @@ impl ChunkStore for ShadowTableStore {
     }
 
     fn has_chunk_index(&self) -> bool {
-        true
+        // The queries below are only as good as the index under them: a
+        // table whose chunk index was last read from memory has none, and a
+        // connection that could not create it reads from memory too.
+        Self::conn()
+            .ok()
+            .and_then(|conn| self.chunk_index_sql(&conn).ok().flatten())
+            .is_some()
+    }
+
+    fn ensure_chunk_index(&self, wanted: bool) -> Result<(), String> {
+        let conn = Self::conn()?;
+        let index = sql_ident::qualified_shadow(&self.database, &self.table, "chunks_series_ts");
+        let existing = self.chunk_index_sql(&conn)?;
+        let raw_only = existing
+            .as_deref()
+            .is_some_and(|sql| sql.to_ascii_lowercase().contains("where resolution = 0"));
+        if wanted && raw_only || !wanted && existing.is_none() {
+            return Ok(());
+        }
+        let mut sql = String::new();
+        if existing.is_some() {
+            sql.push_str(&format!("DROP INDEX {index};"));
+        }
+        if wanted {
+            // Raw rows only: every chunk-index query asks for
+            // `resolution = 0`, and rollup rows would be most of the index.
+            sql.push_str(&format!(
+                "CREATE INDEX {index} ON {}(series_id, ts_min) WHERE resolution = 0;",
+                sql_ident::quoted_shadow(&self.table, "chunks")
+            ));
+        }
+        conn.execute_batch(&sql)
+            .map_err(|e| format!("settle chunk index: {e}"))
     }
 
     fn chunk_metas_for(
@@ -1546,7 +1593,8 @@ impl ChunkStore for ShadowTableStore {
         let uncataloged: bool = conn
             .query_row(
                 &format!(
-                    "SELECT EXISTS (SELECT 1 FROM (SELECT DISTINCT series_id FROM {chunks}) c \
+                    "SELECT EXISTS (SELECT 1 FROM (SELECT DISTINCT series_id FROM {chunks} \
+                                                   WHERE resolution = 0) c \
                      WHERE NOT EXISTS (SELECT 1 FROM {series} s WHERE s.id = c.series_id) \
                      AND EXISTS (SELECT 1 FROM {chunks} r \
                                  WHERE r.series_id = c.series_id AND r.resolution = 0))",

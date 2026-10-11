@@ -14,6 +14,29 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+Upgrade notes: the first writable open of a metrics table settles its
+`<t>_chunks_series_ts` index. A table whose catalog is held in memory
+(`index_cache='unbounded'`, which the metrics server uses) drops it; a table
+whose catalog is on disk has it rebuilt over raw rows only, once (a few
+seconds per several million chunk rows). An older extension opening the
+store afterwards works with either shape.
+
+### Changed
+
+- **A metrics table keeps its `(series_id, ts_min)` chunk index only while
+  it is read, and then over raw rows only (#138).** Every flush inserts a
+  chunk row per active series, and their index entries land all over the
+  index, so each flush and each compaction step rewrote essentially the
+  whole index into the WAL and again at checkpoint. With the catalog in
+  memory nothing reads that index: the engine builds its chunk index from
+  the rows when it opens. Such a table now has no index, and a table whose
+  catalog is on disk indexes `WHERE resolution = 0`, which every chunk-index
+  query asks for. The index follows `index_cache` at the next open. On a
+  copy of a 700,000-series store, the flush of one 400,000-point scrape wrote
+  46–49 MiB, where 0.8.14 wrote 620 MiB. In plain SQLite on that store, the
+  same flush writes 237 MB of WAL with the old index, 121 MB with a raw-only
+  index, and 24.5 MB with none.
+
 ## [0.8.15] — 2026-10-11
 
 Upgrade notes: the first maintenance sweep after upgrading merges a store's

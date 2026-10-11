@@ -2718,6 +2718,125 @@ mod disk_series_tests {
         }
     }
 
+    /// The `(series_id, ts_min)` chunk index exists only while the chunk
+    /// index is read from the store, and then over raw rows only (#138): a
+    /// table read from memory has none to maintain, an older table's full
+    /// index is replaced or dropped at the next writable open, and a move
+    /// between the two modes takes the index with it.
+    #[test]
+    fn the_chunk_index_follows_how_the_chunk_index_is_read() {
+        let path = std::env::temp_dir().join(format!(
+            "timeless-chunk-index-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let index_sql = |db: &Connection| -> Option<String> {
+            use rusqlite::OptionalExtension;
+            db.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'm_chunks_series_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+        let hosts = |db: &Connection| {
+            strings(
+                db,
+                "SELECT value FROM timeless_label_values('m', 'cpu', 'host')",
+            )
+        };
+        let points = |db: &Connection| -> i64 {
+            db.query_row("SELECT count(*) FROM m", [], |row| row.get(0))
+                .unwrap()
+        };
+        let open = || {
+            let db = Connection::open(&path).unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db
+        };
+        {
+            // Read from memory from the start: no index is made.
+            let db = open();
+            db.execute_batch(
+                "CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='unbounded');",
+            )
+            .unwrap();
+            fleet(&db);
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            assert_eq!(stat(&db, "m", "series_on_disk"), 0);
+            assert_eq!(index_sql(&db), None);
+            assert_eq!(points(&db), 4);
+        }
+        {
+            // A table from an older extension carries the full index.
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch("CREATE INDEX m_chunks_series_ts ON m_chunks(series_id, ts_min);")
+                .unwrap();
+        }
+        {
+            // Opened to be read from memory, it is dropped; told to move to
+            // disk, nothing changes until the next open.
+            let db = open();
+            assert_eq!(points(&db), 4);
+            assert_eq!(index_sql(&db), None);
+            db.execute("INSERT INTO m(m) VALUES ('index_cache:1MB')", [])
+                .unwrap();
+            assert_eq!(index_sql(&db), None);
+        }
+        {
+            // On disk: the index is there, over raw rows only, and answers.
+            let db = open();
+            assert_eq!(points(&db), 4);
+            assert_eq!(stat(&db, "m", "series_on_disk"), 1);
+            let sql = index_sql(&db).expect("a disk chunk index has its index");
+            assert!(sql.contains("WHERE resolution = 0"), "{sql}");
+            assert_eq!(points(&db), 4);
+            assert_eq!(hosts(&db), ["a", "b", "c"]);
+            write(&db, "cpu", r#"{"host":"d","env":"dev"}"#, 2_000);
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            db.execute("INSERT INTO m(m) VALUES ('compact')", [])
+                .unwrap();
+            assert_eq!(points(&db), 5);
+        }
+        {
+            // An older table read from disk: the full index is replaced.
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "DROP INDEX m_chunks_series_ts;
+                 CREATE INDEX m_chunks_series_ts ON m_chunks(series_id, ts_min);",
+            )
+            .unwrap();
+        }
+        {
+            // The table connects, and the engine opens, at its first use.
+            let db = open();
+            assert_eq!(points(&db), 5);
+            let sql = index_sql(&db).unwrap();
+            assert!(sql.contains("WHERE resolution = 0"), "{sql}");
+            assert_eq!(hosts(&db), ["a", "b", "c", "d"]);
+            db.execute("INSERT INTO m(m) VALUES ('index_cache:unbounded')", [])
+                .unwrap();
+        }
+        {
+            // Back in memory: the index goes, the data does not.
+            let db = open();
+            assert_eq!(points(&db), 5);
+            assert_eq!(stat(&db, "m", "series_on_disk"), 0);
+            assert_eq!(index_sql(&db), None);
+            assert_eq!(hosts(&db), ["a", "b", "c", "d"]);
+            write(&db, "cpu", r#"{"host":"e","env":"dev"}"#, 3_000);
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            assert_eq!(points(&db), 6);
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
     /// A regex matcher that cannot match the empty string selects through
     /// the label index; one that can, and every negative matcher, must not
     /// be narrowed, because an absent label is the empty string. Either way
