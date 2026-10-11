@@ -1712,25 +1712,42 @@ impl TransactionVTab<'_> for MetricsTab {
 }
 
 impl SavepointVTab for MetricsTab {
-    fn savepoint(&mut self, id: c_int) {
+    // Each hook first asks whether it was fired by one of the extension's
+    // own statements (see `shared::in_callback`): a statement journal that
+    // SQLite opened for the store's DML in the middle of an engine
+    // operation is not a savepoint of the host's, and the engine is not to
+    // be re-entered for it.
+    fn savepoint(&mut self, id: c_int) -> std::result::Result<(), String> {
+        if shared::in_callback() {
+            return Ok(());
+        }
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
             self.shared.engine.txn_savepoint(id);
         }
+        Ok(())
     }
 
-    fn release(&mut self, id: c_int) {
+    fn release(&mut self, id: c_int) -> std::result::Result<(), String> {
+        if shared::in_callback() {
+            return Ok(());
+        }
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
             self.shared.engine.txn_release(id);
         }
+        Ok(())
     }
 
-    fn rollback_to(&mut self, id: c_int) {
+    fn rollback_to(&mut self, id: c_int) -> std::result::Result<(), String> {
+        if shared::in_callback() {
+            return Ok(());
+        }
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
             self.shared.engine.txn_rollback_to(id);
         }
+        Ok(())
     }
 }
 

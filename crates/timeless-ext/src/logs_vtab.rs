@@ -1329,25 +1329,28 @@ impl TransactionVTab<'_> for LogsTab {
 }
 
 impl SavepointVTab for LogsTab {
-    fn savepoint(&mut self, id: c_int) {
+    fn savepoint(&mut self, id: c_int) -> std::result::Result<(), String> {
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
             self.shared.engine.txn_savepoint(id);
         }
+        Ok(())
     }
 
-    fn release(&mut self, id: c_int) {
+    fn release(&mut self, id: c_int) -> std::result::Result<(), String> {
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
             self.shared.engine.txn_release(id);
         }
+        Ok(())
     }
 
-    fn rollback_to(&mut self, id: c_int) {
+    fn rollback_to(&mut self, id: c_int) -> std::result::Result<(), String> {
         let _bind = DbGuard::bind(self.db);
         if self.gate_held {
             self.shared.engine.txn_rollback_to(id);
         }
+        Ok(())
     }
 }
 

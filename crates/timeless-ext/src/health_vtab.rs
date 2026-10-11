@@ -873,6 +873,12 @@ impl TransactionVTab<'_> for HealthTab {
         self.inner.begin()
     }
 
+    // Without this the wrapped table's commit-time work is skipped: the
+    // adapter's default `sync` does nothing.
+    fn sync(&mut self) -> Result<()> {
+        self.inner.sync()
+    }
+
     fn commit(&mut self) -> Result<()> {
         self.inner.commit()
     }
@@ -883,15 +889,15 @@ impl TransactionVTab<'_> for HealthTab {
 }
 
 impl SavepointVTab for HealthTab {
-    fn savepoint(&mut self, id: c_int) {
+    fn savepoint(&mut self, id: c_int) -> std::result::Result<(), String> {
         self.inner.savepoint(id)
     }
 
-    fn release(&mut self, id: c_int) {
+    fn release(&mut self, id: c_int) -> std::result::Result<(), String> {
         self.inner.release(id)
     }
 
-    fn rollback_to(&mut self, id: c_int) {
+    fn rollback_to(&mut self, id: c_int) -> std::result::Result<(), String> {
         self.inner.rollback_to(id)
     }
 }

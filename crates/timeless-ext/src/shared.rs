@@ -159,6 +159,19 @@ impl DbGuard {
     }
 }
 
+/// Whether a virtual-table callback of this extension is already running
+/// on this thread.
+///
+/// SQLite calls a table's savepoint hooks for every statement journal a
+/// statement opens, including the statements the extension itself runs
+/// against its shadow tables from inside a callback. Such a hook arrives
+/// with a connection already bound, and is not the host's savepoint: the
+/// engine is in the middle of the very operation that issued the
+/// statement, holding its own locks, and must not be re-entered.
+pub(crate) fn in_callback() -> bool {
+    !CURRENT_DB.get().is_null()
+}
+
 impl Drop for DbGuard {
     fn drop(&mut self) {
         CURRENT_DB.set(self.prev);
