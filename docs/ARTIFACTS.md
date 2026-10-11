@@ -9,25 +9,24 @@ reachable from `main`.
 
 ## Current publication status
 
-[`v0.8.14`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.14)
-was published on 2026-10-11 at 04:38:25 UTC from `main` commit
-`b6660e2fa183eb4afefb73d4f1edd01d3f293541`. It reads a disk-catalog metrics table's
-chunk index from disk as well (#132), stops write buffers holding memory for
-idle series, and has a metrics table used directly flush and compact for
-itself on a `flush_interval`. See the [changelog](../CHANGELOG.md).
+[`v0.8.15`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.15)
+was published on 2026-10-11 at 06:28:53 UTC from `main` commit
+`f705d60fe70ef8c10be25585b95fbd6085398022`. It merges the rollup chunks of a
+live series as they arrive, where one-bucket chunks used to wait behind the
+group's largest (#137). See the [changelog](../CHANGELOG.md).
 
-The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/38111881077)
+The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/38117795247)
 built, identity-checked, and install/remove-drilled the three native
 Linux/macOS archives (Linux x86-64, Linux AArch64, macOS Apple Silicon),
 verified the complete outer `SHA256SUMS`, and published the three archives
 plus that checksum file as permanent release assets. All assets were
 downloaded and verified after publication, including outer and inner
 checksums and manifest source identities. See the
-[release validation record](RELEASE_0_8_14.md) for the complete post-bump
+[release validation record](RELEASE_0_8_15.md) for the complete post-bump
 local checklist and archive hashes.
 
 This is the current download channel. Complete published releases also exist
-for `v0.8.13`, `v0.8.12`, `v0.8.11`, `v0.8.10`, `v0.8.9`, `v0.8.8`, `v0.8.7`, `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`,
+for `v0.8.14`, `v0.8.13`, `v0.8.12`, `v0.8.11`, `v0.8.10`, `v0.8.9`, `v0.8.8`, `v0.8.7`, `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`,
 `v0.8.1`, `v0.8.0`,
 `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`,
 `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
