@@ -2630,6 +2630,71 @@ mod disk_series_tests {
         );
     }
 
+    /// A disk index's totals are moved by each flush and compaction rather
+    /// than read again (a scan of every raw chunk row per write, #144), so
+    /// they must stay what the rows say through every way the rows change.
+    #[test]
+    fn disk_chunk_totals_follow_the_rows() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::register_telemetry(&db).unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE m USING timeless_metrics(retention='10000s', index_cache='1MB');",
+        )
+        .unwrap();
+        let agree = |when: &str| {
+            let (chunks, points, oldest, newest): (i64, i64, Option<i64>, Option<i64>) = db
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(point_count), 0), MIN(ts_min), MAX(ts_max) \
+                     FROM m_chunks WHERE resolution = 0",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(stat(&db, "m", "chunks"), chunks, "chunks {when}");
+            assert_eq!(stat(&db, "m", "disk_points"), points, "points {when}");
+            if chunks > 0 {
+                assert_eq!(Some(stat(&db, "m", "ts_min")), oldest, "oldest {when}");
+                assert_eq!(Some(stat(&db, "m", "ts_max")), newest, "newest {when}");
+            }
+            chunks
+        };
+        // Asked before anything is written, so every later answer is one
+        // that was moved, not read.
+        assert_eq!(agree("empty"), 0);
+        for round in 0..6 {
+            for host in ["a", "b", "c"] {
+                let labels = format!(r#"{{"host":"{host}"}}"#);
+                write(&db, "cpu", &labels, 1_000 + round * 10);
+                write(&db, "cpu", &labels, 1_005 + round * 10);
+            }
+            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+            agree("after a flush");
+        }
+        let before = agree("before compaction");
+        db.execute("INSERT INTO m(m) VALUES ('compact')", [])
+            .unwrap();
+        assert!(
+            agree("after compaction") < before,
+            "compaction merged chunks"
+        );
+
+        // A flush that is rolled back takes its chunks with it.
+        db.execute_batch("BEGIN").unwrap();
+        write(&db, "cpu", r#"{"host":"a"}"#, 2_000);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        agree("inside the transaction");
+        db.execute_batch("ROLLBACK").unwrap();
+        agree("after a rollback");
+
+        // Far enough ahead that retention removes the old chunks.
+        write(&db, "cpu", r#"{"host":"a"}"#, 50_000);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        assert_eq!(agree("after retention"), 1);
+        write(&db, "cpu", r#"{"host":"b"}"#, 50_010);
+        db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
+        assert_eq!(agree("after a flush following retention"), 2);
+    }
+
     /// A table from before #132 has no label index. The first open that can
     /// write builds it from the catalog, whichever way the catalog is read;
     /// told to, the table then moves its catalog to disk on the next open.

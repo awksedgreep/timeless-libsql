@@ -1858,8 +1858,58 @@ impl Engine {
             .collect()
     }
 
-    /// A write may have changed a disk index's totals: read them again
-    /// when next asked.
+    /// Raw chunks were added to and removed from a disk index, and what
+    /// they held is known: move the totals instead of reading them again.
+    /// The totals are an aggregate over every raw chunk row, and they are
+    /// asked for by rollup settling and every statistics read, so reading
+    /// them again after each flush costs a scan of the table per write.
+    ///
+    /// `added` is each new chunk's `(min_ts, max_ts, points)`. Removed
+    /// chunks only move the count and the points: the callers that pass
+    /// them (compaction) put the same points back in the same statement,
+    /// so the oldest and newest timestamps stand. A removal that can move
+    /// those goes through [`Self::disk_chunks_changed`].
+    fn disk_chunks_moved(
+        &self,
+        added: impl Iterator<Item = (i64, i64, u64)>,
+        removed_chunks: usize,
+        removed_points: u64,
+    ) {
+        if !self.disk_chunks {
+            return;
+        }
+        let mut cached = self
+            .disk_chunk_totals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Not read yet: there is nothing to move, and the first reader
+        // sees these rows in the store.
+        let Some((count, points, oldest, newest)) = cached.as_mut() else {
+            return;
+        };
+        for (min_ts, max_ts, chunk_points) in added {
+            *count += 1;
+            *points += chunk_points;
+            *oldest = Some(oldest.map_or(min_ts, |ts| ts.min(min_ts)));
+            *newest = Some(newest.map_or(max_ts, |ts| ts.max(max_ts)));
+        }
+        match (
+            count.checked_sub(removed_chunks),
+            points.checked_sub(removed_points),
+        ) {
+            (Some(left), Some(left_points)) if left > 0 => {
+                *count = left;
+                *points = left_points;
+            }
+            // Nothing left, or more removed than was counted: the store
+            // says what is there.
+            _ => *cached = None,
+        }
+    }
+
+    /// A write may have changed a disk index's totals in a way that is not
+    /// known here (a rollback, a retention delete, another process's
+    /// append): read them again when next asked.
     fn disk_chunks_changed(&self) {
         if self.disk_chunks {
             *self
@@ -2624,7 +2674,13 @@ impl Engine {
                 self.raise_raw_ts_upper_bound(meta.max_ts);
                 self.next_chunk_seq();
             }
-            self.disk_chunks_changed();
+            self.disk_chunks_moved(
+                items
+                    .iter()
+                    .map(|(_, meta)| (meta.min_ts, meta.max_ts, u64::from(meta.point_count))),
+                0,
+                0,
+            );
             return;
         }
         let mut j = self.txn_guard();
@@ -2935,11 +2991,12 @@ impl Engine {
             raw_ts_upper_bound: AtomicI64::new(i64::MIN),
         };
         if engine.disk_chunks {
-            // Nothing is loaded; only the newest timestamp is primed, for
-            // the retention guard that reads it without the store.
-            if let Some(newest) = engine.chunk_high_water() {
-                engine.raise_raw_ts_upper_bound(newest);
-            }
+            // Nothing is loaded, and nothing is read: the newest timestamp
+            // is an aggregate over every raw chunk row, and opening a table
+            // should not cost a scan of it. The retention guard that reads
+            // `raw_ts_upper_bound` only trusts it once a retention pass has
+            // set its floor, and that pass reads the high water first
+            // (`raw_high_water`), which raises the bound.
         } else {
             engine.replace_index(stored_chunks);
         }
@@ -4474,7 +4531,26 @@ impl Engine {
             }
         })?;
         drop(j);
-        self.disk_chunks_changed();
+        if self.disk_chunks {
+            // A compacted group's chunks are replaced by chunks holding the
+            // same points, so only the count and the points move.
+            let (removed_chunks, removed_points) = plans
+                .iter()
+                .flat_map(|(group, _)| group.sources.iter())
+                .fold((0usize, 0u64), |(chunks, points), (_, meta)| {
+                    (chunks + 1, points + u64::from(meta.point_count))
+                });
+            if removed_chunks == deletable.len() {
+                self.disk_chunks_moved(
+                    add.iter()
+                        .map(|chunk| (chunk.min_ts, chunk.max_ts, u64::from(chunk.point_count))),
+                    removed_chunks,
+                    removed_points,
+                );
+            } else {
+                self.disk_chunks_changed();
+            }
+        }
 
         outcome.series_compacted = plans
             .iter()
@@ -6491,6 +6567,8 @@ impl Engine {
     fn raw_high_water(&self) -> Option<i64> {
         let mut high_water = i64::MIN;
         if let Some(newest) = self.chunk_high_water() {
+            // A disk index does not prime the bound at open.
+            self.raise_raw_ts_upper_bound(newest);
             high_water = high_water.max(newest);
         }
         for entry in self.partitions.iter() {

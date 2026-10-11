@@ -14,6 +14,19 @@ See the [compatibility statement](docs/COMPATIBILITY.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- A metrics table whose catalog is on disk (`index_cache` a size) no longer
+  reads its raw chunk totals again after every flush and compaction step.
+  The totals are an aggregate over every raw chunk row, and rollup
+  settling and every statistics read ask for them, so the first of either
+  after a write scanned the chunks table: about 1.5 s for one scan of a
+  store with 3.9 million raw chunks. They
+  are now moved by what each flush and compaction wrote, and read again
+  only after a rollback, a retention delete, or another process's append.
+  Opening such a table no longer reads them at all; the first statistics
+  read or retention pass does (#144).
+
 ## [0.8.16] — 2026-10-11
 
 Upgrade notes: the first writable open of a metrics table settles its
