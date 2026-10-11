@@ -25,6 +25,18 @@ use std::sync::Arc;
 pub const ENC_PCO: u8 = 0;
 pub const ENC_RAW: u8 = 1;
 
+/// What makes a stored chunk the one a plan was made with: where it is,
+/// whose it is, where it begins, how many points (or buckets) it holds and
+/// which tier it is of (0 for raw).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ChunkIdentity {
+    pub loc: ChunkLoc,
+    pub series_id: i64,
+    pub resolution: i64,
+    pub min_ts: i64,
+    pub point_count: u32,
+}
+
 /// Where a persisted chunk lives. Backend-specific.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ChunkLoc {
@@ -541,8 +553,11 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not answer chunk index queries".to_string())
     }
 
-    /// Whether every one of `locs` is still a stored chunk.
-    fn chunks_present(&self, _locs: &[ChunkLoc]) -> Result<bool, String> {
+    /// Whether every one of `chunks` is still the stored chunk it was when
+    /// it was planned with. The row id alone does not say so: SQLite gives a
+    /// freed row id to the next row inserted, so after a rollback or a
+    /// delete the same id can belong to another series' chunk.
+    fn chunks_present(&self, _chunks: &[ChunkIdentity]) -> Result<bool, String> {
         Err("store does not answer chunk index queries".to_string())
     }
 

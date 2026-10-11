@@ -1048,6 +1048,64 @@ fn a_planned_group_whose_chunks_retention_took_is_passed_over() {
     }
 }
 
+/// A sweep's plan names chunks by where they are stored. What a rolled-back
+/// transaction wrote is gone and its row ids are free to be given to other
+/// chunks, so a plan does not outlive a rollback: the next step plans
+/// again from what is there.
+#[test]
+fn a_rollback_discards_the_sweep_plan() {
+    const SERIES: usize = 9;
+    const POINTS: usize = timeless_core::METRICS_COMPACTION_STEP_INPUT_POINTS / 8;
+    let engine = Engine::with_store(
+        Box::new(MemChunkStore::new()),
+        1_000_000,
+        0,
+        3,
+        128 << 20,
+        true,
+    )
+    .unwrap();
+    for number in 0..SERIES {
+        let series_id = engine
+            .resolve_cached(&format!("planned_{number}"), &labels())
+            .unwrap();
+        for offset in 0..POINTS {
+            engine.write_point(series_id, offset as i64, offset as f64);
+        }
+    }
+    engine.flush_all().unwrap();
+    // One step of a sweep that needs two: the rest of the plan is kept.
+    let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+    assert!(more);
+    assert!(engine.info().compaction_planned_groups > 0);
+
+    engine.txn_begin();
+    engine.txn_rollback();
+    assert_eq!(engine.info().compaction_planned_groups, 0);
+
+    // And the sweep still finishes, from a new plan.
+    let plans = engine.info().compaction_plans;
+    loop {
+        let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
+        if !more {
+            break;
+        }
+    }
+    assert!(engine.info().compaction_plans > plans);
+    for number in 0..SERIES {
+        let series_id = engine
+            .resolve_cached(&format!("planned_{number}"), &labels())
+            .unwrap();
+        assert_eq!(
+            engine
+                .query_range_by_id(series_id, i64::MIN, i64::MAX)
+                .unwrap()
+                .len(),
+            POINTS
+        );
+    }
+}
+
 #[test]
 fn bounded_metrics_compaction_caps_each_transaction_by_input_points_and_bytes() {
     const SERIES: usize = 9;

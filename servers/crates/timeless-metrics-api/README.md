@@ -257,3 +257,11 @@ latency, bytes written by flush and sweep, raw/merge work, raw and rollup
 chunk counts, and points per raw chunk. Round 24 onward closes an hour, so
 rollups do real work from there, and round 60 first merges hourly rollups. A
 sweep longer than the 300-second slot cannot keep up.
+
+`BENCH_READERS=4` adds readers: each asks for one series over HTTP every
+`BENCH_READ_PACE_MS` (10) milliseconds for as long as the rounds run, and the
+report gains a `reads` object with their count, failures, latency
+percentiles, and the server's own count of read attempts it had to start
+again behind the writer. That is what a dashboard sees while the store
+ingests and sweeps. Under read load a sweep takes much longer, so eight
+rounds is enough.

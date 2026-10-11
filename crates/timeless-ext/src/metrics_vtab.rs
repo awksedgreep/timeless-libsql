@@ -507,7 +507,9 @@ impl MetricsTab {
         let instance_id =
             shadow_meta::require_instance_id(&host, database, table).map_err(module_err)?;
         let key = shared::registry_key(handle, database.as_bytes(), table, instance_id);
+        let mut created = false;
         let shared = shared::get_or_create(&key, || {
+            created = true;
             let store = ShadowTableStore::new_read_only(database, table);
             Engine::with_store(
                 Box::new(store),
@@ -522,16 +524,41 @@ impl MetricsTab {
         // P1: keep the engine alive for this connection's lifetime, so
         // TVF-only readers stop rebuilding it every statement.
         shared::pin_engine(handle, &key, shared.clone());
-        shared.engine.set_retention(
-            shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
+        // Retention and the rollup ladder are the writer's to set: it reads
+        // them when it connects and at the start of each write transaction
+        // (`begin`). A read sets them only for an engine it has just made.
+        // Setting them from every read let a reader's older snapshot
+        // overwrite a ladder the writer had changed and not yet committed,
+        // and each such change restarts rollup and retention bookkeeping.
+        if created {
+            shared.engine.set_retention(
+                shadow_meta::load_retention(&host, database, table).map_err(module_err)?,
+            );
+            shared.engine.set_rollups(
+                load_rollups(&host, database, table)
+                    .map_err(module_err)?
+                    .unwrap_or_default(),
+            );
+        }
+
+        Ok(shared)
+    }
+
+    /// Read the table's retention and rollup ladder as this connection now
+    /// sees them, and give them to the engine. A no-op when they have not
+    /// changed.
+    fn reload_configuration(&self) -> Result<()> {
+        let host = unsafe { Connection::from_handle(self.db) }?;
+        self.shared.engine.set_retention(
+            shadow_meta::load_retention(&host, &self.database_name, &self.table_name)
+                .map_err(module_err)?,
         );
-        shared.engine.set_rollups(
-            load_rollups(&host, database, table)
+        self.shared.engine.set_rollups(
+            load_rollups(&host, &self.database_name, &self.table_name)
                 .map_err(module_err)?
                 .unwrap_or_default(),
         );
-
-        Ok(shared)
+        Ok(())
     }
 
     /// Take the shared engine's writer gate for THIS connection if we
@@ -1629,6 +1656,12 @@ impl TransactionVTab<'_> for MetricsTab {
         if let Err(err) = self.shared.engine.refresh_authoritative_state() {
             self.release_write_gate();
             return Err(module_err(err));
+        }
+        // Another process may have changed the retention or the ladder
+        // since this one last wrote.
+        if let Err(err) = self.reload_configuration() {
+            self.release_write_gate();
+            return Err(err);
         }
         self.shared.engine.txn_begin();
         Ok(())

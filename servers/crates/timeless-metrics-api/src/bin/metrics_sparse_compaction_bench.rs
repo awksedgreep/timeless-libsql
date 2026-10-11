@@ -26,6 +26,8 @@
 //! Everything is deterministic for a given gateway count.
 
 use std::env;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -104,6 +106,25 @@ struct RoundSample {
     rss_kib: u64,
 }
 
+/// What readers saw while the rounds ran (`BENCH_READERS` > 0).
+#[derive(Serialize)]
+struct ReadReport {
+    readers: usize,
+    pace_ms: u64,
+    reads: usize,
+    not_ok: usize,
+    p50_ms: f64,
+    p90_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+    over_100ms: usize,
+    /// From the server's own counters: attempts refused behind a writer and
+    /// started again, the time that took, and reads that gave up.
+    retries: u64,
+    wait_ms: f64,
+    errors: u64,
+}
+
 #[derive(Serialize)]
 struct Report {
     schema: &'static str,
@@ -114,6 +135,8 @@ struct Report {
     import_batch_points: usize,
     rollups: &'static str,
     total_points: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reads: Option<ReadReport>,
     samples: Vec<RoundSample>,
 }
 
@@ -432,6 +455,76 @@ async fn run(
     )?;
     let mut samples = Vec::with_capacity(rounds);
 
+    // Readers, if asked for: single-series instant queries over HTTP, paced,
+    // for as long as the rounds run. What they measure is what a dashboard
+    // sees while the store ingests, flushes and sweeps.
+    let readers = env_number("BENCH_READERS", 0)? as usize;
+    let pace_ms = env_number("BENCH_READ_PACE_MS", 10)?;
+    let newest_slot = Arc::new(AtomicI64::new(base_ts));
+    let stop = Arc::new(AtomicBool::new(false));
+    let latencies: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    let not_ok = Arc::new(AtomicUsize::new(0));
+    let mut reader_tasks = Vec::new();
+    if readers > 0 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| format!("bind reader listener: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("reader listener address: {error}"))?;
+        let app = timeless_metrics_api::router(storage.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = reqwest::Client::new();
+        for reader in 0..readers {
+            let (client, newest_slot, stop, latencies, not_ok) = (
+                client.clone(),
+                newest_slot.clone(),
+                stop.clone(),
+                latencies.clone(),
+                not_ok.clone(),
+            );
+            reader_tasks.push(tokio::spawn(async move {
+                let mut seen = Vec::new();
+                let mut turn = reader as u64;
+                while !stop.load(Ordering::Relaxed) {
+                    turn = mix(turn.wrapping_add(1));
+                    let selector = format!(
+                        "majordomo_device_reachable{{cm_mac=\"{}\"}}",
+                        mac(turn as usize % devices)
+                    );
+                    let query: String = form_urlencoded::Serializer::new(String::new())
+                        .append_pair("query", &selector)
+                        .append_pair("time", &newest_slot.load(Ordering::Relaxed).to_string())
+                        .finish();
+                    let started = Instant::now();
+                    let ok = match client
+                        .get(format!("http://{address}/api/v1/query?{query}"))
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            let ok = response.status().is_success();
+                            let _ = response.bytes().await;
+                            ok
+                        }
+                        Err(_) => false,
+                    };
+                    seen.push(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
+                    if !ok {
+                        not_ok.fetch_add(1, Ordering::Relaxed);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(pace_ms)).await;
+                }
+                latencies
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .extend(seen);
+            }));
+        }
+    }
+
     for round in 0..rounds {
         let slot_ts = base_ts + round as i64 * SLOT_SECS;
         let members: Vec<usize> = catalog
@@ -455,6 +548,7 @@ async fn run(
         storage.barrier().await?;
         let ingest_ms = started.elapsed().as_secs_f64() * 1000.0;
         let ingest_cpu_ms = process_cpu_ms() - cpu;
+        newest_slot.store(slot_ts, Ordering::Relaxed);
 
         let cpu = process_cpu_ms();
         let written = write_bytes();
@@ -558,6 +652,54 @@ async fn run(
             final_stats.disk_points, final_stats.buffered_points, final_stats.queued_points
         ));
     }
+    stop.store(true, Ordering::Relaxed);
+    for task in reader_tasks {
+        let _ = task.await;
+    }
+    let reads = (readers > 0).then(|| {
+        let mut micros = std::mem::take(
+            &mut *latencies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        micros.sort_unstable();
+        let at = |quantile: f64| -> f64 {
+            micros
+                .get(((micros.len() as f64 * quantile) as usize).min(micros.len().saturating_sub(1)))
+                .map_or(0.0, |micros| f64::from(*micros) / 1000.0)
+        };
+        ReadReport {
+            readers,
+            pace_ms,
+            reads: micros.len(),
+            not_ok: not_ok.load(Ordering::Relaxed),
+            p50_ms: at(0.50),
+            p90_ms: at(0.90),
+            p99_ms: at(0.99),
+            max_ms: micros.last().map_or(0.0, |micros| f64::from(*micros) / 1000.0),
+            over_100ms: micros.iter().filter(|micros| **micros > 100_000).count(),
+            retries: final_stats.api_read_retries,
+            wait_ms: final_stats.api_read_wait_ns as f64 / 1_000_000.0,
+            errors: final_stats.api_read_errors,
+        }
+    });
+    if let Some(reads) = &reads {
+        eprintln!(
+            "reads: {} by {} readers, {} not ok, p50 {:.1} ms, p90 {:.1} ms, p99 {:.1} ms, max {:.1} ms, \
+             {} over 100 ms; server retried {} attempts ({:.0} ms waiting), {} errors",
+            reads.reads,
+            reads.readers,
+            reads.not_ok,
+            reads.p50_ms,
+            reads.p90_ms,
+            reads.p99_ms,
+            reads.max_ms,
+            reads.over_100ms,
+            reads.retries,
+            reads.wait_ms,
+            reads.errors,
+        );
+    }
     storage.shutdown().await?;
     println!(
         "{}",
@@ -570,11 +712,21 @@ async fn run(
             import_batch_points: IMPORT_BATCH_POINTS,
             rollups: STACK_ROLLUPS,
             total_points,
+            reads,
             samples,
         })
         .map_err(|error| format!("serialize report: {error}"))?
     );
     Ok(())
+}
+
+fn env_number(name: &str, default: u64) -> Result<u64, String> {
+    match env::var(name) {
+        Err(_) => Ok(default),
+        Ok(value) => value
+            .parse()
+            .map_err(|_| format!("{name} must be a number, got {value:?}")),
+    }
 }
 
 fn parse_positive(value: Option<String>, default: usize, name: &str) -> Result<usize, String> {

@@ -1,6 +1,6 @@
 use crate::store::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk, StoredSeries,
-    ENC_PCO, ENC_RAW,
+    ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, FsStore, StoredChunk,
+    StoredSeries, ENC_PCO, ENC_RAW,
 };
 
 use crate::rollup::{decode_rollup_payload, encode_rollup_payload, ENC_ROLLUP_V1};
@@ -2703,6 +2703,16 @@ impl Engine {
         self.disk_chunks_changed();
         // Rollup chunks a settled tier counted on may be going with it.
         self.rollup_unsettle();
+        // Whatever was planned was planned from rows that may be going:
+        // plan again from what is left. Row ids are reused, so a plan kept
+        // across a rollback can name a row that is by then another chunk.
+        *self.compaction_plan_lock() = None;
+        self.rollup_merge_plan_lock().clear();
+        self.rollup_cycle_series_lock().clear();
+        self.rollup_cycle_high_water
+            .store(i64::MIN, Ordering::Relaxed);
+        self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+        self.retention_floor.store(i64::MIN, Ordering::Relaxed);
         // 1. Truncate buffers to their marks. Partitions without a mark
         //    were not mutated in this frame and are already as they were;
         //    one created during the frame was marked at 0 (the empty
@@ -4551,11 +4561,9 @@ impl Engine {
             // Nearly always every source is still there, and one statement
             // says so; only when something has gone is each group asked
             // after on its own.
-            let locs: Vec<ChunkLoc> = selected
-                .iter()
-                .flat_map(|group| group.sources.iter().map(|(_, meta)| meta.loc.clone()))
-                .collect();
-            if !self.store.chunks_present(&locs).unwrap_or(false) {
+            let chunks: Vec<ChunkIdentity> =
+                selected.iter().flat_map(Self::group_identities).collect();
+            if !self.store.chunks_present(&chunks).unwrap_or(false) {
                 selected.retain(|group| self.sources_present(group));
             }
         }
@@ -4860,15 +4868,24 @@ impl Engine {
     /// Chunks are immutable, so one that is there is as it was planned.
     fn sources_present(&self, group: &MetricsCompactionGroup) -> bool {
         if self.disk_chunks {
-            let locs: Vec<ChunkLoc> = group
-                .sources
-                .iter()
-                .map(|(_, meta)| meta.loc.clone())
-                .collect();
-            return self.store.chunks_present(&locs).unwrap_or(false);
+            let chunks: Vec<ChunkIdentity> = Self::group_identities(group).collect();
+            return self.store.chunks_present(&chunks).unwrap_or(false);
         }
         let index = self.index_read();
         group.sources.iter().all(|(key, _)| index.contains_key(key))
+    }
+
+    /// The identities of a planned group's source chunks.
+    fn group_identities(
+        group: &MetricsCompactionGroup,
+    ) -> impl Iterator<Item = ChunkIdentity> + '_ {
+        group.sources.iter().map(|(_, meta)| ChunkIdentity {
+            loc: meta.loc.clone(),
+            series_id: group.key.series_id,
+            resolution: 0,
+            min_ts: meta.min_ts,
+            point_count: meta.point_count,
+        })
     }
 
     /// Every actionable group for the cutoff. The index is ordered by
@@ -7016,12 +7033,20 @@ impl Engine {
             // settles it; only when something has gone is each run asked
             // after on its own.
             let present = |plans: &[RollupMergeGroup]| -> EngineResult<bool> {
-                let locs: Vec<ChunkLoc> = plans
+                let chunks: Vec<ChunkIdentity> = plans
                     .iter()
-                    .flat_map(|(_, entries)| entries.iter().map(|entry| entry.loc()))
+                    .flat_map(|(group, entries)| {
+                        entries.iter().map(|entry| ChunkIdentity {
+                            loc: entry.loc(),
+                            series_id: group.series_id,
+                            resolution: group.resolution,
+                            min_ts: entry.min_ts,
+                            point_count: entry.point_count,
+                        })
+                    })
                     .collect();
                 self.store
-                    .chunks_present(&locs)
+                    .chunks_present(&chunks)
                     .map_err(|err| format!("rollup merge presence check failed: {err}"))
             };
             if present(&plans)? {

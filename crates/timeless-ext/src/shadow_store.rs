@@ -40,9 +40,11 @@
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
+
 use timeless_core::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, ResolvedSeries,
-    StoredChunk, StoredRollupChunk, StoredSeries,
+    ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk,
+    ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
 };
 
 use crate::{shared, sql_ident};
@@ -337,8 +339,16 @@ impl ShadowTableStore {
                  WHERE resolution = 0 AND ts_max < ?1 AND (encoding = ?2 OR point_count <> ?3) \
                  ORDER BY series_id, ts_min"
             ),
+            // Each element is `[id, series_id, resolution, ts_min,
+            // point_count]`: a row that has the id and is another chunk is
+            // not the chunk asked after.
             chunks_present_sql: format!(
-                "SELECT COUNT(*) FROM {chunks} WHERE id IN (SELECT value FROM json_each(?1))"
+                "SELECT COUNT(*) FROM json_each(?1) j CROSS JOIN {chunks} c \
+                 WHERE c.id = json_extract(j.value, '$[0]') \
+                   AND c.series_id = json_extract(j.value, '$[1]') \
+                   AND c.resolution = json_extract(j.value, '$[2]') \
+                   AND c.ts_min = json_extract(j.value, '$[3]') \
+                   AND c.point_count = json_extract(j.value, '$[4]')"
             ),
             // Every rollup query repeats `resolution > 0`: the rollup index
             // is partial on it, and SQLite uses a partial index only where
@@ -1991,27 +2001,36 @@ impl ChunkStore for ShadowTableStore {
         Ok(chunks)
     }
 
-    fn chunks_present(&self, locs: &[ChunkLoc]) -> Result<bool, String> {
-        if locs.is_empty() {
+    fn chunks_present(&self, chunks: &[ChunkIdentity]) -> Result<bool, String> {
+        if chunks.is_empty() {
             return Ok(true);
         }
-        let ids: Vec<i64> = locs
-            .iter()
-            .map(|loc| match loc {
-                ChunkLoc::Row { rowid } => Ok(*rowid),
-                ChunkLoc::File { .. } => Err("shadow store chunks are rows".to_string()),
-            })
-            .collect::<Result<_, _>>()?;
+        let mut seen: HashSet<i64> = HashSet::with_capacity(chunks.len());
+        let mut list = String::with_capacity(chunks.len() * 40 + 2);
+        list.push('[');
+        for chunk in chunks {
+            let ChunkLoc::Row { rowid } = chunk.loc else {
+                return Err("shadow store chunks are rows".to_string());
+            };
+            if !seen.insert(rowid) {
+                continue;
+            }
+            if list.len() > 1 {
+                list.push(',');
+            }
+            list.push_str(&format!(
+                "[{rowid},{},{},{},{}]",
+                chunk.series_id, chunk.resolution, chunk.min_ts, chunk.point_count
+            ));
+        }
+        list.push(']');
         let conn = Self::conn()?;
         let found: i64 = conn
             .prepare_cached(&self.chunks_present_sql)
             .map_err(|e| format!("prepare chunk presence: {e}"))?
-            .query_row([Self::id_list(&ids)], |row| row.get(0))
+            .query_row([list], |row| row.get(0))
             .map_err(|e| format!("chunk presence: {e}"))?;
-        let mut distinct = ids;
-        distinct.sort_unstable();
-        distinct.dedup();
-        Ok(found as usize == distinct.len())
+        Ok(found as usize == seen.len())
     }
 
     fn has_label_index(&self) -> bool {
@@ -2182,4 +2201,47 @@ impl ChunkStore for ShadowTableStore {
 
     /// No backend cache to sweep — SQLite's page cache does this job.
     fn sweep_cache(&self) {}
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod chunk_identity_tests {
+    use super::*;
+
+    /// A chunk is the one a plan was made with only if the row with its id
+    /// is still that series' chunk: SQLite gives a freed row id to the next
+    /// row inserted, so after a rollback or a delete the id alone can name
+    /// another series' chunk of the same shape.
+    #[test]
+    fn a_reused_row_id_is_not_the_planned_chunk() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE m_chunks (id INTEGER PRIMARY KEY, series_id INTEGER, \
+               resolution INTEGER, ts_min INTEGER, point_count INTEGER);
+             INSERT INTO m_chunks VALUES (1, 10, 0, 1000, 1), (2, 10, 0, 1010, 1), \
+               (3, 10, 300, 900, 4);",
+        )
+        .unwrap();
+        let store = ShadowTableStore::new_read_only("main", "m");
+        let present = |rows: &[(i64, i64, i64, i64, u32)]| -> i64 {
+            let list = rows
+                .iter()
+                .map(|(id, series, resolution, ts_min, points)| {
+                    format!("[{id},{series},{resolution},{ts_min},{points}]")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            conn.query_row(&store.chunks_present_sql, [format!("[{list}]")], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(present(&[(1, 10, 0, 1000, 1), (2, 10, 0, 1010, 1)]), 2);
+        assert_eq!(present(&[(3, 10, 300, 900, 4)]), 1);
+        // The same ids, as they would be after another series took them.
+        assert_eq!(present(&[(1, 11, 0, 1000, 1)]), 0, "another series");
+        assert_eq!(present(&[(2, 10, 0, 1020, 1)]), 0, "another start");
+        assert_eq!(present(&[(2, 10, 0, 1010, 2)]), 0, "another size");
+        assert_eq!(present(&[(3, 10, 0, 900, 4)]), 0, "another tier");
+        assert_eq!(present(&[(4, 10, 0, 1000, 1)]), 0, "gone");
+    }
 }

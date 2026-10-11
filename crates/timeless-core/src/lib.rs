@@ -40,8 +40,8 @@ pub use spans::{
     SPAN_ATTRIBUTE_BLOOM_BYTES, SPAN_ATTRIBUTE_BLOOM_HASHES, SPAN_ATTRIBUTE_BLOOM_VERSION,
 };
 pub use store::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, FsStore,
-    ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
+    ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk,
+    FsStore, ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
