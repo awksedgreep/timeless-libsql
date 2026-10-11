@@ -10,9 +10,11 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.16 -->
+<!-- release-target: 0.8.17 -->
 
 ## [Unreleased]
+
+## [0.8.17] — 2026-10-11
 
 Upgrade notes: a metrics table whose index is on disk (`index_cache` a
 size; the extension's default for a table it creates) has its raw chunk
