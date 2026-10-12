@@ -409,12 +409,16 @@ async fn a_scheduled_sweep_is_planned_once_and_leaves_what_is_newer_than_its_cut
     storage.shutdown().await.unwrap();
 }
 
+/// A read does not wait for a writer (#143): while another connection
+/// holds a write transaction open on the table, the API answers from what
+/// is committed, at once and without a retry, and sees the transaction
+/// only once it has committed.
 #[tokio::test]
 #[ignore = "requires a built timeless_ext shared library"]
-async fn exhausted_writer_conflict_is_retryable_observable_and_recovers() {
+async fn a_read_answers_while_another_connection_holds_a_write_transaction() {
     let extension = extension_path();
     let directory = TempDir::new().unwrap();
-    let database = directory.path().join("writer-conflict.db");
+    let database = directory.path().join("writer-held.db");
     let storage = Storage::start(
         database.clone(),
         extension.clone(),
@@ -424,37 +428,37 @@ async fn exhausted_writer_conflict_is_retryable_observable_and_recovers() {
     )
     .unwrap();
     let app = router(storage.clone());
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap().to_owned())
+            .collect()
+    };
 
-    // Hold a real extension write transaction longer than the five-second
-    // reader retry budget. The fail-fast read permit must not deadlock; the
-    // exhausted request becomes an explicit retryable API response.
     let writer = open_with_extension(&database, &extension);
     writer
         .execute_batch(
             "BEGIN;
              INSERT INTO metric_samples(name, ts, value, labels)
-             VALUES ('held_writer', 1700000000, 1.0, '{}');",
+             VALUES ('held_writer', 1700000000, 1.0, '{}');
+             INSERT INTO metric_samples(metric_samples) VALUES ('flush');",
         )
         .unwrap();
-    let blocked = get_json(&app, "/api/v1/label/__name__/values").await;
-    assert_eq!(blocked.0, StatusCode::SERVICE_UNAVAILABLE, "{}", blocked.1);
-    assert_eq!(blocked.1["error"], "temporarily_unavailable");
-    assert_eq!(blocked.1["reason"], "storage_busy");
-    writer.execute_batch("ROLLBACK;").unwrap();
+    let during = get_json(&app, "/api/v1/label/__name__/values").await;
+    assert_eq!(during.0, StatusCode::OK, "{}", during.1);
+    assert!(names(&during.1).is_empty(), "{}", during.1);
+    writer.execute_batch("COMMIT;").unwrap();
 
-    let recovered = get_json(&app, "/api/v1/label/__name__/values").await;
-    assert_eq!(recovered.0, StatusCode::OK, "{}", recovered.1);
+    let after = get_json(&app, "/api/v1/label/__name__/values").await;
+    assert_eq!(after.0, StatusCode::OK, "{}", after.1);
+    assert_eq!(names(&after.1), ["held_writer"]);
     let stats = storage.stats().await.unwrap();
-    assert_eq!(stats.api_read_errors, 1);
-    assert!(stats.api_read_retries > 0);
+    assert_eq!(stats.api_read_errors, 0);
+    assert_eq!(stats.api_read_retries, 0);
     assert_eq!(stats.api_stats_retries, 0);
-    assert_eq!(
-        stats.last_error, None,
-        "successful recovery clears busy state"
-    );
-    assert_eq!(stats.admitted_points, stats.completed_points);
-    assert_eq!(stats.failed_points, 0);
-    assert_eq!(stats.queued_points, 0);
+    assert_eq!(stats.last_error, None);
 
     drop(writer);
     drop(app);

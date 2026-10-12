@@ -1979,13 +1979,10 @@ unsafe impl VTabCursor for MetricsCursor<'_> {
     /// Start of a scan: decode the pushed-down constraints per the
     /// best_index bitmask, materialize all matching rows, iterate.
     fn filter(&mut self, idx_num: c_int, idx_str: Option<&str>, args: &Filters<'_>) -> Result<()> {
-        // Route chunk reads to the connection running this SELECT.
+        // Route chunk reads to the connection running this SELECT. It
+        // reads that connection's snapshot and waits for no writer; if it
+        // is the writer, what it has buffered is stored first.
         let _bind = DbGuard::bind(self.db);
-        let _read = self
-            .shared
-            .write_gate
-            .acquire_read(self.connection, &self.table_name)
-            .map_err(module_err)?;
         MetricsTab::store_own_writes(&self.shared, self.db)?;
         self.shared
             .engine
@@ -3250,12 +3247,12 @@ mod disk_series_tests {
         assert_eq!(memory[6].len(), 3);
     }
 
-    /// The concurrency gate (#132): one connection creates series in
+    /// The concurrency gate (#132, #143): one connection creates series in
     /// transactions, committing some and rolling others back, flushing and
-    /// compacting as it goes, while another reads the disk catalog
-    /// throughout. A reader may be told the store is busy; it must never
-    /// see a row that does not match its selector, a series from a
-    /// rolled-back transaction, or any other error.
+    /// compacting as it goes, while another reads the catalog throughout.
+    /// The reader is never told the table is busy, and never sees a row
+    /// that does not match its selector, a series from a rolled-back
+    /// transaction, or any other error.
     #[test]
     fn readers_stay_consistent_while_a_writer_creates_and_rolls_back_series() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3282,7 +3279,6 @@ mod disk_series_tests {
                  CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='1MB');",
             )
             .unwrap();
-        assert_eq!(stat(&writer, "m", "series_on_disk"), 1);
 
         let done = Arc::new(AtomicBool::new(false));
         let reads = Arc::new(AtomicUsize::new(0));
@@ -3290,24 +3286,15 @@ mod disk_series_tests {
             let (done, reads, path) = (Arc::clone(&done), Arc::clone(&reads), path.clone());
             std::thread::spawn(move || -> Result<(), String> {
                 let db = open(&path);
-                let busy = |error: &rusqlite::Error| {
-                    let text = error.to_string();
-                    text.contains("busy") || text.contains("locked")
-                };
+                // Every read answers: a refusal is an error like any other.
                 let rows = |sql: &str| -> Result<Option<Vec<String>>, String> {
-                    let mut stmt = match db.prepare(sql) {
-                        Ok(stmt) => stmt,
-                        Err(error) if busy(&error) => return Ok(None),
-                        Err(error) => return Err(format!("{sql}: {error}")),
-                    };
+                    let mut stmt = db.prepare(sql).map_err(|error| format!("{sql}: {error}"))?;
                     let collected: rusqlite::Result<Vec<String>> = stmt
                         .query_map([], |row| row.get(0))
                         .and_then(Iterator::collect);
-                    match collected {
-                        Ok(rows) => Ok(Some(rows)),
-                        Err(error) if busy(&error) => Ok(None),
-                        Err(error) => Err(format!("{sql}: {error}")),
-                    }
+                    collected
+                        .map(Some)
+                        .map_err(|error| format!("{sql}: {error}"))
                 };
                 let mut last_committed = 0usize;
                 while !done.load(Ordering::Relaxed) {
@@ -3420,6 +3407,133 @@ mod disk_series_tests {
             "name, host and fate for each kept series"
         );
         drop(writer);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    /// A read on another connection never waits for a write and never sees
+    /// it before it commits (#143): through an open write transaction, a
+    /// rollback, a compaction inside a transaction and a commit, a second
+    /// connection reads what is committed, and so does a new one.
+    #[test]
+    fn a_read_on_another_connection_sees_what_is_committed_and_does_not_wait() {
+        let path = std::env::temp_dir().join(format!(
+            "timeless-read-beside-write-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let open = || {
+            let db = Connection::open(&path).unwrap();
+            // A read that had to wait for the writer would fail at once.
+            db.busy_timeout(std::time::Duration::ZERO).unwrap();
+            crate::register_telemetry(&db).unwrap();
+            db
+        };
+        // Everything a reader can ask, as text.
+        let answers = |db: &Connection| -> Vec<Vec<String>> {
+            vec![
+                strings(db, "SELECT CAST(count(*) AS TEXT) FROM m"),
+                strings(
+                    db,
+                    "SELECT name || labels || ts || value FROM m ORDER BY name, labels, ts",
+                ),
+                strings(
+                    db,
+                    "SELECT name || labels FROM timeless_series('m') ORDER BY 1",
+                ),
+                strings(
+                    db,
+                    "SELECT value FROM timeless_label_values('m', NULL, 'host')",
+                ),
+                strings(db, "SELECT name FROM timeless_label_names('m')"),
+                strings(
+                    db,
+                    r#"SELECT labels FROM timeless_series('m', 'cpu', '{"env":"prod"}') ORDER BY 1"#,
+                ),
+                strings(
+                    db,
+                    "SELECT key || '=' || CAST(value AS TEXT) FROM timeless_stats('m') \
+                     WHERE key IN ('series', 'chunks', 'disk_points', 'buffered_points', \
+                                   'ts_min', 'ts_max') ORDER BY key",
+                ),
+            ]
+        };
+        let writer = open();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE VIRTUAL TABLE m USING timeless_metrics(flush_interval='off');",
+            )
+            .unwrap();
+        fleet(&writer);
+        let reader = open();
+        let committed = answers(&reader);
+        assert_eq!(committed[0], ["4"]);
+        assert_eq!(committed[6].len(), 6, "{:?}", committed[6]);
+
+        // An open transaction: new series, more points, some of them
+        // stored (the multi-row statement opens a savepoint, which stores
+        // what was buffered before it) and some still buffered.
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        write(&writer, "cpu", r#"{"host":"x","env":"prod"}"#, 5_000);
+        writer
+            .execute_batch(
+                r#"INSERT INTO m(name, ts, value, labels) VALUES
+                     ('cpu', 5001, 1.0, '{"host":"y","env":"prod"}'),
+                     ('cpu', 5002, 1.0, '{"host":"a","env":"prod"}');"#,
+            )
+            .unwrap();
+        write(&writer, "mem", r#"{"host":"z"}"#, 5_003);
+        assert_eq!(answers(&reader), committed, "during the transaction");
+        assert_eq!(answers(&open()), committed, "a new connection, during it");
+        // The writer reads its own writes.
+        assert_eq!(answers(&writer)[0], ["8"]);
+        assert_eq!(answers(&reader), committed, "after the writer read");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(answers(&reader), committed, "after the rollback");
+        assert_eq!(
+            answers(&writer),
+            committed,
+            "the writer, after its rollback"
+        );
+
+        // A compaction inside a transaction replaces every chunk; the
+        // reader goes on reading the ones that are committed.
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        write(&writer, "cpu", r#"{"host":"a","env":"prod"}"#, 6_000);
+        writer
+            .execute("INSERT INTO m(m) VALUES ('compact')", [])
+            .unwrap();
+        assert_eq!(answers(&reader), committed, "during a compaction");
+
+        // A reader that began before the commit keeps its snapshot until
+        // it ends its transaction; one that begins after sees the commit.
+        reader.execute_batch("BEGIN").unwrap();
+        assert_eq!(answers(&reader), committed);
+        writer.execute_batch("COMMIT").unwrap();
+        let after = answers(&writer);
+        assert_eq!(after[0], ["5"]);
+        assert_eq!(
+            answers(&open()),
+            after,
+            "a new connection, after the commit"
+        );
+        assert_eq!(
+            answers(&reader),
+            committed,
+            "an older snapshot is still read"
+        );
+        // And what it read did not displace what newer readers are told.
+        assert_eq!(answers(&open()), after);
+        reader.execute_batch("COMMIT").unwrap();
+        assert_eq!(answers(&reader), after, "its next read sees the commit");
+
+        drop((writer, reader));
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
@@ -3705,8 +3819,8 @@ mod disk_series_tests {
         assert_eq!(count(&db), 3);
         assert_eq!(count(&db), 3);
 
-        // Another connection's transaction: a read waits it out (the
-        // table refuses one meanwhile) and then sees what it committed.
+        // Another connection's transaction: a read goes on answering what
+        // is committed, and then sees what the transaction committed.
         let other = open();
         other.execute_batch("BEGIN IMMEDIATE").unwrap();
         other
@@ -3715,10 +3829,7 @@ mod disk_series_tests {
                 params![r#"{"host":"f","env":"prod"}"#],
             )
             .unwrap();
-        assert!(db
-            .prepare(PROD)
-            .and_then(|mut read| read.exists([]))
-            .is_err());
+        assert_eq!(count(&db), 3);
         other.execute_batch("COMMIT").unwrap();
         assert_eq!(count(&db), 4);
         assert_eq!(count(&other), 4);

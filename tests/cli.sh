@@ -2823,13 +2823,13 @@ check_eq "direct discovery rejects an invalid regex with label context" \
   "$(grep -c 'invalid regex.*host' <<<"$err")" "1"
 
 # ---------------------------------------------------------------------------
-echo "== section 39: reader gate hides transaction-private chunk rows =="
+echo "== section 39: a reader beside a write transaction reads what is committed =="
 E39DB="$TMP/read_gate39.db"
 if cargo run --quiet --manifest-path "$ROOT/tools/query-harness/Cargo.toml" --locked -- \
   gate cli reader-gate --extension "$EXT" --database "$E39DB"; then
-  pass "reader gate reports conflict and publishes rollback/commit exactly"
+  pass "a reader beside a write transaction reads what is committed, exactly"
 else
-  fail "reader gate reports conflict and publishes rollback/commit exactly"
+  fail "a reader beside a write transaction reads what is committed, exactly"
 fi
 
 # ---------------------------------------------------------------------------

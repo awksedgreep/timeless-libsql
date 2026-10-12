@@ -355,15 +355,15 @@ fn reader_gate(extension: &Path, database: &Path) -> Result<()> {
          INSERT INTO m(name,ts,value) VALUES('cpu',20,2.0);
          INSERT INTO m(m) VALUES('flush');",
     )?;
-    let error = raw_rows(&b).expect_err("reader escaped active write transaction");
-    let message = error.to_string();
-    ensure!(
-        message.contains("active write transaction")
-            && message.contains("retry")
-            && message.contains("SQLITE_BUSY")
-    );
+    // Beside an open write transaction another connection reads what is
+    // committed, without waiting and without an error; the writer reads
+    // its own writes.
+    ensure!(raw_rows(&b)? == [(10, 1.0)]);
+    ensure!(raw_rows(&a)? == [(10, 1.0), (20, 2.0)]);
+    ensure!(raw_rows(&b)? == [(10, 1.0)]);
     a.execute("ROLLBACK", [])?;
     ensure!(raw_rows(&b)? == [(10, 1.0)]);
+    ensure!(raw_rows(&a)? == [(10, 1.0)]);
     a.execute_batch(
         "BEGIN;
          INSERT INTO m(name,ts,value) VALUES('cpu',30,3.0);
@@ -371,7 +371,7 @@ fn reader_gate(extension: &Path, database: &Path) -> Result<()> {
          COMMIT;",
     )?;
     ensure!(raw_rows(&b)? == [(10, 1.0), (30, 3.0)]);
-    println!("PASS: reader gate reports conflict and publishes rollback/commit exactly");
+    println!("PASS: a reader beside a write transaction reads what is committed, exactly");
     Ok(())
 }
 
@@ -593,14 +593,14 @@ fn frames(extension: &Path, database: &Path, auxiliary: &[PathBuf]) -> Result<()
         "INSERT INTO m(name,labels,ts,value) VALUES('cpu','{\"host\":\"a\"}',20,2.0)",
         [],
     )?;
-    let error = b
-        .query_row::<Vec<u8>, _, _>(
-            "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)",
-            [],
-            |row| row.get(0),
-        )
-        .expect_err("frame escaped active transaction");
-    ensure!(error.to_string().contains("active write transaction"));
+    // Another connection's frame is of what is committed until the
+    // transaction commits.
+    let during: Vec<u8> = b.query_row(
+        "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(decode_latest(&during)? == [(1, 10, Some(1.0))]);
     a.execute("COMMIT", [])?;
     let second: Vec<u8> = b.query_row(
         "SELECT frame FROM timeless_latest_frame('m','cpu',NULL,0,100)",

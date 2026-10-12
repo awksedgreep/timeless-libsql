@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Helpers that lived below the NIF boundary in the original tms_engine file.
@@ -215,6 +215,14 @@ struct MetricsCompactionPlan {
     /// The chunk sequence at which the sweep finished, when it has: until
     /// a chunk is added, there is nothing for it to find again.
     drained_at_seq: Option<u64>,
+}
+
+/// A store's totals at one committed generation.
+#[derive(Clone, Copy)]
+struct PublishedTotals {
+    generation: (i64, i64),
+    raw: ChunkTotals,
+    rollups: (usize, usize),
 }
 
 /// The series a planning pass has still to read.
@@ -709,11 +717,11 @@ pub struct Engine {
     /// Where everything durable lives: chunk rows, the series catalog and
     /// the indexes over both. The engine keeps no copy of any of them.
     store: Box<dyn ChunkStore>,
-    /// Pins one complete query-visible generation. Queries hold a shared
-    /// guard from candidate lookup through payload and buffer reads;
-    /// maintenance holds the exclusive guard while moving data between
-    /// buffers, indexes, and the store.
-    transition: RwLock<()>,
+    /// Held by whatever is moving data between buffers and the store or
+    /// changing what the engine remembers of it: one such at a time. Reads
+    /// do not take it: a read sees its own connection's snapshot of the
+    /// store, and nothing in memory that a writer is part-way through.
+    transition: Mutex<()>,
     flush_threshold: usize,
     min_flush_size: usize,
     compression_level: usize,
@@ -775,13 +783,21 @@ pub struct Engine {
     /// remembered selections are emptied again when the transaction ends,
     /// for a reader that worked one out meanwhile from its own snapshot.
     series_touched: AtomicBool,
-    /// Whole-store raw-chunk totals, read once and kept until a write
-    /// could have changed them.
+    /// Whole-store raw-chunk totals as the writer sees them, read once
+    /// and then moved by what it writes, its uncommitted writes included.
+    /// For the writer's own use (maintenance asks for the newest sample at
+    /// every step); a statistics read goes through `published_totals`.
     chunk_totals: Mutex<Option<ChunkTotals>>,
     /// Rollup chunks: how many, and how many hold one bucket. Read from
     /// the store once and then moved by what each rollup pass, merge and
     /// delete did, as the raw totals are.
     rollup_chunk_totals: Mutex<Option<(usize, usize)>>,
+    /// The totals of the store as committed at one generation: what a
+    /// statistics read reports if that is the generation its connection
+    /// sees, without the aggregate over every chunk that working them out
+    /// takes. Set as a transaction commits, from the writer's totals, and
+    /// by a reader that had to work them out.
+    published_totals: Mutex<Option<PublishedTotals>>,
     /// Per tier, the coverage end through which a rollup cycle has looked
     /// at every series' group and left nothing undone. While a tier's next
     /// coverage end is still that one (an hourly tier's is, for eleven
@@ -966,12 +982,8 @@ impl Drop for ColdFlushGuard<'_> {
 }
 
 impl Engine {
-    fn transition_read(&self) -> RwLockReadGuard<'_, ()> {
-        self.transition.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn transition_write(&self) -> RwLockWriteGuard<'_, ()> {
-        self.transition.write().unwrap_or_else(|e| e.into_inner())
+    fn transition_write(&self) -> MutexGuard<'_, ()> {
+        self.transition.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn next_chunk_seq(&self) -> u64 {
@@ -1138,6 +1150,44 @@ impl Engine {
             }
             Err(_) => (0, 0, None, None),
         }
+    }
+
+    /// The store's totals as the calling connection sees it: raw chunks,
+    /// and rollup chunks. From what was published for the generation it
+    /// sees, if that is the one; otherwise read from its snapshot, which
+    /// is an aggregate over every chunk's index entry. A connection inside
+    /// a transaction that has written sees a generation nothing was
+    /// published for, and reads its own.
+    fn snapshot_totals(&self) -> (ChunkTotals, (usize, usize)) {
+        let seen = self.store.catalog_generation().ok().flatten();
+        if let Some(seen) = seen {
+            let published = *self
+                .published_totals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(totals) = published.filter(|totals| totals.generation == seen) {
+                return (totals.raw, totals.rollups);
+            }
+        }
+        // An unreadable store reports nothing rather than failing a
+        // statistics read.
+        let (Ok(raw), Ok(rollups)) = (self.store.chunk_totals(), self.store.rollup_totals()) else {
+            return ((0, 0, None, None), (0, 0));
+        };
+        // Worth keeping if it is the committed store that was read: a
+        // generation seen inside an open transaction may never be
+        // committed, and be reached again later by other writes.
+        if let Some(generation) = seen.filter(|seen| Some(*seen) == *self.catalog_gen_lock()) {
+            *self
+                .published_totals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(PublishedTotals {
+                generation,
+                raw,
+                rollups,
+            });
+        }
+        (raw, rollups)
     }
 
     /// The newest timestamp any raw chunk holds.
@@ -1412,8 +1462,19 @@ impl Engine {
                 text(value);
             }
         }
-        if let Some(ids) = cache.get(&key) {
-            return Ok(ids);
+        // Remembered answers are of the catalog as last committed. They are
+        // this read's answers only if that is the catalog its connection
+        // sees: not an older snapshot, not another process's later commit,
+        // and not a transaction's own uncommitted series.
+        let current = cache.capacity > 0
+            && self
+                .store
+                .catalog_generation()
+                .is_ok_and(|seen| seen.is_some() && seen == *self.catalog_gen_lock());
+        if current {
+            if let Some(ids) = cache.get(&key) {
+                return Ok(ids);
+            }
         }
         let epoch = cache.epoch();
         let ids = if any_of.is_empty() {
@@ -1422,17 +1483,8 @@ impl Engine {
             self.store.find_series_ids_any(Some(metric), eq, any_of)
         }
         .map_err(|err| format!("failed to select series: {err}"))?;
-        // Kept only if it was read from the catalog as it now stands: not
-        // inside a transaction that may yet roll back or that others
-        // cannot see, and not from a snapshot older than what this engine
-        // last saw committed.
-        if cache.capacity > 0
-            && !self.txn_active.load(Ordering::SeqCst)
-            && self
-                .store
-                .catalog_generation()
-                .is_ok_and(|seen| seen.is_some() && seen == *self.catalog_gen_lock())
-        {
+        // Kept if no series came or went while it was being worked out.
+        if current {
             cache.admit(key, &ids, epoch);
         }
         Ok(ids.into())
@@ -1630,6 +1682,25 @@ impl Engine {
         }
         if let Some(generation) = generation {
             *self.catalog_gen_lock() = Some(generation);
+            // What the writer counted is now what is committed.
+            let raw = *self
+                .chunk_totals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let rollups = *self
+                .rollup_chunk_totals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let (Some(raw), Some(rollups)) = (raw, rollups) {
+                *self
+                    .published_totals
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(PublishedTotals {
+                    generation,
+                    raw,
+                    rollups,
+                });
+            }
         }
         self.txn_active.store(false, Ordering::SeqCst);
         self.series_settled();
@@ -1945,7 +2016,7 @@ impl Engine {
         }
         let engine = Engine {
             store,
-            transition: RwLock::new(()),
+            transition: Mutex::new(()),
             flush_threshold,
             min_flush_size,
             compression_level,
@@ -1985,6 +2056,7 @@ impl Engine {
             series_touched: AtomicBool::new(false),
             chunk_totals: Mutex::new(None),
             rollup_chunk_totals: Mutex::new(None),
+            published_totals: Mutex::new(None),
             rollup_settled: Mutex::new(HashMap::new()),
             rollup_settled_max: AtomicI64::new(i64::MIN),
             rollup_tier_started: Mutex::new(None),
@@ -3681,7 +3753,6 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<(Labels, Vec<(i64, f64)>)>> {
-        let _transition = self.transition_read();
         let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
@@ -3712,7 +3783,6 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<(i64, f64)>> {
-        let _transition = self.transition_read();
         self.query_range_by_id_inner(series_id, t_start, t_end)
     }
 
@@ -3725,7 +3795,6 @@ impl Engine {
         t_end: i64,
         max_points: usize,
     ) -> EngineResult<Vec<(i64, f64)>> {
-        let _transition = self.transition_read();
         if max_points == 0 {
             return Ok(Vec::new());
         }
@@ -3785,7 +3854,6 @@ impl Engine {
             return Ok(series_ids.iter().map(|&sid| (sid, Vec::new())).collect());
         }
 
-        let _transition = self.transition_read();
         let (matching, carried) =
             self.chunk_metas_batch_carrying(series_ids, t_start, t_end, max_work_points)?;
         let locs: Vec<ChunkLoc> = matching
@@ -3950,7 +4018,6 @@ impl Engine {
         if t_start > t_end {
             return Ok(None);
         }
-        let _transition = self.transition_read();
         self.query_latest_by_id_inner(series_id, t_start, t_end)
     }
 
@@ -3994,7 +4061,6 @@ impl Engine {
             return Ok(series_ids.iter().map(|&sid| (sid, None)).collect());
         }
 
-        let _transition = self.transition_read();
         let matching: Vec<Vec<(usize, ChunkMeta)>> = self
             .chunk_metas_batch(series_ids, t_start, t_end)?
             .into_iter()
@@ -4200,7 +4266,6 @@ impl Engine {
         t_end: i64,
         agg: AggFn,
     ) -> EngineResult<Vec<(Labels, f64)>> {
-        let _transition = self.transition_read();
         let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
@@ -4229,7 +4294,6 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Option<AggregateSummary>> {
-        let _transition = self.transition_read();
         self.query_aggregate_summary_by_id_inner(series_id, t_start, t_end)
     }
 
@@ -4245,7 +4309,6 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<AggregateSummaryBatch> {
-        let _transition = self.transition_read();
         let matching: Vec<Vec<ChunkMeta>> = self.chunk_metas_batch(series_ids, t_start, t_end)?;
 
         let mut locs = Vec::new();
@@ -4645,7 +4708,6 @@ impl Engine {
         if Self::validate_grid_last(start, stop, step, lookback)? == 0 {
             return Ok(Vec::new());
         }
-        let _transition = self.transition_read();
         let samples =
             self.query_range_by_id_inner(series_id, start.saturating_sub(lookback), stop)?;
         Ok(Self::grid_last_walk(&samples, start, stop, step, lookback))
@@ -4701,7 +4763,6 @@ impl Engine {
         if Self::validate_window(start, stop, step, window)? == 0 {
             return Ok(Vec::new());
         }
-        let _transition = self.transition_read();
         let samples =
             self.query_range_by_id_inner(series_id, start.saturating_sub(window), stop)?;
         Ok(Self::window_op_walk(
@@ -4785,7 +4846,6 @@ impl Engine {
             ));
         }
 
-        let _transition = self.transition_read();
         let range_start = start.saturating_sub(window);
         let (matching, carried) =
             self.chunk_metas_batch_carrying(series_ids, range_start, stop, max_work_points)?;
@@ -4907,7 +4967,6 @@ impl Engine {
         if Self::validate_window(start, stop, step, window)? == 0 {
             return Ok(Vec::new());
         }
-        let _transition = self.transition_read();
         let samples =
             self.query_range_by_id_inner(series_id, start.saturating_sub(window), stop)?;
         Ok(Self::window_op_walk(
@@ -4937,7 +4996,6 @@ impl Engine {
         if Self::validate_grid_last(start, stop, step, lookback)? == 0 {
             return Ok(Vec::new());
         }
-        let _transition = self.transition_read();
         let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
@@ -4978,7 +5036,6 @@ impl Engine {
         if Self::validate_window(start, stop, step, window)? == 0 {
             return Ok(Vec::new());
         }
-        let _transition = self.transition_read();
         let candidates: Vec<(i64, Labels)> = self.select_series(metric_name, label_filter)?;
 
         candidates
@@ -5781,7 +5838,6 @@ impl Engine {
         if resolution <= 0 {
             return Err(format!("resolution must be positive, got {resolution}"));
         }
-        let _transition = self.transition_read();
         let metas: Vec<ChunkMeta> = self
             .rollup_metas_for(resolution, &[series_id], start, stop)?
             .pop()
@@ -5816,7 +5872,6 @@ impl Engine {
             return Err(format!("resolution must be positive, got {resolution}"));
         }
 
-        let _transition = self.transition_read();
         let matching: Vec<Vec<ChunkMeta>> =
             self.rollup_metas_for(resolution, series_ids, start, stop)?;
         let locs: Vec<ChunkLoc> = matching
@@ -6258,8 +6313,17 @@ impl Engine {
             .store
             .catalog_generation()
             .map_err(|err| format!("failed to read catalog generation: {err}"))?;
-        if observed.is_some() && observed == *self.catalog_gen_lock() {
+        let known = *self.catalog_gen_lock();
+        if observed.is_some() && observed == known {
             return Ok(());
+        }
+        // A connection still reading a snapshot from before the last
+        // commit sees an older generation. Nobody else wrote; it reads its
+        // snapshot, and what is remembered of the newer store stays.
+        if let (Some(observed), Some(known)) = (observed, known) {
+            if (observed.1, observed.0) < (known.1, known.0) {
+                return Ok(());
+            }
         }
         let _transition = self.transition_write();
         let _journal = self.txn_lock();
@@ -6286,8 +6350,6 @@ impl Engine {
     /// describes stored points; a transaction's own points are stored
     /// before the transaction reads, so `buffered` is always 0.
     pub fn series_overview(&self) -> Vec<SeriesOverview> {
-        let _transition = self.transition_read();
-
         let chunk_agg = self.chunk_stats_all();
 
         let mut out: Vec<SeriesOverview> = Vec::new();
@@ -6323,7 +6385,6 @@ impl Engine {
         metric_name: &str,
         label_filter: &Labels,
     ) -> Vec<SeriesOverview> {
-        let _transition = self.transition_read();
         let series_ids = self
             .select_series_ids(metric_name, label_filter)
             .unwrap_or_default();
@@ -6334,7 +6395,6 @@ impl Engine {
     /// host apply regex/negative matchers to catalog labels before it asks
     /// the engine to aggregate chunk metadata.
     pub fn series_overview_by_ids(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
-        let _transition = self.transition_read();
         self.series_overview_by_ids_inner(series_ids)
     }
 
@@ -6342,7 +6402,6 @@ impl Engine {
     /// so a full-catalog read never holds every series' cloned labels in
     /// memory at once. It reads index entries only, never chunk bytes.
     pub fn series_overview_by_id(&self, series_id: i64) -> Option<SeriesOverview> {
-        let _transition = self.transition_read();
         let SeriesInfo {
             metric_name: name,
             labels,
@@ -6368,7 +6427,6 @@ impl Engine {
     /// Catalog rows for series whose names and labels the caller already
     /// holds, so a selection that read them once does not read them again.
     pub fn series_overview_for(&self, infos: Vec<(i64, SeriesInfo)>) -> Vec<SeriesOverview> {
-        let _transition = self.transition_read();
         self.series_overview_of(infos)
     }
 
@@ -6399,19 +6457,37 @@ impl Engine {
         out
     }
 
+    /// The engine's figures, with the points the open transaction has
+    /// written and not yet stored counted in.
     pub fn info(&self) -> EngineInfo {
+        self.info_with(true)
+    }
+
+    /// [`Self::info`] of what is stored, as the calling connection sees
+    /// it. Buffered points are another connection's open transaction, or
+    /// the caller's own, which it stores before it reads.
+    pub fn info_stored(&self) -> EngineInfo {
+        self.info_with(false)
+    }
+
+    fn info_with(&self, buffers: bool) -> EngineInfo {
         let series_count = self.series_count();
-        let (chunk_count, total_disk_points, mut oldest_ts, mut newest_ts) = self.chunk_totals();
+        let (
+            (chunk_count, total_disk_points, mut oldest_ts, mut newest_ts),
+            (rollup_chunk_count, rollup_single_bucket_chunks),
+        ) = self.snapshot_totals();
         let partition_count = self.partitions.len();
-        let (rollup_chunk_count, rollup_single_bucket_chunks) = self.rollup_totals();
-        let buffered_points: usize = self
-            .partitions
-            .iter()
-            .map(|e| e.value().timestamps.len())
-            .sum();
+        let buffered_points: usize = if buffers {
+            self.partitions
+                .iter()
+                .map(|e| e.value().timestamps.len())
+                .sum()
+        } else {
+            0
+        };
         let buffer_memory = self.buffer_memory.load(Ordering::Relaxed);
 
-        for entry in self.partitions.iter() {
+        for entry in self.partitions.iter().filter(|_| buffers) {
             let buf = entry.value();
             if let Some(min_ts) = buf.timestamps.iter().min() {
                 oldest_ts = match oldest_ts {
