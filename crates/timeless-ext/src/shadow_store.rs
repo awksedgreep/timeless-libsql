@@ -44,7 +44,7 @@ use std::collections::HashSet;
 
 use timeless_core::{
     ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk,
-    ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
+    ResolvedSeries, SeriesSpan, StoredChunk, StoredRollupChunk, StoredSeries,
 };
 
 use crate::{shared, sql_ident};
@@ -206,14 +206,17 @@ pub(crate) struct ShadowTableStore {
     chunk_rows_one_sql: String,
     chunk_stats_one_sql: String,
     chunk_series_ids_sql: String,
+    next_chunk_series_sql: String,
     chunk_locs_before_sql: String,
     chunk_locs_after_sql: String,
     compaction_candidates_sql: String,
+    compaction_candidates_of_sql: String,
     chunks_present_sql: String,
     rollup_watermarks_sql: String,
     series_with_raw_between_sql: String,
     rollup_metas_sql: String,
     rollup_groups_sql: String,
+    next_rollup_series_sql: String,
     rollup_series_ids_sql: String,
     rollup_resolutions_sql: String,
     rollup_totals_sql: String,
@@ -313,7 +316,12 @@ impl ShadowTableStore {
                  FROM {chunks} WHERE resolution = 0"
             ),
             chunk_series_ids_sql: format!(
-                "SELECT DISTINCT series_id FROM {chunks} WHERE resolution = 0 ORDER BY series_id"
+                "SELECT DISTINCT series_id FROM {chunks} \
+                 WHERE resolution = 0 AND series_id BETWEEN ?1 AND ?2 ORDER BY series_id"
+            ),
+            next_chunk_series_sql: format!(
+                "SELECT series_id FROM {chunks} WHERE resolution = 0 AND series_id >= ?1 \
+                 ORDER BY series_id LIMIT 1"
             ),
             chunk_locs_before_sql: format!(
                 "SELECT id FROM {chunks} WHERE resolution = 0 AND ts_max < ?1"
@@ -328,8 +336,17 @@ impl ShadowTableStore {
             // every row (0.53 s against 0.14 s for 1.9 million).
             compaction_candidates_sql: format!(
                 "SELECT id, series_id, ts_min, ts_max, point_count, encoding FROM {chunks} \
-                 WHERE resolution = 0 AND ts_max < ?1 AND (encoding = ?2 OR point_count <> ?3) \
+                 WHERE resolution = 0 AND series_id BETWEEN ?4 AND ?5 \
+                   AND ts_max < ?1 AND (encoding = ?2 OR point_count <> ?3) \
                  ORDER BY series_id, ts_min"
+            ),
+            compaction_candidates_of_sql: format!(
+                "SELECT c.id, c.series_id, c.ts_min, c.ts_max, c.point_count, c.encoding \
+                 FROM json_each(?4) AS wanted \
+                 JOIN {chunks} AS c ON c.series_id = wanted.value \
+                 WHERE c.resolution = 0 \
+                   AND c.ts_max < ?1 AND (c.encoding = ?2 OR c.point_count <> ?3) \
+                 ORDER BY c.series_id, c.ts_min"
             ),
             // Each element is `[id, series_id, resolution, ts_min,
             // point_count]`: a row that has the id and is another chunk is
@@ -374,8 +391,12 @@ impl ShadowTableStore {
             ),
             rollup_groups_sql: format!(
                 "SELECT id, series_id, resolution, ts_min, ts_max, point_count \
-                 FROM {chunks} WHERE resolution > 0 \
+                 FROM {chunks} WHERE resolution > 0 AND series_id BETWEEN ?1 AND ?2 \
                  ORDER BY series_id, resolution, ts_min, id"
+            ),
+            next_rollup_series_sql: format!(
+                "SELECT series_id FROM {chunks} WHERE resolution > 0 AND series_id >= ?1 \
+                 ORDER BY series_id LIMIT 1"
             ),
             rollup_series_ids_sql: format!(
                 "SELECT DISTINCT series_id FROM {chunks} WHERE resolution > 0 ORDER BY series_id"
@@ -1452,17 +1473,24 @@ impl ChunkStore for ShadowTableStore {
         .map_err(|e| format!("chunk totals: {e}"))
     }
 
-    fn chunk_series_ids(&self) -> Result<Vec<i64>, String> {
+    fn chunk_series_ids_between(&self, from: i64, upto: i64) -> Result<Vec<i64>, String> {
         let conn = Self::conn()?;
         let mut stmt = conn
             .prepare_cached(&self.chunk_series_ids_sql)
             .map_err(|e| format!("prepare chunk series ids: {e}"))?;
         let ids = stmt
-            .query_map([], |row| row.get(0))
+            .query_map(params![from, upto], |row| row.get(0))
             .map_err(|e| format!("chunk series ids: {e}"))?
             .collect::<Result<_, _>>()
             .map_err(|e| format!("chunk series ids: {e}"))?;
         Ok(ids)
+    }
+
+    fn next_chunk_series(&self, from: i64) -> Result<Option<i64>, String> {
+        let conn = Self::conn()?;
+        conn.prepare_cached(&self.next_chunk_series_sql)
+            .and_then(|mut stmt| stmt.query_row(params![from], |row| row.get(0)).optional())
+            .map_err(|e| format!("next chunk series: {e}"))
     }
 
     fn chunk_series_cataloged(&self) -> Result<bool, String> {
@@ -1592,6 +1620,8 @@ impl ChunkStore for ShadowTableStore {
 
     fn visit_rollup_groups(
         &self,
+        from: i64,
+        upto: i64,
         visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
     ) -> Result<(), String> {
         let conn = Self::conn()?;
@@ -1599,7 +1629,7 @@ impl ChunkStore for ShadowTableStore {
             .prepare_cached(&self.rollup_groups_sql)
             .map_err(|e| format!("prepare rollup group scan: {e}"))?;
         let mut rows = stmt
-            .query([])
+            .query(params![from, upto])
             .map_err(|e| format!("rollup group scan: {e}"))?;
         while let Some(row) = rows
             .next()
@@ -1608,6 +1638,13 @@ impl ChunkStore for ShadowTableStore {
             visitor(Self::rollup_index_row(row).map_err(|e| e.to_string())?)?;
         }
         Ok(())
+    }
+
+    fn next_rollup_series(&self, from: i64) -> Result<Option<i64>, String> {
+        let conn = Self::conn()?;
+        conn.prepare_cached(&self.next_rollup_series_sql)
+            .and_then(|mut stmt| stmt.query_row(params![from], |row| row.get(0)).optional())
+            .map_err(|e| format!("next rollup series: {e}"))
     }
 
     fn rollup_victims(
@@ -1695,14 +1732,30 @@ impl ChunkStore for ShadowTableStore {
         cutoff_ts: i64,
         raw_encoding: u8,
         target_points: u32,
+        span: SeriesSpan<'_>,
     ) -> Result<Vec<StoredChunk>, String> {
         let conn = Self::conn()?;
+        let (sql, first, second) = match span {
+            SeriesSpan::Between(from, upto) => (
+                &self.compaction_candidates_sql,
+                rusqlite::types::Value::Integer(from),
+                Some(upto),
+            ),
+            SeriesSpan::Of([]) => return Ok(Vec::new()),
+            SeriesSpan::Of(ids) => (
+                &self.compaction_candidates_of_sql,
+                rusqlite::types::Value::Text(Self::id_list(ids)),
+                None,
+            ),
+        };
         let mut stmt = conn
-            .prepare_cached(&self.compaction_candidates_sql)
+            .prepare_cached(sql)
             .map_err(|e| format!("prepare compaction candidates: {e}"))?;
-        let mut rows = stmt
-            .query(params![cutoff_ts, raw_encoding, target_points])
-            .map_err(|e| format!("compaction candidates: {e}"))?;
+        let mut rows = match second {
+            Some(upto) => stmt.query(params![cutoff_ts, raw_encoding, target_points, first, upto]),
+            None => stmt.query(params![cutoff_ts, raw_encoding, target_points, first]),
+        }
+        .map_err(|e| format!("compaction candidates: {e}"))?;
         let mut chunks = Vec::new();
         while let Some(row) = rows
             .next()

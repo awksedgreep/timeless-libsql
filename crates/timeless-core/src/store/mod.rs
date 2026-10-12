@@ -25,6 +25,15 @@ use std::sync::Arc;
 pub const ENC_PCO: u8 = 0;
 pub const ENC_RAW: u8 = 1;
 
+/// The series a read of an index covers.
+#[derive(Clone, Copy, Debug)]
+pub enum SeriesSpan<'a> {
+    /// Every series with an id in this range, both ends included.
+    Between(i64, i64),
+    /// These series: ascending, each once.
+    Of(&'a [i64]),
+}
+
 /// What makes a stored chunk the one a plan was made with: where it is,
 /// whose it is, where it begins, how many points (or buckets) it holds and
 /// which tier it is of (0 for raw).
@@ -426,6 +435,17 @@ pub trait ChunkStore: Send + Sync {
 
     /// Ids of the series that have a raw chunk, ascending.
     fn chunk_series_ids(&self) -> Result<Vec<i64>, String> {
+        self.chunk_series_ids_between(i64::MIN, i64::MAX)
+    }
+
+    /// [`Self::chunk_series_ids`] for series ids in `[from, upto]`.
+    fn chunk_series_ids_between(&self, _from: i64, _upto: i64) -> Result<Vec<i64>, String> {
+        Err("store does not answer chunk index queries".to_string())
+    }
+
+    /// The smallest series id at or above `from` that has a raw chunk:
+    /// where a walk of the raw index in stretches of series goes next.
+    fn next_chunk_series(&self, _from: i64) -> Result<Option<i64>, String> {
         Err("store does not answer chunk index queries".to_string())
     }
 
@@ -475,12 +495,20 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not answer rollup index queries".to_string())
     }
 
-    /// Every rollup chunk, a `(series, resolution)` group at a time and in
-    /// `min_ts` order within it. `payload_bytes` is not read and is zero.
+    /// The rollup chunks of the series with ids in `[from, upto]`, a
+    /// `(series, resolution)` group at a time and in `min_ts` order within
+    /// it. `payload_bytes` is not read and is zero.
     fn visit_rollup_groups(
         &self,
+        _from: i64,
+        _upto: i64,
         _visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
     ) -> Result<(), String> {
+        Err("store does not answer rollup index queries".to_string())
+    }
+
+    /// The smallest series id at or above `from` that has a rollup chunk.
+    fn next_rollup_series(&self, _from: i64) -> Result<Option<i64>, String> {
         Err("store does not answer rollup index queries".to_string())
     }
 
@@ -524,18 +552,19 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not answer chunk index queries".to_string())
     }
 
-    /// Raw chunks a compaction sweep may act on: newest sample before
-    /// `cutoff_ts`, and either still encoded as `raw_encoding` or holding
-    /// anything but exactly `target_points` (smaller ones may merge, larger
-    /// ones are cut down). A plan is made of these, so the value
-    /// statistics are not read and are zero, and `payload_bytes` may be an
-    /// estimate. Ordered by series id, then `min_ts`, then
-    /// insertion.
+    /// Raw chunks of the series in `span` that a compaction sweep may act
+    /// on: newest sample before `cutoff_ts`, and either still encoded as
+    /// `raw_encoding` or holding anything but exactly `target_points`
+    /// (smaller ones may merge, larger ones are cut down). A plan is made
+    /// of these, so the value statistics are not read and are zero, and
+    /// `payload_bytes` may be an estimate. Ordered by series id, then
+    /// `min_ts`, then insertion.
     fn compaction_candidates(
         &self,
         _cutoff_ts: i64,
         _raw_encoding: u8,
         _target_points: u32,
+        _span: SeriesSpan<'_>,
     ) -> Result<Vec<StoredChunk>, String> {
         Err("store does not answer chunk index queries".to_string())
     }

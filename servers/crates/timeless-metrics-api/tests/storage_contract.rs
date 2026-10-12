@@ -385,9 +385,9 @@ async fn a_scheduled_sweep_is_planned_once_and_leaves_what_is_newer_than_its_cut
         stats.extension_compaction_raw_chunks,
         RAW_RUN * OVER_STEP_SERIES as i64
     );
-    // Planned once for the sweep, and once more at its end to see that
-    // nothing was left; not at every step.
-    assert_eq!(stats.extension_compaction_plans, 2);
+    // One plan for the sweep, read from the index as the sweep goes; not
+    // one at every step.
+    assert_eq!(stats.extension_compaction_plans, 1);
     assert_eq!(stats.extension_compaction_planned_groups, 0);
     assert_eq!(stats.raw_chunk_index_entries, OVER_STEP_SERIES as i64 + 1);
 

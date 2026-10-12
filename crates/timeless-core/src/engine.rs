@@ -5,7 +5,7 @@ use crate::store::{
 
 use crate::rollup::{decode_rollup_payload, encode_rollup_payload};
 use crate::rollup::{rollup_buckets, RollupBucket, RollupTier};
-use crate::store::{EncodedRollupChunk, StoredRollupChunk};
+use crate::store::{EncodedRollupChunk, SeriesSpan, StoredRollupChunk};
 use dashmap::DashMap;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -53,6 +53,15 @@ pub const METRICS_COMPACTION_TARGET_POINTS: usize = 2 * 1024;
 /// raw and compressed groups are capped by the target above.
 pub const METRICS_COMPACTION_STEP_INPUT_POINTS: usize = 256 * 1024;
 pub const METRICS_COMPACTION_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Series ids a planning pass reads in one stretch, and the most stretches
+/// a step reads when it finds too little to do in them. A stretch is one
+/// range read of an index: some tens of milliseconds at the few chunks a
+/// series that a maintained store holds.
+const PLAN_STRETCH_SERIES: i64 = 16 * 1024;
+const PLAN_STRETCHES_PER_STEP: usize = 8;
+/// Groups a compaction step tops its plan up to before it selects from it.
+const METRICS_PLAN_REFILL_GROUPS: usize = 1024;
 
 /// Compressed chunks of one series it takes to be worth a merge, however few
 /// points they hold between them. A series written once a flush and
@@ -185,17 +194,67 @@ fn owned_sources(sources: &[MetricsCandidate<'_>]) -> Vec<(ChunkKey, ChunkMeta)>
         .collect()
 }
 
-/// The groups one sweep is to do, planned once from the index and stepped
-/// through from the front by every bounded call that passes the same cutoff.
-/// Planning walks the whole index; a store of millions of chunks cannot
-/// afford that at each of hundreds of steps.
+/// A compaction sweep's plan, made a stretch of series at a time.
+///
+/// Planning reads the raw index, and a store's whole index is millions of
+/// entries: read in one step, as it once was, that step held the writer
+/// for a second or more (#148). So a pass walks the series in id order, a
+/// stretch a step, and the groups it finds are worked off before the next
+/// stretch is read.
 struct MetricsCompactionPlan {
     cutoff_ts: i64,
     raw_min_chunks: usize,
+    /// Groups found and not yet done, in the order they are to be done.
     groups: VecDeque<MetricsCompactionGroup>,
-    /// The chunk sequence at which the plan was found empty, when it was:
-    /// until a chunk is added, there is nothing for it to find again.
+    /// What this pass has still to look at.
+    pending: PlanPending,
+    /// Series whose chunks this pass replaced. What a merge wrote may
+    /// unlock a larger tier, and only for them: the next pass looks at
+    /// these again, and the sweep ends with the pass that replaces none.
+    touched: Vec<i64>,
+    /// The chunk sequence at which the sweep finished, when it has: until
+    /// a chunk is added, there is nothing for it to find again.
     drained_at_seq: Option<u64>,
+}
+
+/// The series a planning pass has still to read.
+enum PlanPending {
+    /// Every series from this id up.
+    From(i64),
+    /// These series, from this position.
+    Series(Vec<i64>, usize),
+    /// Nothing: the pass has read everything it was to.
+    Done,
+}
+
+impl MetricsCompactionPlan {
+    fn new(cutoff_ts: i64, raw_min_chunks: usize) -> Self {
+        MetricsCompactionPlan {
+            cutoff_ts,
+            raw_min_chunks,
+            groups: VecDeque::new(),
+            pending: PlanPending::From(i64::MIN),
+            touched: Vec::new(),
+            drained_at_seq: None,
+        }
+    }
+
+    /// Whether the sweep has anything left to read or to do.
+    fn active(&self) -> bool {
+        !self.groups.is_empty()
+            || !matches!(self.pending, PlanPending::Done)
+            || !self.touched.is_empty()
+    }
+}
+
+/// Rollup merges a sweep has planned and not yet done, and where its
+/// planning pass has got to. Planned a stretch of series a step, as
+/// compaction is (#148).
+#[derive(Default)]
+struct RollupMergePlan {
+    groups: VecDeque<RollupMergeGroup>,
+    /// The series id the pass reads from next, while one is under way.
+    from: Option<i64>,
 }
 
 #[derive(Default)]
@@ -796,10 +855,17 @@ pub struct Engine {
     /// (tier, series) group, and a rollup merge — for data that has not
     /// changed (#123). Process-local, like the cursor.
     rollup_cycle_done_sweep: AtomicU64,
-    /// Rollup merges planned when a sweep's cycle completed, taken a
-    /// bounded number of groups per step by `rollup_bounded_for_sweep`
-    /// (#123). Process-local; a restart plans again at its first cycle.
-    rollup_merge_plan: Mutex<VecDeque<RollupMergeGroup>>,
+    /// The rollup merges of the sweep whose cycle completed: planned a
+    /// stretch of series a step and taken a bounded number of groups a
+    /// step by `rollup_bounded_for_sweep` (#123, #148). Process-local.
+    rollup_merge_plan: Mutex<RollupMergePlan>,
+    /// Whether rollup chunks may have changed since merges were last
+    /// planned for every series: a rollup pass wrote some, retention took
+    /// a series' last raw chunk, a transaction rolled back, someone else
+    /// wrote. While they have not, a sweep's cycle plans no merges: for
+    /// eleven sweeps in twelve of an hourly tier at a five-minute sweep,
+    /// every group is as the last plan left it.
+    rollup_merge_due: AtomicBool,
     /// F2 retention window in NATIVE ts units; 0 = disabled. Set from
     /// the persisted table argument after construction (idempotent —
     /// every connection loads the same _meta value).
@@ -1157,8 +1223,10 @@ impl Engine {
     //
     // As with raw chunks, the store's rollup rows are the index.
 
-    /// Something may have given a settled rollup tier work again.
+    /// Something may have given a settled rollup tier work again, and with
+    /// it the rollup chunks may be about to change.
     fn rollup_unsettle(&self) {
+        self.rollup_merge_due.store(true, Ordering::Relaxed);
         if self.rollup_settled_max.swap(i64::MIN, Ordering::Relaxed) != i64::MIN {
             self.rollup_settled
                 .lock()
@@ -1685,7 +1753,7 @@ impl Engine {
         // plan again from what is left. Row ids are reused, so a plan kept
         // across a rollback can name a row that is by then another chunk.
         *self.compaction_plan_lock() = None;
-        self.rollup_merge_plan_lock().clear();
+        *self.rollup_merge_plan_lock() = RollupMergePlan::default();
         self.rollup_cycle_series_lock().clear();
         self.rollup_cycle_high_water
             .store(i64::MIN, Ordering::Relaxed);
@@ -1737,6 +1805,20 @@ impl Engine {
         for (_, meta) in &items {
             self.raise_raw_ts_upper_bound(meta.max_ts);
             self.next_chunk_seq();
+        }
+        // A sweep under way has read some series already: the ones given a
+        // chunk it could act on are looked at again before it ends. Chunks
+        // normally arrive newer than a sweep's cutoff, and are the next
+        // sweep's.
+        if let Some(plan) = self.compaction_plan_lock().as_mut() {
+            if plan.active() {
+                plan.touched.extend(
+                    items
+                        .iter()
+                        .filter(|(_, meta)| meta.max_ts < plan.cutoff_ts)
+                        .map(|(key, _)| key.series_id),
+                );
+            }
         }
         self.chunks_moved(
             items
@@ -1932,7 +2014,8 @@ impl Engine {
             rollup_tiers: Mutex::new(Vec::new()),
             rollup_maintenance_cursor: AtomicUsize::new(0),
             rollup_cycle_done_sweep: AtomicU64::new(0),
-            rollup_merge_plan: Mutex::new(VecDeque::new()),
+            rollup_merge_plan: Mutex::new(RollupMergePlan::default()),
+            rollup_merge_due: AtomicBool::new(true),
             retention_native: AtomicI64::new(0),
             retention_floor: AtomicI64::new(i64::MIN),
             raw_ts_upper_bound: AtomicI64::new(i64::MIN),
@@ -2914,24 +2997,32 @@ impl Engine {
         let raw_min_chunks = budget.raw_min_chunks.max(1);
         let _transition = self.transition_write();
 
-        // The sweep's plan: made once from the index for the cutoff the
-        // caller keeps passing, and stepped through from the front. Planning
-        // never reads payloads and never mixes raw conversion with compressed
-        // merging in one group.
+        // The sweep's plan: for the cutoff the caller keeps passing, read
+        // from the index a stretch of series at a time and stepped through
+        // from the front. Planning never reads payloads and never mixes raw
+        // conversion with compressed merging in one group.
         let mut plan_guard = self.compaction_plan_lock();
         let seq = self.chunk_seq.load(Ordering::Relaxed);
         let kept = matches!(
             plan_guard.as_ref(),
             Some(plan) if plan.cutoff_ts == cutoff_ts
                 && plan.raw_min_chunks == raw_min_chunks
-                && (!plan.groups.is_empty() || plan.drained_at_seq == Some(seq))
+                && (plan.active() || plan.drained_at_seq == Some(seq))
         );
         if !kept {
-            *plan_guard = Some(self.plan_metrics_sweep(cutoff_ts, raw_min_chunks));
+            self.compaction_plans.fetch_add(1, Ordering::Relaxed);
+            self.forget_idle_released_writes(step_started);
+            *plan_guard = Some(MetricsCompactionPlan::new(cutoff_ts, raw_min_chunks));
         }
         let plan = plan_guard.as_mut().expect("a plan was kept or made");
+        self.refill_metrics_plan(plan, budget.max_series);
         if plan.groups.is_empty() {
-            return Ok(MetricsCompactionOutcome::default());
+            // Nothing to do in what this step read; there may be more to
+            // read.
+            return Ok(MetricsCompactionOutcome {
+                more: self.metrics_sweep_continues(plan),
+                ..MetricsCompactionOutcome::default()
+            });
         }
 
         // Take complete groups until any budget is exhausted. One first
@@ -2965,7 +3056,6 @@ impl Engine {
             selected_series.insert(group.key);
             selected.push(group);
         }
-        let budget_limited = !plan.groups.is_empty();
         drop(plan_guard);
         if !selected.is_empty() {
             // Nearly always every source is still there, and one statement
@@ -2983,10 +3073,7 @@ impl Engine {
         // in plan order; each plan records how many are its own.
         let mut plans: Vec<(MetricsCompactionGroup, usize)> = Vec::new();
         let mut add: Vec<EncodedChunk> = Vec::new();
-        let mut outcome = MetricsCompactionOutcome {
-            more: budget_limited,
-            ..MetricsCompactionOutcome::default()
-        };
+        let mut outcome = MetricsCompactionOutcome::default();
 
         // Every source of the step in one store read: one statement for the
         // step instead of one per chunk. The step's input bytes are already
@@ -3078,8 +3165,8 @@ impl Engine {
         }
 
         if plans.is_empty() {
-            if !outcome.more {
-                outcome.more = self.replan_metrics_sweep(cutoff_ts, raw_min_chunks);
+            if let Some(plan) = self.compaction_plan_lock().as_mut() {
+                outcome.more |= self.metrics_sweep_continues(plan);
             }
             return Ok(outcome);
         }
@@ -3130,34 +3217,64 @@ impl Engine {
             .collect::<HashSet<_>>()
             .len();
         outcome.chunks_replaced = plans.iter().map(|(group, _)| group.sources.len()).sum();
-        if !outcome.more {
-            // Every size-tier boundary is a real transaction boundary: only
-            // after replacements are committed can their output unlock a
-            // larger tier. Once a sweep has drained its plan it is planned
-            // again, so the next tier is reached without being merged in the
-            // same transaction.
-            outcome.more = self.replan_metrics_sweep(cutoff_ts, raw_min_chunks);
+        // Every size-tier boundary is a real transaction boundary: only
+        // after replacements are committed can their output unlock a larger
+        // tier. So the series this step compacted are looked at again by
+        // the sweep's next pass, in a later step, and not merged further in
+        // this one.
+        if let Some(plan) = self.compaction_plan_lock().as_mut() {
+            plan.touched
+                .extend(plans.iter().map(|(group, _)| group.key.series_id));
+            outcome.more |= self.metrics_sweep_continues(plan);
         }
         self.record_metrics_compaction(&outcome);
         Ok(outcome)
     }
 
-    /// Plan a sweep: every actionable group for the cutoff, in the order it
-    /// is to be done. Counted, so that a host can see how often the index
-    /// was walked for it.
-    fn plan_metrics_sweep(&self, cutoff_ts: i64, raw_min_chunks: usize) -> MetricsCompactionPlan {
-        self.compaction_plans.fetch_add(1, Ordering::Relaxed);
-        let groups: VecDeque<MetricsCompactionGroup> = self
-            .plan_metrics_compaction(cutoff_ts, raw_min_chunks)
-            .into();
-        let drained_at_seq = groups
-            .is_empty()
-            .then(|| self.chunk_seq.load(Ordering::Relaxed));
-        MetricsCompactionPlan {
-            cutoff_ts,
-            raw_min_chunks,
-            groups,
-            drained_at_seq,
+    /// Top a sweep's plan up from the index: stretches of series are read
+    /// until the plan holds a step's worth of groups, the pass has nothing
+    /// left to read, or this step has read its share.
+    fn refill_metrics_plan(&self, plan: &mut MetricsCompactionPlan, max_series: usize) {
+        let want = max_series.min(METRICS_PLAN_REFILL_GROUPS);
+        let now = Instant::now();
+        let mut stretches = 0;
+        while plan.groups.len() < want
+            && stretches < PLAN_STRETCHES_PER_STEP
+            && !matches!(plan.pending, PlanPending::Done)
+        {
+            self.plan_metrics_stretch(plan, now);
+            stretches += 1;
+        }
+    }
+
+    /// Whether a sweep has more to do after a step. A step that worked off
+    /// the plan's last group reads on here, so that the next step finds
+    /// its work waiting and the sweep's last step says it was the last:
+    /// through what is left of the pass, and then through the series the
+    /// pass compacted, until groups are found, nothing is left to read, or
+    /// this step has read its share.
+    fn metrics_sweep_continues(&self, plan: &mut MetricsCompactionPlan) -> bool {
+        let now = Instant::now();
+        let mut stretches = 0;
+        loop {
+            if !plan.groups.is_empty() {
+                return true;
+            }
+            if matches!(plan.pending, PlanPending::Done) {
+                if plan.touched.is_empty() {
+                    plan.drained_at_seq = Some(self.chunk_seq.load(Ordering::Relaxed));
+                    return false;
+                }
+                let mut series = std::mem::take(&mut plan.touched);
+                series.sort_unstable();
+                series.dedup();
+                plan.pending = PlanPending::Series(series, 0);
+            }
+            if stretches == PLAN_STRETCHES_PER_STEP {
+                return true;
+            }
+            self.plan_metrics_stretch(plan, now);
+            stretches += 1;
         }
     }
 
@@ -3194,15 +3311,6 @@ impl Engine {
             .retain(|_, written| now.saturating_sub(*written) < COMPACT_MIN_AGE_SECS as u32);
     }
 
-    /// Plan the sweep again from the index as it now is, and say whether
-    /// there is anything left to do.
-    fn replan_metrics_sweep(&self, cutoff_ts: i64, raw_min_chunks: usize) -> bool {
-        let plan = self.plan_metrics_sweep(cutoff_ts, raw_min_chunks);
-        let more = !plan.groups.is_empty();
-        *self.compaction_plan_lock() = Some(plan);
-        more
-    }
-
     /// Whether every chunk a planned group was made of is still there.
     /// Chunks are immutable, so one that is there is as it was planned.
     fn sources_present(&self, group: &MetricsCompactionGroup) -> bool {
@@ -3223,25 +3331,48 @@ impl Engine {
         })
     }
 
-    /// Every actionable group for the cutoff. The index is ordered by
-    /// series, so it is planned a series at a time from references into it,
-    /// and only the chunks that make a group are copied out: a plan walks
-    /// every chunk, and copying each into a per-series map first made a
-    /// plan at a few million chunks a step of its own (#125).
-    fn plan_metrics_compaction(
-        &self,
-        cutoff_ts: i64,
-        raw_min_chunks: usize,
-    ) -> Vec<MetricsCompactionGroup> {
-        let now = Instant::now();
-        self.forget_idle_released_writes(now);
-        let mut groups = Vec::new();
-        // The store returns the eligible chunks already, in the index's
-        // order; a chunk's row id stands in for its insertion sequence.
-        let candidates: Vec<(ChunkKey, ChunkMeta)> = self
-            .store
-            .compaction_candidates(cutoff_ts, ENC_RAW, METRICS_COMPACTION_TARGET_POINTS as u32)
-            .unwrap_or_default()
+    /// Read the next stretch of a pass and add the groups found in it to
+    /// the plan. The index is ordered by series, so a stretch is planned a
+    /// series at a time and only the chunks that make a group are kept.
+    fn plan_metrics_stretch(&self, plan: &mut MetricsCompactionPlan, now: Instant) {
+        let target = METRICS_COMPACTION_TARGET_POINTS as u32;
+        let candidates = |span: SeriesSpan<'_>| {
+            self.store
+                .compaction_candidates(plan.cutoff_ts, ENC_RAW, target, span)
+        };
+        let read = match std::mem::replace(&mut plan.pending, PlanPending::Done) {
+            PlanPending::Done => return,
+            PlanPending::From(from) => match self.store.next_chunk_series(from) {
+                Ok(Some(first)) => {
+                    let last = first.saturating_add(PLAN_STRETCH_SERIES - 1);
+                    let read = candidates(SeriesSpan::Between(first, last));
+                    if last < i64::MAX {
+                        plan.pending = PlanPending::From(last + 1);
+                    }
+                    read
+                }
+                // No series from there up. An unreadable index plans
+                // nothing more this sweep; the next tries again.
+                Ok(None) | Err(_) => return,
+            },
+            PlanPending::Series(series, at) => {
+                let end = at
+                    .saturating_add(PLAN_STRETCH_SERIES as usize)
+                    .min(series.len());
+                let read = candidates(SeriesSpan::Of(&series[at..end]));
+                if end < series.len() {
+                    plan.pending = PlanPending::Series(series, end);
+                }
+                read
+            }
+        };
+        let Ok(chunks) = read else {
+            plan.pending = PlanPending::Done;
+            return;
+        };
+        // The store returns the eligible chunks in the index's order; a
+        // chunk's row id stands in for its insertion sequence.
+        let candidates: Vec<(ChunkKey, ChunkMeta)> = chunks
             .into_iter()
             .map(|chunk| {
                 let sequence = match chunk.meta.loc {
@@ -3260,21 +3391,20 @@ impl Engine {
                 )
             })
             .collect();
+        let mut groups = Vec::new();
         self.plan_metrics_groups(
             candidates.iter().map(|(key, meta)| (key, meta)),
-            cutoff_ts,
-            raw_min_chunks,
+            plan.cutoff_ts,
+            plan.raw_min_chunks,
             now,
             &mut groups,
         );
-        // First compression always wins over optional merges. Within each
-        // phase, groups go in series order, oldest first within a series: a
-        // sweep's plan is fixed by its cutoff and is worked to the end, so
-        // order cannot starve a series, but it decides which rows a step
-        // touches. Flushes persist in series order, so series-major steps
-        // delete neighbouring rows; oldest-first across series interleaved
-        // series whose merge ladders had drifted apart (as sparse reporters'
-        // do) and touched a page per row (#121).
+        // Within a stretch, first compression before optional merges, and
+        // within each, series order, oldest first within a series. Flushes
+        // persist in series order, so series-major steps delete
+        // neighbouring rows; oldest-first across series interleaved series
+        // whose merge ladders had drifted apart (as sparse reporters' do)
+        // and touched a page per row (#121).
         groups.sort_by_key(|group| {
             (
                 group.kind,
@@ -3287,7 +3417,7 @@ impl Engine {
                     .unwrap_or(i64::MAX),
             )
         });
-        groups
+        plan.groups.extend(groups);
     }
 
     /// Group eligible chunks a series at a time, from entries in the
@@ -5006,11 +5136,29 @@ impl Engine {
         self.apply_rollup_merges(plans)
     }
 
-    /// Every rollup merge there is to do, from a read snapshot.
+    /// Every rollup merge there is to do.
     fn plan_rollup_merges(&self) -> Vec<RollupMergeGroup> {
+        // An unreadable index plans nothing; the next sweep tries again,
+        // as with an unreadable raw index.
+        self.plan_rollup_merge_stretch(i64::MIN, i64::MAX)
+            .unwrap_or_default()
+    }
+
+    /// The rollup merges there are to do for the series with ids in
+    /// `[from, upto]`, in series order, so that a merge step's deletes and
+    /// inserts share pages.
+    fn plan_rollup_merge_stretch(
+        &self,
+        from: i64,
+        upto: i64,
+    ) -> EngineResult<Vec<RollupMergeGroup>> {
         // A series with no raw chunk left has nothing more to roll up:
         // its pieces are put together once, however few they are.
-        let with_raw: HashSet<i64> = self.chunk_series_ids().into_iter().collect();
+        let with_raw: HashSet<i64> = self
+            .store
+            .chunk_series_ids_between(from, upto)?
+            .into_iter()
+            .collect();
         let mut plans = Vec::new();
         let plan_group = |group: RollupGroupKey,
                           entries: &[RollupIndexEntry],
@@ -5025,7 +5173,7 @@ impl Engine {
         // group's entries are held while it is planned.
         let mut current: Option<RollupGroupKey> = None;
         let mut entries: Vec<RollupIndexEntry> = Vec::new();
-        let visited = self.store.visit_rollup_groups(&mut |chunk| {
+        self.store.visit_rollup_groups(from, upto, &mut |chunk| {
             let (group, entry) = Self::rollup_index_parts(chunk)?;
             if current != Some(group) {
                 if let Some(previous) = current {
@@ -5036,18 +5184,53 @@ impl Engine {
             }
             entries.push(entry);
             Ok(())
-        });
-        // An unreadable index plans nothing this sweep; the next tries
-        // again, as an unreadable raw index does.
-        if visited.is_err() {
-            return Vec::new();
-        }
+        })?;
         if let Some(previous) = current {
             plan_group(previous, &entries, &mut plans);
         }
-        // Series order, so a merge step's deletes and inserts share pages.
-        plans.sort_unstable_by_key(|(group, _)| (group.series_id, group.resolution));
-        plans
+        plans.sort_by_key(|(group, _)| (group.series_id, group.resolution));
+        Ok(plans)
+    }
+
+    /// One step of a sweep's rollup merges: read stretches of series until
+    /// there is a step's worth of groups to merge or this step has read
+    /// its share, and merge at most `max_groups` of them. Returns
+    /// (chunks written, whether there is more).
+    fn rollup_merge_step(&self, max_groups: usize) -> EngineResult<(usize, bool)> {
+        let step: Vec<RollupMergeGroup> = {
+            let mut plan = self.rollup_merge_plan_lock();
+            let mut stretches = 0;
+            while plan.groups.len() < max_groups && stretches < PLAN_STRETCHES_PER_STEP {
+                let Some(from) = plan.from else {
+                    break;
+                };
+                stretches += 1;
+                // No series from there up, or an unreadable index: the
+                // pass ends, and the next sweep's begins again.
+                plan.from = None;
+                let Ok(Some(first)) = self.store.next_rollup_series(from) else {
+                    break;
+                };
+                let last = first.saturating_add(PLAN_STRETCH_SERIES - 1);
+                let Ok(groups) = self.plan_rollup_merge_stretch(first, last) else {
+                    self.rollup_merge_due.store(true, Ordering::Relaxed);
+                    break;
+                };
+                plan.groups.extend(groups);
+                if last < i64::MAX {
+                    plan.from = Some(last + 1);
+                }
+            }
+            let take = max_groups.min(plan.groups.len());
+            plan.groups.drain(..take).collect()
+        };
+        let written = if step.is_empty() {
+            0
+        } else {
+            self.apply_rollup_merges(step)?.1
+        };
+        let plan = self.rollup_merge_plan_lock();
+        Ok((written, !plan.groups.is_empty() || plan.from.is_some()))
     }
 
     /// Runs to merge for a group still being rolled up, size-tiered over
@@ -5305,19 +5488,10 @@ impl Engine {
         }
         if self.rollup_cycle_done_sweep.load(Ordering::Relaxed) == sweep {
             // The cycle is done; what remains of this sweep's rollup work is
-            // the merges planned at its end, a bounded batch per step. They
-            // were one transaction over every group, which at 550k series
-            // rewrote ~2M hourly chunks in one step every four hours.
-            let step: Vec<RollupMergeGroup> = {
-                let mut plan = self.rollup_merge_plan_lock();
-                let take = max_groups.min(plan.len());
-                plan.drain(..take).collect()
-            };
-            if step.is_empty() {
-                return Ok((0, 0, false));
-            }
-            let (_, written) = self.apply_rollup_merges(step)?;
-            let more = !self.rollup_merge_plan_lock().is_empty();
+            // its merges, a bounded batch per step. They were one
+            // transaction over every group, which at 550k series rewrote
+            // ~2M hourly chunks in one step every four hours.
+            let (written, more) = self.rollup_merge_step(max_groups)?;
             return Ok((written, 0, more));
         }
         let (chunks, buckets, more) = self.rollup_inner(Some(max_groups))?;
@@ -5325,16 +5499,31 @@ impl Engine {
             return Ok((chunks, buckets, true));
         }
         self.rollup_cycle_done_sweep.store(sweep, Ordering::Relaxed);
-        let plan = self.plan_rollup_merges();
-        let more = !plan.is_empty();
-        *self.rollup_merge_plan_lock() = plan.into();
-        Ok((chunks, buckets, more))
+        // Merges are planned by the steps that follow, and only if a rollup
+        // chunk may have changed since they were last planned for every
+        // series, or the last sweep left its merges unfinished.
+        let mut plan = self.rollup_merge_plan_lock();
+        let unfinished = !plan.groups.is_empty() || plan.from.is_some();
+        if self.rollup_merge_due.swap(false, Ordering::Relaxed) || unfinished {
+            plan.groups.clear();
+            plan.from = Some(i64::MIN);
+        }
+        Ok((chunks, buckets, plan.from.is_some()))
     }
 
-    fn rollup_merge_plan_lock(&self) -> MutexGuard<'_, VecDeque<RollupMergeGroup>> {
+    fn rollup_merge_plan_lock(&self) -> MutexGuard<'_, RollupMergePlan> {
         self.rollup_merge_plan
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// The coverage end a tier of resolution `r` is rolled up to when the
+    /// newest raw sample is at `high_water`: its last bucket with a full
+    /// bucket of settle behind it.
+    fn rollup_produce_to(high_water: i64, r: i64) -> Option<i64> {
+        let limit = high_water.checked_sub(r)?;
+        let last_bucket = limit.checked_sub(r - 1)?.div_euclid(r) * r;
+        Some(last_bucket + r - 1)
     }
 
     fn rollup_inner(&self, max_groups: Option<usize>) -> EngineResult<(usize, usize, bool)> {
@@ -5362,6 +5551,24 @@ impl Engine {
                 self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
                 return Ok((0, 0, false));
             };
+            // Every tier settled to the coverage end it would be rolled up
+            // to now: the cycle would pass over each of them, so it does
+            // not begin, and the series are not read from the index for
+            // it.
+            let all_settled = {
+                let settled = self
+                    .rollup_settled
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                tiers.iter().all(|tier| {
+                    Self::rollup_produce_to(high_water, tier.resolution)
+                        .is_some_and(|to| settled.get(&tier.resolution) == Some(&to))
+                })
+            };
+            if all_settled {
+                self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
+                return Ok((0, 0, false));
+            }
             let ids = self.series_in_index();
             *self.rollup_cycle_series_lock() = ids.clone();
             self.rollup_cycle_high_water
@@ -5407,11 +5614,7 @@ impl Engine {
         let mut due: Option<HashSet<i64>> = None;
         // The coverage end a tier is rolled up to: its last bucket with a
         // full bucket of settle behind it.
-        let produce_to_for = |r: i64| -> Option<i64> {
-            let limit = high_water.checked_sub(r)?;
-            let last_bucket = limit.checked_sub(r - 1)?.div_euclid(r) * r;
-            Some(last_bucket + r - 1)
-        };
+        let produce_to_for = |r: i64| Self::rollup_produce_to(high_water, r);
         let mut scan_end = scan_end;
         let mut settled_now: Vec<(i64, i64)> = Vec::new();
         let settled_before: HashMap<i64, i64> = self
@@ -5549,6 +5752,8 @@ impl Engine {
         }
 
         let buckets_total: usize = batch.iter().map(|c| c.bucket_count as usize).sum();
+        // New pieces to put together.
+        self.rollup_merge_due.store(true, Ordering::Relaxed);
         // The rows just written are the index entries.
         let single = batch.iter().filter(|chunk| chunk.bucket_count == 1).count();
         self.rollups_moved((batch.len(), single), (0, 0));
@@ -5974,6 +6179,11 @@ impl Engine {
             Err(error) => return (0, 0, vec![error]),
         };
         let errors = self.store.delete_chunks(&locs);
+        if !locs.is_empty() {
+            // A series may have lost its last raw chunk: its rollup pieces
+            // are then put together whatever their sizes.
+            self.rollup_merge_due.store(true, Ordering::Relaxed);
+        }
         self.chunks_changed();
         (locs.len(), locs.len(), errors)
     }
@@ -5988,6 +6198,9 @@ impl Engine {
             Err(error) => return (0, 0, vec![error]),
         };
         let errors = self.store.delete_chunks(&locs);
+        if !locs.is_empty() {
+            self.rollup_merge_due.store(true, Ordering::Relaxed);
+        }
         self.chunks_changed();
         (locs.len(), locs.len(), errors)
     }

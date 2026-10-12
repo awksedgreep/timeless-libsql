@@ -642,8 +642,8 @@ fn a_sweep_is_planned_once_and_leaves_what_arrives_after_its_cutoff() {
     assert_eq!(series, SERIES - 128);
     assert!(!more);
     let info = engine.info();
-    // Once for the sweep, and once at its end to see that nothing was left.
-    assert_eq!(info.compaction_plans, 2);
+    // One plan for the sweep, read as the sweep went.
+    assert_eq!(info.compaction_plans, 1);
     assert_eq!(info.compaction_planned_groups, 0);
     assert_eq!(info.compaction_raw_chunks, (SERIES * 2) as u64);
 
@@ -651,13 +651,13 @@ fn a_sweep_is_planned_once_and_leaves_what_arrives_after_its_cutoff() {
     // planning to do; a chunk added makes it worth looking once more.
     let (_, _, more) = engine.compact_partitions_bounded(cutoff, 64).unwrap();
     assert!(!more);
-    assert_eq!(engine.info().compaction_plans, 2);
+    assert_eq!(engine.info().compaction_plans, 1);
     engine.write_point(series_ids[0], 1_500, 4.0);
     engine.flush_all().unwrap();
     let (series, _, more) = engine.compact_partitions_bounded(cutoff, 64).unwrap();
     assert_eq!(series, 1);
     assert!(!more);
-    assert_eq!(engine.info().compaction_plans, 4);
+    assert_eq!(engine.info().compaction_plans, 2);
 
     // A sweep with a later cutoff takes the late chunks.
     let (series, _, _) = engine
@@ -674,6 +674,54 @@ fn a_sweep_is_planned_once_and_leaves_what_arrives_after_its_cutoff() {
             if number == 0 { 4 } else { 3 }
         );
     }
+}
+
+/// A sweep reads the index a stretch of series at a time (#148): its first
+/// step plans the first stretch, not every series there is, and the sweep
+/// still reaches them all with the one plan.
+#[test]
+fn a_sweep_plans_a_stretch_of_series_at_a_time() {
+    const SERIES: usize = 20_000;
+    const STRETCH: usize = 16 * 1024;
+
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
+    let series_ids: Vec<_> = (0..SERIES)
+        .map(|number| {
+            engine
+                .resolve_cached(&format!("stretch_{number}"), &labels())
+                .unwrap()
+        })
+        .collect();
+    for epoch in 0..2i64 {
+        for &series_id in &series_ids {
+            engine.write_point(series_id, 1_000 + epoch * 100, epoch as f64);
+        }
+        engine.flush_all().unwrap();
+    }
+
+    let (series, _, more) = engine.compact_partitions_bounded(2_000, 64).unwrap();
+    assert_eq!(series, 64);
+    assert!(more);
+    assert_eq!(
+        engine.info().compaction_planned_groups,
+        (STRETCH - 64) as u64,
+        "the first stretch, less what the step did"
+    );
+
+    let mut compacted = series;
+    loop {
+        let (series, _, more) = engine.compact_partitions_bounded(2_000, 4_096).unwrap();
+        compacted += series;
+        if !more {
+            break;
+        }
+    }
+    assert_eq!(compacted, SERIES);
+    let info = engine.info();
+    assert_eq!(info.compaction_plans, 1);
+    assert_eq!(info.compaction_raw_chunks, (SERIES * 2) as u64);
+    assert_eq!(info.chunk_count, SERIES);
 }
 
 #[test]
@@ -1142,8 +1190,8 @@ fn a_step_out_of_time_leaves_its_remaining_groups_for_the_next() {
         }
     }
     assert_eq!(steps, series_ids.len());
-    // Planned once for the sweep, and once at its end.
-    assert_eq!(engine.info().compaction_plans, 2);
+    // One plan for the whole sweep.
+    assert_eq!(engine.info().compaction_plans, 1);
     for &series_id in &series_ids {
         assert_eq!(
             engine

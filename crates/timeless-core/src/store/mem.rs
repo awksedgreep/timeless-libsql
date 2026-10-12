@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{
     ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk,
-    ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
+    ResolvedSeries, SeriesSpan, StoredChunk, StoredRollupChunk, StoredSeries,
 };
 use crate::rollup::ENC_ROLLUP_V1;
 
@@ -613,9 +613,23 @@ impl ChunkStore for MemStore {
         Ok(totals)
     }
 
-    fn chunk_series_ids(&self) -> Result<Vec<i64>, String> {
-        let ids: BTreeSet<i64> = self.lock().raw().map(|(_, row)| row.series_id).collect();
+    fn chunk_series_ids_between(&self, from: i64, upto: i64) -> Result<Vec<i64>, String> {
+        let ids: BTreeSet<i64> = self
+            .lock()
+            .raw()
+            .map(|(_, row)| row.series_id)
+            .filter(|id| (from..=upto).contains(id))
+            .collect();
         Ok(ids.into_iter().collect())
+    }
+
+    fn next_chunk_series(&self, from: i64) -> Result<Option<i64>, String> {
+        Ok(self
+            .lock()
+            .raw()
+            .map(|(_, row)| row.series_id)
+            .filter(|id| *id >= from)
+            .min())
     }
 
     fn chunk_locs_outside(
@@ -662,10 +676,15 @@ impl ChunkStore for MemStore {
         cutoff_ts: i64,
         raw_encoding: u8,
         target_points: u32,
+        span: SeriesSpan<'_>,
     ) -> Result<Vec<StoredChunk>, String> {
         let state = self.lock();
         let mut chunks: Vec<(i64, i64, i64, ChunkMeta)> = state
             .raw()
+            .filter(|(_, row)| match span {
+                SeriesSpan::Between(from, upto) => (from..=upto).contains(&row.series_id),
+                SeriesSpan::Of(ids) => ids.binary_search(&row.series_id).is_ok(),
+            })
             .filter(|(_, row)| {
                 row.max_ts < cutoff_ts
                     && (row.encoding == raw_encoding || row.point_count != target_points)
@@ -770,11 +789,14 @@ impl ChunkStore for MemStore {
 
     fn visit_rollup_groups(
         &self,
+        from: i64,
+        upto: i64,
         visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
     ) -> Result<(), String> {
         let mut chunks: Vec<(i64, i64, i64, i64, StoredRollupChunk)> = self
             .lock()
             .rollups()
+            .filter(|(_, row)| (from..=upto).contains(&row.series_id))
             .map(|(rowid, row)| {
                 (
                     row.series_id,
@@ -792,6 +814,15 @@ impl ChunkStore for MemStore {
             visitor(chunk)?;
         }
         Ok(())
+    }
+
+    fn next_rollup_series(&self, from: i64) -> Result<Option<i64>, String> {
+        Ok(self
+            .lock()
+            .rollups()
+            .map(|(_, row)| row.series_id)
+            .filter(|id| *id >= from)
+            .min())
     }
 
     fn rollup_victims(

@@ -41,7 +41,7 @@ pub use spans::{
 };
 pub use store::{
     ChunkBytes, ChunkIdentity, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk,
-    MemFault, MemStore, ResolvedSeries, StoredChunk, StoredRollupChunk, StoredSeries,
+    MemFault, MemStore, ResolvedSeries, SeriesSpan, StoredChunk, StoredRollupChunk, StoredSeries,
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
