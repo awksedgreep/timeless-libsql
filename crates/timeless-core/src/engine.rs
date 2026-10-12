@@ -1954,7 +1954,7 @@ impl Engine {
             };
         if !indexed {
             return Err(
-                "this table's indexes have not been built by this version yet: open it once                  with a connection that can write"
+                "this table's indexes have not been built by this version yet: open it once with a connection that can write"
                     .to_string(),
             );
         }
@@ -2009,7 +2009,7 @@ impl Engine {
             }
             if !cataloged(store.as_ref())? {
                 return Err(
-                    "the series catalog does not identify every persisted chunk and no legacy                      registry is available"
+                    "the series catalog does not identify every persisted chunk and no legacy registry is available"
                         .to_string(),
                 );
             }

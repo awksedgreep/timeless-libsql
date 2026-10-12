@@ -9,27 +9,27 @@ reachable from `main`.
 
 ## Current publication status
 
-[`v0.8.17`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.8.17)
-was published on 2026-10-11 at 19:37:36 UTC from `main` commit
-`e14ccd52236171c98b13e33d7506036250f8ec25`. A metrics table whose index is
-on disk reads its rollup index from disk too and opens without reading the
-store (#144, #146), compressed chunks merge to 2,048 points (#145), the
-servers create databases with incremental auto-vacuum (#79), and OTLP/JSON
-integers are stored as numbers (#80).
-See the [changelog](../CHANGELOG.md).
+[`v0.9.0`](https://github.com/awksedgreep/timeless-libsql/releases/tag/v0.9.0)
+was published on 2026-10-12 at 01:42:49 UTC from `main` commit
+`44508fee6090d648c1f36c0757e5df208ddcbdb7`. A new compatibility line: a
+metrics point is stored when its transaction commits, the metrics index is
+read from the database for every table, and a metrics read does not wait
+for a writer (#143, #148, #149).
+See the [changelog](../CHANGELOG.md) and the
+[upgrade guide](UPGRADE.md#metrics-storage-contract-change-in-090).
 
-The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/38168374564)
+The [release workflow](https://github.com/awksedgreep/timeless-libsql/actions/runs/38192518664)
 built, identity-checked, and install/remove-drilled the three native
 Linux/macOS archives (Linux x86-64, Linux AArch64, macOS Apple Silicon),
 verified the complete outer `SHA256SUMS`, and published the three archives
 plus that checksum file as permanent release assets. All assets were
 downloaded and verified after publication, including outer and inner
 checksums and manifest source identities. See the
-[release validation record](RELEASE_0_8_17.md) for the complete post-bump
+[release validation record](RELEASE_0_9_0.md) for the complete post-bump
 local checklist and archive hashes.
 
 This is the current download channel. Complete published releases also exist
-for `v0.8.16`, `v0.8.15`, `v0.8.14`, `v0.8.13`, `v0.8.12`, `v0.8.11`, `v0.8.10`, `v0.8.9`, `v0.8.8`, `v0.8.7`, `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`,
+for `v0.8.17`, `v0.8.16`, `v0.8.15`, `v0.8.14`, `v0.8.13`, `v0.8.12`, `v0.8.11`, `v0.8.10`, `v0.8.9`, `v0.8.8`, `v0.8.7`, `v0.8.6`, `v0.8.5`, `v0.8.4`, `v0.8.3`, `v0.8.2`,
 `v0.8.1`, `v0.8.0`,
 `v0.7.9`, `v0.7.8`, `v0.7.7`, `v0.7.6`, `v0.7.5` back through `v0.7.1`,
 `v0.6.4`, `v0.6.2`, `v0.6.1`, `v0.6.0`, `v0.5.0`, and `v0.4.2`.
