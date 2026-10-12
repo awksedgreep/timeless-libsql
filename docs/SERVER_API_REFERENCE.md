@@ -417,8 +417,8 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_READER_CONNECTIONS` | metrics | `2` | Independent bounded SQLite readers. |
 | `TIMELESS_METRICS_COMMAND_QUEUE_BATCHES` | metrics | `256` | Writer-command queue capacity in admitted request batches. |
 | `TIMELESS_METRICS_QUEUE_BYTES` | metrics | `134217728` | Queued-payload admission gate in bytes; admissions wait while in-flight ingest bytes exceed it (a batch larger than the gate is admitted alone). |
-| `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Ordered public extension flush cadence. |
-| `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` | metrics | `300` | Public compact/rollup sweep cadence. Each sweep is planned once from the chunk index, for the chunks there when it began, and stepped through in resumable transactions capped at 64 metrics series, 262,144 source points, 4 MiB of encoded metrics input, and 64 rollup groups, with a reader-admission pause between commits, and a step is not begun while a read is in flight (for up to half a second), since a read refused by the writer gate is begun again from its first statement. What is flushed while a sweep runs waits for the next. |
+| `TIMELESS_METRICS_FLUSH_INTERVAL_SECS` | metrics | `10` | Cadence of the ordered `flush` command. A metrics write is stored when its batch commits, so this now only applies retention on that cadence. |
+| `TIMELESS_METRICS_COMPACT_INTERVAL_SECS` | metrics | `300` | Public compact/rollup sweep cadence. Each sweep is planned for the chunks there when it began, a stretch of series at a time as it goes, and stepped through in resumable transactions capped at 64 metrics series, 262,144 source points, 4 MiB of encoded metrics input, and 64 rollup groups, with a 10 ms pause between commits in which queued writes are taken. Reads do not wait for a step and a step does not wait for a read. What is written while a sweep runs waits for the next. |
 | `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` | metrics | unset | Full OTLP/HTTP traces endpoint, for example `http://127.0.0.1:19449/insert/opentelemetry/v1/traces` or an `https://` collector. Unset disables export and no exporter, queue, or span cost exists. The scope is one scheduled compact/rollup sweep span with raw/merge step, point, byte, and elapsed-time totals plus events for steps taking at least 50 ms; it does not trace requests, samples, or other services. Credentials in the URL are rejected; use `..._HEADERS` for authentication. |
 | `TIMELESS_METRICS_OTEL_TRACES_HEADERS` | metrics | unset | Extra OTLP request headers as comma-separated `name=value` entries (the `OTEL_EXPORTER_OTLP_HEADERS` convention; values may be percent-encoded). Values are secrets: they are never logged, and validation errors name only the header. `content-type`, `content-length`, `host`, and `transfer-encoding` are set by the exporter and rejected here. Requires the endpoint. |
 | `TIMELESS_METRICS_OTEL_TRACES_HEADERS_FILE` | metrics | unset | Path to a file with the same `name=value` entries, one per line or comma-separated, for deployments that mount secrets as files. Mutually exclusive with `..._HEADERS`. |
@@ -430,7 +430,7 @@ integers and an invalid value stops startup with status 2.
 | `TIMELESS_METRICS_OTEL_TRACES_EXPORT_TIMEOUT_MS` | metrics | `2000` | Per-request HTTP connect and response timeout, 1–60,000 ms. Shutdown flushes the queue for at most twice this budget, then discards and counts what is left. |
 | `TIMELESS_METRICS_OTEL_TRACES_REQUEST_SAMPLE_RATIO` | metrics | unset | Unset leaves HTTP request tracing off even when the endpoint is set. A value in `0.0`–`1.0` turns it on: every request that fails with a 5xx, takes at least `..._REQUEST_SLOW_MS`, or carries a sampled W3C `traceparent` is recorded, plus this fraction of the rest (`0.0` means errors, slow requests, and sampled parents only). Spans share the exporter queue and health. |
 | `TIMELESS_METRICS_OTEL_TRACES_REQUEST_SLOW_MS` | metrics | `1000` | A request at least this slow is always recorded when request tracing is on, 1–60,000 ms. |
-| `TIMELESS_METRICS_INDEX_CACHE` | metrics | unset (`unbounded` for new databases) | Where the metrics table's series catalog and chunk index are read from: `unbounded` (all in memory, the lowest read latency) or a size such as `64MB` or `0` (read from disk; see `index_cache` in the SQL reference). Unset keeps an existing database's setting. A changed setting is applied during startup: the first start after a change builds or drops the two chunk indexes (about 14 s for 9 million chunk rows) and later starts do not. With a size, startup and memory no longer grow with the store; a maintenance sweep costs somewhat more CPU and its longest step is longer. |
+| `TIMELESS_METRICS_INDEX_CACHE` | metrics | unset | The metrics table's `index_cache` budget: `unbounded`, or a size such as `64MB` or `0` (see `index_cache` in the SQL reference). It bounds the cache of series identities and remembered selections; the catalog and chunk index are read from the database whatever it says. Unset keeps an existing database's setting. A changed setting is applied during startup. The first start of 0.9.0 or later on a database that an earlier version held its indexes in memory for builds them (about four seconds for 700,000 series and 7.9 million chunks). |
 | `TIMELESS_METRICS_RETENTION_INTERVAL_SECS` | metrics | `3600` | Cadence of the optional additional wall-clock raw-retention prune. Inert when `TIMELESS_METRICS_RAW_RETENTION_SECS=0`. |
 | `TIMELESS_METRICS_RAW_RETENTION_SECS` | metrics | `0` | Additional wall-clock expiry for raw metrics, in seconds (`0` disables it; maximum `i64::MAX`). Positive values explicitly prune raw chunks older than now minus this window. Unset/zero preserves the table's declared data-time retention without adding wall-clock expiry; a fresh table without retention keeps its data. This setting cannot lengthen or replace a shorter table policy and never changes rollup tiers. |
 | `TIMELESS_METRICS_ROLLUPS` | metrics | unset (`none` for new databases) | Persisted rollup ladder such as `1h@30d,1d@365d`. Unset preserves an existing database's ladder; explicit `none` disables future rollup production and lets scheduled compact maintenance drain old rollup rows through the same 64-row transaction budget. The HTTP API does not require persisted rollups. |
@@ -667,14 +667,17 @@ all admitted writer commands, checkpoints the WAL with `TRUNCATE`, joins its
 workers, and releases the owner lease. Metrics also stop all scrape tasks.
 Shutdown returns failure if the final flush or complete checkpoint fails.
 
-SIGKILL cannot run this sequence. Already flushed SQLite transactions remain
-recoverable; an extension-buffer tail is intentionally not claimed durable.
+SIGKILL cannot run this sequence. Committed SQLite transactions remain
+recoverable, which for metrics is every acknowledged write; a logs or traces
+extension-buffer tail is intentionally not claimed durable.
 
 ## Flush, backup, restore, and WAL
 
-Explicit flush is the durability boundary for every signal. Metrics and
-traces return exact admitted/completed/failed/queued/in-flight watermarks;
-logs returns `{"status":"ok"}` after the same ordered writer barrier.
+Explicit flush is the durability boundary for logs and traces. A metrics
+write is durable when the request that made it is answered; its flush route
+remains the ordered barrier behind every admitted write. Metrics and traces
+return exact admitted/completed/failed/queued/in-flight watermarks; logs
+returns `{"status":"ok"}` after the same ordered writer barrier.
 
 Every backup route accepts exactly:
 

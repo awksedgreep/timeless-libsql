@@ -10,9 +10,75 @@ capability document remains authoritative for a particular binary pairing.
 See the [compatibility statement](docs/COMPATIBILITY.md) and
 [upgrade guide](docs/UPGRADE.md).
 
-<!-- release-target: 0.8.17 -->
+<!-- release-target: 0.9.0 -->
 
 ## [Unreleased]
+
+## [0.9.0] — 2026-10-11
+
+A new compatibility line: the metrics engine's storage contract changes.
+The 0.9 extension and servers require each other. Read the [upgrade
+guide](docs/UPGRADE.md#metrics-storage-contract-change-in-090) first: the
+first start builds indexes on a database an earlier version held in memory,
+and an embedded host that commits a point at a time should batch.
+
+### Changed
+
+- **Metrics points are stored when their transaction commits.** A committed
+  point is durable and is a row; nothing committed waits in a buffer, and
+  the 60-second flush timer is gone. A chunk is written for each series a
+  transaction wrote to. Inside an open transaction points are buffered
+  until the commit, a savepoint, the connection's own read of the table, a
+  maintenance command, 4,096 points for a series, or the buffer budget.
+  `flush_interval` now only says whether a table takes a compaction step
+  for itself at commit.
+- **One index, read from the database (#149).** The series catalog, the raw
+  chunk index and the rollup index are no longer copied into memory, for
+  any table. `index_cache` bounds the cache of series identities and
+  remembered selections; `unbounded` means no bound on that cache. Opening
+  a table reads nothing of the store: on a copy of a store with 703,000
+  series and 7.9 million chunks a server is ready in 0.8 s with 77 MiB,
+  where 0.8.17 took 7.9 s and 1,961 MiB with its index in memory.
+- **A metrics read does not wait for a writer (#143).** A read on another
+  connection takes no permit and no engine lock and reads its connection's
+  snapshot; it is not refused while a write transaction is open and sees
+  the transaction once it commits. With four readers beside ingest and a
+  sweep at 548,000 series: 18,707 reads, none refused, p99 2.4 ms, where
+  0.8.17 answered 3,420, refused 38 after five seconds of retries, and had
+  a p99 of 5.1 s. `timeless_stats` reports what is stored as the calling
+  connection sees it.
+- **A sweep is planned a stretch of series at a time (#148).** Compaction
+  and rollup merges read the index 16,384 series ids a step instead of all
+  of it in one, and the pass after a sweep's first looks only at the series
+  it compacted. Rollup merges are planned only when a rollup chunk may have
+  changed. The longest maintenance step at 548,000 series is 265 ms (523 ms
+  for 0.8.17 with its index in memory, 1,267 ms with it on disk).
+  `compaction_plans` now counts sweeps planned.
+- **Batched reads fetch labels for the series that answer**, not for every
+  candidate: `timeless_latest`, `timeless_aggregate`, the grid and window
+  kernels and the rollup batches. A timeless-acct frame of 33 metrics, each
+  with about 16,000 series of which 280 are live: 56 ms, where 0.8.17 took
+  119 ms.
+- The metrics server's sweep no longer waits between steps for reads in
+  flight; `compact_yield_count` and `compact_yield_total_ns` stay at zero.
+- `series_on_disk` and `chunks_on_disk` in `timeless_stats` are always 1.
+
+### Removed
+
+- The in-memory index mode, its transaction journal, the reload and append
+  delta for another process's writes, and the legacy filesystem chunk store
+  (`FsStore`) with its `import` benchmark tool. `Engine::new` is replaced by
+  `Engine::in_memory`, over an in-memory store for tests and tools.
+
+### Fixed
+
+- A rollback discards a compaction or rollup merge plan made from rows it
+  undid, and a plan's chunks are identified by more than their row id,
+  which SQLite gives out again.
+- A read no longer overwrites the retention and rollup ladder a writer has
+  changed and not yet committed.
+- `last_insert_rowid()` is what the statement set, whatever the table
+  stored for it at commit.
 
 ## [0.8.17] — 2026-10-11
 

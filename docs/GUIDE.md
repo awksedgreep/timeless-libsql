@@ -87,7 +87,8 @@ INSERT INTO metrics(name, ts, value, labels) VALUES
   ('cpu_usage', 1753000015, 43.1, '{"host":"web1"}'),
   ('cpu_usage', 1753000030, 41.9, '{"host":"web1"}');
 
--- Compress what's buffered to disk (more on this in section 3).
+-- Store what's buffered (more on this in section 3; for metrics, the
+-- end of the statement already did).
 INSERT INTO metrics(metrics) VALUES ('flush');
 
 -- Query with ordinary SQL.
@@ -120,7 +121,25 @@ time and becomes muscle memory the second.
 
 ## 3. The one concept you must know: flush
 
-Inserts don't compress immediately — they land in an **in-memory buffer**:
+**Metrics commit like any other row.** Points you insert are stored when
+their transaction commits (a bare `INSERT` is its own transaction), as one
+chunk for each series the transaction wrote to:
+
+- A committed point is **durable**, and is what every connection reads.
+- Another connection **never waits** for your transaction and never sees it
+  before it commits: it goes on reading what is committed. Your own
+  connection reads its own writes.
+- Because a chunk is written per series per transaction, **group your
+  writes**: one transaction for a scrape, a poll, or a few seconds of
+  points. Committing a point at a time works, and stores a chunk a point
+  (about four times the bytes, and a quarter of the insert rate) until
+  compaction puts them together. In one measurement of 20,000 points over
+  20 series: 17,000 rows a second and 20,000 chunks a point at a time;
+  626,000 rows a second and 340 chunks a minute's worth at a time.
+- `'flush'` on a metrics table has nothing left to store outside a
+  transaction. It still applies retention.
+
+**Logs and traces buffer.** Their inserts land in an **in-memory buffer**:
 
 - Buffered rows are **immediately queryable**. `SELECT` sees them right away;
   you never have to flush just to read your own writes.
@@ -134,11 +153,10 @@ Inserts don't compress immediately — they land in an **in-memory buffer**:
   buffer; you never get corruption.
 - `'flush'` compresses the buffer into blocks inside the database file,
   riding whatever transaction you're in.
-- The buffer also **auto-flushes** when it gets big (4,096 points per series
-  for metrics; 8,192 entries for logs and traces), so you can't grow it
-  forever by forgetting.
+- The buffer also **auto-flushes** when it gets big (8,192 entries), so you
+  can't grow it forever by forgetting.
 
-The rule of thumb:
+The rule of thumb for logs and traces:
 
 > **Flush at the cadence at which you're willing to lose data.**
 
@@ -627,7 +645,7 @@ All commands are the same idiom: insert a string into the table's hidden
 command column. All are safe to run anytime, transactional, and idempotent.
 
 ```sql
-INSERT INTO metrics(metrics) VALUES ('flush');      -- persist the buffer (all tables)
+INSERT INTO metrics(metrics) VALUES ('flush');      -- persist the buffer (logs, traces); metrics: apply retention
 INSERT INTO metrics(metrics) VALUES ('compact');    -- metrics: merge small chunks
 INSERT INTO metrics(metrics) VALUES ('compact-step:64'); -- defaults: 262144 points / 4 MiB
 INSERT INTO metrics(metrics) VALUES ('compact-step:64:131072:2097152'); -- explicit ceilings
@@ -772,12 +790,14 @@ a busy result is not a failure, just a pass to retry next interval. Watch
 
 Two behaviors that surprise people but are intentional:
 
-- **Rows visible before flush** — inserts are queryable immediately from any
-  connection in the same process, even before `'flush'` or `COMMIT`. Flushed
-  data is fully transactional.
-- **Rows gone after a crash** — anything inserted but not yet flushed (or
-  auto-flushed) is lost if the process dies. Never corrupted, just not yet
-  durable. Flush at the cadence you can afford to lose.
+- **Log and trace rows visible before flush** — inserts are queryable
+  immediately from any connection in the same process, even before `'flush'`
+  or `COMMIT`. Flushed data is fully transactional. Metrics are transactional
+  throughout: visible to others when committed, and not before.
+- **Log and trace rows gone after a crash** — anything inserted but not yet
+  flushed (or auto-flushed) is lost if the process dies. Never corrupted,
+  just not yet durable. Flush at the cadence you can afford to lose. A
+  committed metrics point is never lost this way.
 
 ## 10. Monitor the database itself: dbhealth
 

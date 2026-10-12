@@ -38,14 +38,10 @@ use timeless_api_common::otel::{ExporterHealth, OtelTracesStats};
 const COMPACT_STEP_WORK_ITEMS: usize = 1024;
 const COMPACT_STEP_INPUT_POINTS: usize = 256 * 1024;
 const COMPACT_STEP_INPUT_BYTES: u64 = 4 * 1024 * 1024;
-/// Leave a deliberate reader-admission window between maintenance writes.
+/// The pause between two steps of a sweep, in which queued writes are
+/// taken. Reads need none: a read does not wait for a step, and a step
+/// does not wait for a read (#143).
 const COMPACT_STEP_PAUSE: Duration = Duration::from_millis(10);
-/// How long a sweep waits between two steps for a read in flight to finish.
-/// A read is several statements, each admitted only while no writer holds
-/// or waits for the gate, and begun again from the first when one is
-/// refused: a step taken while it runs refuses it every time (#94). The
-/// cap keeps a stream of reads from holding a sweep off for good.
-const COMPACT_STEP_YIELD: Duration = Duration::from_millis(500);
 
 /// The release migration and embedded Elixir engine have always used
 /// `metric_samples`. The POC server used `metrics` before the release boundary
@@ -996,18 +992,7 @@ impl Storage {
             match step {
                 Err(error) => break Err(error),
                 Ok(step) if !step.more => break Ok(()),
-                Ok(_) => {
-                    let profile = Arc::clone(&self.0.profile);
-                    let yielded =
-                        pause_between_steps(|| profile_lock(&profile).read_in_flight).await;
-                    if let Some(yielded) = yielded {
-                        let mut profile = profile_lock(&self.0.profile);
-                        profile.compact_yield_count = profile.compact_yield_count.saturating_add(1);
-                        profile.compact_yield_total_ns = profile
-                            .compact_yield_total_ns
-                            .saturating_add(duration_ns(yielded));
-                    }
-                }
+                Ok(_) => tokio::time::sleep(COMPACT_STEP_PAUSE).await,
             }
         };
         record_compaction(&self.0.profile, steps, total_ns, step_max_ns, &result);
@@ -2053,22 +2038,6 @@ fn run_compact_step(
     run_continuation_command(conn, table, &command, "run bounded metrics compaction")
 }
 
-/// The pause between two steps of a sweep, and then, while a read is in
-/// flight, up to [`COMPACT_STEP_YIELD`] more. Says how long it yielded,
-/// when it did.
-async fn pause_between_steps(reads_in_flight: impl Fn() -> u64) -> Option<Duration> {
-    tokio::time::sleep(COMPACT_STEP_PAUSE).await;
-    if reads_in_flight() == 0 {
-        return None;
-    }
-    let started = Instant::now();
-    let until = started + COMPACT_STEP_YIELD;
-    while reads_in_flight() > 0 && Instant::now() < until {
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    Some(started.elapsed())
-}
-
 fn unix_seconds_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2650,32 +2619,6 @@ mod tests {
         assert!(error.contains("already owned"), "{error}");
         first.unlock().unwrap();
         acquire_database_lease(&database, "metrics").unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_sweep_waits_between_steps_while_a_read_is_in_flight_and_not_for_good() {
-        // No read in flight: the pause and no more.
-        let started = Instant::now();
-        assert!(pause_between_steps(|| 0).await.is_none());
-        assert!(started.elapsed() < COMPACT_STEP_YIELD);
-
-        // A read that finishes: waited for, and the wait is said.
-        let remaining = Cell::new(20_u64);
-        let yielded = pause_between_steps(|| {
-            remaining.set(remaining.get().saturating_sub(1));
-            remaining.get()
-        })
-        .await
-        .expect("a read was in flight");
-        assert!(yielded < COMPACT_STEP_YIELD, "{yielded:?}");
-
-        // A read that never finishes: the cap, and the sweep goes on.
-        let started = Instant::now();
-        let yielded = pause_between_steps(|| 1)
-            .await
-            .expect("a read was in flight");
-        assert!(yielded >= COMPACT_STEP_YIELD, "{yielded:?}");
-        assert!(started.elapsed() < COMPACT_STEP_YIELD * 2);
     }
 
     #[test]

@@ -20,8 +20,8 @@ The exact public storage contract is in the
 
 - Fresh databases use the `metric_samples` `timeless_metrics` virtual table;
   compatible existing public metrics tables remain readable.
-- The extension owns durable series identity, its 4,096-point per-series
-  threshold, compression, chunks, rollups, retention, and transactions.
+- The extension owns durable series identity, compression, chunks, rollups,
+  retention, and transactions. A write is stored when its batch commits.
 - Retention follows the table's declared data-time window by default, so
   historical imports keep their original timestamps. Optional additional
   wall-clock expiry requires `TIMELESS_METRICS_RAW_RETENTION_SECS` (default
@@ -47,7 +47,9 @@ The exact public storage contract is in the
   writer-side ones `cpu_ns`, the writer thread's CPU time. Wall time less
   CPU time is time the writer was blocked: on a lock, on the disk, or
   throttled by the kernel. `compact_last_*` describe the most recent sweep,
-  `api_read_wait_ns` is the part of read time spent refused behind a writer,
+  `api_read_wait_ns` is the part of read time spent refused as busy (a read
+  no longer waits for the writer, so this stays at zero unless SQLite itself
+  reports the database busy),
   `wal_high_water_bytes` the largest write-ahead log seen after a flush or
   step, and `rollup_single_bucket_chunks` the rollup chunks not yet merged.
   `/metrics` serves the same as
@@ -63,11 +65,10 @@ The exact public storage contract is in the
   `timeless_metrics_wal_high_water_bytes`,
   `timeless_metrics_write_busy_retries_total` and
   `timeless_metrics_rollup_single_bucket_chunks`.
-- A write refused as busy is tried again. The writer waits up to five
-  seconds for reads in flight before a transaction; if that runs out (one
-  long read is enough), the ingest batch, flush, or maintenance step is
-  attempted up to five more times before its error is reported, and
-  `write_busy_retries` counts each one.
+- A write refused as busy is tried again: the ingest batch, flush, or
+  maintenance step is attempted up to five more times before its error is
+  reported, and `write_busy_retries` counts each one. Reads do not hold a
+  write off: a read and the writer do not wait for each other.
 - Optional first-party OpenTelemetry export is deliberately limited to those
   scheduled compact/rollup sweeps. Set
   `TIMELESS_METRICS_OTEL_TRACES_ENDPOINT` to a full OTLP/HTTP endpoint such as
@@ -129,8 +130,8 @@ publish the honest storage split:
 - `timeless_metrics_raw_ingested_bytes` (`raw_ingested_bytes`) is the raw
   comparator at the standard 16 bytes per sample (8-byte timestamp + 8-byte
   value; series identity is the amortized catalog, not the row). It derives
-  from durable point counts — disk plus buffered — so it stays
-  lifetime-accurate across restarts.
+  from durable point counts, so it stays lifetime-accurate across
+  restarts.
 - `timeless_metrics_index_bytes` (`sqlite_index_bytes`) is a compatibility
   gauge reported as `0`; exact allocation would require a complete `dbstat`
   walk on every routine stats request.
@@ -262,6 +263,5 @@ sweep longer than the 300-second slot cannot keep up.
 `BENCH_READ_PACE_MS` (10) milliseconds for as long as the rounds run, and the
 report gains a `reads` object with their count, failures, latency
 percentiles, and the server's own count of read attempts it had to start
-again behind the writer. That is what a dashboard sees while the store
-ingests and sweeps. Under read load a sweep takes much longer, so eight
-rounds is enough.
+again. That is what a dashboard sees while the store ingests and sweeps.
+Eight rounds is enough to see it.

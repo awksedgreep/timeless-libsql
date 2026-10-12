@@ -289,6 +289,16 @@ runtime `pragma_module_list` check.
 
 ## Durability and flush cadence
 
+**Since 0.9.0** the metrics engine stores points when their transaction
+commits, and a health table is a metrics table: a sample is durable when the
+statement that took it commits, whatever `flush_every` says. `flush_every`
+above 1 therefore no longer trades durability for fewer chunks; it is
+accepted and stored as before, and only spaces out the explicit flush that
+applies retention. A host that wants fewer, larger chunks takes its samples
+inside transactions of its own, or leaves the one-point chunks to
+`'compact'`, as the default always has. What follows is the reasoning from
+when samples could wait in memory, kept for the record.
+
 The metrics engine's default auto-flush (4096 points/series) would hold ~68
 days of 1-minute samples in memory — useless for the crash-forensics case,
 where the samples *leading up to the crash* are the valuable ones. Options:

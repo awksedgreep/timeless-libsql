@@ -160,9 +160,10 @@ accepted by this raw SQL endpoint.
 ## 6. Durability, maintenance, and shutdown
 
 sqld does not know which virtual tables need a Timeless flush when the process
-receives a shutdown signal. Automatic thresholds are 4,096 points per metric
-series, 8,192 logs, and 8,192 spans, but a smaller accepted tail remains only
-in the extension process until an explicit flush. Before planned shutdown:
+receives a shutdown signal. Metrics points are stored when their transaction
+commits and need nothing more. Logs and spans flush automatically at 8,192
+rows, but a smaller accepted tail remains only in the extension process until
+an explicit flush. Before planned shutdown:
 
 1. stop producers;
 2. wait for admitted requests to finish;
@@ -174,8 +175,9 @@ in the extension process until an explicit flush. Before planned shutdown:
 
 The virtual tables have no embedded maintenance scheduler. The sqld operator
 must schedule public maintenance/retention commands and enforce query work and
-response limits. SIGKILL can lose the unflushed tail; persisted transactions
-remain subject to the host database's recovery guarantees.
+response limits. SIGKILL can lose the unflushed tail of logs and traces;
+persisted transactions remain subject to the host database's recovery
+guarantees.
 
 `dbhealth` is a separate extension and not part of the telemetry bundle. When
 loaded explicitly under sqld, its background sampler stays disabled to avoid
@@ -187,7 +189,8 @@ described in [DBHEALTH.md](DBHEALTH.md).
 All durable Timeless compressed blocks, catalogs, and indexes live in the
 sqld-managed database. Host-supported libSQL replication or bottomless backup
 can therefore carry committed Timeless state without an extension-specific
-replication protocol. The in-memory buffer is not stored or replicated, and a
+replication protocol. The in-memory buffer of logs and traces is not stored or
+replicated, and a
 replica must load a compatible extension before querying the virtual tables.
 
 This guide does not claim a particular replication topology, S3-compatible

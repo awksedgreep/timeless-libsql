@@ -243,7 +243,8 @@ asserts `PRAGMA integrity_check` is clean, all flushed watermarks are present,
 and no `_terms`/`_trace_blocks`/`_duration_bounds`/`_attribute_blooms` row
 dangles. Every current trace block must also have valid duration bounds and
 exact configured-attribute results. The durability contract being proven is:
-**flushed = durable, buffered = lost, never corrupt.**
+**flushed = durable, buffered = lost, never corrupt**; for metrics, whose
+points are stored at commit, **committed = durable**.
 
 `tests/dbhealth.sh` builds and loads `libdbhealth_ext` separately. Never build
 `timeless-ext` and `dbhealth-ext` with two `-p` arguments in one Cargo

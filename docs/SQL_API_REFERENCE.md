@@ -109,7 +109,7 @@ The following table is machine-checked against the Rust registration source.
 | `timeless_aggregate` | eponymous TVF | telemetry | One scalar aggregate row per non-empty metric series. |
 | `timeless_aggregate_frame` | eponymous TVF | telemetry | All scalar aggregate results in one `TAF1` frame. |
 | `timeless_grid` | eponymous TVF | telemetry | Last sample on an evaluation grid. |
-| `timeless_label_names` | eponymous TVF | telemetry | Label names a metrics table's series carry, from the in-memory label index. |
+| `timeless_label_names` | eponymous TVF | telemetry | Label names a metrics table's series carry, from the label index. |
 | `timeless_label_values` | eponymous TVF | telemetry | Distinct metric-label values. |
 | `timeless_latest` | eponymous TVF | telemetry | Newest metric point per series. |
 | `timeless_latest_frame` | eponymous TVF | telemetry | All newest points in one `TLF1` frame. |
@@ -204,61 +204,57 @@ projection follows SQLite's NaN behavior.
 Creation arguments:
 
 - `retention=<n>[s|m|h|d]`: raw data-time window; a bare integer is seconds.
-- `flush_interval=off|<n>[s|m|h]`: how long a buffered point waits to be
-  flushed. A table has no clock of its own; each ingest statement ends by
-  asking, so once the oldest buffered point has waited this long the next
-  ingest statement flushes every buffer (its own points included), and the
-  table then takes one bounded compaction step for itself. A point
-  therefore waits for the first write after its interval: a host that
-  writes every five minutes is flushed a poll at a time. A table with no
-  setting uses 60 seconds. `off` (or `0`) leaves flushing to the
-  4,096-point threshold and the `flush` command, and compaction to the
-  host; a host that runs its own flush and compaction timers, as the
-  metrics server does, sets it. A flush writes points uncompressed, so the
-  interval decides durability and buffer memory, not compression, which is
-  compaction's. Independently, when buffered points exceed the buffer
-  budget (256 MiB) the largest buffers are flushed. `timeless_stats`
-  reports `flush_interval` in seconds.
+- `flush_interval=off|<n>[s|m|h]`: whether the table maintains itself, and
+  how often. Points are stored when their transaction commits whatever this
+  says (see [Transactions, durability, and
+  concurrency](#transactions-durability-and-concurrency)); the name is from
+  when it also timed a flush. With an interval, the table takes one bounded
+  compaction step for itself as a transaction commits, at most once an
+  interval, so that an embedded host with no maintenance of its own is
+  still compacted. A table with no setting uses 60 seconds. `off` (or `0`)
+  leaves compaction to the host; a host that runs its own maintenance, as
+  the metrics server does, sets it. `timeless_stats` reports
+  `flush_interval` in seconds.
 - `rollups=RESOLUTION@RETENTION,...`: ascending, divisible resolution ladder;
   `0` or `forever` retains a tier indefinitely.
-- `index_cache=<size>|unbounded`: where the series catalog (names, labels and
-  the label index) is read from. Every table keeps the catalog durably on
-  disk. A size (`64MB`, `16MB`, `0`; `KB`/`MB`/`GB` are powers of 1024)
-  reads it from there, with a cache of at most that size mapping a series'
-  identity to its id for ingest: memory then does not grow with the number
-  of series, and `0` caches nothing. An eighth of the size remembers the
-  answers to repeated selections (a metric and its label matchers) until
-  the set of series next changes, so a dashboard's repeated reads skip the
-  label index. `unbounded` additionally holds the
-  whole catalog in memory, for the lowest read latency, at a few hundred
-  bytes to a kilobyte of memory a series. **A table created without the
-  argument uses `64MB`.** A dedicated server should ask for `unbounded`;
-  the bundled metrics server does unless told otherwise
-  (`TIMELESS_METRICS_INDEX_CACHE`). A table created by an extension older
-  than this setting has none and behaves as `unbounded`.
+- `index_cache=<size>|unbounded`: how much memory the table may use to
+  remember series. The series catalog (names, labels and the label index)
+  and the chunk index are always read from the database: nothing is held in
+  memory per series or per chunk, opening a table does not read the store,
+  and memory does not grow with the number of series. Within the budget
+  (`64MB`, `16MB`, `0`; `KB`/`MB`/`GB` are powers of 1024) a cache maps a
+  series' identity to its id for ingest, at about 48 bytes a series, and
+  an eighth of the budget (64 MiB at most) remembers the answers to
+  repeated selections (a metric and its label matchers) until the set of
+  series next changes, so a dashboard's repeated reads skip the label
+  index. `0` caches nothing. `unbounded` sets no limit on the identity
+  cache, for a server that ingests every series every scrape. **A table
+  created without the argument uses `64MB`.** The bundled metrics server
+  leaves an existing table's setting alone unless told otherwise
+  (`TIMELESS_METRICS_INDEX_CACHE`). `timeless_stats` reports the setting.
 
-  With a size, the chunk index is read from disk as well, raw chunks and
-  rollup chunks alike, through two partial indexes on the chunks table
-  (`<t>_chunks_series_ts` over raw rows and `<t>_rollups_series_ts` over
-  rollup rows). Nothing is then held in memory per series or per chunk, so
-  opening the table does not read the store: a table of 700,000 series,
-  3.9 million raw chunks and 5.5 million rollup chunks opens in under a
-  second in 40 MiB, where `unbounded` takes nine seconds and 1.9 GiB. A
-  second process reading the table beside its writer also has nothing to
-  reload when the writer compacts. The price is in reads that touch many
-  series, which ask the index rather than memory (two to three times as
-  long for a 100,000-series selection), and in the two indexes' space. The
-  indexes are made when a table is first opened to be read this way and
-  dropped when it is opened `unbounded`; a connection that cannot make
-  them (a read-only one) reads from memory until a writer has.
+  Before 0.9.0 `unbounded` meant "hold the whole catalog and chunk index in
+  memory", and a table created before the setting existed behaved that
+  way. There is no such mode now. Such a table is unbounded in the sense
+  above, and the first connection that can write to it under this version
+  builds what it reads from: the label index if the table predates it, and
+  two partial indexes on the chunks table (`<t>_chunks_series_ts` over raw
+  rows and `<t>_rollups_series_ts` over rollup rows), about four seconds
+  for 700,000 series and 7.9 million chunks. A connection that cannot
+  write (read-only, or `query_only`) fails with a message saying so until
+  one that can has opened the table. The setting is stored as a number,
+  `unbounded` as the largest there is, because versions 0.8.12 to 0.8.17
+  drop those two indexes when they read the word.
 
 Writes are append-only. Insert rows with `(name,ts,value,labels)` or with a
 previously resolved `series_id`. Use the hidden command column for:
 
 - `resolve`, supplied with `name` and optional `labels`, returns the durable
   table-scoped series id through `last_insert_rowid()`.
-- `flush` drains every series buffer into raw durable chunks; scheduled or
-  explicit compaction performs the CPU-heavy first compression later.
+- `flush` stores whatever the open transaction has buffered, as raw chunks,
+  and applies retention. Outside a transaction there is nothing buffered,
+  since a commit stores it. Scheduled or explicit compaction performs the
+  CPU-heavy first compression later.
 - `compact` drains eligible size-tiered metric work in bounded internal steps
   and runs declared rollups.
 - `compact-step:<series>[:<points>:<bytes>][:<cutoff>]` performs one
@@ -274,17 +270,17 @@ previously resolved `series_id`. Use the hidden command column for:
   also accepted) is the sweep's: a chunk whose newest sample is at or past it
   is left for the next sweep, so that a sweep over a store being written to
   ends. Pass the time the sweep began on every step of it: the sweep is
-  planned once from the chunk index for that cutoff and stepped through, and
-  a step costs its budget, not the size of the store. Without a cutoff every
+  planned for that cutoff a stretch of series at a time, read from the chunk
+  index as the sweep goes, and a step costs its budget, not the size of the
+  store. Without a cutoff every
   chunk is eligible, and a store that is flushed between steps keeps a sweep
   going. `timeless_stats` reports `compaction_plans` and
   `compaction_planned_groups`.
 - `flush_interval:off|<n>[s|m|h]` records a new `flush_interval` and
   applies it at once.
-- `index_cache:<size>|unbounded` records a new `index_cache` setting. It
+- `index_cache:<size>|unbounded` records a new `index_cache` budget. It
   takes effect the next time the table is opened by a process, not under
-  the engine that is running; no data is rewritten either way, because the
-  on-disk catalog is always maintained.
+  the engine that is running. No data is rewritten.
 - `rollup` builds settled buckets for the declared ladder.
 - `rollups:none` disables future persisted rollup production;
   `rollups:<ladder>` transactionally replaces the declared ladder.
@@ -297,8 +293,8 @@ previously resolved `series_id`. Use the hidden command column for:
   cutoff. Declared rollup retention is applied by maintenance; use the
   bounded `clear-rollups` command for an explicit full-tier removal.
 - Retention also removes every series it has left nothing of: no raw chunk,
-  no rollup chunk, and no buffered point. The catalog row and the registry
-  entry go in the same transaction and come back on rollback. A series with
+  no rollup chunk, and no buffered point. The catalog row and its label
+  postings go in the same transaction and come back on rollback. A series with
   a rollup chunk in a tier kept `forever` is therefore kept forever.
 - `rollup` and `compact` merge a series' small rollup chunks into large
   ones as they accumulate, size-tiered, so a bucket is rewritten a few times
@@ -626,8 +622,7 @@ is an inclusive conservative pre-decode limit; failure returns no partial
 frame.
 
 Latest queries count a metadata-only chunk candidate as one work point;
-candidates requiring payload decoding count their stored points, and buffered
-points also count. The check runs before payload reads. Catalog queries count
+candidates requiring payload decoding count their stored points. The check runs before payload reads. Catalog queries count
 examined series, including those rejected by label filters. An exact metric
 name narrows the catalog before this accounting. `max_catalog_bytes` bounds
 the total matching metric-name, label-key, and label-value UTF-8 bytes before
@@ -675,6 +670,13 @@ persists the counters in the same host transaction.
 | metrics | `series`, raw `chunks`, `rollup_chunks`, `rollup_single_bucket_chunks` (rollup chunks not yet merged), `disk_points`, `buffered_points`, `bytes_on_disk`, `index_bytes`, `ts_min`, `ts_max`, the `compaction_raw_*` / `compaction_merge_*` phase counters, `retention_series_removed`, `rollup_merge_chunks_removed`, `rollup_merge_chunks_written`, the `raw_batch_query_*` / `window_batch_query_*` work counters, and the catalog's `index_cache` (the setting, or NULL for a table that predates it), `series_on_disk` (1 when the catalog is read from disk), `series_resolve_cache_entries` and `selection_cache_entries`. |
 | logs | `blocks`, `raw_blocks`, `compressed_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_entries`, `disk_entries`, `total_entries`, `bytes_on_disk`, `raw_bytes`, `compressed_bytes`, `ingest_raw_bytes_total`, `terms`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the ingest/query/optimize/gate counter families. |
 | traces | `blocks`, `raw_blocks`, `block_mean_ts_span`, `block_max_ts_span`, `block_over_target_count`, `buffered_spans`, `disk_spans`, `total_spans`, `bytes_on_disk`, `ingest_raw_bytes_total`, `duration_bounded_blocks`, `duration_unknown_blocks`, `attribute_index_fields`, `attribute_bloom_rows`, `attribute_bloom_bytes`, `terms`, `trace_index_rows`, `index_bytes`, `ts_min`, `ts_max`, `optimize_source_entries`, `optimize_source_bytes`, and the query/discovery/optimize/gate counter families, including `query_decoded_columns`, `query_decoded_column_bytes`, `query_materialized_values`, `query_materialized_rich_values`, and `optimize_duration_backfill_{blocks,entries,input_bytes,total_ns}`. |
+
+For metrics, `buffered_points` and the `buffered` column of `timeless_series`
+are 0 except to a connection reading inside its own open transaction, and
+then only until that read stores them: what a transaction has written and
+not yet stored is not another connection's to see. `series_on_disk` and
+`chunks_on_disk` are always 1, kept for hosts that read them when a table
+could hold its indexes in memory.
 
 `bytes_on_disk` and `bytes_per_point` are payload only: the encoded chunk or
 block bytes. No index is part of them, in any signal: not the metrics label
@@ -778,18 +780,43 @@ decoders for `TAF1` and `TLF1` are
 
 ## Transactions, durability, and concurrency
 
-Buffered rows are visible to queries through the same process-owned engine.
-`flush` encodes them into ordinary SQLite writes, but durability is not final
-until the surrounding SQLite transaction commits according to the host's
-journal and synchronous policy. Rollback restores buffers, catalog state,
-blocks, terms, trace indexes, rollups, and maintenance swaps.
+**Metrics.** Points are stored when their transaction commits, a chunk for
+each series it wrote to, and are then durable to whatever the host's journal
+and synchronous policy make a commit. Inside an open transaction they are
+held in memory until one of: the commit; a savepoint (which SQLite also
+opens for a statement that inserts more than one row); a read of the table
+by the same connection; a maintenance command; 4,096 points for one series;
+or 256 MiB buffered in all. Any of those stores what is buffered, in the
+transaction, so a transaction reads its own writes from rows like everything
+else. Rollback, of the transaction or to a savepoint, undoes the rows and
+drops what was still buffered. `last_insert_rowid()` is left as the
+statement set it.
+
+A read on another connection takes no lock in the engine and waits for no
+writer: it reads its own connection's snapshot, as it would an ordinary
+table. It sees a transaction when it has committed and not before, and
+`timeless_stats` reports what is stored as that connection sees it. Under
+SQLite's WAL journal a reader and the writer do not block each other; with
+a rollback journal SQLite's own locking applies. A connection that wrote
+points and then set `PRAGMA query_only` cannot store them before it reads,
+and its read fails saying so.
+
+Because a chunk is written per series per transaction, a host that commits
+one point at a time writes one chunk a point until compaction merges them.
+Group writes into transactions: a scrape, a poll, a batch.
+
+**Logs and traces.** Buffered rows are visible to queries through the same
+process-owned engine. `flush` encodes them into ordinary SQLite writes, but
+durability is not final until the surrounding SQLite transaction commits
+according to the host's journal and synchronous policy. Rollback restores
+buffers, blocks, terms, trace indexes, and maintenance swaps. A reader that
+would observe another connection's transaction-private locations receives a
+retryable busy-style error instead of inconsistent rows. Queries merge
+committed blocks with the caller's visible buffer.
 
 Connections in one process that open the same database file, attached schema,
 table, and durable instance id share one engine. Writers are serialized by a
-five-second bounded owner gate. A reader that would observe another
-connection's transaction-private locations receives a retryable busy-style
-error instead of inconsistent rows. Queries merge committed blocks with the
-caller's visible buffer.
+five-second bounded owner gate.
 
 Backup and replication operate on the containing SQLite/libSQL database, not
 on individual shadow tables. Use SQLite's online backup API or a coordinated

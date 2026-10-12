@@ -91,10 +91,12 @@ registration.
 
 Connections in one process that open the same database and virtual-table name
 share one Timeless engine. A bounded table-scoped writer gate serializes
-writes. Readers on another connection receive a retryable busy-style error
-while a write transaction has private shadow state; treat it like
-`SQLITE_BUSY`. Registration is still per connection because SQLite's module
-catalog is per connection.
+writes. A metrics read on another connection does not wait for a writer: it
+reads its own snapshot of what is committed, so give readers their own
+connections and use WAL. A logs or traces reader on another connection
+receives a retryable busy-style error while a write transaction has private
+shadow state; treat it like `SQLITE_BUSY`. Registration is still per
+connection because SQLite's module catalog is per connection.
 
 One process must own writes to a database. The embedded API does not acquire
 the signal-server advisory lease and cannot fence an unrelated process that
@@ -113,8 +115,18 @@ restores both buffered state and shadow-table changes made by a flush or
 maintenance command in that transaction. Use ordinary `BEGIN`, `COMMIT`, and
 `ROLLBACK`; never write private shadow tables.
 
-Buffered rows are queryable but are not a process-crash durability promise.
-The durable boundary is a successful public `flush` command:
+Metrics points are stored when their transaction commits, one chunk for
+each series the transaction wrote to: commit is the durable boundary, and a
+host should group its writes (a poll, a scrape, a batch) into one
+transaction rather than commit a point at a time. A collector that samples
+every few seconds and can afford to lose a minute keeps one transaction open
+for the minute and commits it; readers on other connections see each minute
+as it commits.
+
+Logs and traces buffer. Their buffered rows are queryable but are not a
+process-crash durability promise, and the durable boundary is a successful
+public `flush` command (for metrics the command stores nothing a commit has
+not, and applies retention):
 
 ```sql
 INSERT INTO metrics(metrics) VALUES ('flush');
@@ -122,12 +134,14 @@ INSERT INTO logs(logs)       VALUES ('flush');
 INSERT INTO traces(traces)   VALUES ('flush');
 ```
 
-The authoritative automatic thresholds are 4,096 points per metric series,
-8,192 log entries, and 8,192 spans. A graceful embedded shutdown must stop
+The authoritative automatic thresholds are 8,192 log entries and 8,192
+spans; a metrics transaction that buffers 4,096 points for one series stores
+them before it commits. A graceful embedded shutdown must stop
 producers, wait for admitted work, flush every created Timeless table, commit,
 perform the host's required WAL checkpoint, close readers, and finally close
-the writer. SIGKILL can lose the unflushed tail but cannot turn it into a
-claimed successful durable write.
+the writer. SIGKILL can lose the unflushed tail of logs and traces, and an
+uncommitted metrics transaction, but cannot turn either into a claimed
+successful durable write.
 
 ## Maintenance and retention
 

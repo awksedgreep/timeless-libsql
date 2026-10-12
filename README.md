@@ -295,9 +295,11 @@ claimed by this release line.
 
 ## Flush, maintenance, and durability
 
-Buffered rows are immediately queryable but are not durable against process
-loss until the extension flushes them. Automatic flush thresholds limit the
-tail; an explicit flush is the durability barrier:
+Metrics are stored when their transaction commits: a committed point is on
+disk and is what every connection reads. Logs and traces buffer rows, which
+are immediately queryable but are not durable against process loss until the
+extension flushes them; automatic flush thresholds limit that tail, and an
+explicit flush is the durability barrier:
 
 ```sql
 INSERT INTO metrics(metrics) VALUES ('flush');
@@ -317,8 +319,14 @@ INSERT INTO traces(traces) VALUES ('prune:1753000000000000000');
 
 Flush and maintenance participate in the host SQLite transaction. Rollback
 restores both live engine state and shadow-table writes. A crash may lose the
-unflushed tail, but must not corrupt flushed state. The crash suite proves
-reopen integrity, durable watermarks, and index consistency after `SIGKILL`.
+unflushed tail of logs and traces, and never a committed metrics point; it
+must not corrupt stored state. The crash suite proves reopen integrity,
+durable watermarks, and index consistency after `SIGKILL`.
+
+A metrics chunk is written for each series a transaction wrote to, so a host
+that commits a point at a time writes a chunk a point until compaction puts
+them together. Group a scrape, a poll or a second's worth of points into one
+transaction: see the guide.
 
 The Rust signal servers stop admission, drain accepted work, issue a final
 ordered flush, checkpoint WAL, join workers, and release their owner lease on

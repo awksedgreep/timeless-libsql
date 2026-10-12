@@ -31,7 +31,7 @@ fn document() -> &'static str {
             "data_abi": DATA_ABI,
             "sql_surface_version": 1,
             "observability_schema": crate::schema::SCHEMA_VERSION,
-            "minimum_server_version": "0.8.0",
+            "minimum_server_version": "0.9.0",
             "build": {
                 "commit": env!("TIMELESS_BUILD_COMMIT_RESOLVED"),
                 "target": env!("TIMELESS_BUILD_TARGET"),
@@ -131,7 +131,9 @@ fn document() -> &'static str {
                 },
                 "timeless_metrics": {
                     "index_cache": true,
-                    "flush_interval": true
+                    "flush_interval": true,
+                    "stored_at_commit": true,
+                    "reads_without_writer_gate": true
                 },
                 "timeless_label_values": {
                     "all_series": true
@@ -208,12 +210,12 @@ mod tests {
             "the tagged v0.3.0 artifact predates the capability handshake"
         );
         assert!(
-            env!("CARGO_PKG_VERSION").starts_with("0.8."),
-            "the current extension must remain on the documented 0.8 compatibility line"
+            env!("CARGO_PKG_VERSION").starts_with("0.9."),
+            "the current extension must remain on the documented 0.9 compatibility line"
         );
         assert_eq!(
-            value["minimum_server_version"], "0.8.0",
-            "the 0.8 line moved the server floor with the workspace bump"
+            value["minimum_server_version"], "0.9.0",
+            "the 0.9 line moved the server floor with the workspace bump"
         );
         assert_eq!(value["data_abi"], 1);
         assert_eq!(value["sql_surface_version"], 1);

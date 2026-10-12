@@ -115,6 +115,51 @@ such a binary starts open instead of failing. If you want token verification,
 set `TIMELESS_AUTH_MODE=required` with `TIMELESS_AUTH_POLICY_FILE` — one
 line, and the enforcement is exactly as before.
 
+## Metrics storage contract change in 0.9.0
+
+Three things change for a metrics table, and one of them is done to the
+database at the first start.
+
+**The indexes are read from the database, always.** Before 0.9.0 a table
+with `index_cache='unbounded'`, or one created before the setting existed
+(every metrics server database unless `TIMELESS_METRICS_INDEX_CACHE` named
+a size), held its series catalog and chunk index in memory and had no
+on-disk chunk index. The first connection that can write to such a table
+under 0.9.0 builds two partial indexes on the chunks table, and the label
+index if the table predates it: about four seconds for 700,000 series and
+7.9 million chunks, once, in free pages if the file has them. It also
+rewrites the stored `index_cache` from the word `unbounded` to the largest
+number, which 0.8.12 to 0.8.17 read as a budget and leave the indexes alone
+for. Until a writable connection has done this, a read-only connection on
+that table fails with "open it once with a connection that can write":
+start the writer first. A server's start then takes under a second and a
+few tens of megabytes whatever the store holds, where it took seconds and
+gigabytes; reads that touch very many series cost somewhat more (a count
+over 98,000 series: 103 ms against 67 ms).
+
+**A committed point is stored.** Points are no longer held in memory after
+their transaction commits: commit writes a chunk for each series the
+transaction wrote to. An embedded host that commits a point, or a few, at
+a time and relied on the 60-second `flush_interval` to batch them now
+writes a chunk at every commit. Nothing is lost and compaction merges them,
+but the insert rate is about a quarter and the store larger until it does.
+Wrap what you would have let the timer gather in one transaction (see the
+guide, section 3). `flush_interval` now only says whether the table takes a
+compaction step for itself at commit; `off` if the host compacts.
+`buffered_points` reads 0 outside an open transaction.
+
+**A read never waits for a writer.** A read on another connection is no
+longer refused with a busy-style error while a write transaction is open;
+it reads what is committed. Code that retried on that error keeps working
+and never retries. Code that relied on another connection seeing committed
+points *before* a flush is unaffected (it sees them at commit); code that
+relied on another connection seeing a transaction's points before its
+commit, through the shared buffer, will not see them until the commit.
+
+An in-place return to 0.8.17 works: it reads and writes the database, keeps
+the indexes, and runs with its index on disk. Use the matching server and
+extension, as always; the 0.9 servers and extension refuse 0.8 partners.
+
 ## Metrics retention default change — 0.8.4
 
 The metrics server no longer applies an implicit seven-day wall-clock cutoff.

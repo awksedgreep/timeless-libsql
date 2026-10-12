@@ -15,14 +15,14 @@ constants that enforce the handshake.
 
 | Contract key | Current value | Meaning |
 |---|---:|---|
-| `extension_workspace` | `0.8.17` | Current extension/core/dbhealth source line. |
-| `server_workspace` | `0.8.17` | Current metrics/logs/traces server source line. |
+| `extension_workspace` | `0.9.0` | Current extension/core/dbhealth source line. |
+| `server_workspace` | `0.9.0` | Current metrics/logs/traces server source line. |
 | `extension_data_abi` | `1` | Stored/public telemetry data compatibility generation. |
 | `sql_surface_version` | `1` | Advertised public SQL inventory generation. |
-| `extension_minimum_server` | `0.8.0` | Oldest server accepted by the current extension document. |
+| `extension_minimum_server` | `0.9.0` | Oldest server accepted by the current extension document. |
 | `server_data_schema` | `1` | Additive `_timeless_schema_migrations` ledger generation. |
 | `server_required_data_abi` | `1` | Data ABI required by all current signal servers. |
-| `server_minimum_extension` | `0.8.11` | Oldest extension semantic version considered by current servers. |
+| `server_minimum_extension` | `0.9.0` | Oldest extension semantic version considered by current servers. |
 
 <!-- public-compatibility-versions:end -->
 
@@ -80,14 +80,28 @@ These independent versions must not be conflated:
   list and the [server API reference](SERVER_API_REFERENCE.md) for the
   updated routes.
 
+### Behavior changes on the 0.9 line
+
+- A metrics point is stored when its transaction commits; nothing committed
+  waits in a buffer, and `flush_interval` no longer times a flush.
+- The metrics catalog and chunk index are read from the database for every
+  table. `index_cache='unbounded'` no longer holds them in memory; the
+  first writable open of a table that 0.8 did builds its indexes.
+- A metrics read on another connection is not refused while a write
+  transaction is open; it reads what is committed.
+
+The data ABI is unchanged: a 0.9 database is read and written by 0.8.12 to
+0.8.17, and the reverse. See the [upgrade
+guide](UPGRADE.md#metrics-storage-contract-change-in-090).
+
 ## Supported artifact pairings
 
 | Extension | Rust server | Verdict | Reason |
 |---|---|---|---|
-| current `0.8.x` | matching current `0.8.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
+| current `0.9.x` | matching current `0.9.x` | supported when the full capability preflight passes | Both sides require data ABI 1 and the same release floor. |
 | tagged `v0.3.0` | `0.7.x` | unsupported | The tag predates `timeless_capabilities()` and the release-server query guards. |
-| tagged `0.4.x`–`0.7.x` | current `0.8.x` server | unsupported | The current servers declare a `0.8.0` extension floor; a pre-`0.5.0` extension additionally cannot decode codec-8 blocks a later optimize may already have written. |
-| `0.8.x` | tagged `0.3.x`–`0.7.x` server | unsupported | The current extension declares a `0.8.0` server floor; an old server cannot prove it understands the current API/resource contract, and the `0.7` line changed the documented authentication default. |
+| tagged `0.4.x`–`0.8.x` | current `0.9.x` server | unsupported | The current servers declare a `0.9.0` extension floor, since they expect a metrics write to be stored at commit and a read never refused; a pre-`0.5.0` extension additionally cannot decode codec-8 blocks a later optimize may already have written. |
+| `0.9.x` | tagged `0.3.x`–`0.8.x` server | unsupported | The current extension declares a `0.9.0` server floor; an old server cannot prove it understands the current API/resource contract, and the `0.7` line changed the documented authentication default. |
 | any version with a different `data_abi` | current servers | unsupported | The server refuses before virtual-table initialization. |
 | current extension with a future-schema database | current servers | unsupported/fail closed | The server does not downgrade or mutate a future ledger. |
 | current extension loaded directly by SQLite/libSQL | no Timeless server; host-owned | supported | The host must negotiate capabilities and own maintenance, backup, concurrency, and limits. |
