@@ -1135,6 +1135,94 @@ fn metric_candidate_ids(
         .collect())
 }
 
+/// The series a batched read is to look at. Their labels are here only if
+/// selecting them took the labels; otherwise they are read afterwards, for
+/// the series that answered. A metric's series are mostly ones that ended
+/// long ago, and a read of one moment is answered by few of them: reading
+/// sixteen thousand series' labels to print three hundred cost more than
+/// the read itself.
+struct BatchCandidates {
+    ids: Vec<i64>,
+    labels: HashMap<i64, Labels>,
+}
+
+/// [`metric_candidates`] for a batched read: ids from the label index
+/// alone when no matcher needs the labels to decide.
+fn batch_candidates(
+    engine: &Engine,
+    metric: &str,
+    eq: &Labels,
+    matchers: &[(String, LabelMatcher)],
+    selection: SeriesSelection,
+) -> Result<BatchCandidates> {
+    if matchers.is_empty() && selection == SeriesSelection::All {
+        return Ok(BatchCandidates {
+            ids: engine.select_series_ids(metric, eq).map_err(module_err)?,
+            labels: HashMap::new(),
+        });
+    }
+    let selected = metric_candidates(engine, metric, eq, matchers, selection)?;
+    Ok(BatchCandidates {
+        ids: selected.iter().map(|(series_id, _)| *series_id).collect(),
+        labels: selected.into_iter().collect(),
+    })
+}
+
+impl BatchCandidates {
+    /// What a batched read returned for these candidates, with the labels
+    /// of each series that `answered`, in candidate order. A series whose
+    /// labels are not to be found has been removed since it was selected,
+    /// and is left out.
+    fn labelled<R>(
+        mut self,
+        engine: &Engine,
+        table: &str,
+        operation: &str,
+        results: Vec<(i64, R)>,
+        answered: impl Fn(&R) -> bool,
+    ) -> Result<Vec<(i64, Labels, R)>> {
+        if results.len() != self.ids.len() {
+            return Err(module_err(format!(
+                "{table}: {operation} returned {} series for {} candidates",
+                results.len(),
+                self.ids.len()
+            )));
+        }
+        for (expected, (actual, _)) in self.ids.iter().zip(&results) {
+            if expected != actual {
+                return Err(module_err(format!(
+                    "{table}: {operation} order mismatch (expected series {expected}, got {actual})"
+                )));
+            }
+        }
+        let results: Vec<(i64, R)> = results
+            .into_iter()
+            .filter(|(_, result)| answered(result))
+            .collect();
+        let unread: Vec<i64> = results
+            .iter()
+            .map(|(series_id, _)| *series_id)
+            .filter(|series_id| !self.labels.contains_key(series_id))
+            .collect();
+        if !unread.is_empty() {
+            self.labels.extend(
+                engine
+                    .series_infos(&unread)
+                    .map_err(module_err)?
+                    .into_iter()
+                    .map(|(series_id, info)| (series_id, info.labels)),
+            );
+        }
+        Ok(results
+            .into_iter()
+            .filter_map(|(series_id, result)| {
+                let labels = self.labels.remove(&series_id)?;
+                Some((series_id, labels, result))
+            })
+            .collect())
+    }
+}
+
 fn validate_batch_series<L, R>(
     table: &str,
     operation: &str,
@@ -1178,25 +1266,26 @@ fn run_kernel(
     // metrics_vtab.rs). P4: the batch primitives pay validation, the
     // transition guard, and the store's read_chunks round-trip once for
     // the whole candidate set instead of once per series.
-    let candidates = metric_candidates(
+    let candidates = batch_candidates(
         &shared.engine,
         &ka.metric,
         &ka.filter,
         &ka.matchers,
         ka.series_selection,
     )?;
-    let sids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
-    let results = kernel(&shared.engine, &sids)?;
-    validate_batch_series(&ka.table, "batch kernel", &candidates, &results)?;
+    let results = kernel(&shared.engine, &candidates.ids)?;
 
     let mut rows = Vec::new();
-    for ((sid, labels), (_, points)) in candidates.into_iter().zip(results) {
-        // Per-series absence rule (matches query_multi's omission): a
-        // series with NO points on the grid emits nothing, fill or not.
-        // Labels render lazily — only for series that emit rows.
-        if points.is_empty() {
-            continue;
-        }
+    // Per-series absence rule (matches query_multi's omission): a series
+    // with NO points on the grid emits nothing, fill or not. Labels are
+    // read and rendered only for series that emit rows.
+    for (sid, labels, points) in candidates.labelled(
+        &shared.engine,
+        &ka.table,
+        "batch kernel",
+        results,
+        |points| !points.is_empty(),
+    )? {
         let labels_json = labels_to_json(&labels);
         if ka.fill {
             // Dense emission: every grid point, NULL where the kernel
@@ -1465,7 +1554,7 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
             .refresh_authoritative_state()
             .map_err(module_err)?;
 
-        let candidates = metric_candidates(
+        let candidates = batch_candidates(
             &shared.engine,
             &ka.metric,
             &ka.filter,
@@ -1473,35 +1562,23 @@ unsafe impl VTabCursor for WindowBatchCursor<'_> {
             ka.series_selection,
         )?;
 
-        let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
+        let series_ids = &candidates.ids;
         let batch = match ka.max_work_points {
             Some(limit) => shared.engine.query_window_op_batch_by_id_limited(
-                &series_ids,
-                ka.start,
-                ka.stop,
-                ka.step,
-                ka.width,
-                op,
-                limit,
+                series_ids, ka.start, ka.stop, ka.step, ka.width, op, limit,
             ),
-            None => shared.engine.query_window_op_batch_by_id(
-                &series_ids,
-                ka.start,
-                ka.stop,
-                ka.step,
-                ka.width,
-                op,
-            ),
+            None => shared
+                .engine
+                .query_window_op_batch_by_id(series_ids, ka.start, ka.stop, ka.step, ka.width, op),
         }
         .map_err(module_err)?;
-        validate_batch_series(&ka.table, M, &candidates, &batch)?;
 
         let mut rows = Vec::new();
-        for ((sid, labels), (_, points)) in candidates.into_iter().zip(batch) {
-            if points.is_empty() {
-                continue;
-            }
-
+        for (sid, labels, points) in
+            candidates.labelled(&shared.engine, &ka.table, M, batch, |points| {
+                !points.is_empty()
+            })?
+        {
             let packed = encode_window_points(&points, &ka)?;
             rows.push((sid, labels, packed));
         }
@@ -1810,15 +1887,15 @@ unsafe impl VTabCursor for AggregateCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
-        let series_ids: Vec<i64> = candidates.iter().map(|(series_id, _)| *series_id).collect();
+        let candidates = batch_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
         let batch = shared
             .engine
-            .query_aggregate_summary_batch_by_id(&series_ids, start, stop)
+            .query_aggregate_summary_batch_by_id(&candidates.ids, start, stop)
             .map_err(module_err)?;
-        validate_batch_series(&table, M, &candidates, &batch)?;
         let mut rows = Vec::new();
-        for ((sid, labels), (_, summary)) in candidates.into_iter().zip(batch) {
+        for (sid, labels, summary) in
+            candidates.labelled(&shared.engine, &table, M, batch, Option::is_some)?
+        {
             let Some(summary) = summary else {
                 continue;
             };
@@ -2110,23 +2187,23 @@ unsafe impl VTabCursor for LatestCursor<'_> {
             .engine
             .refresh_authoritative_state()
             .map_err(module_err)?;
-        let candidates = metric_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
-        let series_ids: Vec<i64> = candidates.iter().map(|(series_id, _)| *series_id).collect();
+        let candidates = batch_candidates(&shared.engine, &metric, &eq, &matchers, selection)?;
         let batch = match slots[5] {
             Some(slot) => shared.engine.query_latest_batch_by_id_limited(
-                &series_ids,
+                &candidates.ids,
                 start,
                 stop,
                 positive_work_limit(M, args, slot)?,
             ),
             None => shared
                 .engine
-                .query_latest_batch_by_id(&series_ids, start, stop),
+                .query_latest_batch_by_id(&candidates.ids, start, stop),
         }
         .map_err(module_err)?;
-        validate_batch_series(&table, M, &candidates, &batch)?;
         let mut rows = Vec::new();
-        for ((sid, labels), (_, point)) in candidates.into_iter().zip(batch) {
+        for (sid, labels, point) in
+            candidates.labelled(&shared.engine, &table, M, batch, Option::is_some)?
+        {
             let Some((ts, value)) = point else {
                 continue;
             };
@@ -3196,25 +3273,24 @@ unsafe impl VTabCursor for RollupBatchCursor<'_> {
             .refresh_authoritative_state()
             .map_err(module_err)?;
 
-        let candidates = metric_candidates(
+        let candidates = batch_candidates(
             &shared.engine,
             &ka.metric,
             &ka.filter,
             &ka.matchers,
             ka.series_selection,
         )?;
-        let series_ids: Vec<i64> = candidates.iter().map(|(sid, _)| *sid).collect();
         let batch = shared
             .engine
-            .query_rollup_batch_by_id(&series_ids, ka.width, ka.start, ka.stop)
+            .query_rollup_batch_by_id(&candidates.ids, ka.width, ka.start, ka.stop)
             .map_err(module_err)?;
-        validate_batch_series(&ka.table, M, &candidates, &batch)?;
 
         let mut rows = Vec::new();
-        for ((series_id, labels), (_, buckets)) in candidates.into_iter().zip(batch) {
-            if buckets.is_empty() {
-                continue;
-            }
+        for (series_id, labels, buckets) in
+            candidates.labelled(&shared.engine, &ka.table, M, batch, |buckets| {
+                !buckets.is_empty()
+            })?
+        {
             rows.push((series_id, labels, encode_rollup_buckets(&buckets)?));
         }
         rows.sort_by(|a, b| (&a.1, a.0).cmp(&(&b.1, b.0)));
