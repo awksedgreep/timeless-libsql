@@ -1055,8 +1055,8 @@ fn decode_series_selection(
 /// the label index; a broader one filters rows instead.
 const MAX_INDEXED_ALTERNATIVES: usize = 512;
 
-/// For a disk-resident catalog (#132), turn each regex matcher that cannot
-/// match the empty string into the values of its key it accepts, so the
+/// Turn each regex matcher that cannot match the empty string into the
+/// values of its key it accepts (#132), so the
 /// selection reads those postings instead of every series of the metric.
 /// An absent label is the empty string, so a regex that matches "" also
 /// matches series without the label and cannot be narrowed this way; nor
@@ -1067,9 +1067,6 @@ fn indexed_alternatives(
     matchers: &[(String, LabelMatcher)],
 ) -> Result<Vec<(String, Vec<String>)>> {
     let mut out = Vec::new();
-    if !engine.series_on_disk() {
-        return Ok(out);
-    }
     for (key, matcher) in matchers {
         let LabelMatcher::Re(regex) = matcher else {
             continue;
@@ -5316,7 +5313,11 @@ unsafe impl VTabCursor for StatsCursor<'_> {
                                 )
                                 .map_err(module_err)
                             })?
-                            .map_or(Value::Null, Value::Text),
+                            // A table that has never been opened by a
+                            // connection that could record one has none.
+                            .map_or(Value::Text("unbounded".to_owned()), |stored| {
+                                Value::Text(crate::metrics_vtab::reported_index_cache(&stored))
+                            }),
                     ),
                     (
                         "series_on_disk",

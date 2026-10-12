@@ -237,18 +237,11 @@ pub trait ChunkStore: Send + Sync {
     /// Recovery: enumerate all persisted chunks with their metadata.
     fn scan(&self) -> Result<Vec<StoredChunk>, String>;
 
-    fn save_registry(&self, bytes: &[u8]) -> Result<(), String>;
-    fn load_registry(&self) -> Result<Option<Vec<u8>>, String>;
-
-    /// Whether series identity is owned by normalized store rows rather than
-    /// the legacy whole-registry blob. Filesystem stores retain the blob
-    /// implementation; SQLite stores override this catalog API.
-    fn has_authoritative_series(&self) -> bool {
-        false
-    }
-
-    fn load_series(&self) -> Result<Vec<StoredSeries>, String> {
-        Err("store does not provide an authoritative series catalog".to_string())
+    /// The registry blob the first versions kept the whole series catalog
+    /// in, if this store still holds one. Read once, to bring its series
+    /// into the catalog rows (`migrate_series`).
+    fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
     }
 
     fn resolve_series(
@@ -292,15 +285,9 @@ pub trait ChunkStore: Send + Sync {
     // every series' labels in memory. The defaults say "no index"; an
     // engine that needs one over such a store refuses rather than guess.
 
-    /// Whether this store keeps an on-disk label index.
-    fn has_label_index(&self) -> bool {
-        false
-    }
-
-    /// The table's series-index cache budget in bytes: `None` keeps the
-    /// whole catalog in memory (every table created before #132, and
-    /// `index_cache='unbounded'`); `Some(bytes)` keeps it on disk behind a
-    /// resolve cache of at most that size (`0` caches nothing).
+    /// The table's `index_cache` budget in bytes for remembered series
+    /// identities and selections (`0` remembers nothing); `None` is no
+    /// limit.
     fn series_index_budget(&self) -> Result<Option<u64>, String> {
         Ok(None)
     }
@@ -567,27 +554,6 @@ pub trait ChunkStore: Send + Sync {
         Err("store does not support series migration".to_string())
     }
 
-    /// F3: enumerate persisted ROLLUP chunk metadata (resolution > 0)
-    /// for the engine's rollup index. Default: none (FsStore has no
-    /// rollup support — rollups are a shadow-store feature; an engine
-    /// over a store without them simply never sees a ladder).
-    fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
-        Ok(Vec::new())
-    }
-
-    /// Stream persisted rollup metadata into an index builder. The default
-    /// preserves compatibility with small/in-memory stores; SQL stores should
-    /// override it so recovery does not stage every row in a second Vec.
-    fn visit_rollups(
-        &self,
-        visitor: &mut dyn FnMut(StoredRollupChunk) -> Result<(), String>,
-    ) -> Result<(), String> {
-        for chunk in self.scan_rollups()? {
-            visitor(chunk)?;
-        }
-        Ok(())
-    }
-
     /// F3: persist encoded rollup chunks. Same transactional contract as
     /// put_chunks — rows ride the caller's transaction. Deletion reuses
     /// delete_chunks (rollup rows live in the same chunk table and are
@@ -613,38 +579,6 @@ pub trait ChunkStore: Send + Sync {
     /// token too.
     fn catalog_generation(&self) -> Result<Option<(i64, i64)>, String> {
         Ok(None)
-    }
-
-    /// P2: watermark for the pure-append delta refresh —
-    /// `(chunk_shape_gen, max chunk rowid)`. `chunk_shape_gen` MUST
-    /// change on every committed mutation that removes or replaces a
-    /// chunk row (prune, compaction); it MUST NOT change on pure
-    /// appends (flush, rollup build). The rowid half is the append
-    /// cursor `scan_since` resumes from. `None` = store cannot answer;
-    /// callers keep the full-reload fallback. Both halves must ride
-    /// the same transaction snapshot as the data they describe.
-    fn append_watermark(&self) -> Result<Option<(i64, i64)>, String> {
-        Ok(None)
-    }
-
-    /// P2: enumerate chunk rows with rowid strictly greater than
-    /// `after_rowid`, split raw/rollup. Sound ONLY while the shape half
-    /// of `append_watermark` is unchanged (no deletes → no rowid
-    /// reuse). Callers must tolerate rows they already know (a
-    /// writer's own flushes advance the store past its cached
-    /// watermark), so application has to be idempotent.
-    fn scan_since(
-        &self,
-        _after_rowid: i64,
-    ) -> Result<(Vec<StoredChunk>, Vec<StoredRollupChunk>), String> {
-        Err("store does not support delta chunk scans".to_string())
-    }
-
-    /// P2: series rows with id strictly greater than `after_id`.
-    /// Committed series rows are append-only (the catalog_generation
-    /// contract), so this is always sound for authoritative stores.
-    fn load_series_since(&self, _after_id: i64) -> Result<Vec<StoredSeries>, String> {
-        Err("store does not support delta series loads".to_string())
     }
 
     /// For Engine::info(): (total_bytes, file_or_row_count).

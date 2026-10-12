@@ -374,41 +374,11 @@ impl ChunkStore for MemStore {
             .collect())
     }
 
-    fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
-        self.lock().registry = Some(bytes.to_vec());
-        Ok(())
-    }
-
     fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
         Ok(self.lock().registry.clone())
     }
 
     // ── Series catalog ───────────────────────────────────────────────
-
-    fn has_authoritative_series(&self) -> bool {
-        true
-    }
-
-    fn load_series(&self) -> Result<Vec<StoredSeries>, String> {
-        Ok(self
-            .lock()
-            .series
-            .iter()
-            .map(|(id, (name, labels))| StoredSeries {
-                id: *id,
-                name: name.clone(),
-                labels: labels.clone(),
-            })
-            .collect())
-    }
-
-    fn load_series_since(&self, after_id: i64) -> Result<Vec<StoredSeries>, String> {
-        Ok(self
-            .load_series()?
-            .into_iter()
-            .filter(|series| series.id > after_id)
-            .collect())
-    }
 
     fn resolve_series(
         &self,
@@ -469,10 +439,6 @@ impl ChunkStore for MemStore {
     }
 
     // ── Label index ──────────────────────────────────────────────────
-
-    fn has_label_index(&self) -> bool {
-        true
-    }
 
     fn series_index_budget(&self) -> Result<Option<u64>, String> {
         Ok(self.budget)
@@ -754,18 +720,6 @@ impl ChunkStore for MemStore {
             .collect())
     }
 
-    fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
-        Ok(self
-            .lock()
-            .rollups()
-            .map(|(rowid, row)| StoredRollupChunk {
-                series_id: row.series_id,
-                resolution: row.resolution,
-                meta: row.meta(rowid),
-            })
-            .collect())
-    }
-
     fn rollup_watermarks(
         &self,
         resolution: i64,
@@ -897,39 +851,6 @@ impl ChunkStore for MemStore {
             state.series.keys().next_back().copied().unwrap_or(0),
             state.generation,
         )))
-    }
-
-    fn append_watermark(&self) -> Result<Option<(i64, i64)>, String> {
-        let state = self.lock();
-        Ok(Some((
-            state.shape_generation,
-            state.rows.keys().next_back().copied().unwrap_or(0),
-        )))
-    }
-
-    fn scan_since(
-        &self,
-        after_rowid: i64,
-    ) -> Result<(Vec<StoredChunk>, Vec<StoredRollupChunk>), String> {
-        let state = self.lock();
-        let raw = state
-            .raw()
-            .filter(|(rowid, _)| *rowid > after_rowid)
-            .map(|(rowid, row)| StoredChunk {
-                series_id: row.series_id,
-                meta: row.meta(rowid),
-            })
-            .collect();
-        let rollups = state
-            .rollups()
-            .filter(|(rowid, _)| *rowid > after_rowid)
-            .map(|(rowid, row)| StoredRollupChunk {
-                series_id: row.series_id,
-                resolution: row.resolution,
-                meta: row.meta(rowid),
-            })
-            .collect();
-        Ok((raw, rollups))
     }
 
     fn storage_stats(&self) -> (u64, usize) {

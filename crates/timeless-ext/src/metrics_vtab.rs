@@ -241,12 +241,54 @@ fn flush_interval(seconds: u64) -> Option<std::time::Duration> {
     (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
 }
 
-/// Normalize an `index_cache` setting: `unbounded` (catalog in memory) or
-/// a byte budget such as `64MB` or `0` (#132).
+/// What `index_cache='unbounded'` is stored as: the largest budget there
+/// is. A number, because versions 0.8.12 to 0.8.17 read the word as "keep
+/// the index in memory" and drop the chunk indexes this version reads
+/// from; they read a number as a budget and leave the indexes alone.
+pub(crate) const UNBOUNDED_INDEX_CACHE: u64 = u64::MAX;
+
+/// An `index_cache` setting as it is reported: `unbounded`, or the budget
+/// in bytes.
+pub(crate) fn reported_index_cache(stored: &str) -> String {
+    if stored == "unbounded" || stored == UNBOUNDED_INDEX_CACHE.to_string() {
+        "unbounded".to_owned()
+    } else {
+        stored.to_owned()
+    }
+}
+
+/// A table from before `index_cache`, or one that asked for its index in
+/// memory when there was such a thing, is unbounded: record that in the
+/// form older versions leave the indexes alone for. A connection that
+/// cannot write leaves the table as it is; the engine reads both forms
+/// the same way.
+fn settle_index_cache(
+    host: &Connection,
+    database: &str,
+    table: &str,
+) -> std::result::Result<(), String> {
+    if matches!(
+        shadow_meta::load_meta_text(host, database, table, "index_cache")?.as_deref(),
+        None | Some("unbounded")
+    ) {
+        let _ = shadow_meta::save_meta_text(
+            host,
+            database,
+            table,
+            "index_cache",
+            &UNBOUNDED_INDEX_CACHE.to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Normalize an `index_cache` setting, the budget of the cache that
+/// remembers series identities and selections: `unbounded`, or bytes such
+/// as `64MB` or `0` (#132).
 fn validate_index_cache(value: &str) -> std::result::Result<String, String> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("unbounded") {
-        return Ok("unbounded".to_owned());
+        return Ok(UNBOUNDED_INDEX_CACHE.to_string());
     }
     crate::shadow_label_index::parse_budget(value)
         .map(|bytes| bytes.to_string())
@@ -329,11 +371,9 @@ impl MetricsTab {
         // persisted before the engine is built so the first engine already
         // opens it the right way.
         if is_create {
-            // A new table is embedded-sized unless it says otherwise: the
-            // catalog on disk behind a small resolve cache. A dedicated
-            // server asks for 'unbounded' explicitly. Tables created before
-            // this setting existed have none and keep their catalog in
-            // memory, as they always did.
+            // A new table is embedded-sized unless it says otherwise: a
+            // small cache of series identities. A dedicated server asks
+            // for 'unbounded' explicitly.
             let mut index_cache = DEFAULT_INDEX_CACHE_BYTES.to_string();
             for (name, value) in table_args::parse_kv_args(args).map_err(module_err)? {
                 if name == "index_cache" {
@@ -342,6 +382,8 @@ impl MetricsTab {
             }
             shadow_meta::save_meta_text(&host, &database, &table, "index_cache", &index_cache)
                 .map_err(module_err)?;
+        } else {
+            settle_index_cache(&host, &database, &table).map_err(module_err)?;
         }
         let instance_id = if is_create {
             shadow_meta::ensure_instance_id(&host, &database, &table)
@@ -507,6 +549,7 @@ impl MetricsTab {
         let mut created = false;
         let shared = shared::get_or_create(&key, || {
             created = true;
+            settle_index_cache(&host, database, table).map_err(module_err)?;
             let store = ShadowTableStore::new_read_only(database, table);
             Engine::with_store(
                 Box::new(store),
@@ -767,8 +810,8 @@ impl MetricsTab {
                 .engine
                 .set_flush_interval(flush_interval(seconds));
         } else if let Some(value) = cmd.strip_prefix("index_cache:") {
-            // Recorded for the table; the catalog moves between memory and
-            // disk when the engine is next opened, not under a live one.
+            // Recorded for the table; the cache takes its new size when the
+            // engine is next opened, not under a live one.
             let value = validate_index_cache(value).map_err(module_err)?;
             let host = unsafe { Connection::from_handle(self.db) }?;
             shadow_meta::save_meta_text(
@@ -2599,10 +2642,10 @@ mod disk_series_tests {
         db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
     }
 
-    /// Every read surface answers from the disk catalog what the memory
-    /// catalog answers, and a reopened table needs nothing in memory.
+    /// Every read surface answers the same whatever the cache may hold:
+    /// everything, a little, or nothing.
     #[test]
-    fn reads_answer_from_the_disk_catalog_as_from_memory() {
+    fn reads_answer_the_same_whatever_the_cache_budget() {
         let answers = |index_cache: &str| {
             let db = Connection::open_in_memory().unwrap();
             crate::register_telemetry(&db).unwrap();
@@ -2611,8 +2654,7 @@ mod disk_series_tests {
             ))
             .unwrap();
             fleet(&db);
-            let on_disk = stat(&db, "m", "series_on_disk");
-            let rows = vec![
+            vec![
                 strings(&db, "SELECT value FROM timeless_label_values('m', NULL, '__name__')"),
                 strings(&db, "SELECT value FROM timeless_label_values('m', NULL, 'host')"),
                 strings(&db, "SELECT value FROM timeless_label_values('m', 'cpu', 'env')"),
@@ -2636,17 +2678,14 @@ mod disk_series_tests {
                     "SELECT name || ' ' || labels || ' ' || ts FROM m WHERE name = 'cpu' ORDER BY labels",
                 ),
                 vec![stat(&db, "m", "series").to_string()],
-            ];
-            (on_disk, rows)
+            ]
         };
-        let (memory_mode, memory) = answers("index_cache='unbounded'");
-        let (disk_mode, disk) = answers("index_cache='1MB'");
-        assert_eq!(memory_mode, 0);
-        assert_eq!(disk_mode, 1);
-        assert_eq!(disk, memory);
-        assert_eq!(memory[0], ["cpu", "mem"]);
-        assert_eq!(memory[2], ["dev", "prod"]);
-        assert_eq!(memory[10], ["4"]);
+        let unbounded = answers("index_cache='unbounded'");
+        assert_eq!(answers("index_cache='1MB'"), unbounded);
+        assert_eq!(answers("index_cache='0'"), unbounded);
+        assert_eq!(unbounded[0], ["cpu", "mem"]);
+        assert_eq!(unbounded[2], ["dev", "prod"]);
+        assert_eq!(unbounded[10], ["4"]);
     }
 
     /// A zero budget caches nothing and still resolves every write to the
@@ -2935,11 +2974,12 @@ mod disk_series_tests {
         assert_eq!(agree("after a flush following retention"), 2);
     }
 
-    /// A table from before #132 has no label index. The first open that can
-    /// write builds it from the catalog, whichever way the catalog is read;
-    /// told to, the table then moves its catalog to disk on the next open.
+    /// A table from before #132 has no label index and no `index_cache`
+    /// setting. The first open that can write builds the index from the
+    /// catalog and records the setting as unbounded, in the form older
+    /// versions leave the indexes alone for.
     #[test]
-    fn an_existing_table_moves_its_catalog_to_disk_on_reopen() {
+    fn a_table_from_before_the_label_index_gets_one_at_its_first_open() {
         let path = std::env::temp_dir().join(format!(
             "timeless-disk-series-{}-{}.db",
             std::process::id(),
@@ -2964,8 +3004,7 @@ mod disk_series_tests {
             fleet(&db);
         }
         {
-            // With no engine open, make it a table from before #132: no
-            // label index, and no index_cache setting.
+            // With no engine open, make it a table from before #132.
             let db = Connection::open(&path).unwrap();
             db.execute_batch(
                 "DROP TABLE m_postings; DROP TABLE m_labels;
@@ -2975,29 +3014,28 @@ mod disk_series_tests {
             assert_eq!(tables(&db), 0);
         }
         {
-            // Opened as it is: still read from memory, and indexed.
             let db = Connection::open(&path).unwrap();
             crate::register_telemetry(&db).unwrap();
-            assert_eq!(stat(&db, "m", "series_on_disk"), 0);
             assert_eq!(stat(&db, "m", "series"), 4);
             assert_eq!(tables(&db), 2, "the first writable open builds the index");
             let postings: i64 = db
                 .query_row("SELECT count(*) FROM m_postings", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(postings, 12, "four series, three postings each");
-            db.execute("INSERT INTO m(m) VALUES ('index_cache:1MB')", [])
-                .unwrap();
             assert_eq!(
-                stat(&db, "m", "series_on_disk"),
-                0,
-                "takes effect on reopen"
+                strings(
+                    &db,
+                    "SELECT value FROM timeless_stats('m') WHERE key = 'index_cache'"
+                ),
+                ["unbounded"]
             );
-        }
-        {
-            let db = Connection::open(&path).unwrap();
-            crate::register_telemetry(&db).unwrap();
-            assert_eq!(stat(&db, "m", "series_on_disk"), 1);
-            assert_eq!(stat(&db, "m", "series"), 4);
+            assert_eq!(
+                strings(
+                    &db,
+                    "SELECT CAST(v AS TEXT) FROM m_meta WHERE k = 'index_cache'"
+                ),
+                [u64::MAX.to_string()]
+            );
             assert_eq!(
                 strings(
                     &db,
@@ -3023,13 +3061,13 @@ mod disk_series_tests {
         }
     }
 
-    /// The `(series_id, ts_min)` chunk index exists only while the chunk
-    /// index is read from the store, and then over raw rows only (#138): a
-    /// table read from memory has none to maintain, an older table's full
-    /// index is replaced or dropped at the next writable open, and a move
-    /// between the two modes takes the index with it.
+    /// The chunk indexes are every table's: one over raw rows, one over
+    /// rollup rows (#138, #144). A table that 0.8.x kept its index in
+    /// memory for has neither, or an older index over every row; the first
+    /// open that can write makes them, and a connection that cannot write
+    /// says so rather than read without them.
     #[test]
-    fn the_chunk_index_follows_how_the_chunk_index_is_read() {
+    fn a_table_without_its_chunk_indexes_gets_them_at_its_first_writable_open() {
         let path = std::env::temp_dir().join(format!(
             "timeless-chunk-index-{}-{}.db",
             std::process::id(),
@@ -3038,25 +3076,21 @@ mod disk_series_tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let index_sql = |db: &Connection| -> Option<String> {
+        let index_sql = |db: &Connection, name: &str| -> Option<String> {
             use rusqlite::OptionalExtension;
             db.query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'm_chunks_series_ts'",
-                [],
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [name],
                 |row| row.get(0),
             )
             .optional()
             .unwrap()
         };
-        let rollup_index_sql = |db: &Connection| -> Option<String> {
-            use rusqlite::OptionalExtension;
-            db.query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'm_rollups_series_ts'",
-                [],
-                |row| row.get(0),
+        let setting = |db: &Connection| {
+            strings(
+                db,
+                "SELECT CAST(v AS TEXT) FROM m_meta WHERE k = 'index_cache'",
             )
-            .optional()
-            .unwrap()
         };
         let hosts = |db: &Connection| {
             strings(
@@ -3074,7 +3108,7 @@ mod disk_series_tests {
             db
         };
         {
-            // Read from memory from the start: no index is made.
+            // Unbounded is a budget, not a way of reading: indexed as any.
             let db = open();
             db.execute_batch(
                 "CREATE VIRTUAL TABLE m USING timeless_metrics(index_cache='unbounded');",
@@ -3082,78 +3116,71 @@ mod disk_series_tests {
             .unwrap();
             fleet(&db);
             db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
-            assert_eq!(stat(&db, "m", "series_on_disk"), 0);
-            assert_eq!(index_sql(&db), None);
-            assert_eq!(rollup_index_sql(&db), None);
+            assert!(index_sql(&db, "m_chunks_series_ts").is_some());
+            assert!(index_sql(&db, "m_rollups_series_ts").is_some());
+            assert_eq!(setting(&db), [u64::MAX.to_string()]);
             assert_eq!(points(&db), 4);
         }
         {
-            // A table from an older extension carries the full index.
+            // As 0.8.17 left a table it read from memory: the word, and an
+            // older table's index over every row in place of the two.
             let db = Connection::open(&path).unwrap();
-            db.execute_batch("CREATE INDEX m_chunks_series_ts ON m_chunks(series_id, ts_min);")
-                .unwrap();
+            db.execute_batch(
+                "DROP INDEX m_chunks_series_ts;
+                 DROP INDEX m_rollups_series_ts;
+                 CREATE INDEX m_chunks_series_ts ON m_chunks(series_id, ts_min);
+                 UPDATE m_meta SET v = 'unbounded' WHERE k = 'index_cache';",
+            )
+            .unwrap();
         }
         {
-            // Opened to be read from memory, it is dropped; told to move to
-            // disk, nothing changes until the next open.
-            let db = open();
-            assert_eq!(points(&db), 4);
-            assert_eq!(index_sql(&db), None);
-            db.execute("INSERT INTO m(m) VALUES ('index_cache:1MB')", [])
+            // A connection that cannot write cannot make them, and does not
+            // read without them.
+            let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .unwrap();
-            assert_eq!(index_sql(&db), None);
+            crate::register_telemetry(&db).unwrap();
+            let err = db
+                .query_row("SELECT count(*) FROM m", [], |row| row.get::<_, i64>(0))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("a connection that can write"), "{err}");
         }
         {
-            // On disk: the index is there, over raw rows only, and answers.
             let db = open();
             assert_eq!(points(&db), 4);
-            assert_eq!(stat(&db, "m", "series_on_disk"), 1);
-            let sql = index_sql(&db).expect("a disk chunk index has its index");
+            let sql = index_sql(&db, "m_chunks_series_ts").expect("the raw index");
             assert!(sql.contains("WHERE resolution = 0"), "{sql}");
-            let sql = rollup_index_sql(&db).expect("and one over its rollup rows");
+            let sql = index_sql(&db, "m_rollups_series_ts").expect("the rollup index");
             assert!(sql.contains("WHERE resolution > 0"), "{sql}");
-            assert_eq!(points(&db), 4);
+            assert_eq!(setting(&db), [u64::MAX.to_string()]);
             assert_eq!(hosts(&db), ["a", "b", "c"]);
             write(&db, "cpu", r#"{"host":"d","env":"dev"}"#, 2_000);
             db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
             db.execute("INSERT INTO m(m) VALUES ('compact')", [])
                 .unwrap();
             assert_eq!(points(&db), 5);
-        }
-        {
-            // An older table read from disk: the full index is replaced,
-            // and the rollup index, which it never had (#144), is made.
-            let db = Connection::open(&path).unwrap();
-            db.execute_batch(
-                "DROP INDEX m_chunks_series_ts;
-                 DROP INDEX m_rollups_series_ts;
-                 CREATE INDEX m_chunks_series_ts ON m_chunks(series_id, ts_min);",
-            )
-            .unwrap();
-        }
-        {
-            // The table connects, and the engine opens, at its first use.
-            let db = open();
-            assert_eq!(points(&db), 5);
-            let sql = index_sql(&db).unwrap();
-            assert!(sql.contains("WHERE resolution = 0"), "{sql}");
-            assert!(rollup_index_sql(&db).is_some());
-            assert_eq!(stat(&db, "m", "series_on_disk"), 1);
-            assert_eq!(hosts(&db), ["a", "b", "c", "d"]);
-            db.execute("INSERT INTO m(m) VALUES ('index_cache:unbounded')", [])
+            db.execute("INSERT INTO m(m) VALUES ('index_cache:1MB')", [])
                 .unwrap();
         }
         {
-            // Back in memory: the index goes, the data does not.
+            // A budget changes what is remembered, never the indexes.
             let db = open();
             assert_eq!(points(&db), 5);
-            assert_eq!(stat(&db, "m", "series_on_disk"), 0);
-            assert_eq!(index_sql(&db), None);
-            assert_eq!(rollup_index_sql(&db), None);
+            assert_eq!(setting(&db), [(1u64 << 20).to_string()]);
+            assert!(index_sql(&db, "m_chunks_series_ts").is_some());
+            assert!(index_sql(&db, "m_rollups_series_ts").is_some());
             assert_eq!(hosts(&db), ["a", "b", "c", "d"]);
-            write(&db, "cpu", r#"{"host":"e","env":"dev"}"#, 3_000);
-            db.execute("INSERT INTO m(m) VALUES ('flush')", []).unwrap();
-            assert_eq!(points(&db), 6);
+            db.execute("INSERT INTO m(m) VALUES ('index_cache:unbounded')", [])
+                .unwrap();
+            assert_eq!(setting(&db), [u64::MAX.to_string()]);
+        }
+        {
+            // And now a connection that cannot write reads it.
+            let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+            crate::register_telemetry(&db).unwrap();
+            assert_eq!(points(&db), 5);
+            assert_eq!(hosts(&db), ["a", "b", "c", "d"]);
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
@@ -3474,8 +3501,9 @@ mod disk_series_tests {
         }
     }
 
-    /// A table created without `index_cache` is embedded-sized: its catalog
-    /// on disk behind a 64 MB resolve cache. `unbounded` is asked for.
+    /// A table created without `index_cache` is embedded-sized: a 64 MB
+    /// cache of series identities. `unbounded` is asked for, reported as
+    /// asked, and stored as the largest budget there is.
     #[test]
     fn a_new_table_defaults_to_the_embedded_budget() {
         let db = Connection::open_in_memory().unwrap();
@@ -3494,9 +3522,14 @@ mod disk_series_tests {
             .unwrap()
         };
         assert_eq!(setting("m"), (64u64 << 20).to_string());
-        assert_eq!(stat(&db, "m", "series_on_disk"), 1);
         assert_eq!(setting("big"), "unbounded");
-        assert_eq!(stat(&db, "big", "series_on_disk"), 0);
+        assert_eq!(
+            strings(
+                &db,
+                "SELECT CAST(v AS TEXT) FROM big_meta WHERE k = 'index_cache'"
+            ),
+            [u64::MAX.to_string()]
+        );
     }
 
     /// Points are stored when their transaction commits: nothing a

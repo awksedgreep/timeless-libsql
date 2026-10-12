@@ -3,7 +3,7 @@ use crate::store::{
     StoredSeries, ENC_PCO, ENC_RAW,
 };
 
-use crate::rollup::{decode_rollup_payload, encode_rollup_payload, ENC_ROLLUP_V1};
+use crate::rollup::{decode_rollup_payload, encode_rollup_payload};
 use crate::rollup::{rollup_buckets, RollupBucket, RollupTier};
 use crate::store::{EncodedRollupChunk, StoredRollupChunk};
 use dashmap::DashMap;
@@ -140,7 +140,7 @@ pub type LatestSeriesBatch = Vec<(i64, Option<(i64, f64)>)>;
 /// Ordered scalar-summary results keyed by durable series ID.
 pub type AggregateSummaryBatch = Vec<(i64, Option<AggregateSummary>)>;
 
-/// Partition key is just a series_id. The series registry maps
+/// Partition key is just a series_id. The series catalog maps
 /// (metric_name, labels) → series_id.
 #[derive(Hash, Eq, PartialEq, Clone, Debug, Ord, PartialOrd, Copy)]
 struct PartitionKey {
@@ -217,148 +217,29 @@ struct MetricsCompactionOutcome {
     merge_total_ns: u64,
 }
 
-/// A rollup index group. The series/tier identity is stored once for all of
-/// its chunks instead of repeated in every B-tree key.
+/// A series' rollup chunks at one resolution.
 #[derive(Hash, Eq, PartialEq, Clone, Debug, Copy)]
 struct RollupGroupKey {
     series_id: i64,
     resolution: i64,
 }
 
-/// Compact metadata for one persisted rollup row. Rollups are supported by
-/// the row-addressed shadow store (not FsStore), so keeping the durable rowid
-/// directly avoids carrying the raw-chunk floats, Option, enum, and B-tree
-/// node overhead for every rollup chunk.
+/// What planning a merge needs of one rollup chunk row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RollupIndexEntry {
     min_ts: i64,
-    max_ts: i64,
     rowid: i64,
     point_count: u32,
-    encoding: u8,
 }
 
 impl RollupIndexEntry {
-    fn key(self) -> (i64, i64) {
-        (self.min_ts, self.rowid)
-    }
-
     fn loc(self) -> ChunkLoc {
         ChunkLoc::Row { rowid: self.rowid }
     }
-
-    fn chunk_meta(self) -> ChunkMeta {
-        ChunkMeta {
-            min_ts: self.min_ts,
-            max_ts: self.max_ts,
-            max_ts_val: None,
-            point_count: self.point_count,
-            payload_bytes: 0,
-            min_val: 0.0,
-            max_val: 0.0,
-            sum_val: 0.0,
-            loc: self.loc(),
-            encoding: self.encoding,
-        }
-    }
 }
-
-/// Stable journal identity: group + first bucket timestamp + durable rowid.
-/// Rowid replaces the old process-local sequence number and still preserves
-/// chunks with duplicate first-bucket timestamps across restart/rollback.
-type RollupKey = (RollupGroupKey, i64, i64);
 
 /// One planned rollup merge: a run of a group's chunks to put together.
 type RollupMergeGroup = (RollupGroupKey, Vec<RollupIndexEntry>);
-
-#[derive(Default)]
-struct RollupIndex {
-    groups: HashMap<RollupGroupKey, Vec<RollupIndexEntry>>,
-    len: usize,
-    /// Entries holding exactly one bucket: what a tier's chunks look like
-    /// before they are merged. A group holds up to three (a run of four
-    /// merges), so many more than three a group means merging is not
-    /// keeping up (#137, #141). Kept as entries come and go.
-    single_bucket: usize,
-}
-
-impl RollupIndex {
-    fn push_unsorted(&mut self, group: RollupGroupKey, entry: RollupIndexEntry) {
-        self.groups.entry(group).or_default().push(entry);
-        self.len += 1;
-        self.single_bucket += usize::from(entry.point_count == 1);
-    }
-
-    fn sort_groups(&mut self) {
-        for entries in self.groups.values_mut() {
-            entries.sort_unstable_by_key(|entry| entry.key());
-        }
-    }
-
-    fn insert(
-        &mut self,
-        group: RollupGroupKey,
-        entry: RollupIndexEntry,
-    ) -> Option<RollupIndexEntry> {
-        let entries = self.groups.entry(group).or_default();
-        match entries.binary_search_by_key(&entry.key(), |candidate| candidate.key()) {
-            Ok(position) => {
-                let previous = std::mem::replace(&mut entries[position], entry);
-                self.single_bucket += usize::from(entry.point_count == 1);
-                self.single_bucket -= usize::from(previous.point_count == 1);
-                Some(previous)
-            }
-            Err(position) => {
-                entries.insert(position, entry);
-                self.len += 1;
-                self.single_bucket += usize::from(entry.point_count == 1);
-                None
-            }
-        }
-    }
-
-    fn remove(&mut self, key: &RollupKey) -> Option<RollupIndexEntry> {
-        let (group, min_ts, rowid) = *key;
-        let (removed, empty) = {
-            let entries = self.groups.get_mut(&group)?;
-            let position = entries
-                .binary_search_by_key(&(min_ts, rowid), |candidate| candidate.key())
-                .ok()?;
-            let removed = entries.remove(position);
-            (removed, entries.is_empty())
-        };
-        if empty {
-            self.groups.remove(&group);
-        }
-        self.len -= 1;
-        self.single_bucket -= usize::from(removed.point_count == 1);
-        Some(removed)
-    }
-
-    fn entries(&self, group: &RollupGroupKey) -> &[RollupIndexEntry] {
-        self.groups.get(group).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    /// Rollup chunks are appended in coverage order: a new chunk starts one
-    /// tick after the prior watermark. Groups are sorted by `(min_ts, rowid)`,
-    /// so the final entry carries the maximum durable coverage without an
-    /// O(chunks-per-group) scan on every maintenance pass.
-    fn watermark(&self, group: &RollupGroupKey) -> Option<i64> {
-        self.entries(group).last().map(|entry| entry.max_ts)
-    }
-
-    fn contains_rowid(&self, group: &RollupGroupKey, rowid: i64) -> bool {
-        self.entries(group).iter().any(|entry| entry.rowid == rowid)
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn single_bucket(&self) -> usize {
-        self.single_bucket
-    }
-}
 
 /// Full identity of a series for reverse lookups and label queries.
 #[derive(Clone)]
@@ -450,578 +331,151 @@ impl PartitionBuffer {
 // the store module — they are shared vocabulary across the seam.
 
 // ═══════════════════════════════════════════════════════════════════════
-// Series Registry — maps (metric_name, labels) → series_id
+// The registry blob of the first versions
 // ═══════════════════════════════════════════════════════════════════════
 
-pub struct SeriesRegistry {
-    /// Forward: identity hash of (metric, labels) → candidate ids,
-    /// verified against series_info on lookup (P3: this replaces a
-    /// full `(String, Labels)` key per series — the single largest
-    /// per-series allocation, duplicated from series_info).
-    series_map: HashMap<u64, Vec<i64>>,
-    /// Reverse: series_id → SeriesInfo — the ONE owned copy of a
-    /// series' name and labels.
-    series_info: HashMap<i64, SeriesInfo>,
-    /// Inverted label index: (label_key, label_value) → sorted postings.
-    /// P3: sorted Vec instead of HashSet — half the per-entry overhead,
-    /// same lookup shape (find_series verifies against series_info
-    /// anyway).
-    label_index: HashMap<(String, String), Vec<i64>>,
-    /// Metric name → sorted postings.
-    metric_index: HashMap<String, Vec<i64>>,
-    /// Next ID
-    next_id: AtomicI64,
-    dirty: bool,
-}
-
-impl SeriesRegistry {
-    fn new() -> Self {
-        SeriesRegistry {
-            series_map: HashMap::new(),
-            series_info: HashMap::new(),
-            label_index: HashMap::new(),
-            metric_index: HashMap::new(),
-            next_id: AtomicI64::new(1),
-            dirty: false,
-        }
+/// The series of a registry blob, in id order: how the first versions
+/// stored the whole catalog. Read only to bring such a table's series into
+/// the catalog rows.
+///
+/// Format: [count: u32] [id: i64, metric_len: u16, metric: bytes,
+///   label_count: u16, [key_len: u16, key, val_len: u16, val]...]...
+fn legacy_registry_rows(data: &[u8]) -> Result<Vec<StoredSeries>, String> {
+    if data.len() < 4 {
+        return Err("series registry file too small".to_string());
     }
 
-    /// Identity hash for the forward map. Labels is a BTreeMap, so its
-    /// iteration order is exactly the sorted-and-deduplicated order
-    /// fast_series_hash_pairs requires.
-    fn identity_hash(metric_name: &str, labels: &Labels) -> u64 {
-        let pairs: Vec<(&str, &str)> = labels
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        fast_series_hash_pairs(metric_name, &pairs)
-    }
+    let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+    let mut rows: Vec<StoredSeries> = Vec::with_capacity(count.min(data.len() / 10));
+    let mut ids: HashSet<i64> = HashSet::new();
+    let mut identities: HashSet<(String, Vec<(String, String)>)> = HashSet::new();
+    let mut pos = 4;
 
-    /// Exact forward lookup: hash bucket, then verify each candidate
-    /// against series_info (collisions are resolved, never trusted).
-    fn lookup(&self, metric_name: &str, labels: &Labels) -> Option<i64> {
-        let ids = self
-            .series_map
-            .get(&Self::identity_hash(metric_name, labels))?;
-        ids.iter().copied().find(|id| {
-            self.series_info
-                .get(id)
-                .is_some_and(|info| info.metric_name == metric_name && &info.labels == labels)
-        })
-    }
-
-    fn map_insert(&mut self, metric_name: &str, labels: &Labels, id: i64) {
-        self.series_map
-            .entry(Self::identity_hash(metric_name, labels))
-            .or_default()
-            .push(id);
-    }
-
-    fn map_remove(&mut self, metric_name: &str, labels: &Labels, id: i64) {
-        let hash = Self::identity_hash(metric_name, labels);
-        if let Some(ids) = self.series_map.get_mut(&hash) {
-            ids.retain(|&existing| existing != id);
-            if ids.is_empty() {
-                self.series_map.remove(&hash);
-            }
-        }
-    }
-
-    /// Insert into a sorted postings list, keeping order and uniqueness.
-    fn postings_insert(postings: &mut Vec<i64>, id: i64) {
-        if let Err(at) = postings.binary_search(&id) {
-            postings.insert(at, id);
-        }
-    }
-
-    fn postings_remove(postings: &mut Vec<i64>, id: i64) {
-        if let Ok(at) = postings.binary_search(&id) {
-            postings.remove(at);
-        }
-    }
-
-    /// Resolve (metric_name, labels) → series_id. Creates if new.
-    fn get_or_create(&mut self, metric_name: &str, labels: &Labels) -> i64 {
-        if let Some(id) = self.lookup(metric_name, labels) {
-            return id;
-        }
-
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-        // Forward map
-        self.map_insert(metric_name, labels, id);
-
-        // Reverse map
-        self.series_info.insert(
-            id,
-            SeriesInfo {
-                metric_name: metric_name.to_string(),
-                labels: labels.clone(),
-            },
-        );
-
-        // Label index — index every label pair + __name__
-        Self::postings_insert(
-            self.metric_index
-                .entry(metric_name.to_string())
-                .or_default(),
-            id,
-        );
-        for (k, v) in labels {
-            Self::postings_insert(
-                self.label_index.entry((k.clone(), v.clone())).or_default(),
-                id,
-            );
-        }
-
-        self.dirty = true;
-        id
-    }
-
-    fn insert_known(
-        &mut self,
-        id: i64,
-        metric_name: &str,
-        labels: &Labels,
-        dirty: bool,
-    ) -> Result<(), String> {
-        if id <= 0 {
-            return Err(format!("series id must be positive, got {id}"));
-        }
-        if let Some(existing_id) = self.lookup(metric_name, labels) {
-            return if existing_id == id {
-                Ok(())
-            } else {
-                Err(format!(
-                    "series identity {metric_name:?} maps to both {existing_id} and {id}"
-                ))
-            };
-        }
-        if let Some(existing) = self.series_info.get(&id) {
+    for entry_idx in 0..count {
+        if pos + 10 > data.len() {
             return Err(format!(
-                "series id {id} maps to both {:?} and {metric_name:?}",
-                existing.metric_name
+                "series registry truncated at entry {} (pos {} of {})",
+                entry_idx,
+                pos,
+                data.len()
             ));
         }
-
-        self.map_insert(metric_name, labels, id);
-        self.series_info.insert(
-            id,
-            SeriesInfo {
-                metric_name: metric_name.to_string(),
-                labels: labels.clone(),
-            },
-        );
-        Self::postings_insert(
-            self.metric_index
-                .entry(metric_name.to_string())
-                .or_default(),
-            id,
-        );
-        for (key, value) in labels {
-            Self::postings_insert(
-                self.label_index
-                    .entry((key.clone(), value.clone()))
-                    .or_default(),
-                id,
-            );
+        let id = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        let ml = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+        if pos + ml > data.len() {
+            return Err(format!(
+                "series registry truncated: metric name at entry {} (pos {} of {})",
+                entry_idx,
+                pos,
+                data.len()
+            ));
         }
-        let next_after_id = id
-            .checked_add(1)
-            .ok_or_else(|| format!("series id {id} cannot be incremented"))?;
-        let next_id = self.next_id.load(Ordering::Relaxed).max(next_after_id);
-        self.next_id.store(next_id, Ordering::Relaxed);
-        self.dirty |= dirty;
-        Ok(())
-    }
+        let metric_name = String::from_utf8(data[pos..pos + ml].to_vec())
+            .map_err(|e| format!("invalid UTF-8 in metric name at entry {}: {}", entry_idx, e))?;
+        pos += ml;
 
-    fn remove_id(&mut self, id: i64) {
-        let Some(info) = self.series_info.remove(&id) else {
-            return;
-        };
-        self.map_remove(&info.metric_name, &info.labels, id);
-        if let Some(ids) = self.metric_index.get_mut(&info.metric_name) {
-            Self::postings_remove(ids, id);
-            if ids.is_empty() {
-                self.metric_index.remove(&info.metric_name);
-            }
+        if pos + 2 > data.len() {
+            return Err(format!(
+                "series registry truncated: label count at entry {} (pos {} of {})",
+                entry_idx,
+                pos,
+                data.len()
+            ));
         }
-        for (key, value) in info.labels {
-            let index_key = (key, value);
-            if let Some(ids) = self.label_index.get_mut(&index_key) {
-                Self::postings_remove(ids, id);
-                if ids.is_empty() {
-                    self.label_index.remove(&index_key);
-                }
-            }
-        }
-    }
-
-    fn from_stored(rows: &[StoredSeries]) -> Result<Self, String> {
-        let mut registry = Self::new();
-        registry.series_map.reserve(rows.len());
-        registry.series_info.reserve(rows.len());
-        for row in rows {
-            let mut labels = Labels::new();
-            let mut previous_key: Option<&str> = None;
-            for (key, value) in &row.labels {
-                if previous_key.is_some_and(|previous| previous >= key.as_str()) {
-                    return Err(format!(
-                        "series {} labels are not in strict canonical order",
-                        row.id
-                    ));
-                }
-                if labels.insert(key.clone(), value.clone()).is_some() {
-                    return Err(format!("series {} has duplicate label key {key:?}", row.id));
-                }
-                previous_key = Some(key);
-            }
-            registry.insert_known(row.id, &row.name, &labels, false)?;
-        }
-        Ok(registry)
-    }
-
-    fn stored_rows(&self) -> Vec<StoredSeries> {
-        let mut rows: Vec<StoredSeries> = self
-            .series_info
-            .iter()
-            .map(|(&id, info)| StoredSeries {
-                id,
-                name: info.metric_name.clone(),
-                labels: info
-                    .labels
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            })
-            .collect();
-        rows.sort_by_key(|row| row.id);
-        rows
-    }
-
-    pub fn info_for(&self, id: i64) -> Option<&SeriesInfo> {
-        self.series_info.get(&id)
-    }
-
-    /// Borrow catalog entries without cloning names, labels, or postings.
-    /// Callers can stop before exceeding their catalog work/byte budget.
-    pub fn iter_series(
-        &self,
-        metric: Option<&str>,
-    ) -> Box<dyn Iterator<Item = (i64, &SeriesInfo)> + '_> {
-        match metric {
-            Some(metric) => Box::new(
-                self.metric_index
-                    .get(metric)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|id| self.series_info.get(id).map(|info| (*id, info))),
-            ),
-            None => Box::new(self.series_info.iter().map(|(id, info)| (*id, info))),
-        }
-    }
-
-    /// Find all series_ids matching a metric name and optional label filters.
-    pub fn find_series(&self, metric_name: &str, label_filter: &Labels) -> Vec<i64> {
-        // Borrowed: a selective query must not copy the metric's whole
-        // posting list (400k ids at fleet scale) to read a few of another.
-        let Some(metric_ids) = self.metric_index.get(metric_name) else {
-            return Vec::new();
-        };
-
-        if label_filter.is_empty() {
-            return metric_ids.clone();
-        }
-
-        let mut smallest = metric_ids;
-
-        for (k, v) in label_filter {
-            let matching = match self.label_index.get(&(k.clone(), v.clone())) {
-                Some(ids) => ids,
-                None => return Vec::new(),
-            };
-            if matching.len() < smallest.len() {
-                smallest = matching;
-            }
-        }
-
-        smallest
-            .iter()
-            .copied()
-            .filter(|id| {
-                let Some(info) = self.series_info.get(id) else {
-                    return false;
-                };
-
-                info.metric_name == metric_name
-                    && label_filter
-                        .iter()
-                        .all(|(k, v)| info.labels.get(k).is_some_and(|actual| actual == v))
-            })
-            .collect()
-    }
-
-    pub fn list_metrics(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.metric_index.keys().cloned().collect();
-        names.sort();
-        names
-    }
-
-    pub fn label_values(&self, metric_name: &str, label_key: &str) -> Vec<String> {
-        if label_key == "__name__" {
-            return if self.metric_index.contains_key(metric_name) {
-                vec![metric_name.to_string()]
-            } else {
-                Vec::new()
-            };
-        }
-        let series_ids = match self.metric_index.get(metric_name) {
-            Some(ids) => ids,
-            None => return Vec::new(),
-        };
-
-        let mut values: HashSet<String> = HashSet::new();
-        for &id in series_ids {
-            if let Some(info) = self.series_info.get(&id) {
-                if let Some(val) = info.labels.get(label_key) {
-                    values.insert(val.clone());
-                }
-            }
-        }
-
-        let mut result: Vec<String> = values.into_iter().collect();
-        result.sort();
-        result
-    }
-
-    /// Every value `label_key` takes across all series, sorted; for
-    /// `__name__`, every metric name. Read from the label index, so the cost
-    /// is the number of distinct label pairs, not the number of series.
-    pub fn all_label_values(&self, label_key: &str) -> Vec<String> {
-        if label_key == "__name__" {
-            return self.list_metrics();
-        }
-        let mut values: Vec<String> = self
-            .label_index
-            .keys()
-            .filter(|(key, _)| key == label_key)
-            .map(|(_, value)| value.clone())
-            .collect();
-        values.sort();
-        values
-    }
-
-    /// The label names `metric_name`'s series carry, with `__name__`,
-    /// sorted; empty for an unknown metric.
-    pub fn label_names_for(&self, metric_name: &str) -> Vec<String> {
-        let Some(series_ids) = self.metric_index.get(metric_name) else {
-            return Vec::new();
-        };
-        let mut names: HashSet<&str> = HashSet::from(["__name__"]);
-        for id in series_ids {
-            if let Some(info) = self.series_info.get(id) {
-                names.extend(info.labels.keys().map(String::as_str));
-            }
-        }
-        let mut result: Vec<String> = names.into_iter().map(str::to_string).collect();
-        result.sort();
-        result
-    }
-
-    pub fn all_label_names(&self) -> Vec<String> {
-        let mut names: HashSet<String> = HashSet::new();
-        names.insert("__name__".to_string());
-        for (k, _) in self.label_index.keys() {
-            names.insert(k.clone());
-        }
-        let mut result: Vec<String> = names.into_iter().collect();
-        result.sort();
-        result
-    }
-
-    fn series_count(&self) -> usize {
-        self.series_info.len()
-    }
-
-    /// Serialize for persistence (the store decides where bytes land).
-    /// Format: [count: u32] [id: i64, metric_len: u16, metric: bytes,
-    ///   label_count: u16, [key_len: u16, key, val_len: u16, val]...]...
-    /// Every length prefix is range-checked: names/labels over 64 KiB
-    /// are a clean `Err`, never a wrapped u16 (a wrap would decode as a
-    /// different, shorter name — silent corruption, not a clean error).
-    fn to_bytes(&self) -> Result<Vec<u8>, String> {
-        fn u16_len(len: usize, what: &str) -> Result<u16, String> {
-            u16::try_from(len)
-                .map_err(|_| format!("series registry: {what} is {len} bytes, exceeds u16::MAX"))
-        }
-        let count = u32::try_from(self.series_info.len()).map_err(|_| {
-            format!(
-                "series registry: {} series exceeds u32::MAX",
-                self.series_info.len()
-            )
-        })?;
-        let mut out = Vec::new();
-        out.extend_from_slice(&count.to_be_bytes());
-
-        let mut entries: Vec<(&i64, &SeriesInfo)> = self.series_info.iter().collect();
-        entries.sort_by_key(|&(id, _)| *id);
-
-        for (&id, info) in entries {
-            out.extend_from_slice(&id.to_be_bytes());
-            let mb = info.metric_name.as_bytes();
-            out.extend_from_slice(&u16_len(mb.len(), "metric name")?.to_be_bytes());
-            out.extend_from_slice(mb);
-            let lc = u16_len(info.labels.len(), "label count")?;
-            out.extend_from_slice(&lc.to_be_bytes());
-            for (k, v) in &info.labels {
-                let kb = k.as_bytes();
-                let vb = v.as_bytes();
-                out.extend_from_slice(&u16_len(kb.len(), "label key")?.to_be_bytes());
-                out.extend_from_slice(kb);
-                out.extend_from_slice(&u16_len(vb.len(), "label value")?.to_be_bytes());
-                out.extend_from_slice(vb);
-            }
-        }
-
-        Ok(out)
-    }
-
-    fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        if data.len() < 4 {
-            return Err("series registry file too small".to_string());
-        }
-
-        let count = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
-        let mut reg = SeriesRegistry::new();
-        let mut max_id: i64 = 0;
-        let mut pos = 4;
-
-        for entry_idx in 0..count {
-            if pos + 10 > data.len() {
-                return Err(format!(
-                    "series registry truncated at entry {} (pos {} of {})",
-                    entry_idx,
-                    pos,
-                    data.len()
-                ));
-            }
-            let id = i64::from_be_bytes(data[pos..pos + 8].try_into().unwrap());
-            pos += 8;
-            let ml = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
-            pos += 2;
-            if pos + ml > data.len() {
-                return Err(format!(
-                    "series registry truncated: metric name at entry {} (pos {} of {})",
-                    entry_idx,
-                    pos,
-                    data.len()
-                ));
-            }
-            let metric_name = String::from_utf8(data[pos..pos + ml].to_vec()).map_err(|e| {
-                format!("invalid UTF-8 in metric name at entry {}: {}", entry_idx, e)
-            })?;
-            pos += ml;
-
+        let lc = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+        let mut labels = BTreeMap::new();
+        for label_idx in 0..lc {
             if pos + 2 > data.len() {
                 return Err(format!(
-                    "series registry truncated: label count at entry {} (pos {} of {})",
+                    "series registry truncated: label key len at entry {} label {} (pos {} of {})",
                     entry_idx,
+                    label_idx,
                     pos,
                     data.len()
                 ));
             }
-            let lc = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+            let kl = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
-            let mut labels = BTreeMap::new();
-            for label_idx in 0..lc {
-                if pos + 2 > data.len() {
-                    return Err(format!(
-                        "series registry truncated: label key len at entry {} label {} (pos {} of {})",
-                        entry_idx, label_idx, pos, data.len()
-                    ));
-                }
-                let kl = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
-                pos += 2;
-                if pos + kl > data.len() {
-                    return Err(format!(
-                        "series registry truncated: label key at entry {} label {} (pos {} of {})",
-                        entry_idx,
-                        label_idx,
-                        pos,
-                        data.len()
-                    ));
-                }
-                let k = String::from_utf8(data[pos..pos + kl].to_vec()).map_err(|e| {
-                    format!(
-                        "invalid UTF-8 in label key at entry {} label {}: {}",
-                        entry_idx, label_idx, e
-                    )
-                })?;
-                pos += kl;
-                if pos + 2 > data.len() {
-                    return Err(format!(
-                        "series registry truncated: label value len at entry {} label {} (pos {} of {})",
-                        entry_idx, label_idx, pos, data.len()
-                    ));
-                }
-                let vl = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
-                pos += 2;
-                if pos + vl > data.len() {
-                    return Err(format!(
-                        "series registry truncated: label value at entry {} label {} (pos {} of {})",
-                        entry_idx, label_idx, pos, data.len()
-                    ));
-                }
-                let v = String::from_utf8(data[pos..pos + vl].to_vec()).map_err(|e| {
-                    format!(
-                        "invalid UTF-8 in label value at entry {} label {}: {}",
-                        entry_idx, label_idx, e
-                    )
-                })?;
-                pos += vl;
-                if labels.insert(k.clone(), v).is_some() {
-                    return Err(format!(
-                        "series registry entry {} has duplicate label key {k:?}",
-                        entry_idx
-                    ));
-                }
+            if pos + kl > data.len() {
+                return Err(format!(
+                    "series registry truncated: label key at entry {} label {} (pos {} of {})",
+                    entry_idx,
+                    label_idx,
+                    pos,
+                    data.len()
+                ));
             }
-
-            reg.insert_known(id, &metric_name, &labels, false)?;
-            if id > max_id {
-                max_id = id;
+            let k = String::from_utf8(data[pos..pos + kl].to_vec()).map_err(|e| {
+                format!(
+                    "invalid UTF-8 in label key at entry {} label {}: {}",
+                    entry_idx, label_idx, e
+                )
+            })?;
+            pos += kl;
+            if pos + 2 > data.len() {
+                return Err(format!(
+                    "series registry truncated: label value len at entry {} label {} (pos {} of {})",
+                    entry_idx, label_idx, pos, data.len()
+                ));
+            }
+            let vl = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+            pos += 2;
+            if pos + vl > data.len() {
+                return Err(format!(
+                    "series registry truncated: label value at entry {} label {} (pos {} of {})",
+                    entry_idx,
+                    label_idx,
+                    pos,
+                    data.len()
+                ));
+            }
+            let v = String::from_utf8(data[pos..pos + vl].to_vec()).map_err(|e| {
+                format!(
+                    "invalid UTF-8 in label value at entry {} label {}: {}",
+                    entry_idx, label_idx, e
+                )
+            })?;
+            pos += vl;
+            if labels.insert(k.clone(), v).is_some() {
+                return Err(format!(
+                    "series registry entry {} has duplicate label key {k:?}",
+                    entry_idx
+                ));
             }
         }
 
-        if pos != data.len() {
+        let labels: Vec<(String, String)> = labels.into_iter().collect();
+        if !ids.insert(id) {
+            return Err(format!("series registry repeats id {id}"));
+        }
+        if !identities.insert((metric_name.clone(), labels.clone())) {
             return Err(format!(
-                "series registry has {} trailing bytes",
-                data.len() - pos
+                "series registry entry {entry_idx} repeats the series {metric_name:?}"
             ));
         }
-        reg.next_id = AtomicI64::new(
-            max_id
-                .checked_add(1)
-                .ok_or_else(|| "series registry maximum id cannot be incremented".to_string())?,
-        );
-        Ok(reg)
+        rows.push(StoredSeries {
+            id,
+            name: metric_name,
+            labels,
+        });
     }
+
+    if pos != data.len() {
+        return Err(format!(
+            "series registry has {} trailing bytes",
+            data.len() - pos
+        ));
+    }
+    rows.sort_by_key(|row| row.id);
+    Ok(rows)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // Engine
 // ═══════════════════════════════════════════════════════════════════════
-
-/// Fast hash of (metric, labels) for the resolution cache.
-/// Uses std DefaultHasher which is SipHash — fast and collision-resistant.
-fn fast_series_hash(metric: &str, labels: &HashMap<String, String>) -> u64 {
-    let mut pairs: Vec<(&str, &str)> = labels
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    pairs.sort_unstable_by_key(|&(k, _)| k);
-    fast_series_hash_pairs(metric, &pairs)
-}
 
 /// Hash core shared by the HashMap path and the fused-ingest path.
 /// Pairs MUST be sorted by key and deduplicated — both callers guarantee
@@ -1038,7 +492,7 @@ fn fast_series_hash_pairs(metric: &str, sorted_pairs: &[(&str, &str)]) -> u64 {
 }
 
 /// A second identity hash, independent of [`fast_series_hash_pairs`] by
-/// its salt. Together they key the disk-mode resolve cache by 128 bits,
+/// its salt. Together they key the resolve cache by 128 bits,
 /// which needs no labels to verify a hit (#132): a false hit would merge
 /// two series, and at 2^-128 per pair that is not a risk worth labels.
 fn check_series_hash_pairs(metric: &str, sorted_pairs: &[(&str, &str)]) -> u64 {
@@ -1065,14 +519,14 @@ fn identity_key_of(metric: &str, labels: &Labels) -> u128 {
     identity_key(metric, &pairs)
 }
 
-/// The disk-mode resolve cache (#132): 128-bit identity → series id, and
+/// The resolve cache (#132): 128-bit identity → series id, and
 /// nothing else, so an entry costs ~48 bytes whatever its labels. Ingest
 /// touches every series once a cycle, which defeats recency: a cache
 /// smaller than the working set evicts each entry before its reuse. So
 /// entries are admitted until the budget is full and then kept, which
 /// hits exactly the budget's share of a cycle, the best a cyclic scan
 /// allows.
-pub(crate) struct DiskResolveCache {
+pub(crate) struct ResolveCache {
     map: DashMap<u128, i64>,
     capacity: usize,
     selections: SelectionCache,
@@ -1080,9 +534,9 @@ pub(crate) struct DiskResolveCache {
 
 /// What a selection found, by what was asked: the ids of the series of a
 /// metric that carry given labels. A dashboard asks the same few
-/// selections again and again, and with the catalog on disk each costs a
-/// statement per label and one to intersect their postings; a repeat is
-/// answered from here instead.
+/// selections again and again, and each costs a statement per label and
+/// one to intersect their postings; a repeat is answered from here
+/// instead.
 ///
 /// An answer is only as good as the catalog it was read from, so every
 /// change to the set of series empties the cache: a series this engine
@@ -1153,17 +607,19 @@ impl SelectionCache {
     }
 }
 
-impl DiskResolveCache {
+impl ResolveCache {
     /// Bytes a cached entry costs, key, value and map overhead.
     const ENTRY_BYTES: u64 = 48;
 
     fn new(budget_bytes: u64) -> Self {
-        // An eighth of the budget remembers selections for reads; the rest
-        // resolves identities for ingest.
-        let selections = budget_bytes / 8;
+        // An eighth of the budget remembers selections for reads, up to a
+        // size no dashboard's selections need more than; the rest resolves
+        // identities for ingest.
+        const SELECTIONS_AT_MOST: u64 = 64 << 20;
+        let selections = (budget_bytes / 8).min(SELECTIONS_AT_MOST);
         let capacity =
             usize::try_from((budget_bytes - selections) / Self::ENTRY_BYTES).unwrap_or(usize::MAX);
-        DiskResolveCache {
+        ResolveCache {
             map: DashMap::new(),
             capacity,
             selections: SelectionCache::new(usize::try_from(selections).unwrap_or(usize::MAX)),
@@ -1191,15 +647,14 @@ impl DiskResolveCache {
 }
 
 pub struct Engine {
-    /// Chunk persistence backend (filesystem today, SQLite shadow
-    /// tables later). All bytes-at-rest go through this seam.
+    /// Where everything durable lives: chunk rows, the series catalog and
+    /// the indexes over both. The engine keeps no copy of any of them.
     store: Box<dyn ChunkStore>,
     /// Pins one complete query-visible generation. Queries hold a shared
     /// guard from candidate lookup through payload and buffer reads;
     /// maintenance holds the exclusive guard while moving data between
     /// buffers, indexes, and the store.
     transition: RwLock<()>,
-    authoritative_series: bool,
     flush_threshold: usize,
     min_flush_size: usize,
     compression_level: usize,
@@ -1217,19 +672,16 @@ pub struct Engine {
     /// planned.
     released_writes: DashMap<i64, u32>,
     started_at: Instant,
-    /// Longest a buffered point waits for a flush once writes keep
-    /// arriving, in milliseconds; 0 leaves flushing to the point threshold
-    /// and the host. See `flush_due`.
+    /// How often the table takes a bounded maintenance step for itself at
+    /// commit, in milliseconds; 0 leaves maintenance to the host.
     flush_interval_ms: AtomicU64,
     /// A compaction the table started for itself has work left.
     self_compaction_more: AtomicBool,
     /// When the table last started a compaction for itself (as above).
     self_compacted_at_ms: AtomicU64,
-    index: RwLock<BTreeMap<ChunkKey, ChunkMeta>>,
-    /// Source of the ChunkKey sequence field. In-memory only — restart
-    /// recovery re-assigns fresh values while scanning.
+    /// Counts chunks written: how a drained compaction sweep learns there
+    /// is something new to plan.
     chunk_seq: AtomicU64,
-    series: RwLock<SeriesRegistry>,
     flush_queue: Mutex<Vec<PartitionKey>>,
     buffer_memory: AtomicUsize,
     cold_flush_running: AtomicBool,
@@ -1257,29 +709,20 @@ pub struct Engine {
     /// Rollup chunks merged away, and merged chunks written, cumulative.
     rollup_merge_chunks_removed: AtomicU64,
     rollup_merge_chunks_written: AtomicU64,
-    /// Fast resolution cache: hash(metric, labels) → series_id.
-    /// Persists across batches — steady-state scraping is pure cache hits.
-    resolve_cache: DashMap<u64, i64>,
-    /// `Some` when the series catalog lives on disk (#132): the registry
-    /// stays empty, catalog reads go to the store's label index, and
-    /// resolution goes through this bounded cache.
-    disk_series: Option<DiskResolveCache>,
+    /// Series identity → id for ingest, and remembered selections for
+    /// reads, within the table's `index_cache` budget (#132).
+    identities: ResolveCache,
     /// A series was created or removed since the last commit or rollback:
     /// remembered selections are emptied again when the transaction ends,
     /// for a reader that worked one out meanwhile from its own snapshot.
     series_touched: AtomicBool,
-    /// Whether the raw chunk index lives on disk (#132 phase 2): the
-    /// store's chunk rows answer every index question, the in-memory index
-    /// stays empty, and nothing of it is journaled, because the rows are
-    /// restored by the host's own rollback. Goes with `disk_series`.
-    disk_chunks: bool,
-    /// Whole-store raw-chunk totals for a disk index, read once and kept
-    /// until a write could have changed them.
-    disk_chunk_totals: Mutex<Option<ChunkTotals>>,
-    /// A disk index's rollup chunks: how many, and how many hold one
-    /// bucket. Read from the store once and then moved by what each rollup
-    /// pass, merge and delete did, as the raw totals are.
-    disk_rollup_totals: Mutex<Option<(usize, usize)>>,
+    /// Whole-store raw-chunk totals, read once and kept until a write
+    /// could have changed them.
+    chunk_totals: Mutex<Option<ChunkTotals>>,
+    /// Rollup chunks: how many, and how many hold one bucket. Read from
+    /// the store once and then moved by what each rollup pass, merge and
+    /// delete did, as the raw totals are.
+    rollup_chunk_totals: Mutex<Option<(usize, usize)>>,
     /// Per tier, the coverage end through which a rollup cycle has looked
     /// at every series' group and left nothing undone. While a tier's next
     /// coverage end is still that one (an hourly tier's is, for eleven
@@ -1333,27 +776,12 @@ pub struct Engine {
     /// The transaction journal itself (PLAN.md risk R5). See txn_begin
     /// for the full design story.
     txn: Mutex<TxnJournal>,
-    /// Store catalog generation observed by the last completed
-    /// refresh_authoritative_state reload (None = never refreshed, or the
-    /// store cannot report one). Lets refresh skip its full catalog +
-    /// chunk-index reload when nothing has been committed since — the
-    /// per-query cost drops from O(series + chunks) SQL to one cached
-    /// single-row SELECT. Own-process mutations do NOT update this, so
-    /// SQL hosts may publish the exact transaction generation through
-    /// txn_commit_published(), avoiding a redundant reload after local
-    /// flush/compact/prune/new-series work. Other hosts leave it stale and
-    /// retain the always-correct reload fallback.
+    /// The store's generation as this engine last saw it: read at open,
+    /// published by each of this process's own commits
+    /// (`txn_commit_published`), and observed by
+    /// `refresh_authoritative_state`. A store at another generation was
+    /// written by someone else, and what is remembered of it is dropped.
     catalog_gen: Mutex<Option<(i64, i64)>>,
-    /// P2: the append watermark `(chunk_shape_gen, max chunk rowid)`
-    /// the last reload/delta observed. While the shape half is
-    /// unchanged, a generation mismatch is pure appends and refresh
-    /// applies only the rows past the rowid half instead of reloading
-    /// O(total series + chunks).
-    append_wm: Mutex<Option<(i64, i64)>>,
-    /// F3 rollup index: one hash group per (series, resolution), each holding
-    /// compact, sorted row metadata. Separate from the raw index ON PURPOSE —
-    /// every pre-F3 read path stays byte-identical. max_ts is coverage END.
-    rollup_index: RwLock<RollupIndex>,
     /// The declared ladder (ascending resolutions). Empty = no rollups.
     rollup_tiers: Mutex<Vec<RollupTier>>,
     /// Next `(tier, series)` ordinal for bounded rollup maintenance. The
@@ -1390,79 +818,43 @@ pub struct Engine {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Transaction journal (PLAN.md risk R5)
+// Transaction journal
 //
-// THE PROBLEM: chunk ROWS ride the host transaction — ROLLBACK removes
-// them — but the engine's in-memory index knows nothing about SQL
-// transactions. Without a journal, ROLLBACK leaves index entries
-// pointing at chunk rows that no longer exist (dangling locs → read
-// errors on the next query).
+// Everything durable is rows in the store, and rows ride the host
+// transaction: ROLLBACK removes what a transaction wrote and restores
+// what it deleted, index entries included, because the rows are the
+// index. So the journal has very little to remember — only what the
+// engine holds in memory that a rollback would leave wrong:
+//
+//   - whether a series was created or removed, since the resolve cache
+//     may then hold an id that no longer exists (or miss one that does);
+//   - the rollup ladder as it was, when a command changed it.
 //
 // Write buffers need no journal: they hold only what the open
 // transaction wrote and has not stored yet. The host stores them at a
 // savepoint and at commit, so a rollback (outer or to a savepoint) just
-// drops them and SQLite undoes any rows already written.
+// drops them. Totals, plans and settled tiers are derived from rows and
+// are simply forgotten on rollback, to be worked out again.
 //
-// THE FIX: while a journal is active, every mutation of the index
-// records enough to undo itself. SQLite calls xBegin before the FIRST
-// write of ANY transaction — including the implicit per-statement
-// transaction wrapping a bare INSERT in autocommit mode — so txn_begin
-// must be CHEAP: O(1), into reused (capacity-retaining) collections.
-//
-// WHAT IS JOURNALED:
-//   - added: index keys inserted during the txn (flush/compact). Their
-//     rows vanish at rollback, so the entries must be removed or they
-//     would dangle.
-//   - removed: pre-txn index entries removed during the txn (compact /
-//     prune), WITH their metas. SQLite's rollback restores the deleted
-//     rows under their original rowids (page-level undo), so restoring
-//     the entries verbatim — same ChunkLoc::Row ids — is exactly right.
-//
-// The added/removed pair follows one dedup rule to stay consistent when
-// one txn both adds and removes the same entry (flush then compact):
-// removing an entry that is in `added` cancels the add instead of
-// journaling a removal — that chunk never existed as far as rollback is
-// concerned. Restores therefore never resurrect intra-txn chunks.
-//
-// SERIES CATALOG:
-//   - Authoritative stores record IDs inserted by each frame. Rollback
-//     removes those identities from memory and clears the resolve cache,
-//     matching the host rollback of their `_series` rows.
-//
-// PRECONDITIONS:
-//   - The store must be transactional (shadow tables riding the host
-//     txn, or the in-memory test store's own begin/rollback).
-//   - SQLite never nests xBegin. Savepoints create additional undo
-//     frames inside the one outer transaction journal.
+// SQLite calls xBegin before the FIRST write of ANY transaction —
+// including the implicit per-statement transaction wrapping a bare
+// INSERT in autocommit mode — so txn_begin is O(1). SQLite never nests
+// xBegin; savepoints add frames inside the one outer journal.
 //
 // LOCK ORDER (deadlock rule): transition → txn journal →
-// partitions/flush_queue → store callbacks → index → series. Queries
-// take only a shared transition guard; their candidate index guard is
-// released before store reads, and store reads finish before buffer access.
-// Store callbacks re-enter only the caller's SQLite connection and
-// never call back into this engine, so holding the transition guard
-// across them cannot form an engine/connection lock cycle.
+// partitions/flush_queue → store callbacks. Store callbacks re-enter
+// only the caller's SQLite connection and never call back into this
+// engine, so holding the transition guard across them cannot form an
+// engine/connection lock cycle.
 // ═══════════════════════════════════════════════════════════════════════
 
 #[derive(Default)]
 struct TxnFrame {
     savepoint: Option<i32>,
-    /// Index keys inserted during the txn (their chunk rows roll back).
-    added: HashSet<ChunkKey>,
-    /// Pre-txn index entries removed during the txn (their chunk rows
-    /// are restored by the host rollback). Keys carry their original
-    /// chunk_seq, so rollback reinstates entries verbatim.
-    removed: Vec<(ChunkKey, ChunkMeta)>,
-    /// Authoritative series rows first inserted inside this frame.
-    series_added: HashSet<i64>,
-    /// Series removed inside this frame because retention left nothing
-    /// of them: identity enough to put them back on rollback (the store's
-    /// rows come back with the host's rollback).
-    series_removed: Vec<(i64, String, Labels)>,
-    /// F3: rollup index entries added / removed inside this frame (same
-    /// cancel rule as added/removed on the raw index).
-    rollup_added: HashSet<RollupKey>,
-    rollup_removed: Vec<(RollupKey, RollupIndexEntry)>,
+    /// A series was created or removed inside this frame. The rows come
+    /// and go with the host's transaction; the resolve cache may hold an
+    /// id that a rollback takes away.
+    series_changed: bool,
     /// Ladder value before the first configuration change in this frame.
     /// The matching `_meta` update rides the same SQLite transaction.
     rollup_tiers_before: Option<Vec<RollupTier>>,
@@ -1516,36 +908,14 @@ impl Engine {
         self.transition.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn index_read(&self) -> RwLockReadGuard<'_, BTreeMap<ChunkKey, ChunkMeta>> {
-        self.index.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn index_write(&self) -> RwLockWriteGuard<'_, BTreeMap<ChunkKey, ChunkMeta>> {
-        self.index.write().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn rollup_read(&self) -> RwLockReadGuard<'_, RollupIndex> {
-        self.rollup_index.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn rollup_write(&self) -> RwLockWriteGuard<'_, RollupIndex> {
-        self.rollup_index.write().unwrap_or_else(|e| e.into_inner())
-    }
-
     fn next_chunk_seq(&self) -> u64 {
         self.chunk_seq.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn series_read(&self) -> RwLockReadGuard<'_, SeriesRegistry> {
-        self.series.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    // ── Chunk index reads (#132 phase 2) ─────────────────────────────
+    // ── Chunk index reads ────────────────────────────────────────────
     //
-    // Readers ask these for chunk metadata, never the index map directly,
-    // so the index can be held in memory or read from the store's chunk
-    // rows behind them. Results are owned and in the index's order for a
-    // series: ascending (min_ts, insertion).
+    // The store's chunk rows are the index. Results are owned and in a
+    // series' order: ascending (min_ts, insertion).
 
     /// Metadata of `series_id`'s raw chunks overlapping `[t_start, t_end]`.
     fn chunk_metas(
@@ -1554,22 +924,12 @@ impl Engine {
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<ChunkMeta>> {
-        if self.disk_chunks {
-            return Ok(self
-                .store
-                .chunk_metas_for(&[series_id], t_start, t_end)
-                .map_err(|err| format!("failed to read chunk index: {err}"))?
-                .into_iter()
-                .map(|chunk| chunk.meta)
-                .collect());
-        }
-        let pk = PartitionKey { series_id };
-        let index = self.index_read();
-        Ok(index
-            .range((pk, i64::MIN, u64::MIN)..)
-            .take_while(|((key, _, _), _)| key == &pk)
-            .filter(|(_, meta)| meta.min_ts <= t_end && meta.max_ts >= t_start)
-            .map(|(_, meta)| meta.clone())
+        Ok(self
+            .store
+            .chunk_metas_for(&[series_id], t_start, t_end)
+            .map_err(|err| format!("failed to read chunk index: {err}"))?
+            .into_iter()
+            .map(|chunk| chunk.meta)
             .collect())
     }
 
@@ -1603,12 +963,12 @@ impl Engine {
     }
 
     /// [`Self::chunk_metas_batch`] for a read that goes on to decode every
-    /// chunk it finds. A disk chunk index has the payload in the row it
-    /// reads the metadata from, and hands both over from the one read:
-    /// the payloads come back by row for [`Self::read_chunks_carried`].
-    /// Empty when there is nothing to carry: an index in memory, a
-    /// selection too wide for the store to probe, or chunks holding more
-    /// than `max_points` points, which the caller is about to refuse.
+    /// chunk it finds. The payload is in the row the metadata is read
+    /// from, and both come from the one read: the payloads come back by
+    /// row for [`Self::read_chunks_carried`]. Empty when there is nothing
+    /// to carry: a selection too wide for the store to probe, or chunks
+    /// holding more than `max_points` points, which the caller is about to
+    /// refuse.
     fn chunk_metas_batch_carrying(
         &self,
         series_ids: &[i64],
@@ -1616,27 +976,25 @@ impl Engine {
         t_end: i64,
         max_points: Option<u64>,
     ) -> EngineResult<(Vec<Vec<ChunkMeta>>, CarriedPayloads)> {
-        if self.disk_chunks {
-            let mut distinct: Vec<i64> = series_ids.to_vec();
-            distinct.sort_unstable();
-            distinct.dedup();
-            if let Some(rows) = self
-                .store
-                .chunk_rows_for(&distinct, t_start, t_end, max_points)
-                .map_err(|err| format!("failed to read chunk index: {err}"))?
-            {
-                let mut carried = CarriedPayloads::with_capacity(rows.len());
-                let chunks = rows
-                    .into_iter()
-                    .map(|(chunk, payload)| {
-                        if let ChunkLoc::Row { rowid } = chunk.meta.loc {
-                            carried.insert(rowid, payload);
-                        }
-                        chunk
-                    })
-                    .collect();
-                return Ok((Self::chunks_by_position(series_ids, chunks), carried));
-            }
+        let mut distinct: Vec<i64> = series_ids.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if let Some(rows) = self
+            .store
+            .chunk_rows_for(&distinct, t_start, t_end, max_points)
+            .map_err(|err| format!("failed to read chunk index: {err}"))?
+        {
+            let mut carried = CarriedPayloads::with_capacity(rows.len());
+            let chunks = rows
+                .into_iter()
+                .map(|(chunk, payload)| {
+                    if let ChunkLoc::Row { rowid } = chunk.meta.loc {
+                        carried.insert(rowid, payload);
+                    }
+                    chunk
+                })
+                .collect();
+            return Ok((Self::chunks_by_position(series_ids, chunks), carried));
         }
         Ok((
             self.chunk_metas_batch(series_ids, t_start, t_end)?,
@@ -1668,169 +1026,65 @@ impl Engine {
 
     /// [`Self::chunk_metas`] for each of `series_ids`, positionally
     /// (duplicate ids included).
-    ///
-    /// In memory, dense selections are swept sequentially, seeking past
-    /// long gaps so a sparse selection does not walk unrelated series'
-    /// chunk histories. A small, fixed allowance keeps short gaps cheaper
-    /// than another B-tree seek without making work proportional to the
-    /// whole span.
     fn chunk_metas_batch(
         &self,
         series_ids: &[i64],
         t_start: i64,
         t_end: i64,
     ) -> EngineResult<Vec<Vec<ChunkMeta>>> {
-        if self.disk_chunks {
-            let mut distinct: Vec<i64> = series_ids.to_vec();
-            distinct.sort_unstable();
-            distinct.dedup();
-            let chunks = self
-                .store
-                .chunk_metas_for(&distinct, t_start, t_end)
-                .map_err(|err| format!("failed to read chunk index: {err}"))?;
-            return Ok(Self::chunks_by_position(series_ids, chunks));
-        }
-        const MAX_GAP_SCAN: usize = 8;
-        let mut order: Vec<usize> = (0..series_ids.len()).collect();
-        order.sort_unstable_by_key(|&i| series_ids[i]);
-        let mut matching: Vec<Vec<ChunkMeta>> = Vec::with_capacity(series_ids.len());
-        matching.resize_with(series_ids.len(), Vec::new);
-        let index = self.index_read();
-        if let Some(&first) = order.first() {
-            let first_pk = PartitionKey {
-                series_id: series_ids[first],
-            };
-            let mut range = index.range((first_pk, i64::MIN, u64::MIN)..);
-            let mut o = 0;
-            let mut gap_scanned = 0;
-            while let Some(((key, _, _), meta)) = range.next() {
-                while o < order.len() && series_ids[order[o]] < key.series_id {
-                    o += 1;
-                }
-                if o >= order.len() {
-                    break;
-                }
-                if key.series_id < series_ids[order[o]] {
-                    gap_scanned += 1;
-                    if gap_scanned == MAX_GAP_SCAN {
-                        let next_pk = PartitionKey {
-                            series_id: series_ids[order[o]],
-                        };
-                        range = index.range((next_pk, i64::MIN, u64::MIN)..);
-                        gap_scanned = 0;
-                    }
-                    continue;
-                }
-                gap_scanned = 0;
-                let mut p = o;
-                while p < order.len() && series_ids[order[p]] == key.series_id {
-                    if meta.min_ts <= t_end && meta.max_ts >= t_start {
-                        matching[order[p]].push(meta.clone());
-                    }
-                    p += 1;
-                }
-            }
-        }
-        Ok(matching)
+        let mut distinct: Vec<i64> = series_ids.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let chunks = self
+            .store
+            .chunk_metas_for(&distinct, t_start, t_end)
+            .map_err(|err| format!("failed to read chunk index: {err}"))?;
+        Ok(Self::chunks_by_position(series_ids, chunks))
     }
 
     /// Per-series totals over raw chunks: `(min_ts, max_ts, points, chunks)`
     /// for each of `series_ids` that has any.
     fn chunk_stats(&self, series_ids: &[i64]) -> HashMap<i64, ChunkStats> {
-        if self.disk_chunks {
-            return self.disk_chunk_stats(Some(series_ids));
-        }
-        let index = self.index_read();
-        let mut stats: HashMap<i64, ChunkStats> = HashMap::new();
-        for &series_id in series_ids {
-            let pk = PartitionKey { series_id };
-            for (_, meta) in index
-                .range((pk, i64::MIN, u64::MIN)..)
-                .take_while(|((key, _, _), _)| key == &pk)
-            {
-                Self::fold_chunk_stats(stats.entry(series_id), meta);
-            }
-        }
-        stats
+        self.stored_chunk_stats(Some(series_ids))
     }
 
     /// [`Self::chunk_stats`] for every series that has a raw chunk.
     fn chunk_stats_all(&self) -> HashMap<i64, ChunkStats> {
-        if self.disk_chunks {
-            return self.disk_chunk_stats(None);
-        }
-        let index = self.index_read();
-        let mut stats: HashMap<i64, ChunkStats> = HashMap::new();
-        for ((pk, _, _), meta) in index.iter() {
-            Self::fold_chunk_stats(stats.entry(pk.series_id), meta);
-        }
-        stats
-    }
-
-    fn fold_chunk_stats(
-        entry: std::collections::hash_map::Entry<'_, i64, ChunkStats>,
-        meta: &ChunkMeta,
-    ) {
-        let stats = entry.or_insert((meta.min_ts, meta.max_ts, 0, 0));
-        stats.0 = stats.0.min(meta.min_ts);
-        stats.1 = stats.1.max(meta.max_ts);
-        stats.2 += meta.point_count as u64;
-        stats.3 += 1;
+        self.stored_chunk_stats(None)
     }
 
     /// Raw chunks in the store: how many, their points, and the oldest and
     /// newest timestamps they hold.
     fn chunk_totals(&self) -> ChunkTotals {
-        if self.disk_chunks {
-            let mut cached = self
-                .disk_chunk_totals
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some(totals) = *cached {
-                return totals;
+        let mut cached = self
+            .chunk_totals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(totals) = *cached {
+            return totals;
+        }
+        // An unreadable store reports nothing rather than failing a
+        // statistics read; it is not cached, so the next read retries.
+        match self.store.chunk_totals() {
+            Ok(totals) => {
+                *cached = Some(totals);
+                totals
             }
-            // An unreadable store reports nothing rather than failing a
-            // statistics read; it is not cached, so the next read retries.
-            return match self.store.chunk_totals() {
-                Ok(totals) => {
-                    *cached = Some(totals);
-                    totals
-                }
-                Err(_) => (0, 0, None, None),
-            };
+            Err(_) => (0, 0, None, None),
         }
-        let index = self.index_read();
-        let mut points = 0u64;
-        let mut oldest: Option<i64> = None;
-        let mut newest: Option<i64> = None;
-        for meta in index.values() {
-            points += meta.point_count as u64;
-            oldest = Some(oldest.map_or(meta.min_ts, |ts| ts.min(meta.min_ts)));
-            newest = Some(newest.map_or(meta.max_ts, |ts| ts.max(meta.max_ts)));
-        }
-        (index.len(), points, oldest, newest)
     }
 
     /// The newest timestamp any raw chunk holds.
     fn chunk_high_water(&self) -> Option<i64> {
-        if self.disk_chunks {
-            return self.chunk_totals().3;
-        }
-        self.index_read().values().map(|meta| meta.max_ts).max()
+        self.chunk_totals().3
     }
 
     /// Ids of the series that have a raw chunk, ascending.
     fn chunk_series_ids(&self) -> Vec<i64> {
-        if self.disk_chunks {
-            return self.store.chunk_series_ids().unwrap_or_default();
-        }
-        let index = self.index_read();
-        let mut ids: Vec<i64> = index.keys().map(|(pk, _, _)| pk.series_id).collect();
-        ids.dedup();
-        ids
+        self.store.chunk_series_ids().unwrap_or_default()
     }
 
-    fn disk_chunk_stats(&self, series_ids: Option<&[i64]>) -> HashMap<i64, ChunkStats> {
+    fn stored_chunk_stats(&self, series_ids: Option<&[i64]>) -> HashMap<i64, ChunkStats> {
         self.store
             .chunk_stats_for(series_ids)
             .unwrap_or_default()
@@ -1839,28 +1093,25 @@ impl Engine {
             .collect()
     }
 
-    /// Raw chunks were added to and removed from a disk index, and what
-    /// they held is known: move the totals instead of reading them again.
-    /// The totals are an aggregate over every raw chunk row, and they are
-    /// asked for by rollup settling and every statistics read, so reading
-    /// them again after each flush costs a scan of the table per write.
+    /// Raw chunks were added and removed, and what they held is known: move
+    /// the totals instead of reading them again. The totals are an
+    /// aggregate over every raw chunk row, and they are asked for by
+    /// rollup settling and every statistics read, so reading them again
+    /// after each flush costs a scan of the table per write.
     ///
     /// `added` is each new chunk's `(min_ts, max_ts, points)`. Removed
     /// chunks only move the count and the points: the callers that pass
     /// them (compaction) put the same points back in the same statement,
     /// so the oldest and newest timestamps stand. A removal that can move
-    /// those goes through [`Self::disk_chunks_changed`].
-    fn disk_chunks_moved(
+    /// those goes through [`Self::chunks_changed`].
+    fn chunks_moved(
         &self,
         added: impl Iterator<Item = (i64, i64, u64)>,
         removed_chunks: usize,
         removed_points: u64,
     ) {
-        if !self.disk_chunks {
-            return;
-        }
         let mut cached = self
-            .disk_chunk_totals
+            .chunk_totals
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         // Not read yet: there is nothing to move, and the first reader
@@ -1888,27 +1139,23 @@ impl Engine {
         }
     }
 
-    /// A write may have changed a disk index's totals in a way that is not
-    /// known here (a rollback, a retention delete, another process's
-    /// append): read them again when next asked.
-    fn disk_chunks_changed(&self) {
-        if self.disk_chunks {
-            *self
-                .disk_chunk_totals
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = None;
-            *self
-                .disk_rollup_totals
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = None;
-        }
+    /// A write may have changed the totals in a way that is not known here
+    /// (a rollback, a retention delete, another process's append): read
+    /// them again when next asked.
+    fn chunks_changed(&self) {
+        *self
+            .chunk_totals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .rollup_chunk_totals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
     }
 
     // ── Rollup index reads (#144) ────────────────────────────────────
     //
-    // As with raw chunks, every reader asks these and never the in-memory
-    // index directly, so the rollup index can live in memory or on disk
-    // behind them.
+    // As with raw chunks, the store's rollup rows are the index.
 
     /// Something may have given a settled rollup tier work again.
     fn rollup_unsettle(&self) {
@@ -1938,12 +1185,8 @@ impl Engine {
 
     /// How many rollup chunks there are, and how many hold one bucket.
     fn rollup_totals(&self) -> (usize, usize) {
-        if !self.disk_chunks {
-            let rollups = self.rollup_read();
-            return (rollups.len(), rollups.single_bucket());
-        }
         let mut cached = self
-            .disk_rollup_totals
+            .rollup_chunk_totals
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(totals) = *cached {
@@ -1960,14 +1203,11 @@ impl Engine {
         }
     }
 
-    /// Rollup chunks were written to and removed from a disk index: move
-    /// the totals. Each pair is (chunks, of which hold one bucket).
-    fn disk_rollups_moved(&self, added: (usize, usize), removed: (usize, usize)) {
-        if !self.disk_chunks {
-            return;
-        }
+    /// Rollup chunks were written and removed: move the totals. Each pair
+    /// is (chunks, of which hold one bucket).
+    fn rollups_moved(&self, added: (usize, usize), removed: (usize, usize)) {
         let mut cached = self
-            .disk_rollup_totals
+            .rollup_chunk_totals
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let Some((count, single)) = *cached else {
@@ -1993,25 +1233,6 @@ impl Engine {
         start: i64,
         stop: i64,
     ) -> EngineResult<Vec<Vec<ChunkMeta>>> {
-        if !self.disk_chunks {
-            let rollups = self.rollup_read();
-            return Ok(series_ids
-                .iter()
-                .map(|&series_id| {
-                    let group = RollupGroupKey {
-                        series_id,
-                        resolution,
-                    };
-                    rollups
-                        .entries(&group)
-                        .iter()
-                        .take_while(|entry| entry.min_ts <= stop)
-                        .filter(|entry| entry.max_ts >= start)
-                        .map(|entry| entry.chunk_meta())
-                        .collect()
-                })
-                .collect());
-        }
         // The store wants distinct ids; a caller may repeat one.
         let mut distinct = series_ids.to_vec();
         distinct.sort_unstable();
@@ -2040,20 +1261,6 @@ impl Engine {
         resolution: i64,
         series_ids: &[i64],
     ) -> EngineResult<HashMap<i64, i64>> {
-        if !self.disk_chunks {
-            let rollups = self.rollup_read();
-            return Ok(series_ids
-                .iter()
-                .filter_map(|&series_id| {
-                    rollups
-                        .watermark(&RollupGroupKey {
-                            series_id,
-                            resolution,
-                        })
-                        .map(|watermark| (series_id, watermark))
-                })
-                .collect());
-        }
         Ok(self
             .store
             .rollup_watermarks(resolution, series_ids)
@@ -2064,80 +1271,61 @@ impl Engine {
 
     // ── Series catalog reads (#132) ──────────────────────────────────
     //
-    // Every reader outside the resolve path asks these, never the registry
-    // directly, so the catalog can live in memory or on disk behind them.
-    // They return owned values: a disk-resident catalog has nothing to
-    // borrow from.
+    // The catalog is the store's series rows and its label index. These
+    // return owned values: there is nothing in memory to borrow from.
 
     /// One series' name and labels.
     pub fn series_info(&self, id: i64) -> EngineResult<Option<SeriesInfo>> {
-        if self.disk_series.is_some() {
-            return Ok(self.series_infos(&[id])?.pop().map(|(_, info)| info));
-        }
-        Ok(self.series_read().info_for(id).cloned())
+        Ok(self.series_infos(&[id])?.pop().map(|(_, info)| info))
     }
 
     /// Names and labels of `ids`, in `ids` order; absent ids are skipped.
     pub fn series_infos(&self, ids: &[i64]) -> EngineResult<Vec<(i64, SeriesInfo)>> {
-        if self.disk_series.is_some() {
-            let mut found: HashMap<i64, SeriesInfo> = self
-                .store
-                .series_by_ids(ids)
-                .map_err(|err| format!("failed to read series catalog: {err}"))?
-                .into_iter()
-                .map(|row| {
-                    (
-                        row.id,
-                        SeriesInfo {
-                            metric_name: row.name,
-                            labels: row.labels.into_iter().collect(),
-                        },
-                    )
-                })
-                .collect();
-            return Ok(ids
-                .iter()
-                .filter_map(|id| found.remove(id).map(|info| (*id, info)))
-                .collect());
-        }
-        let reg = self.series_read();
+        let mut found: HashMap<i64, SeriesInfo> = self
+            .store
+            .series_by_ids(ids)
+            .map_err(|err| format!("failed to read series catalog: {err}"))?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.id,
+                    SeriesInfo {
+                        metric_name: row.name,
+                        labels: row.labels.into_iter().collect(),
+                    },
+                )
+            })
+            .collect();
         Ok(ids
             .iter()
-            .filter_map(|&id| reg.info_for(id).map(|info| (id, info.clone())))
+            .filter_map(|id| found.remove(id).map(|info| (*id, info)))
             .collect())
     }
 
     /// The first of `ids` that names no live series, if any.
     pub fn first_missing_series(&self, ids: &[i64]) -> EngineResult<Option<i64>> {
-        if self.disk_series.is_some() {
-            let live: HashSet<i64> = self
-                .series_infos(ids)?
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
-            return Ok(ids.iter().copied().find(|id| !live.contains(id)));
-        }
-        let reg = self.series_read();
-        Ok(ids.iter().copied().find(|&id| reg.info_for(id).is_none()))
+        let live: HashSet<i64> = self
+            .series_infos(ids)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        Ok(ids.iter().copied().find(|id| !live.contains(id)))
     }
 
     /// Whether `id` names a live series.
     pub fn series_exists(&self, id: i64) -> EngineResult<bool> {
-        if self.disk_series.is_some() {
-            return Ok(self.series_info(id)?.is_some());
-        }
-        Ok(self.series_read().info_for(id).is_some())
+        Ok(self.series_info(id)?.is_some())
     }
 
     /// The label index's answer to a selection, remembered between
     /// changes to the catalog (see [`SelectionCache`]).
-    fn find_series_on_disk(
+    fn find_series(
         &self,
         metric: &str,
         eq: &[(String, String)],
         any_of: &[(String, Vec<String>)],
     ) -> EngineResult<std::sync::Arc<[i64]>> {
-        let cache = &self.disk_series.as_ref().expect("disk mode").selections;
+        let cache = &self.identities.selections;
         let mut key = Vec::with_capacity(64);
         let mut text = |part: &str| {
             key.extend_from_slice(&(part.len() as u32).to_le_bytes());
@@ -2184,63 +1372,37 @@ impl Engine {
 
     /// The set of series changed: what was remembered of it is forgotten.
     fn series_changed(&self) {
-        if let Some(cache) = self.disk_series.as_ref() {
-            self.series_touched.store(true, Ordering::SeqCst);
-            cache.selections.invalidate();
-        }
+        self.series_touched.store(true, Ordering::SeqCst);
+        self.identities.selections.invalidate();
     }
 
     /// A transaction ended: forget again, if it changed the set of series.
     fn series_settled(&self) {
         if self.series_touched.swap(false, Ordering::SeqCst) {
-            if let Some(cache) = self.disk_series.as_ref() {
-                cache.selections.invalidate();
-            }
+            self.identities.selections.invalidate();
         }
     }
 
     /// Series of `metric` carrying every label in `eq`, ascending by id,
     /// with their labels.
     pub fn select_series(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<(i64, Labels)>> {
-        if self.disk_series.is_some() {
-            let pairs: Vec<(String, String)> =
-                eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            let ids = self.find_series_on_disk(metric, &pairs, &[])?;
-            // Recheck what the rows say: a stale posting can only make a
-            // selection miss a series, never return a wrong one.
-            return Ok(self
-                .series_infos(&ids)?
-                .into_iter()
-                .filter(|(_, info)| {
-                    info.metric_name == metric
-                        && eq.iter().all(|(k, v)| info.labels.get(k) == Some(v))
-                })
-                .map(|(id, info)| (id, info.labels))
-                .collect());
-        }
-        let reg = self.series_read();
-        Ok(reg
-            .find_series(metric, eq)
-            .into_iter()
-            .filter_map(|id| reg.info_for(id).map(|info| (id, info.labels.clone())))
-            .collect())
+        self.select_series_hinted(metric, eq, &[])
     }
 
     /// As [`Self::select_series`], with a hint: for each entry of `any_of`
-    /// the series must carry that key with one of its values. A disk
-    /// catalog narrows its candidates by it; a memory catalog ignores it,
-    /// so the caller still applies the matcher it came from to every row.
+    /// the series must carry that key with one of its values. The label
+    /// index narrows its candidates by it; the caller still applies the
+    /// matcher it came from to every row.
     pub fn select_series_hinted(
         &self,
         metric: &str,
         eq: &Labels,
         any_of: &[(String, Vec<String>)],
     ) -> EngineResult<Vec<(i64, Labels)>> {
-        if self.disk_series.is_none() || any_of.is_empty() {
-            return self.select_series(metric, eq);
-        }
         let pairs: Vec<(String, String)> = eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let ids = self.find_series_on_disk(metric, &pairs, any_of)?;
+        let ids = self.find_series(metric, &pairs, any_of)?;
+        // Recheck what the rows say: a stale posting can only make a
+        // selection miss a series, never return a wrong one.
         Ok(self
             .series_infos(&ids)?
             .into_iter()
@@ -2253,15 +1415,10 @@ impl Engine {
 
     /// Ids of the series of `metric` carrying every label in `eq`.
     pub fn select_series_ids(&self, metric: &str, eq: &Labels) -> EngineResult<Vec<i64>> {
-        if self.disk_series.is_some() {
-            // Ids only, so no rows to recheck: the postings are trusted,
-            // and kept current by every catalog write this engine makes
-            // and by `refresh_authoritative_state` for anyone else's.
-            let pairs: Vec<(String, String)> =
-                eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            return Ok(self.find_series_on_disk(metric, &pairs, &[])?.to_vec());
-        }
-        Ok(self.series_read().find_series(metric, eq))
+        // Ids only, so no rows to recheck: the postings are trusted, and
+        // kept current by every catalog write.
+        let pairs: Vec<(String, String)> = eq.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        Ok(self.find_series(metric, &pairs, &[])?.to_vec())
     }
 
     /// Visit every series, or every series of `metric`, until `visit`
@@ -2272,34 +1429,25 @@ impl Engine {
         metric: Option<&str>,
         visit: &mut dyn FnMut(i64, &SeriesInfo) -> EngineResult<std::ops::ControlFlow<()>>,
     ) -> EngineResult<()> {
-        if self.disk_series.is_some() {
-            const PAGE: usize = 4_000;
-            let ids = match metric {
-                Some(metric) => self
-                    .store
-                    .find_series_ids(Some(metric), &[])
-                    .map_err(|err| format!("failed to select series: {err}"))?,
-                None => self
-                    .store
-                    .series_ids()
-                    .map_err(|err| format!("failed to list series: {err}"))?,
-            };
-            for page in ids.chunks(PAGE) {
-                for (id, info) in self.series_infos(page)? {
-                    if metric.is_some_and(|metric| metric != info.metric_name) {
-                        continue;
-                    }
-                    if visit(id, &info)?.is_break() {
-                        return Ok(());
-                    }
+        const PAGE: usize = 4_000;
+        let ids = match metric {
+            Some(metric) => self
+                .store
+                .find_series_ids(Some(metric), &[])
+                .map_err(|err| format!("failed to select series: {err}"))?,
+            None => self
+                .store
+                .series_ids()
+                .map_err(|err| format!("failed to list series: {err}"))?,
+        };
+        for page in ids.chunks(PAGE) {
+            for (id, info) in self.series_infos(page)? {
+                if metric.is_some_and(|metric| metric != info.metric_name) {
+                    continue;
                 }
-            }
-            return Ok(());
-        }
-        let reg = self.series_read();
-        for (id, info) in reg.iter_series(metric) {
-            if visit(id, info)?.is_break() {
-                break;
+                if visit(id, &info)?.is_break() {
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -2307,60 +1455,28 @@ impl Engine {
 
     /// How many series the catalog holds.
     pub fn series_count(&self) -> usize {
-        if self.disk_series.is_some() {
-            return self.store.series_total().unwrap_or(0);
-        }
-        self.series_read().series_count()
+        self.store.series_total().unwrap_or(0)
     }
 
     /// Distinct metric names, sorted.
     pub fn metric_names(&self) -> EngineResult<Vec<String>> {
-        if self.disk_series.is_some() {
-            return self
-                .store
-                .metric_names()
-                .map_err(|err| format!("failed to list metric names: {err}"));
-        }
-        Ok(self.series_read().list_metrics())
+        self.store
+            .metric_names()
+            .map_err(|err| format!("failed to list metric names: {err}"))
     }
 
     /// Values `key` takes, across every series or within `metric`, sorted.
     pub fn label_values(&self, metric: Option<&str>, key: &str) -> EngineResult<Vec<String>> {
-        if self.disk_series.is_some() {
-            return self
-                .store
-                .label_values(metric, key)
-                .map_err(|err| format!("failed to list label values: {err}"));
-        }
-        let reg = self.series_read();
-        Ok(match metric {
-            Some(metric) => reg.label_values(metric, key),
-            None => reg.all_label_values(key),
-        })
+        self.store
+            .label_values(metric, key)
+            .map_err(|err| format!("failed to list label values: {err}"))
     }
 
     /// Label names, across every series or within `metric`, sorted.
     pub fn label_names(&self, metric: Option<&str>) -> EngineResult<Vec<String>> {
-        if self.disk_series.is_some() {
-            return self
-                .store
-                .label_names(metric)
-                .map_err(|err| format!("failed to list label names: {err}"));
-        }
-        let reg = self.series_read();
-        Ok(match metric {
-            Some(metric) => reg.label_names_for(metric),
-            None => reg.all_label_names(),
-        })
-    }
-
-    /// Whether the series catalog lives on disk (#132).
-    pub fn series_on_disk(&self) -> bool {
-        self.disk_series.is_some()
-    }
-
-    fn series_write(&self) -> RwLockWriteGuard<'_, SeriesRegistry> {
-        self.series.write().unwrap_or_else(|e| e.into_inner())
+        self.store
+            .label_names(metric)
+            .map_err(|err| format!("failed to list label names: {err}"))
     }
 
     fn flush_queue_lock(&self) -> MutexGuard<'_, Vec<PartitionKey>> {
@@ -2385,10 +1501,6 @@ impl Engine {
 
     fn catalog_gen_lock(&self) -> MutexGuard<'_, Option<(i64, i64)>> {
         self.catalog_gen.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn append_wm_lock(&self) -> MutexGuard<'_, Option<(i64, i64)>> {
-        self.append_wm.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Acquire the journal iff a transaction is active. Every mutation
@@ -2427,25 +1539,22 @@ impl Engine {
         self.txn_active.store(true, Ordering::SeqCst);
     }
 
-    /// Commit: the host transaction made every journaled mutation
-    /// permanent — drop the journal. Contents are cleared lazily by the
-    /// next txn_begin; only the flag needs to flip here.
+    /// Commit: the host transaction made everything permanent — drop the
+    /// journal.
     pub fn txn_commit(&self) {
         self.txn_commit_published(None);
     }
 
-    /// Commit and, when supplied by an authoritative transactional host,
-    /// publish the exact store generation captured during that transaction's
-    /// xSync phase. Engine memory already contains every committed mutation,
-    /// so this token lets the next reader prove that a full catalog/index
-    /// reload would be redundant.
+    /// Commit and publish the store generation the host captured during
+    /// the transaction's xSync phase, so that this process's own commit is
+    /// not later taken for someone else's write.
     ///
     /// `generation` must have been read from the same transaction after its
     /// final mutation and while it still excluded other writers. Passing
-    /// `None` preserves the conservative stale-token behavior. The token is
-    /// installed before txn_active becomes false, so a racing refresher sees
-    /// either the active journal or the published generation, never an
-    /// inactive transaction paired with the old token.
+    /// `None` leaves the old token, and the next refresh drops what is
+    /// remembered once more than it needed to. The token is installed
+    /// before txn_active becomes false, so a racing refresher sees either
+    /// the active journal or the published generation.
     pub fn txn_commit_published(&self, generation: Option<(i64, i64)>) {
         let mut j = self.txn_lock(); // serialize against in-flight recorders
         while let Some(frame) = j.frames.pop() {
@@ -2458,19 +1567,9 @@ impl Engine {
         self.series_settled();
     }
 
-    /// Rollback: undo every journaled mutation, in an order that
-    /// mirrors what the host rollback did to the shadow tables:
-    ///   1. truncate partition buffers to their marks (points inserted
-    ///      during the txn vanish, exactly like their SQL statements),
-    ///   2. restore pre-txn points that intra-txn flushes drained (their
-    ///      chunk rows just rolled back — the points move back home),
-    ///   3. rebuild the flush queue from actual buffer sizes (intra-txn
-    ///      flushes may have consumed pre-txn queue entries),
-    ///   4. remove index entries added during the txn (their rows are
-    ///      gone) and restore entries removed during it (their rows are
-    ///      back, same rowids — SQLite rollback is page-level undo),
-    ///   5. remove authoritative series inserted during the transaction,
-    ///      or mark a legacy blob registry dirty for re-persistence.
+    /// Rollback: the host has undone the rows. Forget what was derived
+    /// from them, put back what the journal kept, and drop what the
+    /// transaction had written and not yet stored.
     pub fn txn_rollback(&self) {
         let _transition = self.transition_write();
         let mut j = self.txn_lock();
@@ -2482,9 +1581,6 @@ impl Engine {
             Self::park_txn_frame(&mut j.spares, frame);
         }
         self.clear_buffers();
-        if !self.authoritative_series {
-            self.series_write().dirty = true;
-        }
         self.txn_active.store(false, Ordering::SeqCst);
         self.series_settled();
     }
@@ -2552,36 +1648,15 @@ impl Engine {
         // What is buffered was written after the savepoint (the host
         // flushes when it opens one), and goes with it.
         self.clear_buffers();
-        if !self.authoritative_series {
-            self.series_write().dirty = true;
-        }
     }
 
-    /// Keep a finished frame for reuse, unless it grew large: parked as it
-    /// was, a frame that journaled a large change would hold its tables'
-    /// capacity for good. A small frame keeps the cheap path: no
-    /// allocation to begin a transaction, and nothing to free at commit.
     fn park_txn_frame(spares: &mut Vec<TxnFrame>, frame: TxnFrame) {
-        const KEEP_AT_MOST: usize = 1_024;
-        let held = frame.added.capacity()
-            + frame.removed.capacity()
-            + frame.series_added.capacity()
-            + frame.series_removed.capacity()
-            + frame.rollup_added.capacity()
-            + frame.rollup_removed.capacity();
-        if held <= KEEP_AT_MOST {
-            spares.push(frame);
-        }
+        spares.push(frame);
     }
 
     fn reset_txn_frame(mut frame: TxnFrame, savepoint: Option<i32>) -> TxnFrame {
         frame.savepoint = savepoint;
-        frame.added.clear();
-        frame.removed.clear();
-        frame.series_added.clear();
-        frame.series_removed.clear();
-        frame.rollup_added.clear();
-        frame.rollup_removed.clear();
+        frame.series_changed = false;
         frame.rollup_tiers_before = None;
         frame
     }
@@ -2603,7 +1678,7 @@ impl Engine {
     }
 
     fn rollback_txn_frame(&self, frame: &mut TxnFrame) {
-        self.disk_chunks_changed();
+        self.chunks_changed();
         // Rollup chunks a settled tier counted on may be going with it.
         self.rollup_unsettle();
         // Whatever was planned was planned from rows that may be going:
@@ -2616,28 +1691,6 @@ impl Engine {
             .store(i64::MIN, Ordering::Relaxed);
         self.rollup_maintenance_cursor.store(0, Ordering::Relaxed);
         self.retention_floor.store(i64::MIN, Ordering::Relaxed);
-        // Index: adds out, removals back in. The dedup rule at
-        //    record time guarantees `removed` never contains an entry
-        //    whose chunk row was created inside this frame.
-        {
-            let mut index = self.index_write();
-            for key in frame.added.drain() {
-                index.remove(&key);
-            }
-            for (key, meta) in frame.removed.drain(..) {
-                index.insert(key, meta);
-            }
-        }
-
-        if !frame.rollup_added.is_empty() || !frame.rollup_removed.is_empty() {
-            let mut rollups = self.rollup_write();
-            for key in frame.rollup_added.drain() {
-                rollups.remove(&key);
-            }
-            for ((group, _, _), entry) in frame.rollup_removed.drain(..) {
-                rollups.insert(group, entry);
-            }
-        }
 
         if let Some(tiers) = frame.rollup_tiers_before.take() {
             *self
@@ -2646,56 +1699,20 @@ impl Engine {
                 .unwrap_or_else(|error| error.into_inner()) = tiers;
         }
 
-        if let Some(cache) = self.disk_series.as_ref() {
-            // SQLite's rollback restored the catalog rows and the label
-            // index; only the cache may hold ids that no longer exist.
-            if !frame.series_added.is_empty() || !frame.series_removed.is_empty() {
-                frame.series_added.clear();
-                frame.series_removed.clear();
-                cache.clear();
-            }
-        } else if !frame.series_added.is_empty() || !frame.series_removed.is_empty() {
-            let mut series = self.series_write();
-            for id in frame.series_added.drain() {
-                series.remove_id(id);
-            }
-            for (id, name, labels) in frame.series_removed.drain(..) {
-                // Cannot collide: the id was this series' before the frame,
-                // and nothing else took it inside the frame that is being
-                // undone.
-                if let Err(err) = series.insert_known(id, &name, &labels, true) {
-                    debug_assert!(false, "rollback could not restore series {id}: {err}");
-                }
-            }
-            self.resolve_cache.clear();
+        // SQLite's rollback restored the catalog rows and the label index;
+        // only the cache may hold ids that no longer exist.
+        if std::mem::take(&mut frame.series_changed) {
+            self.identities.clear();
         }
     }
 
     fn merge_txn_frame(parent: &mut TxnFrame, child: &mut TxnFrame) {
-        for (key, meta) in child.removed.drain(..) {
-            if !parent.added.remove(&key) {
-                parent.removed.push((key, meta));
-            }
-        }
-        parent.added.extend(child.added.drain());
-        for (key, meta) in child.rollup_removed.drain(..) {
-            if !parent.rollup_added.remove(&key) {
-                parent.rollup_removed.push((key, meta));
-            }
-        }
-        parent.rollup_added.extend(child.rollup_added.drain());
         if parent.rollup_tiers_before.is_none() {
             parent.rollup_tiers_before = child.rollup_tiers_before.take();
         }
-        parent.series_added.extend(child.series_added.drain());
-        parent.series_removed.append(&mut child.series_removed);
+        parent.series_changed |= std::mem::take(&mut child.series_changed);
     }
 
-    /// Insert freshly-persisted chunk metas into the index, journaling
-    /// the additions (and any silent overwrites of pre-existing keys)
-    /// when a transaction is active. THE single index-insertion path
-    /// for all flush routes — centralizing it here is what makes the
-    /// journal complete by construction.
     /// Raise `raw_ts_upper_bound` to `ts`. A load first: the bound moves
     /// once per newer timestamp, not once per point.
     #[inline]
@@ -2705,6 +1722,8 @@ impl Engine {
         }
     }
 
+    /// Chunks were written: account for them. The rows the store just
+    /// wrote are the index entries, so there is nothing to insert.
     fn index_insert_new(&self, items: Vec<(PartitionKey, ChunkMeta)>) {
         if items.is_empty() {
             return;
@@ -2715,39 +1734,17 @@ impl Engine {
         if settled_to != i64::MIN && items.iter().any(|(_, meta)| meta.min_ts <= settled_to) {
             self.rollup_unsettle();
         }
-        if self.disk_chunks {
-            // The rows the store just wrote are the index entries. The
-            // chunk sequence still advances once per chunk: it is how a
-            // drained compaction sweep learns there is something new to
-            // plan.
-            for (_, meta) in &items {
-                self.raise_raw_ts_upper_bound(meta.max_ts);
-                self.next_chunk_seq();
-            }
-            self.disk_chunks_moved(
-                items
-                    .iter()
-                    .map(|(_, meta)| (meta.min_ts, meta.max_ts, u64::from(meta.point_count))),
-                0,
-                0,
-            );
-            return;
-        }
-        let mut j = self.txn_guard();
-        let mut index = self.index_write();
-        for (key, meta) in items {
-            // The fresh chunk_seq makes every insert key unique, so an
-            // insert can never overwrite an existing entry (the min_ts
-            // shadowing bug this key shape fixes) — the pre-fix
-            // "journal the shadowed meta" branch is gone because
-            // shadowing is now impossible by construction.
-            let k = (key, meta.min_ts, self.next_chunk_seq());
-            if let Some(j) = j.as_deref_mut() {
-                j.added.insert(k);
-            }
+        for (_, meta) in &items {
             self.raise_raw_ts_upper_bound(meta.max_ts);
-            index.insert(k, meta);
+            self.next_chunk_seq();
         }
+        self.chunks_moved(
+            items
+                .iter()
+                .map(|(_, meta)| (meta.min_ts, meta.max_ts, u64::from(meta.point_count))),
+            0,
+            0,
+        );
     }
 
     /// An engine over the in-memory store kept under `name` (see
@@ -2771,9 +1768,9 @@ impl Engine {
         )
     }
 
-    /// Construct over an arbitrary chunk store. The store is expected to
-    /// have completed any crash recovery of its own (FsStore finishes
-    /// interrupted compactions in its constructor) before scan() runs.
+    /// Construct over a store. Nothing is loaded from it: opening costs a
+    /// few index probes whatever the table holds, unless this is the
+    /// first open by this version, which builds the indexes.
     pub fn with_store(
         store: Box<dyn ChunkStore>,
         flush_threshold: usize,
@@ -2782,191 +1779,91 @@ impl Engine {
         memory_budget: usize,
         defer_compression: bool,
     ) -> EngineResult<Self> {
-        let authoritative_series = store.has_authoritative_series();
-        // P2: prime the refresh tokens BEFORE the recovery scans — read
-        // after, a commit landing between scan and prime would be
-        // skipped by the first refresh. Read before, the worst case is
-        // one redundant reload (the same stale-token rule
-        // refresh_authoritative_state documents).
-        let primed_gen = if authoritative_series {
-            store
-                .catalog_generation()
-                .map_err(|err| format!("failed to prime catalog generation: {err}"))?
-        } else {
-            None
-        };
-        let primed_wm = if authoritative_series {
-            store
-                .append_watermark()
-                .map_err(|err| format!("failed to prime append watermark: {err}"))?
-        } else {
-            None
-        };
+        // Read before anything else is: a commit landing after this and
+        // before the engine exists is then seen as a change by the first
+        // refresh, where read later it would be taken for already seen.
+        let primed_gen = store
+            .catalog_generation()
+            .map_err(|err| format!("failed to prime catalog generation: {err}"))?;
 
-        // #132: a table with an index_cache budget keeps its catalog on
-        // disk. That needs a current label index; a connection that cannot
-        // bring it current (read-only) keeps the catalog in memory.
-        // The label index is every table's durable catalog, whichever way
-        // it is read: created and brought current here on the first open
-        // that can write (a table from before #132, or one an older
-        // extension wrote to since). A connection that cannot write leaves
-        // it as it is and keeps the catalog in memory.
-        let index_current = authoritative_series
-            && (store.label_index_current().unwrap_or(false)
-                || (store.ensure_label_index().is_ok()
-                    && store.label_index_current().unwrap_or(false)));
-        let disk_budget = if index_current {
-            store
-                .series_index_budget()
-                .map_err(|err| format!("failed to read index_cache: {err}"))?
-        } else {
-            None
-        };
-
-        // With the catalog on disk, the chunk index is read from the store's
-        // chunk rows too, if the store can answer for them. The store keeps
-        // an index for that only while it is read that way: with the chunk
-        // index in memory, every flush and compaction step otherwise
-        // rewrote an index over every chunk row that nothing read (#138).
-        // A connection that cannot change it leaves it, and reads from
-        // memory if it is not there.
-        let _ = store.ensure_chunk_index(disk_budget.is_some());
-        let disk_chunks = disk_budget.is_some() && store.has_chunk_index();
-        // A disk catalog is trusted only if it identifies every persisted
-        // chunk, the same condition the memory catalog is held to below.
-        // One that does not (empty, or a store whose series still live in
-        // a legacy registry) goes through that path, which migrates the
-        // legacy registry or refuses to open, and never silently adopts
-        // chunks whose series it cannot name. A disk chunk index asks the
-        // store, and never loads a chunk's metadata to find out.
-        let mut stored_chunks: Vec<StoredChunk> = Vec::new();
-        let disk_catalog_complete = disk_budget.is_some() && {
-            if disk_chunks {
-                store
-                    .series_total()
-                    .map_err(|err| format!("failed to count series catalog: {err}"))?
-                    > 0
-                    && store
-                        .chunk_series_cataloged()
-                        .map_err(|err| format!("failed to check chunk series: {err}"))?
-            } else {
-                stored_chunks = store
-                    .scan()
-                    .map_err(|err| format!("failed to recover chunk index: {err}"))?;
-                let known: HashSet<i64> = store
-                    .series_ids()
-                    .map_err(|err| format!("failed to list series catalog: {err}"))?
-                    .into_iter()
-                    .collect();
-                !known.is_empty()
-                    && stored_chunks
-                        .iter()
-                        .all(|chunk| known.contains(&chunk.series_id))
-            }
-        };
-        if disk_budget.is_none() {
-            stored_chunks = store
-                .scan()
-                .map_err(|err| format!("failed to recover chunk index: {err}"))?;
+        // The store's indexes are the only index there is: the label index
+        // over the series catalog, and the indexes over raw and rollup
+        // chunk rows. A table from before they existed, or one an older
+        // version left without them, gets them on the first open that can
+        // write. A connection that cannot write cannot read such a table
+        // until one that can has opened it.
+        let labels_current = |store: &dyn ChunkStore| store.label_index_current().unwrap_or(false);
+        let indexed = (labels_current(store.as_ref())
+            || (store.ensure_label_index().is_ok() && labels_current(store.as_ref())))
+            && {
+                let _ = store.ensure_chunk_index(true);
+                store.has_chunk_index()
+            };
+        if !indexed {
+            return Err(
+                "this table's indexes have not been built by this version yet: open it once                  with a connection that can write"
+                    .to_string(),
+            );
         }
-        // A catalog that failed that test is checked the memory way, which
-        // needs every chunk's metadata after all.
-        if disk_chunks && !disk_catalog_complete {
-            stored_chunks = store
-                .scan()
-                .map_err(|err| format!("failed to recover chunk index: {err}"))?;
-        }
+        let budget = store
+            .series_index_budget()
+            .map_err(|err| format!("failed to read index_cache: {err}"))?
+            .unwrap_or(u64::MAX);
 
-        let registry = if disk_catalog_complete {
-            SeriesRegistry::new()
-        } else if authoritative_series {
-            let mut rows = store
-                .load_series()
-                .map_err(|err| format!("failed to load series catalog: {err}"))?;
-            let mut registry = SeriesRegistry::from_stored(&rows)
-                .map_err(|err| format!("series catalog is invalid: {err}"))?;
-            let needs_legacy =
-                rows.is_empty() || Self::validate_chunk_series(&registry, &stored_chunks).is_err();
-            if needs_legacy {
-                match store
-                    .load_registry()
-                    .map_err(|err| format!("failed to load legacy series registry: {err}"))?
-                {
-                    Some(bytes) => {
-                        let legacy = SeriesRegistry::from_bytes(&bytes)
-                            .map_err(|err| format!("legacy series registry is corrupt: {err}"))?;
-                        let legacy_rows = legacy.stored_rows();
-                        if !legacy_rows.is_empty() {
-                            store.migrate_series(&legacy_rows).map_err(|err| {
-                                format!("failed to migrate legacy series registry: {err}")
-                            })?;
-                            rows = store.load_series().map_err(|err| {
-                                format!("failed to reload migrated series catalog: {err}")
-                            })?;
-                            registry = SeriesRegistry::from_stored(&rows).map_err(|err| {
-                                format!("migrated series catalog is invalid: {err}")
-                            })?;
-                            for row in &legacy_rows {
-                                let labels: Labels = row.labels.iter().cloned().collect();
-                                if registry.lookup(&row.name, &labels) != Some(row.id) {
-                                    return Err(format!(
-                                        "legacy series {} did not migrate with its original id",
-                                        row.id
-                                    ));
-                                }
-                            }
+        // The catalog must name the series of every chunk. One that does
+        // not is a table whose series still live in the registry blob of
+        // the first versions: bring those rows over, or refuse to open,
+        // and never adopt chunks whose series cannot be named.
+        let cataloged = |store: &dyn ChunkStore| {
+            store
+                .chunk_series_cataloged()
+                .map_err(|err| format!("failed to check chunk series: {err}"))
+        };
+        let series_total = store
+            .series_total()
+            .map_err(|err| format!("failed to count series catalog: {err}"))?;
+        if series_total == 0 || !cataloged(store.as_ref())? {
+            if let Some(bytes) = store
+                .load_registry()
+                .map_err(|err| format!("failed to load legacy series registry: {err}"))?
+            {
+                let legacy_rows = legacy_registry_rows(&bytes)
+                    .map_err(|err| format!("legacy series registry is corrupt: {err}"))?;
+                if !legacy_rows.is_empty() {
+                    store.migrate_series(&legacy_rows).map_err(|err| {
+                        format!("failed to migrate legacy series registry: {err}")
+                    })?;
+                    store
+                        .ensure_label_index()
+                        .map_err(|err| format!("failed to index the series catalog: {err}"))?;
+                    let ids: Vec<i64> = legacy_rows.iter().map(|row| row.id).collect();
+                    let migrated = store.series_by_ids(&ids).map_err(|err| {
+                        format!("failed to reload migrated series catalog: {err}")
+                    })?;
+                    let migrated: HashMap<i64, &StoredSeries> =
+                        migrated.iter().map(|row| (row.id, row)).collect();
+                    for row in &legacy_rows {
+                        if !migrated.get(&row.id).is_some_and(|found| {
+                            found.name == row.name && found.labels == row.labels
+                        }) {
+                            return Err(format!(
+                                "legacy series {} did not migrate with its original id",
+                                row.id
+                            ));
                         }
                     }
-                    None if !stored_chunks.is_empty() || !rows.is_empty() => {
-                        return Err(
-                            "the authoritative series catalog does not identify every persisted \
-                             chunk and no legacy registry is available"
-                                .to_string(),
-                        );
-                    }
-                    None => {}
                 }
             }
-            registry
-        } else {
-            match store
-                .load_registry()
-                .map_err(|err| format!("failed to load series registry: {err}"))?
-            {
-                Some(bytes) => SeriesRegistry::from_bytes(&bytes)
-                    .map_err(|err| format!("series registry is corrupt: {err}"))?,
-                None if !stored_chunks.is_empty() => {
-                    return Err("persisted chunks exist without a series registry".to_string());
-                }
-                None => SeriesRegistry::new(),
+            if !cataloged(store.as_ref())? {
+                return Err(
+                    "the series catalog does not identify every persisted chunk and no legacy                      registry is available"
+                        .to_string(),
+                );
             }
-        };
-        if !disk_catalog_complete {
-            Self::validate_chunk_series(&registry, &stored_chunks)?;
         }
-        // The catalog was loaded, and perhaps migrated, the memory way and
-        // is sound; a disk-mode table now reads it from disk, with its
-        // label index brought up to whatever the migration added.
-        let registry = if disk_budget.is_some() && !disk_catalog_complete {
-            store
-                .ensure_label_index()
-                .map_err(|err| format!("failed to index the series catalog: {err}"))?;
-            SeriesRegistry::new()
-        } else {
-            registry
-        };
-        // A disk index holds no entry per rollup chunk either (#144): the
-        // store answers from its rollup index, and nothing is read here.
-        let rollup_index = if disk_chunks {
-            RollupIndex::default()
-        } else {
-            Self::load_rollup_index(store.as_ref())?
-        };
-
         let engine = Engine {
             store,
             transition: RwLock::new(()),
-            authoritative_series,
             flush_threshold,
             min_flush_size,
             compression_level,
@@ -2978,9 +1875,7 @@ impl Engine {
             flush_interval_ms: AtomicU64::new(0),
             self_compaction_more: AtomicBool::new(false),
             self_compacted_at_ms: AtomicU64::new(0),
-            index: RwLock::new(BTreeMap::new()),
             chunk_seq: AtomicU64::new(0),
-            series: RwLock::new(registry),
             flush_queue: Mutex::new(Vec::new()),
             buffer_memory: AtomicUsize::new(0),
             cold_flush_running: AtomicBool::new(false),
@@ -3004,12 +1899,10 @@ impl Engine {
             retention_series_removed: AtomicU64::new(0),
             rollup_merge_chunks_removed: AtomicU64::new(0),
             rollup_merge_chunks_written: AtomicU64::new(0),
-            resolve_cache: DashMap::new(),
-            disk_series: disk_budget.map(DiskResolveCache::new),
+            identities: ResolveCache::new(budget),
             series_touched: AtomicBool::new(false),
-            disk_chunks,
-            disk_chunk_totals: Mutex::new(None),
-            disk_rollup_totals: Mutex::new(None),
+            chunk_totals: Mutex::new(None),
+            rollup_chunk_totals: Mutex::new(None),
             rollup_settled: Mutex::new(HashMap::new()),
             rollup_settled_max: AtomicI64::new(i64::MIN),
             rollup_tier_started: Mutex::new(None),
@@ -3036,8 +1929,6 @@ impl Engine {
             txn_active: AtomicBool::new(false),
             txn: Mutex::new(TxnJournal::default()),
             catalog_gen: Mutex::new(primed_gen),
-            append_wm: Mutex::new(primed_wm),
-            rollup_index: RwLock::new(rollup_index),
             rollup_tiers: Mutex::new(Vec::new()),
             rollup_maintenance_cursor: AtomicUsize::new(0),
             rollup_cycle_done_sweep: AtomicU64::new(0),
@@ -3046,27 +1937,22 @@ impl Engine {
             retention_floor: AtomicI64::new(i64::MIN),
             raw_ts_upper_bound: AtomicI64::new(i64::MIN),
         };
-        if engine.disk_chunks {
-            // Nothing is loaded, and nothing is read: the newest timestamp
-            // is an aggregate over every raw chunk row, and opening a table
-            // should not cost a scan of it. The retention guard that reads
-            // `raw_ts_upper_bound` only trusts it once a retention pass has
-            // set its floor, and that pass reads the high water first
-            // (`raw_high_water`), which raises the bound.
-        } else {
-            engine.replace_index(stored_chunks);
-        }
+        // Nothing is loaded, and nothing is read: the newest timestamp is
+        // an aggregate over every raw chunk row, and opening a table should
+        // not cost a scan of it. The retention guard that reads
+        // `raw_ts_upper_bound` only trusts it once a retention pass has set
+        // its floor, and that pass reads the high water first
+        // (`raw_high_water`), which raises the bound.
         Ok(engine)
     }
 
     // ── Series resolution ────────────────────────────────────────────
 
-    /// Disk-mode resolution (#132): the bounded cache, then the store, whose
-    /// single-series path is safe under the journal lock (single-row
-    /// statements only). Created ids are journaled so a rollback clears
-    /// the cache that may hold them.
-    fn resolve_series_on_disk(&self, metric_name: &str, labels: &Labels) -> EngineResult<i64> {
-        let cache = self.disk_series.as_ref().expect("disk mode");
+    /// The cache, then the store, whose single-series path is safe under
+    /// the journal lock (single-row statements only). A created id is
+    /// journaled so a rollback clears the cache that may hold it.
+    fn resolve_series(&self, metric_name: &str, labels: &Labels) -> EngineResult<i64> {
+        let cache = &self.identities;
         let key = identity_key_of(metric_name, labels);
         if let Some(id) = cache.get(key) {
             return Ok(id);
@@ -3082,7 +1968,7 @@ impl Engine {
             .map_err(|err| format!("failed to resolve series {metric_name:?}: {err}"))?;
         if resolved.created {
             if let Some(journal) = journal.as_deref_mut() {
-                journal.series_added.insert(resolved.id);
+                journal.series_changed = true;
             }
             self.series_changed();
         }
@@ -3090,14 +1976,18 @@ impl Engine {
         Ok(resolved.id)
     }
 
-    /// Disk-mode batch resolution: cache hits, then ONE bulk store call for
-    /// the distinct misses with no engine lock held (the lock hazard
-    /// `resolve_series_batch` documents), then journal and admit.
-    fn resolve_series_batch_on_disk(
-        &self,
-        cache: &DiskResolveCache,
-        entries: &[(String, Labels)],
-    ) -> EngineResult<Vec<i64>> {
+    /// Batch resolution for Tier 2 ingest: cache hits, then ONE bulk store
+    /// call for the distinct misses instead of a statement pair per
+    /// series, then journal and admit. Semantics per entry are those of
+    /// `resolve_series`.
+    ///
+    /// LOCK HAZARD: the bulk store call runs multi-row SQL, and multi-row
+    /// DML makes SQLite open a statement journal, which fires xSavepoint
+    /// on every vtab in the transaction — re-entrantly, into THIS engine's
+    /// txn_savepoint, which takes the journal mutex. So no engine lock may
+    /// be held across the store call.
+    pub fn resolve_series_batch(&self, entries: &[(String, Labels)]) -> EngineResult<Vec<i64>> {
+        let cache = &self.identities;
         let mut out = vec![0i64; entries.len()];
         let mut first_slot: HashMap<u128, usize> = HashMap::new();
         let mut unique: Vec<(usize, u128)> = Vec::new();
@@ -3144,7 +2034,7 @@ impl Engine {
             for (res, &(_, key)) in resolved.iter().zip(&unique) {
                 if res.created {
                     if let Some(journal) = journal.as_deref_mut() {
-                        journal.series_added.insert(res.id);
+                        journal.series_changed = true;
                     }
                 }
                 cache.admit(key, res.id);
@@ -3157,150 +2047,6 @@ impl Engine {
             out[idx] = resolved[slot].id;
         }
         Ok(out)
-    }
-
-    /// Resolve (metric, labels) → series_id. Fast read path, slow write path.
-    fn resolve_series(&self, metric_name: &str, labels: &Labels) -> EngineResult<i64> {
-        if self.disk_series.is_some() {
-            return self.resolve_series_on_disk(metric_name, labels);
-        }
-        let mut journal = self.txn_guard();
-        let mut reg = self.series_write();
-        if let Some(id) = reg.lookup(metric_name, labels) {
-            return Ok(id);
-        }
-        if !self.authoritative_series {
-            return Ok(reg.get_or_create(metric_name, labels));
-        }
-
-        let label_pairs: Vec<(String, String)> = labels
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        let resolved = self
-            .store
-            .resolve_series(metric_name, &label_pairs)
-            .map_err(|err| format!("failed to resolve series {metric_name:?}: {err}"))?;
-        reg.insert_known(resolved.id, metric_name, labels, false)?;
-        if resolved.created {
-            if let Some(journal) = journal.as_deref_mut() {
-                journal.series_added.insert(resolved.id);
-            }
-        }
-        Ok(resolved.id)
-    }
-
-    /// Batch resolution for Tier 2 ingest: one registry pass for hits, and
-    /// misses go to the store through ONE bulk call instead of a statement
-    /// pair per series. Semantics per entry are identical to
-    /// resolve_series — authoritative ids allocated in the caller's
-    /// transaction, created ids journaled for rollback.
-    ///
-    /// LOCK HAZARD: the bulk store call runs multi-row SQL, and multi-row
-    /// DML makes SQLite open a statement journal, which fires xSavepoint
-    /// on every vtab in the transaction — re-entrantly, into THIS engine's
-    /// txn_savepoint, which takes the journal mutex. So no engine lock may
-    /// be held across the store call: misses are detected under a read
-    /// lock that is dropped first, and results are recorded under locks
-    /// taken after the call returns. The writer gate (held by every
-    /// caller) is what makes the between-locks window safe: no other
-    /// writer can touch the registry, and refresh skips while txn_active.
-    pub fn resolve_series_batch(&self, entries: &[(String, Labels)]) -> EngineResult<Vec<i64>> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        if let Some(cache) = self.disk_series.as_ref() {
-            return self.resolve_series_batch_on_disk(cache, entries);
-        }
-        let mut out = vec![0i64; entries.len()];
-        let mut misses: Vec<usize> = Vec::new();
-        {
-            let reg = self.series_read();
-            for (idx, (metric_name, labels)) in entries.iter().enumerate() {
-                if let Some(id) = reg.lookup(metric_name, labels) {
-                    out[idx] = id;
-                } else {
-                    misses.push(idx);
-                }
-            }
-        }
-        if misses.is_empty() {
-            return Ok(out);
-        }
-        if !self.authoritative_series {
-            let mut reg = self.series_write();
-            for &idx in &misses {
-                out[idx] = reg.get_or_create(&entries[idx].0, &entries[idx].1);
-            }
-            return Ok(out);
-        }
-
-        // Dedupe repeated keys so the store sees each new series once and
-        // the registry insert stays idempotent within the batch.
-        let mut first_slot: HashMap<&(String, Labels), usize> = HashMap::new();
-        let mut unique: Vec<usize> = Vec::new();
-        for &idx in &misses {
-            first_slot.entry(&entries[idx]).or_insert_with(|| {
-                unique.push(idx);
-                unique.len() - 1
-            });
-        }
-        let requests: Vec<(&str, Vec<(String, String)>)> = unique
-            .iter()
-            .map(|&idx| {
-                let (name, labels) = &entries[idx];
-                (
-                    name.as_str(),
-                    labels
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                )
-            })
-            .collect();
-        // NO engine locks held here — see the lock-hazard note above.
-        let resolved = self
-            .store
-            .resolve_series_bulk(&requests)
-            .map_err(|err| format!("failed to bulk-resolve series: {err}"))?;
-        if resolved.len() != unique.len() {
-            return Err(format!(
-                "bulk series resolution returned {} of {} entries",
-                resolved.len(),
-                unique.len()
-            ));
-        }
-        let mut journal = self.txn_guard();
-        let mut reg = self.series_write();
-        for (&idx, res) in unique.iter().zip(&resolved) {
-            let (name, labels) = &entries[idx];
-            reg.insert_known(res.id, name, labels, false)?;
-            if res.created {
-                if let Some(journal) = journal.as_deref_mut() {
-                    journal.series_added.insert(res.id);
-                }
-            }
-        }
-        for &idx in &misses {
-            out[idx] = resolved[first_slot[&entries[idx]]].id;
-        }
-        Ok(out)
-    }
-
-    fn save_series(&self) -> EngineResult<()> {
-        if self.authoritative_series {
-            return Ok(());
-        }
-        let mut reg = self.series_write();
-        if !reg.dirty {
-            return Ok(());
-        }
-        let bytes = reg.to_bytes()?;
-        self.store
-            .save_registry(&bytes)
-            .map_err(|err| format!("failed to persist series registry: {err}"))?;
-        reg.dirty = false;
-        Ok(())
     }
 
     // ── Write path ───────────────────────────────────────────────────
@@ -3355,70 +2101,16 @@ impl Engine {
         }
     }
 
-    /// Resolve series using the persistent hash cache.
-    /// Fast path: DashMap hash lookup + verification (~100ns).
-    /// Slow path: full registry resolve + cache insert.
-    /// Verification prevents silent data corruption from hash collisions.
+    /// Resolve a series by name and labels: a cache lookup in the steady
+    /// state, the store otherwise.
     #[inline]
     pub fn resolve_cached(
         &self,
         metric: &str,
         labels: &HashMap<String, String>,
     ) -> EngineResult<i64> {
-        if self.disk_series.is_some() {
-            let labels_bt: Labels = labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            return self.resolve_series_on_disk(metric, &labels_bt);
-        }
-        let hash = fast_series_hash(metric, labels);
-
-        // Fast path: cache hit with verification
-        if let Some(id) = self.resolve_cache.get(&hash) {
-            let series_id = *id;
-            if self.verify_series_identity(series_id, metric, labels) {
-                return Ok(series_id);
-            }
-            // Hash collision detected — fall through to slow path
-        }
-
-        // Slow path: full resolve + cache
-        let labels_bt: BTreeMap<String, String> =
-            labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let id = self.resolve_series(metric, &labels_bt)?;
-        self.resolve_cache.insert(hash, id);
-        Ok(id)
-    }
-
-    /// Verify that a cached series_id still matches (metric, labels).
-    /// Reads from series_info under read lock — single HashMap lookup.
-    #[inline]
-    fn verify_series_identity(
-        &self,
-        series_id: i64,
-        metric: &str,
-        labels: &HashMap<String, String>,
-    ) -> bool {
-        let reg = match self.series.read() {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        match reg.info_for(series_id) {
-            Some(info) => {
-                if info.metric_name != metric {
-                    return false;
-                }
-                if info.labels.len() != labels.len() {
-                    return false;
-                }
-                for (k, v) in labels {
-                    match info.labels.get(k) {
-                        Some(iv) if iv == v => {}
-                        _ => return false,
-                    }
-                }
-                true
-            }
-            None => false,
-        }
+        let labels_bt: Labels = labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        self.resolve_series(metric, &labels_bt)
     }
 
     /// Write a batch of labeled entries. Resolves series internally.
@@ -3528,47 +2220,6 @@ impl Engine {
         Ok(())
     }
 
-    /// Verify a cached series_id against borrowed (metric, sorted pairs).
-    /// BTreeMap iterates sorted by key, so element-wise zip comparison works.
-    #[inline]
-    fn verify_series_identity_pairs(
-        &self,
-        series_id: i64,
-        metric: &str,
-        sorted_pairs: &[(&str, &str)],
-    ) -> bool {
-        let reg = self.series_read();
-        match reg.info_for(series_id) {
-            Some(info) => {
-                info.metric_name == metric
-                    && info.labels.len() == sorted_pairs.len()
-                    && info
-                        .labels
-                        .iter()
-                        .zip(sorted_pairs)
-                        .all(|((ik, iv), &(k, v))| ik == k && iv == v)
-            }
-            None => false,
-        }
-    }
-
-    /// Slow path for the fused ingest: materialize owned strings, resolve
-    /// through the registry, and cache under the precomputed hash.
-    fn resolve_pairs_slow(
-        &self,
-        hash: u64,
-        metric: &str,
-        sorted_pairs: &[(&str, &str)],
-    ) -> EngineResult<i64> {
-        let labels_bt: Labels = sorted_pairs
-            .iter()
-            .map(|&(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        let id = self.resolve_series(metric, &labels_bt)?;
-        self.resolve_cache.insert(hash, id);
-        Ok(id)
-    }
-
     /// Fused ingest: Prometheus text → resolve → buffer in one pass.
     /// No BEAM terms are built per sample; on the steady-state cache-hit
     /// path no allocations happen per sample either. `default_ts` (epoch
@@ -3656,28 +2307,15 @@ impl Engine {
         }
         sorted.truncate(w);
 
-        if let Some(cache) = self.disk_series.as_ref() {
-            // Allocation-free on a hit, as the memory path is.
-            if let Some(id) = cache.get(identity_key(metric, sorted)) {
-                return Ok(id);
-            }
-            let labels_bt: Labels = sorted
-                .iter()
-                .map(|&(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            return self.resolve_series_on_disk(metric, &labels_bt);
+        // Allocation-free on a hit.
+        if let Some(id) = self.identities.get(identity_key(metric, sorted)) {
+            return Ok(id);
         }
-        let hash = fast_series_hash_pairs(metric, sorted);
-
-        if let Some(id) = self.resolve_cache.get(&hash) {
-            let series_id = *id;
-            if self.verify_series_identity_pairs(series_id, metric, sorted) {
-                return Ok(series_id);
-            }
-            // Hash collision — fall through to the verified slow path
-        }
-
-        self.resolve_pairs_slow(hash, metric, sorted)
+        let labels_bt: Labels = sorted
+            .iter()
+            .map(|&(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        self.resolve_series(metric, &labels_bt)
     }
 
     /// Prometheus exposition escapes newline, quote, and backslash bytes in
@@ -3709,8 +2347,8 @@ impl Engine {
         self.resolve_cached(&metric, &labels)
     }
 
-    /// Rare fallback for invalid UTF-8 in names/labels: resolve through
-    /// the registry with lossy conversion, bypassing the hash cache.
+    /// Rare fallback for invalid UTF-8 in names/labels: resolve with lossy
+    /// conversion.
     fn resolve_lossy(&self, name: &[u8], labels: &[(&[u8], &[u8])]) -> EngineResult<i64> {
         let metric = String::from_utf8_lossy(name);
         let labels_bt: Labels = labels
@@ -3744,7 +2382,7 @@ impl Engine {
         // The virtual-table ingest paths call this after every statement so
         // the advertised threshold is self-driving for direct SQLite users.
         // Keep the overwhelmingly common below-threshold path free of store
-        // writes (especially the legacy registry snapshot).
+        // writes.
         if keys.is_empty() {
             return Ok(0);
         }
@@ -3770,7 +2408,6 @@ impl Engine {
             let indexed = self.put_chunk_batch(&batch)?;
             self.index_insert_new(indexed);
         }
-        self.save_series()?;
         Ok(count)
     }
 
@@ -3857,7 +2494,6 @@ impl Engine {
             files_written += 1;
         }
 
-        self.save_series()?;
         Ok((flushed, evicted, files_written))
     }
 
@@ -3951,7 +2587,6 @@ impl Engine {
                 self.index_insert_new(metas);
             }
         }
-        self.save_series()?;
         Ok(count)
     }
 
@@ -3968,7 +2603,7 @@ impl Engine {
         // is empty: a timed flush between scrapes need not walk a partition
         // per series to find that out (#125).
         if self.buffer_memory.load(Ordering::Relaxed) == 0 {
-            return self.save_series();
+            return Ok(());
         }
         let keys: Vec<(PartitionKey, usize)> = self
             .partitions
@@ -4016,13 +2651,11 @@ impl Engine {
         if self.partitions.is_empty() {
             self.partitions.shrink_to_fit();
         }
-        self.save_series()?;
         Ok(())
     }
 
     pub fn shutdown(&self) -> EngineResult<()> {
-        self.flush_all()?;
-        self.save_series()
+        self.flush_all()
     }
 
     // ── Compression ──────────────────────────────────────────────────
@@ -4324,11 +2957,9 @@ impl Engine {
             if !selected.is_empty() && (exceeds_series || exceeds_points || exceeds_bytes) {
                 break;
             }
+            // Whether its chunks are still there is asked once for the
+            // whole step, below.
             let group = plan.groups.pop_front().expect("the front group is there");
-            // A disk index is asked once for the whole step, below.
-            if !self.disk_chunks && !self.sources_present(&group) {
-                continue;
-            }
             selected_points = selected_points.saturating_add(points);
             selected_bytes = selected_bytes.saturating_add(bytes);
             selected_series.insert(group.key);
@@ -4336,7 +2967,7 @@ impl Engine {
         }
         let budget_limited = !plan.groups.is_empty();
         drop(plan_guard);
-        if self.disk_chunks && !selected.is_empty() {
+        if !selected.is_empty() {
             // Nearly always every source is still there, and one statement
             // says so; only when something has gone is each group asked
             // after on its own.
@@ -4453,97 +3084,26 @@ impl Engine {
             return Ok(outcome);
         }
 
-        // Old storage units are deletable only if no surviving
-        // (non-replaced) index entry still references them.
-        let removed: HashSet<ChunkKey> = plans
-            .iter()
-            .flat_map(|(group, _)| group.sources.iter().map(|(key, _)| *key))
-            .collect();
-        // A row holds one chunk, so a replaced row is always deletable; only
-        // a file unit can be shared, and only the index can say whether a
-        // survivor still references it. The index is walked only then, and
-        // only for those units: a walk of every chunk at every step made a
-        // step's cost grow with the whole store (#118).
+        // A row holds one chunk, so every replaced row is deletable.
         let deletable: Vec<ChunkLoc> = {
             let mut seen: HashSet<ChunkLoc> = HashSet::new();
-            let candidates: Vec<ChunkLoc> = plans
+            plans
                 .iter()
                 .flat_map(|(group, _)| group.sources.iter().map(|(_, meta)| meta.loc.unit()))
-                .filter(|u| seen.insert(u.clone()))
-                .collect();
-            let shared: HashSet<&ChunkLoc> = candidates
-                .iter()
-                .filter(|u| matches!(u, ChunkLoc::File { .. }))
-                .collect();
-            let survivors: HashSet<ChunkLoc> = if shared.is_empty() {
-                HashSet::new()
-            } else {
-                let index = self.index_read();
-                index
-                    .iter()
-                    .filter(|(entry_key, m)| {
-                        matches!(m.loc, ChunkLoc::File { .. }) && !removed.contains(entry_key)
-                    })
-                    .map(|(_, m)| m.loc.unit())
-                    .filter(|u| shared.contains(u))
-                    .collect()
-            };
-            candidates
-                .into_iter()
-                .filter(|u| !survivors.contains(u))
+                .filter(|unit| seen.insert(unit.clone()))
                 .collect()
         };
 
-        // Phase 2: the store makes the swap durable (fs: manifest +
-        // renames). The commit callback swaps the index while the new
-        // chunks are live but the old ones not yet removed, so queries
-        // never see a deleted unit.
-        //
-        // Journal (R5): grabbed BEFORE replace_chunks so the lock order
-        // inside the callback stays txn → index. Removals journal their
-        // metas — the host rollback restores the deleted rows under
-        // their original rowids, so restoring the entries verbatim is
-        // correct — EXCEPT entries this same txn added (flush → compact
-        // in one txn): removing those just cancels the add. Additions
-        // journal their keys so rollback can drop them.
-        let mut j = self.txn_guard();
+        // Phase 2: the store swaps the rows in the host's transaction,
+        // which undoes them if it rolls back; there is nothing of them
+        // here to journal. Each new chunk advances the sequence, as a
+        // flush's does.
         self.store.replace_chunks(&add, &deletable, &mut |locs| {
-            if self.disk_chunks {
-                // The swapped rows are the index; the host transaction
-                // undoes them, so there is nothing to journal. Each new
-                // chunk still advances the sequence, as an insert does.
-                for _ in locs {
-                    self.next_chunk_seq();
-                }
-                return;
-            }
-            let mut index = self.index_write();
-            let mut next = 0;
-            for (group, new_count) in &plans {
-                for (chunk_key, meta) in &group.sources {
-                    if let Some(j) = j.as_deref_mut() {
-                        if !j.added.remove(chunk_key) {
-                            j.removed.push((*chunk_key, meta.clone()));
-                        }
-                    }
-                    index.remove(chunk_key);
-                }
-                for i in next..next + new_count {
-                    let meta = add[i].meta(locs[i].clone());
-                    // Fresh chunk_seq → the key cannot collide with any
-                    // existing entry, so no shadowed-meta journaling is
-                    // needed (see index_insert_new).
-                    let k = (group.key, meta.min_ts, self.next_chunk_seq());
-                    if let Some(j) = j.as_deref_mut() {
-                        j.added.insert(k);
-                    }
-                    index.insert(k, meta);
-                }
-                next += new_count;
+            for _ in locs {
+                self.next_chunk_seq();
             }
         })?;
-        drop(j);
-        if self.disk_chunks {
+        {
             // A compacted group's chunks are replaced by chunks holding the
             // same points, so only the count and the points move.
             let (removed_chunks, removed_points) = plans
@@ -4553,14 +3113,14 @@ impl Engine {
                     (chunks + 1, points + u64::from(meta.point_count))
                 });
             if removed_chunks == deletable.len() {
-                self.disk_chunks_moved(
+                self.chunks_moved(
                     add.iter()
                         .map(|chunk| (chunk.min_ts, chunk.max_ts, u64::from(chunk.point_count))),
                     removed_chunks,
                     removed_points,
                 );
             } else {
-                self.disk_chunks_changed();
+                self.chunks_changed();
             }
         }
 
@@ -4643,15 +3203,11 @@ impl Engine {
         more
     }
 
-    /// Whether every chunk a planned group was made of is still in the index.
+    /// Whether every chunk a planned group was made of is still there.
     /// Chunks are immutable, so one that is there is as it was planned.
     fn sources_present(&self, group: &MetricsCompactionGroup) -> bool {
-        if self.disk_chunks {
-            let chunks: Vec<ChunkIdentity> = Self::group_identities(group).collect();
-            return self.store.chunks_present(&chunks).unwrap_or(false);
-        }
-        let index = self.index_read();
-        group.sources.iter().all(|(key, _)| index.contains_key(key))
+        let chunks: Vec<ChunkIdentity> = Self::group_identities(group).collect();
+        self.store.chunks_present(&chunks).unwrap_or(false)
     }
 
     /// The identities of a planned group's source chunks.
@@ -4680,42 +3236,37 @@ impl Engine {
         let now = Instant::now();
         self.forget_idle_released_writes(now);
         let mut groups = Vec::new();
-        if self.disk_chunks {
-            // The store returns the eligible chunks already, in the index's
-            // order; a chunk's row id stands in for its insertion sequence.
-            let candidates: Vec<(ChunkKey, ChunkMeta)> = self
-                .store
-                .compaction_candidates(cutoff_ts, ENC_RAW, METRICS_COMPACTION_TARGET_POINTS as u32)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|chunk| {
-                    let sequence = match chunk.meta.loc {
-                        ChunkLoc::Row { rowid } => rowid as u64,
-                        ChunkLoc::File { .. } => 0,
-                    };
+        // The store returns the eligible chunks already, in the index's
+        // order; a chunk's row id stands in for its insertion sequence.
+        let candidates: Vec<(ChunkKey, ChunkMeta)> = self
+            .store
+            .compaction_candidates(cutoff_ts, ENC_RAW, METRICS_COMPACTION_TARGET_POINTS as u32)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|chunk| {
+                let sequence = match chunk.meta.loc {
+                    ChunkLoc::Row { rowid } => rowid as u64,
+                    ChunkLoc::File { .. } => 0,
+                };
+                (
                     (
-                        (
-                            PartitionKey {
-                                series_id: chunk.series_id,
-                            },
-                            chunk.meta.min_ts,
-                            sequence,
-                        ),
-                        chunk.meta,
-                    )
-                })
-                .collect();
-            self.plan_metrics_groups(
-                candidates.iter().map(|(key, meta)| (key, meta)),
-                cutoff_ts,
-                raw_min_chunks,
-                now,
-                &mut groups,
-            );
-        } else {
-            let index = self.index_read();
-            self.plan_metrics_groups(index.iter(), cutoff_ts, raw_min_chunks, now, &mut groups);
-        }
+                        PartitionKey {
+                            series_id: chunk.series_id,
+                        },
+                        chunk.meta.min_ts,
+                        sequence,
+                    ),
+                    chunk.meta,
+                )
+            })
+            .collect();
+        self.plan_metrics_groups(
+            candidates.iter().map(|(key, meta)| (key, meta)),
+            cutoff_ts,
+            raw_min_chunks,
+            now,
+            &mut groups,
+        );
         // First compression always wins over optional merges. Within each
         // phase, groups go in series order, oldest first within a series: a
         // sweep's plan is fixed by its cutoff and is worked to the end, so
@@ -6344,25 +4895,10 @@ impl Engine {
             },
             RollupIndexEntry {
                 min_ts: chunk.meta.min_ts,
-                max_ts: chunk.meta.max_ts,
                 rowid,
                 point_count: chunk.meta.point_count,
-                encoding: chunk.meta.encoding,
             },
         ))
-    }
-
-    fn load_rollup_index(store: &dyn ChunkStore) -> EngineResult<RollupIndex> {
-        let mut rollups = RollupIndex::default();
-        store
-            .visit_rollups(&mut |chunk| {
-                let (group, entry) = Self::rollup_index_parts(chunk)?;
-                rollups.push_unsorted(group, entry);
-                Ok(())
-            })
-            .map_err(|err| format!("failed to scan rollup chunks: {err}"))?;
-        rollups.sort_groups();
-        Ok(rollups)
     }
 
     /// Configure the ladder (idempotent per connect, like set_retention).
@@ -6407,22 +4943,11 @@ impl Engine {
             .clone()
     }
 
-    /// Distinct resolutions present in the persisted rollup index, including
-    /// tiers no longer declared by an active ladder. Used by the repair path,
-    /// which must sweep every stored tier rather than only current ones.
+    /// Distinct resolutions of the stored rollup chunks, including tiers no
+    /// longer declared by an active ladder. Used by the repair path, which
+    /// must sweep every stored tier rather than only current ones.
     pub fn rollup_resolutions(&self) -> Vec<i64> {
-        if self.disk_chunks {
-            return self.store.rollup_resolutions().unwrap_or_default();
-        }
-        let rollups = self.rollup_read();
-        let mut resolutions: Vec<i64> = rollups
-            .groups
-            .keys()
-            .map(|group| group.resolution)
-            .collect();
-        resolutions.sort_unstable();
-        resolutions.dedup();
-        resolutions
+        self.store.rollup_resolutions().unwrap_or_default()
     }
 
     /// The newest stored raw timestamp — the data-time reference for
@@ -6432,7 +4957,7 @@ impl Engine {
     fn raw_high_water(&self) -> Option<i64> {
         let mut high_water = i64::MIN;
         if let Some(newest) = self.chunk_high_water() {
-            // A disk index does not prime the bound at open.
+            // Nothing primes the bound at open.
             self.raise_raw_ts_upper_bound(newest);
             high_water = high_water.max(newest);
         }
@@ -6496,36 +5021,29 @@ impl Engine {
                 Self::plan_ended_rollup_group(group, entries, plans);
             }
         };
-        if self.disk_chunks {
-            // The store hands the chunks over a group at a time, so only
-            // one group's entries are held while it is planned.
-            let mut current: Option<RollupGroupKey> = None;
-            let mut entries: Vec<RollupIndexEntry> = Vec::new();
-            let visited = self.store.visit_rollup_groups(&mut |chunk| {
-                let (group, entry) = Self::rollup_index_parts(chunk)?;
-                if current != Some(group) {
-                    if let Some(previous) = current {
-                        plan_group(previous, &entries, &mut plans);
-                    }
-                    entries.clear();
-                    current = Some(group);
+        // The store hands the chunks over a group at a time, so only one
+        // group's entries are held while it is planned.
+        let mut current: Option<RollupGroupKey> = None;
+        let mut entries: Vec<RollupIndexEntry> = Vec::new();
+        let visited = self.store.visit_rollup_groups(&mut |chunk| {
+            let (group, entry) = Self::rollup_index_parts(chunk)?;
+            if current != Some(group) {
+                if let Some(previous) = current {
+                    plan_group(previous, &entries, &mut plans);
                 }
-                entries.push(entry);
-                Ok(())
-            });
-            // An unreadable index plans nothing this sweep; the next tries
-            // again, as an unreadable raw index does.
-            if visited.is_err() {
-                return Vec::new();
+                entries.clear();
+                current = Some(group);
             }
-            if let Some(previous) = current {
-                plan_group(previous, &entries, &mut plans);
-            }
-        } else {
-            let rollups = self.rollup_read();
-            for (group, entries) in &rollups.groups {
-                plan_group(*group, entries, &mut plans);
-            }
+            entries.push(entry);
+            Ok(())
+        });
+        // An unreadable index plans nothing this sweep; the next tries
+        // again, as an unreadable raw index does.
+        if visited.is_err() {
+            return Vec::new();
+        }
+        if let Some(previous) = current {
+            plan_group(previous, &entries, &mut plans);
         }
         // Series order, so a merge step's deletes and inserts share pages.
         plans.sort_unstable_by_key(|(group, _)| (group.series_id, group.resolution));
@@ -6624,48 +5142,36 @@ impl Engine {
     /// Put together the planned runs. A run any of whose chunks has gone
     /// since it was planned (retention, an earlier merge) is passed over.
     fn apply_rollup_merges(&self, plans: Vec<RollupMergeGroup>) -> EngineResult<(usize, usize)> {
-        let plans: Vec<RollupMergeGroup> = if self.disk_chunks {
-            // Nearly always every source is still there, and one question
-            // settles it; only when something has gone is each run asked
-            // after on its own.
-            let present = |plans: &[RollupMergeGroup]| -> EngineResult<bool> {
-                let chunks: Vec<ChunkIdentity> = plans
-                    .iter()
-                    .flat_map(|(group, entries)| {
-                        entries.iter().map(|entry| ChunkIdentity {
-                            loc: entry.loc(),
-                            series_id: group.series_id,
-                            resolution: group.resolution,
-                            min_ts: entry.min_ts,
-                            point_count: entry.point_count,
-                        })
+        // Nearly always every source is still there, and one question
+        // settles it; only when something has gone is each run asked after
+        // on its own.
+        let present = |plans: &[RollupMergeGroup]| -> EngineResult<bool> {
+            let chunks: Vec<ChunkIdentity> = plans
+                .iter()
+                .flat_map(|(group, entries)| {
+                    entries.iter().map(|entry| ChunkIdentity {
+                        loc: entry.loc(),
+                        series_id: group.series_id,
+                        resolution: group.resolution,
+                        min_ts: entry.min_ts,
+                        point_count: entry.point_count,
                     })
-                    .collect();
-                self.store
-                    .chunks_present(&chunks)
-                    .map_err(|err| format!("rollup merge presence check failed: {err}"))
-            };
-            if present(&plans)? {
-                plans
-            } else {
-                let mut still = Vec::with_capacity(plans.len());
-                for plan in plans {
-                    if present(std::slice::from_ref(&plan))? {
-                        still.push(plan);
-                    }
-                }
-                still
-            }
-        } else {
-            let rollups = self.rollup_read();
-            plans
-                .into_iter()
-                .filter(|(group, entries)| {
-                    entries
-                        .iter()
-                        .all(|entry| rollups.contains_rowid(group, entry.rowid))
                 })
-                .collect()
+                .collect();
+            self.store
+                .chunks_present(&chunks)
+                .map_err(|err| format!("rollup merge presence check failed: {err}"))
+        };
+        let plans: Vec<RollupMergeGroup> = if present(&plans)? {
+            plans
+        } else {
+            let mut still = Vec::with_capacity(plans.len());
+            for plan in plans {
+                if present(std::slice::from_ref(&plan))? {
+                    still.push(plan);
+                }
+            }
+            still
         };
         if plans.is_empty() {
             return Ok((0, 0));
@@ -6686,7 +5192,7 @@ impl Engine {
             ));
         }
         let mut batch: Vec<EncodedRollupChunk> = Vec::new();
-        let mut merged: Vec<(RollupGroupKey, Vec<RollupIndexEntry>, usize)> = Vec::new();
+        let mut merged: Vec<(Vec<RollupIndexEntry>, usize)> = Vec::new();
         for (group, entries) in plans {
             let mut buckets = Vec::new();
             for _ in &entries {
@@ -6716,7 +5222,7 @@ impl Engine {
                 });
                 written += 1;
             }
-            merged.push((group, entries, written));
+            merged.push((entries, written));
         }
         if batch.is_empty() {
             return Ok((0, 0));
@@ -6733,84 +5239,28 @@ impl Engine {
             ));
         }
 
-        // Phase 2: swap the index, journaled, before any old row goes,
-        // so that no reader is sent to a row that is not there.
+        // Phase 2: the old rows go. The rows are the index, and the host
+        // transaction undoes both halves together: there is nothing to
+        // swap or journal. A reader on another connection sees neither
+        // half until the transaction commits, and then both.
         let mut old_locs: Vec<ChunkLoc> = Vec::new();
-        if self.disk_chunks {
-            // The rows are the index, and the host transaction undoes
-            // them: there is nothing to swap or journal. No other
-            // connection reads this table inside a write transaction (the
-            // writer gate), and another process reads a committed
-            // snapshot, so nobody sees the new rows beside the old.
-            let mut removed_single = 0;
-            for (_, entries, _) in &merged {
-                for entry in entries {
-                    removed_single += usize::from(entry.point_count == 1);
-                    old_locs.push(entry.loc());
-                }
-            }
-            let errors = self.store.delete_chunks(&old_locs);
-            if !errors.is_empty() {
-                self.disk_chunks_changed();
-                return Err(format!("rollup merge delete failed: {}", errors.join("; ")));
-            }
-            let added_single = batch.iter().filter(|chunk| chunk.bucket_count == 1).count();
-            self.disk_rollups_moved(
-                (batch.len(), added_single),
-                (old_locs.len(), removed_single),
-            );
-            self.rollup_merge_chunks_removed
-                .fetch_add(old_locs.len() as u64, Ordering::Relaxed);
-            self.rollup_merge_chunks_written
-                .fetch_add(batch.len() as u64, Ordering::Relaxed);
-            return Ok((old_locs.len(), batch.len()));
-        }
-        {
-            let _transition = self.transition_write();
-            let mut journal = self.txn_guard();
-            let mut rollups = self.rollup_write();
-            let mut new = batch.iter().zip(locs);
-            for (group, entries, written) in &merged {
-                for entry in entries {
-                    let key = (*group, entry.min_ts, entry.rowid);
-                    if rollups.remove(&key).is_some() {
-                        if let Some(journal) = journal.as_deref_mut() {
-                            if !journal.rollup_added.remove(&key) {
-                                journal.rollup_removed.push((key, *entry));
-                            }
-                        }
-                    }
-                    old_locs.push(entry.loc());
-                }
-                for _ in 0..*written {
-                    let Some((chunk, loc)) = new.next() else {
-                        break;
-                    };
-                    let ChunkLoc::Row { rowid } = loc else {
-                        return Err(format!(
-                            "rollup store returned non-row location {loc:?} for series {}",
-                            chunk.series_id
-                        ));
-                    };
-                    let entry = RollupIndexEntry {
-                        min_ts: chunk.min_ts,
-                        max_ts: chunk.max_ts,
-                        rowid,
-                        point_count: chunk.bucket_count,
-                        encoding: ENC_ROLLUP_V1,
-                    };
-                    let key = (*group, entry.min_ts, entry.rowid);
-                    rollups.insert(*group, entry);
-                    if let Some(journal) = journal.as_deref_mut() {
-                        journal.rollup_added.insert(key);
-                    }
-                }
+        let mut removed_single = 0;
+        for (entries, _) in &merged {
+            for entry in entries {
+                removed_single += usize::from(entry.point_count == 1);
+                old_locs.push(entry.loc());
             }
         }
         let errors = self.store.delete_chunks(&old_locs);
         if !errors.is_empty() {
+            self.chunks_changed();
             return Err(format!("rollup merge delete failed: {}", errors.join("; ")));
         }
+        let added_single = batch.iter().filter(|chunk| chunk.bucket_count == 1).count();
+        self.rollups_moved(
+            (batch.len(), added_single),
+            (old_locs.len(), removed_single),
+        );
         self.rollup_merge_chunks_removed
             .fetch_add(old_locs.len() as u64, Ordering::Relaxed);
         self.rollup_merge_chunks_written
@@ -6947,11 +5397,11 @@ impl Engine {
         let mut group_end = group_start;
         // Watermarks are read a stretch of groups at a time: a step looks
         // at tens of thousands of groups, nearly all with nothing due, and
-        // a disk index answers a stretch in one statement.
+        // the store answers a stretch in one statement.
         let mut watermarks: HashMap<i64, i64> = HashMap::new();
         let mut watermarks_end = group_start;
-        // With a disk index, the series of the stretch that have a raw
-        // chunk to roll up: asking that of the index for the whole stretch
+        // The series of the stretch that have a raw chunk to roll up:
+        // asking that of the index for the whole stretch
         // replaces a read of each series' chunks, nearly all of which find
         // nothing (a statement a group, and tens of thousands a step).
         let mut due: Option<HashSet<i64>> = None;
@@ -7007,8 +5457,8 @@ impl Engine {
                     let first = group_ordinal % series_ids.len();
                     let stretch = &series_ids[first..first + (watermarks_end - group_ordinal)];
                     watermarks = self.rollup_watermarks(tier.resolution, stretch)?;
-                    due = match (self.disk_chunks, produce_to_for(tier.resolution)) {
-                        (true, Some(produce_to)) => {
+                    due = match produce_to_for(tier.resolution) {
+                        Some(produce_to) => {
                             let covered: Vec<(i64, Option<i64>)> = stretch
                                 .iter()
                                 .map(|sid| (*sid, watermarks.get(sid).copied()))
@@ -7021,7 +5471,7 @@ impl Engine {
                                     .collect(),
                             )
                         }
-                        _ => None,
+                        None => None,
                     };
                 }
                 let r = tier.resolution;
@@ -7099,47 +5549,9 @@ impl Engine {
         }
 
         let buckets_total: usize = batch.iter().map(|c| c.bucket_count as usize).sum();
-        if self.disk_chunks {
-            // The rows just written are the index entries.
-            let single = batch.iter().filter(|chunk| chunk.bucket_count == 1).count();
-            self.disk_rollups_moved((batch.len(), single), (0, 0));
-            self.rollup_settle(&settled_now);
-            self.rollup_maintenance_cursor
-                .store(if more { group_end } else { 0 }, Ordering::Relaxed);
-            return Ok((batch.len(), buckets_total, more));
-        }
-        let mut journal = self.txn_guard();
-        let mut rollups = self.rollup_write();
-        for (chunk, loc) in batch.iter().zip(locs) {
-            let rowid = match loc {
-                ChunkLoc::Row { rowid } => rowid,
-                other => {
-                    return Err(format!(
-                        "rollup store returned non-row location {other:?} for series {}",
-                        chunk.series_id
-                    ));
-                }
-            };
-            let group = RollupGroupKey {
-                series_id: chunk.series_id,
-                resolution: chunk.resolution,
-            };
-            let entry = RollupIndexEntry {
-                min_ts: chunk.min_ts,
-                max_ts: chunk.max_ts,
-                rowid,
-                point_count: chunk.bucket_count,
-                encoding: ENC_ROLLUP_V1,
-            };
-            let key = (group, entry.min_ts, entry.rowid);
-            let previous = rollups.insert(group, entry);
-            debug_assert!(previous.is_none());
-            if let Some(journal) = journal.as_deref_mut() {
-                journal.rollup_added.insert(key);
-            }
-        }
-        drop(rollups);
-        drop(journal);
+        // The rows just written are the index entries.
+        let single = batch.iter().filter(|chunk| chunk.bucket_count == 1).count();
+        self.rollups_moved((batch.len(), single), (0, 0));
         self.rollup_settle(&settled_now);
         self.rollup_maintenance_cursor
             .store(if more { group_end } else { 0 }, Ordering::Relaxed);
@@ -7242,63 +5654,23 @@ impl Engine {
         Ok(result)
     }
 
-    /// Per-tier retention: drop rollup chunks whose coverage ended
-    /// before `cutoff`. Mirrors delete_before's structure (transition
-    /// exclusive, journaled removals, rows deleted in the caller's
-    /// transaction).
+    /// Per-tier retention: drop rollup chunks whose coverage ended before
+    /// `cutoff`, a bounded batch of them, in the caller's transaction.
     fn delete_rollups_before(&self, resolution: i64, cutoff: i64) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
-        if self.disk_chunks {
-            return self.delete_disk_rollups(
-                Some(resolution),
-                Some(cutoff),
-                None,
-                ROLLUP_RETENTION_DELETE_BATCH,
-            );
-        }
-        let mut journal = self.txn_guard();
-        let mut rollups = self.rollup_write();
-        let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
-            .groups
-            .iter()
-            .filter(|(group, _)| group.resolution == resolution)
-            .flat_map(|(group, entries)| {
-                entries
-                    .iter()
-                    .filter(|entry| entry.max_ts < cutoff)
-                    .map(|entry| ((*group, entry.min_ts, entry.rowid), *entry))
-            })
-            .take(ROLLUP_RETENTION_DELETE_BATCH + 1)
-            .collect();
-        let more = victims.len() > ROLLUP_RETENTION_DELETE_BATCH;
-        victims.truncate(ROLLUP_RETENTION_DELETE_BATCH);
-        if victims.is_empty() {
-            return (0, false, Vec::new());
-        }
-        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, entry)| entry.loc()).collect();
-        let errors = self.store.delete_chunks(&locs);
-        if !errors.is_empty() {
-            return (0, more, errors);
-        }
-        for (key, entry) in &victims {
-            rollups.remove(key);
-            if let Some(journal) = journal.as_deref_mut() {
-                if !journal.rollup_added.remove(key) {
-                    journal.rollup_removed.push((*key, *entry));
-                }
-            }
-        }
-        // A series whose rollups have gone is rolled up again from what
-        // raw samples it still has.
-        self.rollup_unsettle();
-        (victims.len(), more, Vec::new())
+        self.delete_rollup_rows(
+            Some(resolution),
+            Some(cutoff),
+            None,
+            ROLLUP_RETENTION_DELETE_BATCH,
+        )
     }
 
-    /// One bounded batch of rollup rows deleted from a disk index: the
-    /// store finds the victims, and each is a row, so there is nothing to
-    /// journal. Returns (deleted, more_may_remain, errors). The caller
-    /// holds the transition lock.
-    fn delete_disk_rollups(
+    /// One bounded batch of rollup rows deleted: the store finds the
+    /// victims, and the host transaction undoes the delete if it rolls
+    /// back. Returns (deleted, more_may_remain, errors). The caller holds
+    /// the transition lock.
+    fn delete_rollup_rows(
         &self,
         resolution: Option<i64>,
         before: Option<i64>,
@@ -7321,11 +5693,11 @@ impl Engine {
         let locs: Vec<ChunkLoc> = victims.iter().map(|(loc, _)| loc.clone()).collect();
         let errors = self.store.delete_chunks(&locs);
         if !errors.is_empty() {
-            self.disk_chunks_changed();
+            self.chunks_changed();
             return (0, more, errors);
         }
         let single = victims.iter().filter(|(_, buckets)| *buckets == 1).count();
-        self.disk_rollups_moved((0, 0), (victims.len(), single));
+        self.rollups_moved((0, 0), (victims.len(), single));
         // A series whose rollups have gone is rolled up again from what
         // raw samples it still has.
         self.rollup_unsettle();
@@ -7337,50 +5709,12 @@ impl Engine {
     /// bounded batch. Returns (deleted, more_may_remain, errors).
     fn delete_rollups_after(&self, resolution: i64, after_ts: i64) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
-        if self.disk_chunks {
-            return self.delete_disk_rollups(
-                Some(resolution),
-                None,
-                Some(after_ts),
-                ROLLUP_RETENTION_DELETE_BATCH,
-            );
-        }
-        let mut journal = self.txn_guard();
-        let mut rollups = self.rollup_write();
-        let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
-            .groups
-            .iter()
-            .filter(|(group, _)| group.resolution == resolution)
-            .flat_map(|(group, entries)| {
-                entries
-                    .iter()
-                    .filter(|entry| entry.min_ts > after_ts)
-                    .map(|entry| ((*group, entry.min_ts, entry.rowid), *entry))
-            })
-            .take(ROLLUP_RETENTION_DELETE_BATCH + 1)
-            .collect();
-        let more = victims.len() > ROLLUP_RETENTION_DELETE_BATCH;
-        victims.truncate(ROLLUP_RETENTION_DELETE_BATCH);
-        if victims.is_empty() {
-            return (0, false, Vec::new());
-        }
-        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, entry)| entry.loc()).collect();
-        let errors = self.store.delete_chunks(&locs);
-        if !errors.is_empty() {
-            return (0, more, errors);
-        }
-        for (key, entry) in &victims {
-            rollups.remove(key);
-            if let Some(journal) = journal.as_deref_mut() {
-                if !journal.rollup_added.remove(key) {
-                    journal.rollup_removed.push((*key, *entry));
-                }
-            }
-        }
-        // A series whose rollups have gone is rolled up again from what
-        // raw samples it still has.
-        self.rollup_unsettle();
-        (victims.len(), more, Vec::new())
+        self.delete_rollup_rows(
+            Some(resolution),
+            None,
+            Some(after_ts),
+            ROLLUP_RETENTION_DELETE_BATCH,
+        )
     }
 
     /// Delete one bounded batch of persisted rollup rows across every tier.
@@ -7395,49 +5729,10 @@ impl Engine {
     /// budget instead of using the larger operator-oriented default batch.
     pub fn clear_rollups_bounded(&self, max_chunks: usize) -> (usize, bool, Vec<String>) {
         let _transition = self.transition_write();
-        if self.disk_chunks {
-            if max_chunks == 0 {
-                return (0, self.rollup_totals().0 > 0, Vec::new());
-            }
-            return self.delete_disk_rollups(None, None, None, max_chunks);
-        }
-        let mut journal = self.txn_guard();
-        let mut rollups = self.rollup_write();
         if max_chunks == 0 {
-            return (0, !rollups.groups.is_empty(), Vec::new());
+            return (0, self.rollup_totals().0 > 0, Vec::new());
         }
-        let mut victims: Vec<(RollupKey, RollupIndexEntry)> = rollups
-            .groups
-            .iter()
-            .flat_map(|(group, entries)| {
-                entries
-                    .iter()
-                    .map(|entry| ((*group, entry.min_ts, entry.rowid), *entry))
-            })
-            .take(max_chunks.saturating_add(1))
-            .collect();
-        let more = victims.len() > max_chunks;
-        victims.truncate(max_chunks);
-        if victims.is_empty() {
-            return (0, false, Vec::new());
-        }
-        let locs: Vec<ChunkLoc> = victims.iter().map(|(_, entry)| entry.loc()).collect();
-        let errors = self.store.delete_chunks(&locs);
-        if !errors.is_empty() {
-            return (0, more, errors);
-        }
-        for (key, entry) in &victims {
-            rollups.remove(key);
-            if let Some(journal) = journal.as_deref_mut() {
-                if !journal.rollup_added.remove(key) {
-                    journal.rollup_removed.push((*key, *entry));
-                }
-            }
-        }
-        // A series whose rollups have gone is rolled up again from what
-        // raw samples it still has.
-        self.rollup_unsettle();
-        (victims.len(), more, Vec::new())
+        self.delete_rollup_rows(None, None, None, max_chunks)
     }
 
     // ── Chunk reading ────────────────────────────────────────────────
@@ -7615,171 +5910,72 @@ impl Engine {
 
     /// Remove every series that has no chunk, no rollup chunk, and no
     /// buffered point: retention has taken the last of it, and a series
-    /// that is kept after its data costs its registry entry, its catalog
-    /// row, and its label postings for as long as the store lives. Series
-    /// created in the current transaction are left alone; their data is
-    /// on its way.
+    /// that is kept after its data costs its catalog row and its label
+    /// postings for as long as the store lives. Series created in the
+    /// current transaction are left alone if they have points waiting.
     ///
-    /// Journaled like the chunk deletions around it: a rollback puts the
-    /// registry entries back, and the host's rollback puts the rows back.
-    /// Returns how many were removed.
+    /// The rows go in the caller's transaction, whose rollback puts them
+    /// back. Returns how many were removed.
     pub fn remove_series_without_data(&self) -> EngineResult<usize> {
         let _transition = self.transition_write();
-        let doomed: Vec<i64> = {
-            let mut journal = self.txn_guard();
-            let mut live: HashSet<i64> = HashSet::new();
-            live.extend(self.chunk_series_ids());
-            if self.disk_chunks {
-                // A series whose rollups cannot be listed is not one to
-                // remove: fail rather than take it for one with none.
-                live.extend(
-                    self.store
-                        .rollup_series_ids()
-                        .map_err(|err| format!("failed to list rollup series: {err}"))?,
-                );
-            } else {
-                let rollups = self.rollup_read();
-                live.extend(rollups.groups.keys().map(|group| group.series_id));
-            }
-            live.extend(
-                self.partitions
-                    .iter()
-                    .filter(|entry| !entry.value().timestamps.is_empty())
-                    .map(|entry| entry.key().series_id),
-            );
-            if let Some(journal) = journal.as_deref() {
-                live.extend(journal.series_added.iter().copied());
-            }
-            if self.disk_series.is_some() {
-                let doomed: Vec<i64> = self
-                    .store
-                    .series_ids()
-                    .map_err(|err| format!("failed to list series: {err}"))?
-                    .into_iter()
-                    .filter(|id| !live.contains(id))
-                    .collect();
-                for id in &doomed {
-                    // The journal entry only marks the catalog as changed:
-                    // a rollback restores the rows itself and clears the
-                    // cache (see rollback_txn_frame).
-                    if let Some(journal) = journal.as_deref_mut() {
-                        journal
-                            .series_removed
-                            .push((*id, String::new(), Labels::new()));
-                    }
-                    self.partitions.remove(&PartitionKey { series_id: *id });
-                    self.released_writes.remove(id);
-                }
-                doomed
-            } else {
-                let mut series = self.series_write();
-                let doomed: Vec<i64> = series
-                    .series_info
-                    .keys()
-                    .filter(|id| !live.contains(id))
-                    .copied()
-                    .collect();
-                for id in &doomed {
-                    if let Some(info) = series.series_info.get(id) {
-                        if let Some(journal) = journal.as_deref_mut() {
-                            journal.series_removed.push((
-                                *id,
-                                info.metric_name.clone(),
-                                info.labels.clone(),
-                            ));
-                        }
-                    }
-                    series.remove_id(*id);
-                    // An emptied buffer is the last thing left of it.
-                    self.partitions.remove(&PartitionKey { series_id: *id });
-                    self.released_writes.remove(id);
-                }
-                if !doomed.is_empty() {
-                    series.dirty = true;
-                }
-                doomed
-            }
-        };
+        let mut live: HashSet<i64> = HashSet::new();
+        live.extend(self.chunk_series_ids());
+        // A series whose rollups cannot be listed is not one to remove:
+        // fail rather than take it for one with none.
+        live.extend(
+            self.store
+                .rollup_series_ids()
+                .map_err(|err| format!("failed to list rollup series: {err}"))?,
+        );
+        live.extend(
+            self.partitions
+                .iter()
+                .filter(|entry| !entry.value().timestamps.is_empty())
+                .map(|entry| entry.key().series_id),
+        );
+        let doomed: Vec<i64> = self
+            .store
+            .series_ids()
+            .map_err(|err| format!("failed to list series: {err}"))?
+            .into_iter()
+            .filter(|id| !live.contains(id))
+            .collect();
         if doomed.is_empty() {
             return Ok(0);
         }
-        self.resolve_cache.clear();
-        if let Some(cache) = self.disk_series.as_ref() {
-            cache.clear();
+        for id in &doomed {
+            // An emptied buffer is the last thing left of it.
+            self.partitions.remove(&PartitionKey { series_id: *id });
+            self.released_writes.remove(id);
         }
+        // A rollback restores the rows itself; the journal only notes
+        // that the cache may then be wrong (see rollback_txn_frame).
+        if let Some(journal) = self.txn_guard().as_deref_mut() {
+            journal.series_changed = true;
+        }
+        self.identities.clear();
         self.series_changed();
         // No engine locks here: store DML can re-enter the vtab's
         // savepoint hooks (invariant 1), as with every other store write.
-        if self.authoritative_series {
-            self.store
-                .delete_series(&doomed)
-                .map_err(|err| format!("series removal failed: {err}"))?;
-        }
+        self.store
+            .delete_series(&doomed)
+            .map_err(|err| format!("series removal failed: {err}"))?;
         self.retention_series_removed
             .fetch_add(doomed.len() as u64, Ordering::Relaxed);
         Ok(doomed.len())
     }
 
+    /// Drop whole raw chunks that end before `before_ts`, in the caller's
+    /// transaction. Returns (chunks, rows, errors); a chunk is a row.
     pub fn delete_before(&self, before_ts: i64) -> (usize, usize, Vec<String>) {
         let _transition = self.transition_write();
-        if self.disk_chunks {
-            // The store finds its own victims; each chunk is a row, so the
-            // rows removed are the storage units removed.
-            let locs = match self.store.chunk_locs_outside(Some(before_ts), None) {
-                Ok(locs) => locs,
-                Err(error) => return (0, 0, vec![error]),
-            };
-            let errors = self.store.delete_chunks(&locs);
-            self.disk_chunks_changed();
-            return (locs.len(), locs.len(), errors);
-        }
-        // Transition is already exclusive; journal before index. Pruned rows are
-        // DELETEd through the store inside the host transaction, so a
-        // rollback restores them — the journal restores the matching
-        // index entries. Entries added by this same txn cancel instead
-        // (their rows will not come back).
-        let mut j = self.txn_guard();
-        let mut index = self.index_write();
-
-        let to_remove: Vec<ChunkKey> = index
-            .iter()
-            .filter(|(_, meta)| meta.max_ts < before_ts)
-            .map(|(k, _)| *k)
-            .collect();
-
-        let entries_removed = to_remove.len();
-        // Refcount storage units (a batch file is one unit shared by
-        // many chunks) — a unit is deletable once nothing references it.
-        let mut unit_refcount: HashMap<ChunkLoc, usize> = HashMap::new();
-        for meta in index.values() {
-            *unit_refcount.entry(meta.loc.unit()).or_insert(0) += 1;
-        }
-
-        let mut units_to_delete: HashSet<ChunkLoc> = HashSet::new();
-        for key in &to_remove {
-            if let Some(meta) = index.remove(key) {
-                let unit = meta.loc.unit();
-                if let Some(count) = unit_refcount.get_mut(&unit) {
-                    *count -= 1;
-                    if *count == 0 {
-                        units_to_delete.insert(unit);
-                    }
-                }
-                if let Some(j) = j.as_deref_mut() {
-                    if !j.added.remove(key) {
-                        j.removed.push((*key, meta));
-                    }
-                }
-            }
-        }
-
-        drop(index);
-        drop(j);
-        let files_deleted = units_to_delete.len();
-        let units: Vec<ChunkLoc> = units_to_delete.into_iter().collect();
-        let errors = self.store.delete_chunks(&units);
-
-        (entries_removed, files_deleted, errors)
+        let locs = match self.store.chunk_locs_outside(Some(before_ts), None) {
+            Ok(locs) => locs,
+            Err(error) => return (0, 0, vec![error]),
+        };
+        let errors = self.store.delete_chunks(&locs);
+        self.chunks_changed();
+        (locs.len(), locs.len(), errors)
     }
 
     /// Repair inverse of [`Self::delete_before`]: drop whole raw chunks whose
@@ -7787,57 +5983,13 @@ impl Engine {
     /// the cutoff is retained.
     pub fn delete_after(&self, after_ts: i64) -> (usize, usize, Vec<String>) {
         let _transition = self.transition_write();
-        if self.disk_chunks {
-            // The store finds its own victims; each chunk is a row, so the
-            // rows removed are the storage units removed.
-            let locs = match self.store.chunk_locs_outside(None, Some(after_ts)) {
-                Ok(locs) => locs,
-                Err(error) => return (0, 0, vec![error]),
-            };
-            let errors = self.store.delete_chunks(&locs);
-            self.disk_chunks_changed();
-            return (locs.len(), locs.len(), errors);
-        }
-        let mut j = self.txn_guard();
-        let mut index = self.index_write();
-
-        let to_remove: Vec<ChunkKey> = index
-            .iter()
-            .filter(|(_, meta)| meta.min_ts > after_ts)
-            .map(|(k, _)| *k)
-            .collect();
-
-        let entries_removed = to_remove.len();
-        let mut unit_refcount: HashMap<ChunkLoc, usize> = HashMap::new();
-        for meta in index.values() {
-            *unit_refcount.entry(meta.loc.unit()).or_insert(0) += 1;
-        }
-
-        let mut units_to_delete: HashSet<ChunkLoc> = HashSet::new();
-        for key in &to_remove {
-            if let Some(meta) = index.remove(key) {
-                let unit = meta.loc.unit();
-                if let Some(count) = unit_refcount.get_mut(&unit) {
-                    *count -= 1;
-                    if *count == 0 {
-                        units_to_delete.insert(unit);
-                    }
-                }
-                if let Some(j) = j.as_deref_mut() {
-                    if !j.added.remove(key) {
-                        j.removed.push((*key, meta));
-                    }
-                }
-            }
-        }
-
-        drop(index);
-        drop(j);
-        let files_deleted = units_to_delete.len();
-        let units: Vec<ChunkLoc> = units_to_delete.into_iter().collect();
-        let errors = self.store.delete_chunks(&units);
-
-        (entries_removed, files_deleted, errors)
+        let locs = match self.store.chunk_locs_outside(None, Some(after_ts)) {
+            Ok(locs) => locs,
+            Err(error) => return (0, 0, vec![error]),
+        };
+        let errors = self.store.delete_chunks(&locs);
+        self.chunks_changed();
+        (locs.len(), locs.len(), errors)
     }
 
     /// Operator repair for chunks stored under a mistaken timestamp unit (a
@@ -7865,68 +6017,27 @@ impl Engine {
         (deleted, more, Vec::new())
     }
 
-    // ── Authoritative state recovery/refresh ─────────────────────────
+    // ── Other writers ────────────────────────────────────────────────
 
-    /// Read the authoritative store token for transaction publication.
-    /// SQLite hosts call this from xSync, while the calling connection still
-    /// sees its own final transactional state and excludes other writers.
-    /// Non-authoritative stores return None and keep the reload fallback.
+    /// The store's generation as the calling connection sees it. SQLite
+    /// hosts call this from xSync, while the connection still sees its own
+    /// final transactional state and excludes other writers, and hand it
+    /// to [`Self::txn_commit_published`].
     pub fn capture_catalog_generation(&self) -> EngineResult<Option<(i64, i64)>> {
-        if !self.authoritative_series {
-            return Ok(None);
-        }
         self.store
             .catalog_generation()
             .map_err(|err| format!("failed to capture catalog generation: {err}"))
     }
 
-    fn validate_chunk_series(
-        registry: &SeriesRegistry,
-        chunks: &[StoredChunk],
-    ) -> EngineResult<()> {
-        for chunk in chunks {
-            if registry.info_for(chunk.series_id).is_none() {
-                return Err(format!(
-                    "persisted chunk {:?} references unknown series {}",
-                    chunk.meta.loc, chunk.series_id
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn replace_index(&self, stored: Vec<StoredChunk>) {
-        let mut index = self.index_write();
-        index.clear();
-        for chunk in stored {
-            let key = PartitionKey {
-                series_id: chunk.series_id,
-            };
-            // Recovery assigns fresh sequence numbers while scanning —
-            // same as the donor fix (the seq is in-memory only, never
-            // persisted), so duplicate-min_ts chunks on disk can never
-            // shadow each other after a restart either.
-            self.raise_raw_ts_upper_bound(chunk.meta.max_ts);
-            index.insert((key, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
-        }
-    }
-
-    /// Refresh process-local catalog and chunk snapshots from a store that
-    /// may be changed by another process. Callers bind the host SQLite
-    /// connection first, so both scans observe that connection's transaction
-    /// snapshot. Active writer transactions retain their journaled view.
+    /// Notice that someone else wrote to the store: another process, or an
+    /// older version of this one. Nothing of the store is kept here to
+    /// reload; what is kept is what was worked out from it, and that is
+    /// dropped: remembered series identities and selections, the totals,
+    /// and which rollup tiers had nothing left to do. Callers bind the
+    /// host SQLite connection first. A no-op inside a write transaction,
+    /// which excludes other writers, and when the store's generation is
+    /// the one last seen.
     pub fn refresh_authoritative_state(&self) -> EngineResult<()> {
-        if !self.authoritative_series {
-            return Ok(());
-        }
-
-        // Fast path: skip the reload when the store's catalog generation
-        // matches the one the last reload observed. The unlocked
-        // txn_active pre-check mirrors the locked check below (an active
-        // writer keeps its journaled view either way); a raced skip is
-        // equivalent to the pre-existing early return. Reading the
-        // generation BEFORE the reload below keeps a concurrent commit
-        // safe: at worst we cache a stale token and reload once more.
         if self.txn_active.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -7937,185 +6048,23 @@ impl Engine {
         if observed.is_some() && observed == *self.catalog_gen_lock() {
             return Ok(());
         }
-        // Someone else wrote: whatever follows, the catalog may differ.
-        if let Some(cache) = self.disk_series.as_ref() {
-            cache.selections.invalidate();
-        }
-
         let _transition = self.transition_write();
         let _journal = self.txn_lock();
         if self.txn_active.load(Ordering::SeqCst) {
             return Ok(());
         }
-
-        // P2: pure-append delta. If the shape generation is unchanged
-        // since the last reload, every change is appended rows — apply
-        // only those. Any doubt (no cached tokens, shape changed, store
-        // can't answer, or a delta-application error) falls through to
-        // the full reload, which is always correct.
-        let wm_new = self
-            .store
-            .append_watermark()
-            .map_err(|err| format!("failed to read append watermark: {err}"))?;
-        let cached_gen = *self.catalog_gen_lock();
-        let cached_wm = *self.append_wm_lock();
-        if let (Some(old_gen), Some(old_wm), Some(new_wm)) = (cached_gen, cached_wm, wm_new) {
-            if new_wm.0 == old_wm.0
-                && self
-                    .apply_append_delta(old_gen.0, old_wm.1, observed, new_wm)
-                    .is_ok()
-            {
-                return Ok(());
-            }
-            // Partial application is harmless: the reload below
-            // replaces registry and indexes wholesale.
-        }
-
-        let registry = if self.disk_series.is_some() {
-            // Another writer changed the catalog; if it was an older
-            // extension, the label index did not follow.
-            if !self.store.label_index_current().unwrap_or(false) {
-                self.store
-                    .ensure_label_index()
-                    .map_err(|err| format!("failed to refresh label index: {err}"))?;
-            }
-            SeriesRegistry::new()
-        } else {
-            let rows = self
-                .store
-                .load_series()
-                .map_err(|err| format!("failed to refresh series catalog: {err}"))?;
-            SeriesRegistry::from_stored(&rows)
-                .map_err(|err| format!("refreshed series catalog is invalid: {err}"))?
-        };
-        let chunks = if self.disk_chunks {
-            Vec::new()
-        } else {
+        // An older version writes series without their label postings.
+        if !self.store.label_index_current().unwrap_or(false) {
             self.store
-                .scan()
-                .map_err(|err| format!("failed to refresh chunk index: {err}"))?
-        };
-        self.disk_chunks_changed();
-        if self.disk_series.is_none() {
-            Self::validate_chunk_series(&registry, &chunks)?;
+                .ensure_label_index()
+                .map_err(|err| format!("failed to refresh label index: {err}"))?;
         }
-        // Another process wrote: what it wrote may be work for any tier.
+        // It may have removed series, and an id been used again.
+        self.identities.clear();
+        self.chunks_changed();
+        // What it wrote may be work for any tier.
         self.rollup_unsettle();
-        let new_rollups = if self.disk_chunks {
-            RollupIndex::default()
-        } else {
-            Self::load_rollup_index(self.store.as_ref())
-                .map_err(|err| format!("failed to refresh rollup index: {err}"))?
-        };
-
-        let mut new_index = BTreeMap::new();
-        for chunk in chunks {
-            let key = PartitionKey {
-                series_id: chunk.series_id,
-            };
-            self.raise_raw_ts_upper_bound(chunk.meta.max_ts);
-            new_index.insert((key, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
-        }
-
-        // Lock order remains transition -> txn -> index -> series. Holding
-        // both write locks prevents readers from pairing a newly visible
-        // series with an old chunk snapshot.
-        // Lock order: transition → txn → index → series → rollup (other
-        // paths only ever hold ONE of these at a time).
-        let mut index = self.index_write();
-        let mut series = self.series_write();
-        let mut rollups = self.rollup_write();
-        *index = new_index;
-        *series = registry;
-        *rollups = new_rollups;
-        self.resolve_cache.clear();
-        if let Some(cache) = self.disk_series.as_ref() {
-            // Another writer may have deleted series and an id been reused.
-            cache.clear();
-        }
         *self.catalog_gen_lock() = observed;
-        *self.append_wm_lock() = self
-            .store
-            .append_watermark()
-            .map_err(|err| format!("failed to refresh append watermark: {err}"))
-            // Read AFTER the reload: if a commit slipped in between, the
-            // watermark is newer than the snapshot — but so is the
-            // store's generation vs `observed`, so the next refresh
-            // reloads again and re-primes. Conservative either way.
-            .unwrap_or(None);
-        Ok(())
-    }
-
-    /// P2: apply a pure-append delta — series rows past the cached
-    /// catalog max-id, chunk/rollup rows past the cached rowid
-    /// watermark. Caller holds the transition and txn locks and has
-    /// proven the shape generation unchanged (no deletes → no rowid
-    /// reuse). Application is idempotent by ChunkLoc because a writer's
-    /// own flushes advance the store past its cached watermark: rows we
-    /// already indexed are skipped, not duplicated.
-    fn apply_append_delta(
-        &self,
-        after_series_id: i64,
-        after_rowid: i64,
-        observed: Option<(i64, i64)>,
-        new_wm: (i64, i64),
-    ) -> EngineResult<()> {
-        let new_series = self
-            .store
-            .load_series_since(after_series_id)
-            .map_err(|err| format!("failed to load series delta: {err}"))?;
-        let (raw, rollup_chunks) = self
-            .store
-            .scan_since(after_rowid)
-            .map_err(|err| format!("failed to scan chunk delta: {err}"))?;
-        // Another process wrote: what it wrote may be work for any tier.
-        self.rollup_unsettle();
-
-        // Same acquisition order as the full reload: index → series →
-        // rollup, under the caller's transition + txn locks.
-        let mut index = self.index_write();
-        let mut series = self.series_write();
-        let mut rollups = self.rollup_write();
-        // Disk mode (#132): appended series are already in the store's
-        // label index; nothing of them is held in memory.
-        let on_disk = self.disk_series.is_some();
-        for row in new_series.iter().filter(|_| !on_disk) {
-            let labels: Labels = row.labels.iter().cloned().collect();
-            // insert_known is idempotent for identical rows and loud on
-            // identity conflicts — exactly the semantics a re-read
-            // series row needs.
-            series.insert_known(row.id, &row.name, &labels, false)?;
-        }
-        self.disk_chunks_changed();
-        for chunk in raw.into_iter().filter(|_| !self.disk_chunks) {
-            let pk = PartitionKey {
-                series_id: chunk.series_id,
-            };
-            if !on_disk && series.info_for(chunk.series_id).is_none() {
-                return Err(format!(
-                    "appended chunk {:?} references unknown series {}",
-                    chunk.meta.loc, chunk.series_id
-                ));
-            }
-            let known = index
-                .range((pk, i64::MIN, u64::MIN)..)
-                .take_while(|((key, _, _), _)| key == &pk)
-                .any(|(_, meta)| meta.loc == chunk.meta.loc);
-            if known {
-                continue;
-            }
-            self.raise_raw_ts_upper_bound(chunk.meta.max_ts);
-            index.insert((pk, chunk.meta.min_ts, self.next_chunk_seq()), chunk.meta);
-        }
-        for chunk in rollup_chunks.into_iter().filter(|_| !self.disk_chunks) {
-            let (group, entry) = Self::rollup_index_parts(chunk)?;
-            if rollups.contains_rowid(&group, entry.rowid) {
-                continue;
-            }
-            rollups.insert(group, entry);
-        }
-        *self.catalog_gen_lock() = observed;
-        *self.append_wm_lock() = Some(new_wm);
         Ok(())
     }
 
@@ -8169,7 +6118,7 @@ impl Engine {
     }
 
     /// Catalog rows for an already selected series-id set. This lets an SQL
-    /// host apply regex/negative matchers to registry labels before it asks
+    /// host apply regex/negative matchers to catalog labels before it asks
     /// the engine to aggregate chunk metadata.
     pub fn series_overview_by_ids(&self, series_ids: &[i64]) -> Vec<SeriesOverview> {
         let _transition = self.transition_read();
@@ -8303,18 +6252,12 @@ impl Engine {
                 .load(Ordering::Relaxed),
             compaction_merge_total_ns: self.compaction_merge_total_ns.load(Ordering::Relaxed),
             compaction_plans: self.compaction_plans.load(Ordering::Relaxed),
-            series_on_disk: self.disk_series.is_some(),
-            chunks_on_disk: self.disk_chunks,
+            series_on_disk: true,
+            chunks_on_disk: true,
             released_series: self.released_writes.len() as u64,
             flush_interval_secs: self.flush_interval_ms.load(Ordering::Relaxed) / 1000,
-            series_resolve_cache_entries: self
-                .disk_series
-                .as_ref()
-                .map_or(0, |cache| cache.len() as u64),
-            selection_cache_entries: self
-                .disk_series
-                .as_ref()
-                .map_or(0, |cache| cache.selections.map.len() as u64),
+            series_resolve_cache_entries: self.identities.len() as u64,
+            selection_cache_entries: self.identities.selections.map.len() as u64,
             compaction_planned_groups: self
                 .compaction_plan_lock()
                 .as_ref()
@@ -8416,21 +6359,20 @@ pub struct EngineInfo {
     pub compaction_plans: u64,
     /// Groups the current plan still holds.
     pub compaction_planned_groups: u64,
-    /// Whether the series catalog lives on disk behind a bounded resolve
-    /// cache (#132), and how many entries that cache holds.
+    /// Always true: the series catalog and the chunk index are read from
+    /// the store. Kept for hosts that read them from when a table could
+    /// hold either in memory.
     pub series_on_disk: bool,
-    /// Whether the raw chunk index is read from the store's chunk rows
-    /// rather than held in memory (#132 phase 2).
     pub chunks_on_disk: bool,
     /// Series whose write buffer has been released and whose last write is
     /// remembered for the compaction policy. `partition_count` is the
     /// buffers still held.
     pub released_series: u64,
-    /// Seconds a buffered point waits for a flush; 0 when the table leaves
-    /// that to the point threshold and the host.
+    /// Seconds between the bounded maintenance steps the table takes for
+    /// itself at commit; 0 when the host maintains it.
     pub flush_interval_secs: u64,
     pub series_resolve_cache_entries: u64,
-    /// Selections a disk catalog is remembering the answers to.
+    /// Selections whose answers are remembered.
     pub selection_cache_entries: u64,
     pub retention_series_removed: u64,
     pub rollup_merge_chunks_removed: u64,
@@ -8676,98 +6618,6 @@ mod decode_tests {
         assert!(
             Engine::decode_chunk_data(&meta, &bytes, i64::MIN, i64::MAX).is_err(),
             "corrupt pco payload must fail"
-        );
-    }
-}
-
-#[cfg(test)]
-mod rollup_index_tests {
-    use super::*;
-
-    fn entry(min_ts: i64, rowid: i64) -> RollupIndexEntry {
-        RollupIndexEntry {
-            min_ts,
-            max_ts: min_ts + 59,
-            rowid,
-            point_count: 1,
-            encoding: ENC_ROLLUP_V1,
-        }
-    }
-
-    #[test]
-    fn compact_rollup_entry_layout_is_pinned() {
-        assert_eq!(std::mem::size_of::<RollupIndexEntry>(), 32);
-    }
-
-    #[test]
-    fn grouped_index_preserves_duplicate_timestamps_and_sorted_reads() {
-        let group = RollupGroupKey {
-            series_id: 7,
-            resolution: 60,
-        };
-        let mut index = RollupIndex::default();
-        index.insert(group, entry(120, 3));
-        index.insert(group, entry(60, 2));
-        index.insert(group, entry(60, 1));
-
-        assert_eq!(index.len(), 3);
-        assert_eq!(
-            index
-                .entries(&group)
-                .iter()
-                .map(|entry| entry.key())
-                .collect::<Vec<_>>(),
-            vec![(60, 1), (60, 2), (120, 3)]
-        );
-        assert_eq!(index.remove(&(group, 60, 2)), Some(entry(60, 2)));
-        assert_eq!(index.len(), 2);
-        assert!(index.contains_rowid(&group, 1));
-        assert!(!index.contains_rowid(&group, 2));
-    }
-
-    #[test]
-    fn grouped_index_scale_fixture_keeps_entries_contiguous() {
-        let mut index = RollupIndex::default();
-        for series_id in 0..1_000 {
-            let group = RollupGroupKey {
-                series_id,
-                resolution: 3_600,
-            };
-            for chunk in 0..100 {
-                index.push_unsorted(group, entry(chunk * 3_600, series_id * 100 + chunk));
-            }
-        }
-        index.sort_groups();
-        assert_eq!(index.len(), 100_000);
-        assert_eq!(index.groups.len(), 1_000);
-        assert_eq!(
-            index.len() * std::mem::size_of::<RollupIndexEntry>(),
-            3_200_000
-        );
-    }
-
-    #[test]
-    #[ignore = "production-scale memory fixture (about 224 MiB of entry payload)"]
-    fn production_scale_rollup_index_fixture() {
-        let mut index = RollupIndex::default();
-        for series_id in 0..36_500 {
-            for (tier, resolution) in [3_600, 86_400, 2_592_000].into_iter().enumerate() {
-                let group = RollupGroupKey {
-                    series_id,
-                    resolution,
-                };
-                for chunk in 0..64 {
-                    let rowid = (series_id * 3 + tier as i64) * 64 + chunk;
-                    index.push_unsorted(group, entry(chunk * resolution, rowid));
-                }
-            }
-        }
-        index.sort_groups();
-        assert_eq!(index.len(), 7_008_000);
-        assert_eq!(index.groups.len(), 109_500);
-        assert_eq!(
-            index.len() * std::mem::size_of::<RollupIndexEntry>(),
-            224_256_000
         );
     }
 }

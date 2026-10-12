@@ -1,244 +1,11 @@
 //! F3 rollup lifecycle at the engine level: produce/query/watermark,
-//! recovery via scan_rollups, per-tier retention, and journal rollback
-//! of the rollup index (FEATURE_PLAN.md F3).
+//! recovery on reopen, per-tier retention, and rollback (FEATURE_PLAN.md F3).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use timeless_core::{
-    ChunkBytes, ChunkLoc, ChunkMeta, ChunkStore, EncodedChunk, EncodedRollupChunk, Engine,
-    MetricsCompactionBudget, RollupTier, StoredChunk, StoredRollupChunk,
+    ChunkStore, EncodedChunk, Engine, MemStore, MetricsCompactionBudget, RollupTier,
 };
-
-type StoredTestChunk = (i64, i64, i64, ChunkMeta, Vec<u8>);
-
-/// Minimal in-memory ChunkStore with rollup support. Not transactional —
-/// journal tests assert ENGINE state only (the row side rides the host
-/// transaction in the real store, which cli.sh §25 covers).
-#[derive(Default)]
-struct MemChunkStore {
-    next_id: AtomicI64,
-    // (id, series_id, resolution, meta-ish, payload)
-    chunks: Mutex<Vec<StoredTestChunk>>,
-    registry: Mutex<Option<Vec<u8>>>,
-}
-
-impl MemChunkStore {
-    fn new() -> Self {
-        Self {
-            next_id: AtomicI64::new(1),
-            chunks: Mutex::new(Vec::new()),
-            registry: Mutex::new(None),
-        }
-    }
-}
-
-impl ChunkStore for MemChunkStore {
-    fn put_chunks(&self, chunks: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String> {
-        let mut store = self.chunks.lock().unwrap();
-        let mut locs = Vec::new();
-        for cp in chunks {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let loc = ChunkLoc::Row { rowid: id };
-            let mut payload = cp.ts_bytes.clone();
-            let ts_len = payload.len();
-            payload.extend_from_slice(&cp.val_bytes);
-            let meta = ChunkMeta {
-                min_ts: cp.min_ts,
-                max_ts: cp.max_ts,
-                max_ts_val: Some(cp.max_ts_val),
-                point_count: cp.point_count,
-                payload_bytes: (cp.ts_bytes.len() + cp.val_bytes.len()) as u64,
-                min_val: cp.min_val,
-                max_val: cp.max_val,
-                sum_val: cp.sum_val,
-                loc: loc.clone(),
-                encoding: cp.encoding,
-            };
-            // stash ts_len in resolution slot? No — store (ts_len) via
-            // a parallel encoding: keep payload split point in meta-free
-            // storage: prepend 8-byte ts_len.
-            let mut framed = (ts_len as u64).to_le_bytes().to_vec();
-            framed.extend_from_slice(&payload);
-            store.push((id, cp.series_id, 0, meta, framed));
-            locs.push(loc);
-        }
-        Ok(locs)
-    }
-
-    fn replace_chunks(
-        &self,
-        add: &[EncodedChunk],
-        remove: &[ChunkLoc],
-        on_committed: &mut dyn FnMut(&[ChunkLoc]),
-    ) -> Result<Vec<ChunkLoc>, String> {
-        let locs = self.put_chunks(add)?;
-        on_committed(&locs);
-        self.delete_chunks(remove);
-        Ok(locs)
-    }
-
-    fn read_chunk(&self, loc: &ChunkLoc) -> Result<ChunkBytes, String> {
-        let ChunkLoc::Row { rowid } = loc else {
-            return Err("mem store uses Row locs".into());
-        };
-        let store = self.chunks.lock().unwrap();
-        let (_, _, _, _, framed) = store
-            .iter()
-            .find(|(id, _, _, _, _)| id == rowid)
-            .ok_or_else(|| format!("chunk {rowid} missing"))?;
-        let ts_len = u64::from_le_bytes(framed[..8].try_into().unwrap()) as usize;
-        let data = framed[8..].to_vec();
-        let total = data.len();
-        Ok(ChunkBytes {
-            data: std::sync::Arc::new(data),
-            ts_range: 0..ts_len,
-            val_range: ts_len..total,
-        })
-    }
-
-    fn delete_chunks(&self, locs: &[ChunkLoc]) -> Vec<String> {
-        let ids: Vec<i64> = locs
-            .iter()
-            .filter_map(|l| match l {
-                ChunkLoc::Row { rowid } => Some(*rowid),
-                _ => None,
-            })
-            .collect();
-        self.chunks
-            .lock()
-            .unwrap()
-            .retain(|(id, _, _, _, _)| !ids.contains(id));
-        Vec::new()
-    }
-
-    fn scan(&self) -> Result<Vec<StoredChunk>, String> {
-        Ok(self
-            .chunks
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, _, res, _, _)| *res == 0)
-            .map(|(_, sid, _, meta, _)| StoredChunk {
-                series_id: *sid,
-                meta: meta.clone(),
-            })
-            .collect())
-    }
-
-    fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
-        Ok(self
-            .chunks
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, _, res, _, _)| *res > 0)
-            .map(|(_, sid, res, meta, _)| StoredRollupChunk {
-                series_id: *sid,
-                resolution: *res,
-                meta: meta.clone(),
-            })
-            .collect())
-    }
-
-    fn put_rollup_chunks(&self, chunks: &[EncodedRollupChunk]) -> Result<Vec<ChunkLoc>, String> {
-        let mut store = self.chunks.lock().unwrap();
-        let mut locs = Vec::new();
-        for cp in chunks {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let loc = ChunkLoc::Row { rowid: id };
-            let meta = ChunkMeta {
-                min_ts: cp.min_ts,
-                max_ts: cp.max_ts,
-                max_ts_val: None,
-                point_count: cp.bucket_count,
-                payload_bytes: cp.payload.len() as u64,
-                min_val: 0.0,
-                max_val: 0.0,
-                sum_val: 0.0,
-                loc: loc.clone(),
-                encoding: timeless_core::ENC_ROLLUP_V1,
-            };
-            let mut framed = (cp.payload.len() as u64).to_le_bytes().to_vec();
-            framed.extend_from_slice(&cp.payload);
-            store.push((id, cp.series_id, cp.resolution, meta, framed));
-            locs.push(loc);
-        }
-        Ok(locs)
-    }
-
-    fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
-        *self.registry.lock().unwrap() = Some(bytes.to_vec());
-        Ok(())
-    }
-
-    fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(self.registry.lock().unwrap().clone())
-    }
-
-    fn storage_stats(&self) -> (u64, usize) {
-        let store = self.chunks.lock().unwrap();
-        (
-            store.iter().map(|(_, _, _, _, p)| p.len() as u64).sum(),
-            store.len(),
-        )
-    }
-
-    fn sweep_cache(&self) {}
-}
-
-#[derive(Clone)]
-struct SharedMemChunkStore(Arc<MemChunkStore>);
-
-impl ChunkStore for SharedMemChunkStore {
-    fn put_chunks(&self, chunks: &[EncodedChunk]) -> Result<Vec<ChunkLoc>, String> {
-        self.0.put_chunks(chunks)
-    }
-
-    fn replace_chunks(
-        &self,
-        add: &[EncodedChunk],
-        remove: &[ChunkLoc],
-        on_committed: &mut dyn FnMut(&[ChunkLoc]),
-    ) -> Result<Vec<ChunkLoc>, String> {
-        self.0.replace_chunks(add, remove, on_committed)
-    }
-
-    fn read_chunk(&self, loc: &ChunkLoc) -> Result<ChunkBytes, String> {
-        self.0.read_chunk(loc)
-    }
-
-    fn delete_chunks(&self, locs: &[ChunkLoc]) -> Vec<String> {
-        self.0.delete_chunks(locs)
-    }
-
-    fn scan(&self) -> Result<Vec<StoredChunk>, String> {
-        self.0.scan()
-    }
-
-    fn scan_rollups(&self) -> Result<Vec<StoredRollupChunk>, String> {
-        self.0.scan_rollups()
-    }
-
-    fn put_rollup_chunks(&self, chunks: &[EncodedRollupChunk]) -> Result<Vec<ChunkLoc>, String> {
-        self.0.put_rollup_chunks(chunks)
-    }
-
-    fn save_registry(&self, bytes: &[u8]) -> Result<(), String> {
-        self.0.save_registry(bytes)
-    }
-
-    fn load_registry(&self) -> Result<Option<Vec<u8>>, String> {
-        self.0.load_registry()
-    }
-
-    fn storage_stats(&self) -> (u64, usize) {
-        self.0.storage_stats()
-    }
-
-    fn sweep_cache(&self) {}
-}
 
 fn new_engine(store: Box<dyn ChunkStore>) -> Engine {
     Engine::with_store(store, 1_000_000, 0, 3, 64 << 20, false).unwrap()
@@ -274,8 +41,8 @@ fn compressed_chunk(series_id: i64, start_ts: i64, point_count: usize) -> Encode
 
 #[test]
 fn rollup_produce_query_watermark_retention() {
-    let store = Arc::new(MemChunkStore::new());
-    let engine = new_engine(Box::new(SharedMemChunkStore(store.clone())));
+    let store = MemStore::new();
+    let engine = new_engine(Box::new(store.clone()));
     engine.set_rollups(vec![
         RollupTier {
             resolution: 60,
@@ -315,7 +82,7 @@ fn rollup_produce_query_watermark_retention() {
     assert_eq!(engine.rollup().unwrap(), (0, 0));
 
     // Recovery: a fresh engine over the same store sees the same buckets.
-    let engine2 = new_engine(Box::new(SharedMemChunkStore(store.clone())));
+    let engine2 = new_engine(Box::new(store.clone()));
     assert_eq!(
         engine2.info().rollup_chunk_count,
         chunks,
@@ -379,15 +146,8 @@ fn rollup_produce_query_watermark_retention() {
 
 #[test]
 fn bounded_metrics_maintenance_drains_across_commit_sized_steps() {
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_ids: Vec<i64> = (0..3)
         .map(|number| {
             engine
@@ -475,15 +235,8 @@ fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail()
     // comment at the end says whatever the target is.
     const POINTS_PER_ROUND: usize = timeless_core::METRICS_COMPACTION_TARGET_POINTS / 32;
 
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_id = engine.resolve_cached("tiered", &labels()).unwrap();
     let mut previous_merge_points = 0u64;
 
@@ -547,15 +300,8 @@ fn repeated_raw_arrivals_merge_by_size_tier_without_rewriting_the_growing_tail()
 /// tier is settled to, arriving after it settled.
 #[test]
 fn a_settled_tier_is_rolled_up_again_when_older_samples_arrive() {
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     engine.set_rollups(vec![RollupTier {
         resolution: 60,
         retention: 0,
@@ -607,16 +353,9 @@ fn a_settled_tier_is_rolled_up_again_when_older_samples_arrive() {
 fn an_oversized_compressed_chunk_is_cut_down_to_the_target_once() {
     const TARGET: usize = timeless_core::METRICS_COMPACTION_TARGET_POINTS;
     const POINTS: usize = TARGET * 5 + TARGET / 2;
-    let store = Arc::new(MemChunkStore::new());
-    let registry_engine = Engine::with_store(
-        Box::new(SharedMemChunkStore(store.clone())),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let store = MemStore::new();
+    let registry_engine =
+        Engine::with_store(Box::new(store.clone()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_id = registry_engine
         .resolve_cached("oversized", &labels())
         .unwrap();
@@ -625,15 +364,7 @@ fn an_oversized_compressed_chunk_is_cut_down_to_the_target_once() {
     store
         .put_chunks(&[compressed_chunk(series_id, 0, POINTS)])
         .unwrap();
-    let engine = Engine::with_store(
-        Box::new(SharedMemChunkStore(store)),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine = Engine::with_store(Box::new(store), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     assert_eq!(engine.info().chunk_count, 1);
 
     let (_, sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
@@ -662,16 +393,9 @@ fn compressed_merge_reports_a_newly_unlocked_next_tier() {
     // 125%-of-target group. Its replacement splits into a full chunk and a
     // quarter; that remainder and the sixth source form a newly actionable
     // tier only after the first swap commits.
-    let store = Arc::new(MemChunkStore::new());
-    let registry_engine = Engine::with_store(
-        Box::new(SharedMemChunkStore(store.clone())),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let store = MemStore::new();
+    let registry_engine =
+        Engine::with_store(Box::new(store.clone()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_id = registry_engine
         .resolve_cached("cascade", &labels())
         .unwrap();
@@ -687,15 +411,7 @@ fn compressed_merge_reports_a_newly_unlocked_next_tier() {
         })
         .collect();
     store.put_chunks(&chunks).unwrap();
-    let engine = Engine::with_store(
-        Box::new(SharedMemChunkStore(store)),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine = Engine::with_store(Box::new(store), 1_000_000, 0, 3, 64 << 20, true).unwrap();
 
     let (_, first_sources, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
     assert_eq!(first_sources, 5);
@@ -726,7 +442,7 @@ fn a_bounded_rollup_step_passes_over_groups_with_nothing_to_roll_up() {
     // transaction for every one of them; it now looks past them for the
     // ones that have something.
     const SERIES: usize = 130;
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let engine = new_engine(Box::new(MemStore::new()));
     engine.set_rollups(vec![RollupTier {
         resolution: 60,
         retention: 0,
@@ -793,15 +509,8 @@ fn small_compressed_chunks_merge_by_count_in_tiers() {
     const ROUNDS: usize = 96;
     const POINTS_PER_ROUND: usize = 30;
 
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_id = engine.resolve_cached("churn", &labels()).unwrap();
     let mut most_chunks = 0;
 
@@ -851,16 +560,9 @@ fn a_series_that_has_ended_has_its_pieces_put_together_once() {
     // series may have ended, as a process's does, and its two chunks are
     // put together once.
     const POINTS_PER_ROUND: usize = 30;
-    let store = Arc::new(MemChunkStore::new());
-    let engine = Engine::with_store(
-        Box::new(SharedMemChunkStore(store.clone())),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let store = MemStore::new();
+    let engine =
+        Engine::with_store(Box::new(store.clone()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_id = engine.resolve_cached("ended", &labels()).unwrap();
     for round in 0..2 {
         for offset in 0..POINTS_PER_ROUND {
@@ -879,15 +581,7 @@ fn a_series_that_has_ended_has_its_pieces_put_together_once() {
     assert_eq!(engine.info().compaction_merge_steps, 0);
     drop(engine);
 
-    let engine = Engine::with_store(
-        Box::new(SharedMemChunkStore(store)),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine = Engine::with_store(Box::new(store), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     loop {
         let (_, _, more) = engine.compact_partitions_bounded(i64::MAX, 64).unwrap();
         if !more {
@@ -910,15 +604,8 @@ fn a_series_that_has_ended_has_its_pieces_put_together_once() {
 fn a_sweep_is_planned_once_and_leaves_what_arrives_after_its_cutoff() {
     const SERIES: usize = 150;
 
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_ids: Vec<_> = (0..SERIES)
         .map(|number| {
             engine
@@ -991,15 +678,8 @@ fn a_sweep_is_planned_once_and_leaves_what_arrives_after_its_cutoff() {
 
 #[test]
 fn a_planned_group_whose_chunks_retention_took_is_passed_over() {
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_ids: Vec<_> = (0..3)
         .map(|number| {
             engine
@@ -1056,15 +736,8 @@ fn a_planned_group_whose_chunks_retention_took_is_passed_over() {
 fn a_rollback_discards_the_sweep_plan() {
     const SERIES: usize = 9;
     const POINTS: usize = timeless_core::METRICS_COMPACTION_STEP_INPUT_POINTS / 8;
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        128 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 128 << 20, true).unwrap();
     for number in 0..SERIES {
         let series_id = engine
             .resolve_cached(&format!("planned_{number}"), &labels())
@@ -1112,15 +785,8 @@ fn bounded_metrics_compaction_caps_each_transaction_by_input_points_and_bytes() 
     // An eighth of a step's point budget a series, so eight fit a step.
     const POINTS: usize = timeless_core::METRICS_COMPACTION_STEP_INPUT_POINTS / 8;
 
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        128 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 128 << 20, true).unwrap();
     let series_ids: Vec<_> = (0..SERIES)
         .map(|number| {
             engine
@@ -1173,7 +839,7 @@ fn bounded_metrics_compaction_caps_each_transaction_by_input_points_and_bytes() 
 /// prunes the old epoch; the keep-forever tier still answers for it.
 #[test]
 fn rollups_survive_raw_retention() {
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let engine = new_engine(Box::new(MemStore::new()));
     engine.set_retention(Some(1_000));
     engine.set_rollups(vec![RollupTier {
         resolution: 60,
@@ -1212,8 +878,9 @@ fn rollups_survive_raw_retention() {
 }
 
 #[test]
-fn rollup_rollback_restores_index() {
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+fn a_rolled_back_rollup_is_not_read() {
+    let store = MemStore::new();
+    let engine = new_engine(Box::new(store.clone()));
     engine.set_rollups(vec![RollupTier {
         resolution: 60,
         retention: 0,
@@ -1224,9 +891,9 @@ fn rollup_rollback_restores_index() {
     }
     engine.flush_all().unwrap();
 
-    // Rollup inside a transaction, then roll back: the engine's rollup
-    // index must forget the entries (the real store's rows ride the
-    // host txn; cli.sh §25 covers that half).
+    // Rollup inside a transaction, then roll back: the rows go with the
+    // store's transaction, and the engine keeps nothing of them.
+    store.begin();
     engine.txn_begin();
     let (chunks, _) = engine.rollup().unwrap();
     assert!(chunks > 0);
@@ -1234,19 +901,23 @@ fn rollup_rollback_restores_index() {
         .query_rollup_by_id(sid, 60, i64::MIN, i64::MAX)
         .unwrap()
         .is_empty());
+    store.rollback();
     engine.txn_rollback();
     assert!(
         engine
             .query_rollup_by_id(sid, 60, i64::MIN, i64::MAX)
             .unwrap()
             .is_empty(),
-        "rollback removed rolled-up index entries"
+        "a rolled-back rollup is not read"
     );
+    // And what it would have produced is produced again.
+    let (chunks, _) = engine.rollup().unwrap();
+    assert!(chunks > 0);
 }
 
 #[test]
 fn rollup_configuration_rollback_restores_the_previous_ladder() {
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let engine = new_engine(Box::new(MemStore::new()));
     let original = vec![RollupTier {
         resolution: 60,
         retention: 3_600,
@@ -1266,7 +937,7 @@ fn rollup_configuration_rollback_restores_the_previous_ladder() {
 /// data; the next sweep's first step begins a cycle that rolls it.
 #[test]
 fn bounded_rollup_runs_one_cycle_per_sweep() {
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let engine = new_engine(Box::new(MemStore::new()));
     let series_ids: Vec<i64> = (0..3)
         .map(|number| {
             engine
@@ -1319,15 +990,8 @@ fn bounded_rollup_runs_one_cycle_per_sweep() {
 /// compresses them together in one rewrite; a dense raw chunk does not wait.
 #[test]
 fn raw_chunks_wait_for_a_run_before_they_are_compressed() {
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let sparse = engine.resolve_cached("sparse", &labels()).unwrap();
     let dense = engine.resolve_cached("dense", &labels()).unwrap();
     let budget = MetricsCompactionBudget {
@@ -1380,7 +1044,7 @@ fn raw_chunks_wait_for_a_run_before_they_are_compressed() {
 #[test]
 fn rollup_merges_are_stepped_through_within_a_sweep() {
     const SERIES: usize = 3;
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let engine = new_engine(Box::new(MemStore::new()));
     let series_ids: Vec<i64> = (0..SERIES)
         .map(|number| {
             engine
@@ -1443,15 +1107,8 @@ fn rollup_merges_are_stepped_through_within_a_sweep() {
 /// no new plan between (#121).
 #[test]
 fn a_step_out_of_time_leaves_its_remaining_groups_for_the_next() {
-    let engine = Engine::with_store(
-        Box::new(MemChunkStore::new()),
-        1_000_000,
-        0,
-        3,
-        64 << 20,
-        true,
-    )
-    .unwrap();
+    let engine =
+        Engine::with_store(Box::new(MemStore::new()), 1_000_000, 0, 3, 64 << 20, true).unwrap();
     let series_ids: Vec<i64> = (0..5)
         .map(|number| {
             engine
@@ -1505,7 +1162,7 @@ fn a_step_out_of_time_leaves_its_remaining_groups_for_the_next() {
 fn rollup_chunks_per_group_stay_logarithmic_as_buckets_accumulate() {
     const SERIES: usize = 3;
     const SWEEPS: u64 = 200;
-    let engine = new_engine(Box::new(MemChunkStore::new()));
+    let engine = new_engine(Box::new(MemStore::new()));
     let series_ids: Vec<i64> = (0..SERIES)
         .map(|number| {
             engine
